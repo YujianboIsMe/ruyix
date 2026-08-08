@@ -259,6 +259,54 @@ fn line_byte_offset(source: &str, line_number: usize) -> usize {
 }
 
 // ============================================
+// Config 命令
+// ============================================
+
+#[derive(serde::Deserialize)]
+struct ConfigCmd {
+    scope: String,
+    key: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    project_root: Option<String>,
+}
+
+#[tauri::command]
+fn config_get(
+    cmd: ConfigCmd,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<Option<String>, String> {
+    let scope = config::Scope::from_str(&cmd.scope)
+        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", cmd.scope))?;
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.config_read(&scope, &cmd.key, cmd.project_root.as_deref())
+}
+
+#[tauri::command]
+fn config_set(
+    cmd: ConfigCmd,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let scope = config::Scope::from_str(&cmd.scope)
+        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", cmd.scope))?;
+    let value = cmd.value.ok_or("缺少 value 参数".to_string())?;
+    let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.config_write(&scope, &cmd.key, &value, cmd.project_root.as_deref())
+}
+
+#[tauri::command]
+fn config_delete(
+    cmd: ConfigCmd,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let scope = config::Scope::from_str(&cmd.scope)
+        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", cmd.scope))?;
+    let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.config_delete(&scope, &cmd.key, cmd.project_root.as_deref())
+}
+
+// ============================================
 // 入口
 // ============================================
 
@@ -274,6 +322,9 @@ fn main() {
             highlight_python,
             get_last_project,
             get_projects,
+            config_get,
+            config_set,
+            config_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

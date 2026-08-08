@@ -172,6 +172,9 @@ async function handleCommand(raw) {
     case "close":
       await handleCloseCommand(parts.slice(1));
       break;
+    case "config":
+      await handleConfigCommand(raw);
+      break;
     default:
       setStatus(`未知命令: ${verb}`, "error");
   }
@@ -255,6 +258,197 @@ async function handleCloseCommand(args) {
       setStatus(`未知子命令: close ${sub}。可用: project, all, <index>, other, left, right`);
   }
 }
+
+// ============================================
+// config 命令
+// ============================================
+
+/**
+ * 解析 config 命令
+ * 格式: config <action> [-g|-p|-r] [key] 或 config <action> [-g|-p|-r] key="value"
+ * 默认 scope 为 -r (runtime)
+ */
+async function handleConfigCommand(raw) {
+  // 去掉 "config " 前缀
+  const rest = raw.slice("config".length).trim();
+  if (!rest) {
+    setStatus(
+      "用法: config <add|get|update|remove|delete> [-g|-p|-r] [darkhorse.code.<section>.<key>[=value]]"
+    );
+    return;
+  }
+
+  // 解析: action scope key=value
+  // 分词：保留引号内容
+  const tokens = parseConfigTokens(rest);
+  if (tokens.length === 0) {
+    setStatus("用法: config <add|get|update|remove|delete> ...");
+    return;
+  }
+
+  const actions = ["add", "get", "update", "remove", "delete"];
+  let idx = 0;
+
+  // 子命令
+  const action = tokens[idx]?.toLowerCase();
+  if (!actions.includes(action)) {
+    setStatus(`未知 config 子命令: ${action}。可用: ${actions.join(", ")}`);
+    return;
+  }
+  idx++;
+
+  // scope 标志
+  let scope = "r";
+  if (tokens[idx] === "-g" || tokens[idx] === "-p" || tokens[idx] === "-r") {
+    scope = tokens[idx].slice(1);
+    idx++;
+  }
+
+  // key[=value]
+  const kv = tokens.slice(idx).join(" "); // 剩余的合并
+  const eqIdx = kv.indexOf("=");
+  const key = eqIdx >= 0 ? kv.slice(0, eqIdx).trim() : kv.trim();
+  const value = eqIdx >= 0 ? kv.slice(eqIdx + 1).trim() : null;
+
+  // 去掉 value 外层的引号
+  let cleanValue = value;
+  if (cleanValue) {
+    if (
+      (cleanValue.startsWith('"') && cleanValue.endsWith('"')) ||
+      (cleanValue.startsWith("'") && cleanValue.endsWith("'"))
+    ) {
+      cleanValue = cleanValue.slice(1, -1);
+    }
+  }
+
+  if (!key) {
+    setStatus("缺少配置键 (格式: darkhorse.code.<section>.<key>)");
+    return;
+  }
+
+  await executeConfigAction(action, scope, key, cleanValue);
+}
+
+/**
+ * 分词：按空格分割但保留引号内内容
+ */
+function parseConfigTokens(s) {
+  const tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    // 跳过空白
+    while (i < s.length && s[i] === " ") i++;
+    if (i >= s.length) break;
+
+    // 引号包裹
+    if (s[i] === '"' || s[i] === "'") {
+      const quote = s[i];
+      i++;
+      let tok = "";
+      while (i < s.length && s[i] !== quote) {
+        if (s[i] === "\\" && i + 1 < s.length) {
+          tok += s[i + 1];
+          i += 2;
+        } else {
+          tok += s[i];
+          i++;
+        }
+      }
+      i++; // 跳过闭合引号
+      tokens.push(tok);
+    } else {
+      let tok = "";
+      while (i < s.length && s[i] !== " ") {
+        tok += s[i];
+        i++;
+      }
+      tokens.push(tok);
+    }
+  }
+  return tokens;
+}
+
+/**
+ * 执行配置操作
+ */
+async function executeConfigAction(action, scope, key, value) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
+
+  const scopeMap = { g: "global", p: "project", r: "runtime" };
+  const projectRoot = state.currentProject?.path || undefined;
+
+  switch (action) {
+    case "add":
+      {
+        try {
+          const existing = await invoke("config_get", {
+            scope: scopeMap[scope],
+            key,
+            projectRoot,
+          });
+          if (existing != null) {
+            setStatus(`配置已存在: ${key} = ${existing}`, "error");
+            return;
+          }
+        } catch {
+          // get 失败视为不存在
+        }
+        try {
+          await invoke("config_set", { scope: scopeMap[scope], key, value, projectRoot });
+          setStatus(`已添加: ${key} = ${value}`);
+        } catch (err) {
+          setStatus(`添加失败: ${err}`, "error");
+        }
+      }
+      break;
+
+    case "get":
+      {
+        try {
+          const val = await invoke("config_get", { scope: scopeMap[scope], key, projectRoot });
+          if (val == null) {
+            setStatus(`配置不存在: ${key}`, "error");
+          } else {
+            setStatus(`${key} = ${val}`);
+          }
+        } catch (err) {
+          setStatus(`读取失败: ${err}`, "error");
+        }
+      }
+      break;
+
+    case "update":
+      {
+        try {
+          await invoke("config_set", { scope: scopeMap[scope], key, value });
+          setStatus(`已更新: ${key} = ${value}`);
+        } catch (err) {
+          setStatus(`更新失败: ${err}`, "error");
+        }
+      }
+      break;
+
+    case "remove":
+    case "delete":
+      {
+        try {
+          await invoke("config_delete", { scope: scopeMap[scope], key });
+          setStatus(`已删除: ${key}`);
+        } catch (err) {
+          setStatus(`删除失败: ${err}`, "error");
+        }
+      }
+      break;
+  }
+}
+
+// ============================================
+// close 命令实现
+// ============================================
 
 function closeProject() {
   if (!state.currentProject) {

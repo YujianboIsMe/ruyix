@@ -32,4 +32,21 @@ index已0开始，从左到右
 如果index是负数，则以-1开始，从右到左
 假如编辑器打开了五个文件,关闭第二个文件为`close 1`或`close -4` 
 
+## config 命令
 
+子命令
+- add 添加配置，已存在则报错
+- remove/delete 删除配置，不存在则报错
+- update 修改配置，不存在则添加
+- get 获取配置，不存在则报错
+
+以上四个子命令都可以配合命令级别选项
+- -g 全局配置，刷新运行时，并保存在全局配置
+- -p 项目配置，刷新运行时，并保存在项目配置
+- -r 运行配置，只刷新运行时，不保存
+
+举例
+``` 
+config add -p darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
+config add -p darkhorse.code.run.target0.name="pdf转储es"
+```

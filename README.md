@@ -9,7 +9,7 @@ Tauri 2 + Monaco Editor + Rust后端
 [界面](doc/ui.md)
 
 ## 配置系统
-
+[配置](doc/config.md)
 
 ## 命令系统
 [命令系统](doc/command.md)
@@ -18,3 +18,8 @@ Tauri 2 + Monaco Editor + Rust后端
 运行时分两种状态：
 1. 无项目状态
 2. 打开项目状态
+
+## 运行
+运行和配置系统有关联。
+详见[配置](doc/config.md)
+暂时先不实现真正的运行，只是保存运行。

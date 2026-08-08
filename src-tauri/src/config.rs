@@ -1,23 +1,37 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// 配置键前缀，所有配置在内存中以完整前缀存储
-#[allow(dead_code)]
+/// 配置键前缀
 pub const PREFIX: &str = "darkhorse.code";
 
 // ============================================
-// 配置数据结构
+// 配置作用域
 // ============================================
 
-/// TOML 文件中 projects 节的表示（可省略前缀）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProjectsToml {
-    pub current: Option<String>,
-    pub list: Option<Vec<String>>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum Scope {
+    Global,
+    Project,
+    Runtime,
 }
 
-/// 运行时 projects 配置，带完整前缀
+impl Scope {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "global" | "g" => Some(Scope::Global),
+            "project" | "p" => Some(Scope::Project),
+            "runtime" | "r" => Some(Scope::Runtime),
+            _ => None,
+        }
+    }
+}
+
+// ============================================
+// Projects 配置
+// ============================================
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectsConfig {
     pub current: Option<String>,
@@ -28,157 +42,242 @@ pub struct ProjectsConfig {
 // ConfigManager
 // ============================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigManager {
-    /// ~/.darkhorse/code
     global_dir: PathBuf,
+    /// 运行时配置（不持久化）
+    runtime: HashMap<String, String>,
 }
 
 impl ConfigManager {
-    /// 创建配置管理器，确保全局配置目录存在
     pub fn new() -> Self {
         let global_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".darkhorse")
             .join("code");
 
-        // 确保目录存在
         let _ = fs::create_dir_all(&global_dir);
 
-        Self { global_dir }
+        Self {
+            global_dir,
+            runtime: HashMap::new(),
+        }
     }
 
-    /// 全局配置目录
     pub fn global_dir(&self) -> &PathBuf {
         &self.global_dir
     }
 
     // ============================================
-    // Projects 配置
+    // 通用配置读写
+    // ============================================
+
+    /// 读取配置值。key 格式: darkhorse.code.<section>.<path>
+    /// scope=global → ~/.darkhorse/code/<section>.toml
+    /// scope=project → <project_root>/.darkhorse/code/<section>.toml
+    /// scope=runtime → 内存
+    pub fn config_read(
+        &self,
+        scope: &Scope,
+        key: &str,
+        project_root: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let (section, sub_key) = self.split_key(key)?;
+
+        match scope {
+            Scope::Runtime => Ok(self.runtime.get(key).cloned()),
+            Scope::Global | Scope::Project => {
+                let dir = match scope {
+                    Scope::Global => self.global_dir.clone(),
+                    Scope::Project => self.resolve_project_dir(project_root)?,
+                    _ => unreachable!(),
+                };
+                let path = dir.join(format!("{}.toml", section));
+                let map = self.read_toml_file(&path)?;
+                Ok(map.get(&sub_key).cloned())
+            }
+        }
+    }
+
+    /// 写入配置值
+    pub fn config_write(
+        &mut self,
+        scope: &Scope,
+        key: &str,
+        value: &str,
+        project_root: Option<&str>,
+    ) -> Result<(), String> {
+        // 运行目标不能保存为全局
+        if *scope == Scope::Global && self.is_run_target_key(key) {
+            return Err("运行目标不能保存为全局".to_string());
+        }
+
+        let (section, sub_key) = self.split_key(key)?;
+
+        match scope {
+            Scope::Runtime => {
+                self.runtime.insert(key.to_string(), value.to_string());
+                Ok(())
+            }
+            Scope::Global | Scope::Project => {
+                let dir = match scope {
+                    Scope::Global => self.global_dir.clone(),
+                    Scope::Project => self.resolve_project_dir(project_root)?,
+                    _ => unreachable!(),
+                };
+                fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
+
+                let path = dir.join(format!("{}.toml", section));
+                let mut map = self.read_toml_file(&path)?;
+                map.insert(sub_key, value.to_string());
+                self.write_toml_file(&path, &map)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// 删除配置值
+    pub fn config_delete(
+        &mut self,
+        scope: &Scope,
+        key: &str,
+        project_root: Option<&str>,
+    ) -> Result<(), String> {
+        let (section, sub_key) = self.split_key(key)?;
+
+        match scope {
+            Scope::Runtime => {
+                self.runtime.remove(key);
+                Ok(())
+            }
+            Scope::Global | Scope::Project => {
+                let dir = match scope {
+                    Scope::Global => self.global_dir.clone(),
+                    Scope::Project => self.resolve_project_dir(project_root)?,
+                    _ => unreachable!(),
+                };
+                let path = dir.join(format!("{}.toml", section));
+                let mut map = self.read_toml_file(&path)?;
+                if map.remove(&sub_key).is_none() {
+                    return Err(format!("配置键不存在: {}", key));
+                }
+                self.write_toml_file(&path, &map)?;
+                Ok(())
+            }
+        }
+    }
+
+    // ============================================
+    // Projects 配置 (保持兼容)
     // ============================================
 
     fn projects_path(&self) -> PathBuf {
         self.global_dir.join("projects.toml")
     }
 
-    /// 加载 projects 配置
     pub fn load_projects(&self) -> ProjectsConfig {
         let path = self.projects_path();
-
-        let toml_str = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => return ProjectsConfig::default(),
-        };
-
-        // 尝试解析：先尝试带前缀的完整 key，再尝试缩略 key
-        // toml crate 支持直接从字符串解析
-        match self.parse_projects(&toml_str) {
-            Ok(cfg) => cfg,
+        match fs::read_to_string(&path) {
+            Ok(s) => {
+                #[derive(Deserialize)]
+                struct File { projects: ProjectsConfig }
+                toml::from_str::<File>(&s)
+                    .map(|f| f.projects)
+                    .unwrap_or_default()
+            }
             Err(_) => ProjectsConfig::default(),
         }
     }
 
-    /// 保存 projects 配置
     pub fn save_projects(&self, cfg: &ProjectsConfig) -> Result<(), String> {
-        let path = self.projects_path();
-
-        // 序列化为 TOML，使用完整前缀格式
-        let toml_str = self.serialize_projects(cfg)?;
-
-        fs::write(&path, toml_str).map_err(|e| format!("写入配置失败: {}", e))?;
-        Ok(())
+        #[derive(Serialize)]
+        struct File { projects: ProjectsConfig }
+        let file = File { projects: cfg.clone() };
+        let toml_str = toml::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        fs::write(self.projects_path(), toml_str).map_err(|e| format!("写入配置失败: {}", e))
     }
 
-    /// 添加项目到列表，并设为当前项目
     pub fn set_current_project(&self, project_path: &str) -> Result<(), String> {
         let mut cfg = self.load_projects();
-
-        // 去重：如果已存在，移到列表末尾（最近使用）
         cfg.list.retain(|p| p != project_path);
         cfg.list.push(project_path.to_string());
         cfg.current = Some(project_path.to_string());
-
-        self.save_projects(&cfg)
-    }
-
-    /// 从 projects 列表中移除
-    pub fn remove_project(&self, project_path: &str) -> Result<(), String> {
-        let mut cfg = self.load_projects();
-        cfg.list.retain(|p| p != project_path);
-        if cfg.current.as_deref() == Some(project_path) {
-            cfg.current = cfg.list.last().cloned();
-        }
         self.save_projects(&cfg)
     }
 
     // ============================================
-    // TOML 解析（支持省略 darkhorse.code 前缀）
+    // 内部辅助
     // ============================================
 
-    fn parse_projects(&self, toml_str: &str) -> Result<ProjectsConfig, String> {
-        // 尝试方式1：带完整前缀 darkhorse.code.projects
-        #[derive(Deserialize)]
-        struct FullConfig {
-            #[serde(rename = "darkhorse.code")]
-            darkhorse_code: Option<DarkhorseSection>,
+    /// 拆分 key 为 (section, sub_key)
+    /// "darkhorse.code.run.target0.cmd" → ("run", "target0.cmd")
+    fn split_key(&self, key: &str) -> Result<(String, String), String> {
+        let rest = key
+            .strip_prefix(PREFIX)
+            .and_then(|s| s.strip_prefix('.'))
+            .unwrap_or(key);
+
+        let dot_pos = rest.find('.').ok_or_else(|| {
+            format!("配置键格式错误 (需为 {0}.<section>.<key>): {1}", PREFIX, key)
+        })?;
+
+        let section = rest[..dot_pos].to_string();
+        let sub_key = rest[dot_pos + 1..].to_string();
+
+        if section.is_empty() || sub_key.is_empty() {
+            return Err(format!("配置键格式错误: {}", key));
         }
 
-        #[derive(Deserialize)]
-        struct DarkhorseSection {
-            projects: Option<ProjectsToml>,
-        }
+        Ok((section, sub_key))
+    }
 
-        if let Ok(full) = toml::from_str::<FullConfig>(toml_str) {
-            if let Some(section) = full.darkhorse_code {
-                if let Some(p) = section.projects {
-                    return Ok(self.build_projects_config(p));
+    /// 判断是否为运行目标配置键
+    fn is_run_target_key(&self, key: &str) -> bool {
+        if let Ok((section, _)) = self.split_key(key) {
+            section == "run"
+        } else {
+            false
+        }
+    }
+
+    fn resolve_project_dir(&self, project_root: Option<&str>) -> Result<PathBuf, String> {
+        match project_root {
+            Some(root) => Ok(PathBuf::from(root).join(".darkhorse").join("code")),
+            None => Err("未打开项目，无法使用项目配置 (-p)".to_string()),
+        }
+    }
+
+    /// 读取扁平的 key-value TOML 文件
+    fn read_toml_file(&self, path: &PathBuf) -> Result<HashMap<String, String>, String> {
+        let content = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return Ok(HashMap::new()), // 文件不存在 → 空 map
+        };
+
+        // 解析为通用 toml::Value，然后展平
+        let value: toml::Value = toml::from_str(&content).map_err(|e| format!("TOML 解析错误: {}", e))?;
+
+        let mut map = HashMap::new();
+        if let toml::Value::Table(table) = value {
+            for (k, v) in table {
+                if let Some(s) = v.as_str() {
+                    map.insert(k, s.to_string());
+                } else {
+                    // 非字符串值序列化为字符串
+                    map.insert(k, v.to_string());
                 }
             }
         }
-
-        // 尝试方式2：缩略 key，省略前缀 [projects]
-        #[derive(Deserialize)]
-        struct ShortConfig {
-            projects: Option<ProjectsToml>,
-        }
-
-        if let Ok(short) = toml::from_str::<ShortConfig>(toml_str) {
-            if let Some(p) = short.projects {
-                return Ok(self.build_projects_config(p));
-            }
-        }
-
-        Ok(ProjectsConfig::default())
+        Ok(map)
     }
 
-    fn build_projects_config(&self, toml: ProjectsToml) -> ProjectsConfig {
-        ProjectsConfig {
-            current: toml.current,
-            list: toml.list.unwrap_or_default(),
+    /// 写入扁平的 key-value TOML 文件
+    fn write_toml_file(&self, path: &PathBuf, map: &HashMap<String, String>) -> Result<(), String> {
+        let mut table = toml::map::Map::new();
+        for (k, v) in map {
+            table.insert(k.clone(), toml::Value::String(v.clone()));
         }
-    }
-
-    fn serialize_projects(&self, cfg: &ProjectsConfig) -> Result<String, String> {
-        use std::fmt::Write;
-
-        let mut out = String::new();
-
-        // 使用缩略格式（省略 darkhorse.code 前缀），更易读
-        writeln!(&mut out, "[projects]").map_err(|e| e.to_string())?;
-
-        if let Some(ref current) = cfg.current {
-            writeln!(&mut out, "current = {:?}", current).map_err(|e| e.to_string())?;
-        }
-
-        // 序列化 list
-        let list_str = cfg
-            .list
-            .iter()
-            .map(|p| format!("  {:?}", p))
-            .collect::<Vec<_>>()
-            .join(",\n");
-        writeln!(&mut out, "list = [\n{}\n]", list_str).map_err(|e| e.to_string())?;
-
-        Ok(out)
+        let toml_str = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+        fs::write(path, toml_str).map_err(|e| format!("写入配置失败: {}", e))
     }
 }
