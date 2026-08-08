@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Darkhorse Code</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 眉部：菜单区 + Windows 窗口按钮 -->
+    <header id="titlebar" data-tauri-drag-region>
+      <div class="titlebar-left">
+        <nav class="menu-bar">
+          <span class="menu-item">文件</span>
+          <span class="menu-item">编辑</span>
+          <span class="menu-item">选择</span>
+          <span class="menu-item">查看</span>
+          <span class="menu-item">帮助</span>
+        </nav>
+      </div>
+      <div class="titlebar-center" data-tauri-drag-region>
+        <span id="titlebar-title" class="titlebar-title">Darkhorse Code</span>
+      </div>
+      <div class="titlebar-right">
+        <button class="window-btn" id="btn-minimize" title="最小化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="window-btn" id="btn-maximize" title="最大化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+        </button>
+        <button class="window-btn window-btn--close" id="btn-close" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 工作区 -->
+    <main id="workspace">
+      <!-- 状态一：欢迎页（无项目时显示） -->
+      <div id="welcome-page" class="welcome">
+        <div class="welcome-icon">
+          <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
+            <rect x="8" y="12" width="64" height="56" rx="6" stroke="currentColor" stroke-width="2.5" fill="none"/>
+            <path d="M24 28h32M24 38h24M24 48h16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h1 class="welcome-title">最好用的IDE，个人使用</h1>
+        <p id="welcome-subtitle" class="welcome-subtitle">Darkhorse Code</p>
+      </div>
+
+      <!-- 状态二：项目工作区（打开项目后显示） -->
+      <div id="project-workspace" class="project-layout" style="display:none">
+        <!-- 导航区：多标签页侧边栏 -->
+        <aside id="navigator" class="navigator">
+          <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="files">项目文件</button>
+            <button class="nav-tab" data-tab="terminal">终端资源</button>
+            <button class="nav-tab" data-tab="target">运行目标</button>
+          </div>
+          <div class="nav-content">
+            <div id="nav-panel-files" class="nav-panel active">
+              <div id="file-tree" class="file-tree"></div>
+            </div>
+            <div id="nav-panel-terminal" class="nav-panel">
+              <ul id="terminal-list" class="terminal-list">
+                <li>PowerShell</li>
+                <li>Cmd</li>
+                <li>Ubuntu</li>
+                <li>Claude</li>
+                <li>Python</li>
+                <li>Node.js</li>
+                <li>Git Bash</li>
+              </ul>
+            </div>
+            <div id="nav-panel-target" class="nav-panel">
+              <div class="file-tree-placeholder">
+                运行目标（待实现）
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- 编辑区 -->
+        <section id="editor-area" class="editor-area">
+          <!-- 标签页栏 -->
+          <div id="tab-bar" class="tab-bar"></div>
+          <!-- 编辑器主体：gutter + 代码区 -->
+          <div id="editor-body" class="editor-body">
+            <div id="editor-empty" class="editor-empty">
+              <p>打开文件以开始编辑</p>
+            </div>
+            <div id="editor-view" class="editor-view" style="display:none">
+              <div id="editor-gutter" class="editor-gutter"></div>
+              <div id="editor-code" class="editor-code"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 大纲区 -->
+        <aside id="outline" class="outline">
+          <div class="outline-header">大纲</div>
+          <div class="outline-content">
+            <div class="outline-placeholder">
+              大纲（待实现）
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- 命令区：单行命令输入 -->
+    <div id="command-bar">
+      <span class="command-prompt">&gt;</span>
+      <input
+        type="text"
+        id="command-input"
+        class="command-input"
+        placeholder="输入命令，回车执行..."
+        autofocus
+      />
+    </div>
+
+    <!-- 状态栏 -->
+    <footer id="statusbar">
+      <span class="status-item">就绪</span>
+      <span class="status-spacer"></span>
+      <span class="status-item">UTF-8</span>
+      <span class="status-item">Rust 2024</span>
+    </footer>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

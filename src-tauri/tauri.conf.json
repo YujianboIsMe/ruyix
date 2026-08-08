@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickolay/tauri-docs/refs/heads/v2/src/static/tauri.conf.json",
+  "productName": "Darkhorse Code",
+  "version": "0.1.0",
+  "identifier": "com.darkhorse.code",
+  "build": {
+    "frontendDist": "../ui",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Darkhorse Code",
+        "width": 1200,
+        "height": 800,
+        "decorations": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

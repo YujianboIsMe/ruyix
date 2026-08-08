@@ -1,0 +1,637 @@
+/* ============================================
+   Darkhorse Code — Dark IDE Theme
+   ============================================ */
+
+:root {
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-titlebar: #2d2d30;
+  --bg-statusbar: #007acc;
+  --bg-command: #1e1e1e;
+  --text-primary: #cccccc;
+  --text-secondary: #969696;
+  --text-statusbar: #ffffff;
+  --border-color: #3e3e42;
+  --hover-bg: #3e3e42;
+  --accent: #007acc;
+  --danger: #e81123;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ============================================
+   眉部 / Title Bar
+   ============================================ */
+
+#titlebar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding-left: 8px;
+}
+
+.menu-bar {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 2px;
+}
+
+.menu-item {
+  padding: 0 10px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  cursor: default;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-radius: 4px;
+}
+
+.menu-item:hover {
+  background: var(--hover-bg);
+}
+
+.titlebar-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  -webkit-app-region: drag;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  transition: color 0.2s;
+}
+
+/* 打开项目后标题使用强调色 */
+.titlebar-title.has-project {
+  color: var(--text-primary);
+}
+
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.window-btn {
+  width: 46px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  cursor: default;
+  transition: background 0.1s;
+}
+
+.window-btn:hover {
+  background: var(--hover-bg);
+}
+
+.window-btn--close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ============================================
+   工作区 / Workspace
+   ============================================ */
+
+#workspace {
+  flex: 1;
+  display: flex;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* --- 状态一：欢迎页 --- */
+
+#welcome-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.welcome {
+  text-align: center;
+  animation: fadeIn 0.5s ease-out;
+}
+
+.welcome-icon {
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+  opacity: 0.6;
+}
+
+.welcome-title {
+  font-size: 28px;
+  font-weight: 300;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.welcome-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- 状态二：项目工作区 --- */
+
+.project-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 导航区侧边栏 */
+.navigator {
+  width: 260px;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.nav-tabs {
+  display: flex;
+  height: 32px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.nav-tab {
+  flex: 1;
+  padding: 0 6px;
+  height: 100%;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: default;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.nav-tab:hover {
+  color: var(--text-primary);
+}
+
+.nav-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.nav-content {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+}
+
+.nav-panel {
+  display: none;
+  padding: 12px;
+  height: 100%;
+}
+
+.nav-panel.active {
+  display: block;
+}
+
+.file-tree-placeholder {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* --- 文件树 --- */
+
+.file-tree {
+  font-size: 13px;
+  user-select: none;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
+  cursor: default;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.tree-node:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tree-arrow {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-secondary);
+  transition: transform 0.12s;
+}
+
+.tree-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.tree-arrow.hidden {
+  visibility: hidden;
+}
+
+.tree-icon {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-right: 4px;
+  font-size: 12px;
+}
+
+.tree-icon--folder {
+  color: #dcb67a;
+}
+
+.tree-icon--file {
+  color: var(--text-secondary);
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-children {
+  /* 子节点容器 */
+}
+
+/* --- 终端资源列表 --- */
+
+.terminal-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.terminal-list li {
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: default;
+  border-radius: 3px;
+}
+
+.terminal-list li:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.terminal-list li::before {
+  content: ">_ ";
+  color: var(--accent);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 11px;
+}
+
+/* 编辑区 */
+.editor-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* --- 标签页栏 --- */
+
+.tab-bar {
+  display: flex;
+  height: 32px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tab-bar::-webkit-scrollbar {
+  height: 2px;
+}
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  height: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border-color);
+  cursor: default;
+  white-space: nowrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tab-item.active {
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border-bottom: 2px solid var(--accent);
+}
+
+.tab-item:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.tab-item:hover .tab-close {
+  opacity: 0.7;
+}
+
+.tab-close:hover {
+  opacity: 1 !important;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* --- 编辑器主体 --- */
+
+.editor-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.editor-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  font-size: 14px;
+}
+
+.editor-view {
+  flex: 1;
+  display: flex;
+  overflow: auto;
+}
+
+/* --- Gutter（行号） --- */
+
+.editor-gutter {
+  min-width: 48px;
+  padding: 8px 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  text-align: right;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.gutter-line {
+  height: 20px;
+  line-height: 20px;
+  padding: 0 12px 0 8px;
+  font-size: 12px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+/* --- 代码区 --- */
+
+.editor-code {
+  flex: 1;
+  padding: 8px 0;
+  overflow: auto;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text-primary);
+}
+
+.code-line {
+  height: 20px;
+  line-height: 20px;
+  padding: 0 16px;
+  white-space: pre;
+}
+
+/* --- 语法高亮颜色 (VS Code Dark+ 风格) --- */
+
+.tok-comment { color: #6a9955; font-style: italic; }
+.tok-string { color: #ce9178; }
+.tok-keyword { color: #569cd6; }
+.tok-function { color: #dcdcaa; }
+.tok-type { color: #4ec9b0; }
+.tok-number { color: #b5cea8; }
+.tok-operator { color: #d4d4d4; }
+.tok-property { color: #9cdcfe; }
+.tok-variable { color: #9cdcfe; }
+.tok-constant { color: #4fc1ff; }
+.tok-punctuation { color: #d4d4d4; }
+.tok-parameter { color: #9cdcfe; }
+.tok-constructor { color: #4ec9b0; }
+.tok-label { color: #569cd6; }
+.tok-namespace { color: #4ec9b0; }
+.tok-escape { color: #d7ba7d; }
+.tok-regexp { color: #d16969; }
+.tok-decorator { color: #dcdcaa; }
+.tok-attribute { color: #9cdcfe; }
+.tok-include { color: #569cd6; }
+.tok-boolean { color: #569cd6; }
+.tok-repeat { color: #569cd6; }
+.tok-conditional { color: #569cd6; }
+.tok-exception { color: #569cd6; }
+.tok-storageclass { color: #569cd6; }
+.tok-struct { color: #4ec9b0; }
+.tok-enum-member { color: #4fc1ff; }
+.tok-field { color: #9cdcfe; }
+.tok-text { color: #d4d4d4; }
+.tok-title { color: #dcdcaa; }
+.tok-literal { color: #ce9178; }
+.tok-uri { color: #d4d4d4; text-decoration: underline; }
+.tok-strong { font-weight: bold; }
+.tok-emphasis { font-style: italic; }
+
+/* 大纲区 */
+.outline {
+  width: 220px;
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.outline-header {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.outline-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.outline-placeholder {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* ============================================
+   命令区 / Command Bar
+   ============================================ */
+
+#command-bar {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  background: var(--bg-command);
+  border-top: 1px solid var(--border-color);
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.command-prompt {
+  color: var(--accent);
+  font-weight: bold;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.command-input {
+  flex: 1;
+  height: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  caret-color: var(--accent);
+}
+
+.command-input::placeholder {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* ============================================
+   状态栏 / Status Bar
+   ============================================ */
+
+#statusbar {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  background: var(--bg-statusbar);
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.status-item {
+  color: var(--text-statusbar);
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+.status-spacer {
+  flex: 1;
+}
