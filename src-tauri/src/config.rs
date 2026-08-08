@@ -6,6 +6,14 @@ use std::path::PathBuf;
 /// 配置键前缀
 pub const PREFIX: &str = "darkhorse.code";
 
+/// 运行目标
+#[derive(Debug, Clone, Serialize)]
+pub struct RunTarget {
+    pub key: String,
+    pub name: Option<String>,
+    pub cmd: Option<String>,
+}
+
 // ============================================
 // 配置作用域
 // ============================================
@@ -93,7 +101,7 @@ impl ConfigManager {
                     _ => unreachable!(),
                 };
                 let path = dir.join(format!("{}.toml", section));
-                let map = self.read_toml_file(&path)?;
+                let map = self.read_toml_file(&path, &section)?;
                 Ok(map.get(&sub_key).cloned())
             }
         }
@@ -107,7 +115,6 @@ impl ConfigManager {
         value: &str,
         project_root: Option<&str>,
     ) -> Result<(), String> {
-        // 运行目标不能保存为全局
         if *scope == Scope::Global && self.is_run_target_key(key) {
             return Err("运行目标不能保存为全局".to_string());
         }
@@ -128,9 +135,9 @@ impl ConfigManager {
                 fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
 
                 let path = dir.join(format!("{}.toml", section));
-                let mut map = self.read_toml_file(&path)?;
+                let mut map = self.read_toml_file(&path, &section)?;
                 map.insert(sub_key, value.to_string());
-                self.write_toml_file(&path, &map)?;
+                self.write_toml_file(&path, &section, &map)?;
                 Ok(())
             }
         }
@@ -157,11 +164,11 @@ impl ConfigManager {
                     _ => unreachable!(),
                 };
                 let path = dir.join(format!("{}.toml", section));
-                let mut map = self.read_toml_file(&path)?;
+                let mut map = self.read_toml_file(&path, &section)?;
                 if map.remove(&sub_key).is_none() {
                     return Err(format!("配置键不存在: {}", key));
                 }
-                self.write_toml_file(&path, &map)?;
+                self.write_toml_file(&path, &section, &map)?;
                 Ok(())
             }
         }
@@ -206,6 +213,49 @@ impl ConfigManager {
     }
 
     // ============================================
+    // 运行目标
+    // ============================================
+
+    /// 加载项目运行目标，按 target key 分组。
+    /// 从 `run.toml` 中读取所有 `target<N>.cmd` 和 `target<N>.name` 键值对。
+    pub fn load_run_targets(
+        &self,
+        project_root: Option<&str>,
+    ) -> Result<Vec<RunTarget>, String> {
+        let dir = self.resolve_project_dir(project_root)?;
+        let path = dir.join("run.toml");
+        let map = self.read_toml_file(&path, "run")?;
+
+        // 按 target key 分组：target0.cmd → target0, target0.name → target0
+        let mut groups: HashMap<String, Option<String>> = HashMap::new();
+        let mut names: HashMap<String, Option<String>> = HashMap::new();
+
+        for (k, v) in &map {
+            if let Some(rest) = k.strip_suffix(".cmd") {
+                groups.entry(rest.to_string()).or_insert(None);
+                // 用 entry 来持有，后面统一构建
+            } else if let Some(rest) = k.strip_suffix(".name") {
+                names.insert(rest.to_string(), Some(v.clone()));
+            }
+        }
+
+        // 合并
+        let mut targets: Vec<RunTarget> = Vec::new();
+        for (key, _) in &groups {
+            let cmd = map.get(&format!("{}.cmd", key)).cloned();
+            let name = names.get(key).cloned().flatten();
+            targets.push(RunTarget {
+                key: key.clone(),
+                name,
+                cmd,
+            });
+        }
+        // 按 key 排序
+        targets.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(targets)
+    }
+
+    // ============================================
     // 内部辅助
     // ============================================
 
@@ -242,42 +292,62 @@ impl ConfigManager {
 
     fn resolve_project_dir(&self, project_root: Option<&str>) -> Result<PathBuf, String> {
         match project_root {
-            Some(root) => Ok(PathBuf::from(root).join(".darkhorse").join("code")),
+            Some(root) if !root.is_empty() => {
+                Ok(PathBuf::from(root).join(".darkhorse").join("code"))
+            }
+            Some(_) => Err("项目路径为空字符串".to_string()),
             None => Err("未打开项目，无法使用项目配置 (-p)".to_string()),
         }
     }
 
-    /// 读取扁平的 key-value TOML 文件
-    fn read_toml_file(&self, path: &PathBuf) -> Result<HashMap<String, String>, String> {
+    /// 读取 TOML 文件，从 `[section]` 中提取 key-value。
+    /// 兼容旧格式：如果没有 `[section]`，则读取根级别的 key。
+    fn read_toml_file(&self, path: &PathBuf, section: &str) -> Result<HashMap<String, String>, String> {
         let content = match fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_) => return Ok(HashMap::new()), // 文件不存在 → 空 map
+            Err(_) => return Ok(HashMap::new()),
         };
 
-        // 解析为通用 toml::Value，然后展平
         let value: toml::Value = toml::from_str(&content).map_err(|e| format!("TOML 解析错误: {}", e))?;
 
         let mut map = HashMap::new();
-        if let toml::Value::Table(table) = value {
-            for (k, v) in table {
-                if let Some(s) = v.as_str() {
-                    map.insert(k, s.to_string());
-                } else {
-                    // 非字符串值序列化为字符串
-                    map.insert(k, v.to_string());
+        if let toml::Value::Table(root) = value {
+            // 优先读取 `[section]` 表
+            if let Some(toml::Value::Table(section_table)) = root.get(section) {
+                for (k, v) in section_table {
+                    if let Some(s) = v.as_str() {
+                        map.insert(k.clone(), s.to_string());
+                    } else {
+                        map.insert(k.clone(), v.to_string());
+                    }
+                }
+            } else {
+                // 兼容旧格式：根级别扁平 key
+                for (k, v) in &root {
+                    if let Some(s) = v.as_str() {
+                        map.insert(k.clone(), s.to_string());
+                    } else {
+                        map.insert(k.clone(), v.to_string());
+                    }
                 }
             }
         }
         Ok(map)
     }
 
-    /// 写入扁平的 key-value TOML 文件
-    fn write_toml_file(&self, path: &PathBuf, map: &HashMap<String, String>) -> Result<(), String> {
-        let mut table = toml::map::Map::new();
+    /// 写入 TOML 文件，key-value 放入 `[section]` 表
+    fn write_toml_file(&self, path: &PathBuf, section: &str, map: &HashMap<String, String>) -> Result<(), String> {
+        // 构建 [section] 内的表
+        let mut section_table = toml::map::Map::new();
         for (k, v) in map {
-            table.insert(k.clone(), toml::Value::String(v.clone()));
+            section_table.insert(k.clone(), toml::Value::String(v.clone()));
         }
-        let toml_str = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+
+        // 外层包裹 [section]
+        let mut root = toml::map::Map::new();
+        root.insert(section.to_string(), toml::Value::Table(section_table));
+
+        let toml_str = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
         fs::write(path, toml_str).map_err(|e| format!("写入配置失败: {}", e))
     }
 }

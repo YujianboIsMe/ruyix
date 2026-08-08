@@ -17,7 +17,7 @@ const state = {
 // 初始化
 // ============================================
 
-(function init() {
+(async function init() {
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
     return;
@@ -27,7 +27,7 @@ const state = {
   setupResponsiveTitlebar();
   setupNavigatorTabs();
   setupTextareaSync();
-  autoOpenLastProject();
+  await autoOpenLastProject();
 })();
 
 // ============================================
@@ -379,7 +379,19 @@ async function executeConfigAction(action, scope, key, value) {
   }
 
   const scopeMap = { g: "global", p: "project", r: "runtime" };
+
+  // 从 state 取项目根路径（确保不为空字符串）
   const projectRoot = state.currentProject?.path || undefined;
+  if (projectRoot === undefined && state.currentProject) {
+    setStatus(`内部错误: 项目已打开但 path 为空 (${JSON.stringify(state.currentProject)})`, "error");
+    return;
+  }
+
+  // -p 需要已打开项目
+  if (scope === "p" && !projectRoot) {
+    setStatus("未打开项目，无法使用项目配置 (-p)。请先 open project <路径>", "error");
+    return;
+  }
 
   switch (action) {
     case "add":
@@ -424,7 +436,7 @@ async function executeConfigAction(action, scope, key, value) {
     case "update":
       {
         try {
-          await invoke("config_set", { scope: scopeMap[scope], key, value });
+          await invoke("config_set", { scope: scopeMap[scope], key, value, projectRoot });
           setStatus(`已更新: ${key} = ${value}`);
         } catch (err) {
           setStatus(`更新失败: ${err}`, "error");
@@ -436,7 +448,7 @@ async function executeConfigAction(action, scope, key, value) {
     case "delete":
       {
         try {
-          await invoke("config_delete", { scope: scopeMap[scope], key });
+          await invoke("config_delete", { scope: scopeMap[scope], key, projectRoot });
           setStatus(`已删除: ${key}`);
         } catch (err) {
           setStatus(`删除失败: ${err}`, "error");
@@ -650,6 +662,12 @@ function switchTab(tabId) {
   if (!tab) return;
 
   showEditor();
+  if (tab._isTerminal) {
+    // 终端标签页：恢复文本区域为只读
+    const textarea = document.getElementById("editor-textarea");
+    if (textarea) textarea.readOnly = true;
+    return; // 内容和 gutter 已在 renderTerminalOutput 中设置
+  }
   if (tab._highlighted) {
     renderHighlightedCode(tab);
   } else {
@@ -749,6 +767,7 @@ function renderHighlightedCode(tab) {
   gutter.innerHTML = gutterHtml;
   backdrop.innerHTML = codeHtml;
   textarea.value = rawLines.join("\n");
+  textarea.readOnly = false;
 }
 
 function renderPlainCode(tab) {
@@ -769,6 +788,7 @@ function renderPlainCode(tab) {
   gutter.innerHTML = gutterHtml;
   backdrop.innerHTML = codeHtml;
   textarea.value = tab.content;
+  textarea.readOnly = false;
 }
 
 function escapeHtml(s) {
@@ -893,9 +913,10 @@ function showProjectWorkspace() {
   if (welcome) welcome.style.display = "none";
   if (project) project.style.display = "";
 
-  // 加载项目文件树
+  // 加载项目文件树和运行目标
   if (state.currentProject) {
     loadFileTree(state.currentProject.path);
+    loadRunTargets();
   }
 }
 
@@ -916,8 +937,147 @@ function setupNavigatorTabs() {
       // 切换面板
       document.querySelectorAll(".nav-panel").forEach((p) => p.classList.remove("active"));
       document.getElementById(panelId)?.classList.add("active");
+
+      // 切换到运行目标标签时刷新
+      if (tab.dataset.tab === "target") {
+        loadRunTargets();
+      }
     });
   });
+}
+
+// ============================================
+// 运行目标
+// ============================================
+
+async function loadRunTargets() {
+  const list = document.getElementById("run-targets-list");
+  if (!list) return;
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    list.innerHTML = '<span class="run-targets-empty">Tauri API 不可用</span>';
+    return;
+  }
+
+  try {
+    const projectRoot = state.currentProject?.path || undefined;
+    const targets = await invoke("get_run_targets", { projectRoot });
+
+    if (!targets || targets.length === 0) {
+      list.innerHTML = '<span class="run-targets-empty">暂无运行目标</span>';
+      return;
+    }
+
+    list.innerHTML = targets
+      .map(
+        (t) => `
+      <div class="run-target-item" data-cmd="${escapeHtml(t.cmd || "")}" data-name="${escapeHtml(t.name || t.key)}">
+        <div class="run-target-name">
+          <span class="run-icon">&#9654;</span>
+          ${escapeHtml(t.name || t.key)}
+        </div>
+        <div class="run-target-cmd">${escapeHtml(t.cmd || "（无命令）")}</div>
+      </div>`
+      )
+      .join("");
+
+    // 点击运行
+    list.querySelectorAll(".run-target-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const cmd = el.dataset.cmd;
+        const name = el.dataset.name;
+        if (cmd) runTargetCmd(name, cmd);
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<span class="run-targets-empty">加载失败: ${err}</span>`;
+  }
+}
+
+/**
+ * 运行目标：在编辑区打开终端标签页执行命令
+ */
+async function runTargetCmd(name, cmd) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
+
+  // 检查是否已打开同名标签
+  const existing = state.tabs.find((t) => t._runTarget === cmd);
+  if (existing) {
+    switchTab(existing.id);
+    return;
+  }
+
+  // 创建终端标签页
+  const tab = {
+    id: "run-" + Date.now().toString(),
+    name,
+    path: "",
+    content: cmd,
+    _isTerminal: true,
+    _runTarget: cmd,
+  };
+  state.tabs.push(tab);
+  renderTabs();
+  switchTab(tab.id);
+
+  // 显示加载中
+  showEditor();
+  renderTerminalOutput(tab, `> ${cmd}\n\n正在执行...`);
+
+  try {
+    setStatus(`正在运行: ${name}`);
+    const result = await invoke("run_target", { cmd });
+
+    let output = `> ${cmd}\n`;
+
+    if (result.stdout) {
+      output += result.stdout;
+      if (!result.stdout.endsWith("\n")) output += "\n";
+    }
+    if (result.stderr) {
+      output += result.stderr;
+      if (!result.stderr.endsWith("\n")) output += "\n";
+    }
+
+    if (result.exit_code != null) {
+      output += `\n[进程退出，代码: ${result.exit_code}]`;
+    } else {
+      output += `\n[进程结束]`;
+    }
+
+    renderTerminalOutput(tab, output);
+    setStatus(`${name} 执行完毕 (exit: ${result.exit_code ?? "?"})`);
+  } catch (err) {
+    renderTerminalOutput(tab, `> ${cmd}\n\n[错误] ${err}`);
+    setStatus(`运行失败: ${err}`, "error");
+  }
+}
+
+/**
+ * 渲染终端输出到标签页
+ */
+function renderTerminalOutput(tab, text) {
+  const backdrop = document.getElementById("editor-code-backdrop");
+  const textarea = document.getElementById("editor-textarea");
+  const gutter = document.getElementById("editor-gutter");
+
+  const lines = text.split("\n");
+  let gutterHtml = "";
+  let codeHtml = "";
+  for (let i = 0; i < lines.length; i++) {
+    gutterHtml += `<div class="gutter-line">${i + 1}</div>`;
+    codeHtml += `<div class="code-line terminal-line">${escapeHtml(lines[i]) || " "}</div>`;
+  }
+
+  gutter.innerHTML = gutterHtml;
+  backdrop.innerHTML = codeHtml;
+  textarea.value = text;
+  textarea.readOnly = true;
 }
 
 // ============================================

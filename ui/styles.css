@@ -365,6 +365,57 @@ html, body {
   font-size: 11px;
 }
 
+/* --- 运行目标列表 --- */
+
+.run-targets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-target-item {
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  cursor: default;
+}
+
+.run-target-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.run-target-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+  margin-bottom: 3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-target-name .run-icon {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.run-target-cmd {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.7;
+}
+
+.run-targets-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
 /* 编辑区 */
 .editor-area {
   flex: 1;
@@ -534,6 +585,12 @@ html, body {
   line-height: 20px;
   padding: 0;
   white-space: pre;
+}
+
+/* 终端行 */
+.terminal-line {
+  color: #d4d4d4;
+  background: var(--bg-primary);
 }
 
 /* --- 语法高亮颜色 (VS Code Dark+ 风格) --- */

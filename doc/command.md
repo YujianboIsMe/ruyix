@@ -49,4 +49,6 @@ index已0开始，从左到右
 ``` 
 config add -p darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
 config add -p darkhorse.code.run.target0.name="pdf转储es"
+config add -r darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
+config add -r darkhorse.code.run.target0.name="pdf转储es"
 ```

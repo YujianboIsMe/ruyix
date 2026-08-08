@@ -186,9 +186,86 @@ fn get_projects(
     Ok(cfg.load_projects().list)
 }
 
-// ============================================
-// 内部函数
-// ============================================
+#[tauri::command]
+fn get_run_targets(
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<Vec<config::RunTarget>, String> {
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.load_run_targets(project_root.as_deref())
+}
+
+#[derive(serde::Serialize, Clone)]
+struct RunOutput {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    killed: bool,
+}
+
+#[tauri::command]
+async fn run_target(cmd: String) -> Result<RunOutput, String> {
+    let parts = split_cmd(&cmd);
+    if parts.is_empty() {
+        return Err("空命令".to_string());
+    }
+
+    let program = parts[0].clone();
+    let args = parts[1..].to_vec();
+
+    // 后台线程执行，避免阻塞 UI
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::process::Command;
+
+        let output = Command::new(&program)
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("执行失败: {}", e))?;
+
+        Ok(RunOutput {
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            killed: false,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 按空格拆分命令行，支持引号包裹，保留 `\`（不转义）
+fn split_cmd(cmd: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut quote_char = '"';
+
+    for ch in cmd.chars() {
+        if in_quote {
+            if ch == quote_char {
+                in_quote = false;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' || ch == '\'' {
+            in_quote = true;
+            quote_char = ch;
+        } else if ch == ' ' || ch == '\t' {
+            if !cur.is_empty() {
+                parts.push(cur.clone());
+                cur.clear();
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts
+}
 
 fn build_line_highlights(
     code: &str,
@@ -262,48 +339,44 @@ fn line_byte_offset(source: &str, line_number: usize) -> usize {
 // Config 命令
 // ============================================
 
-#[derive(serde::Deserialize)]
-struct ConfigCmd {
-    scope: String,
-    key: String,
-    #[serde(default)]
-    value: Option<String>,
-    #[serde(default)]
-    project_root: Option<String>,
-}
-
 #[tauri::command]
 fn config_get(
-    cmd: ConfigCmd,
+    scope: String,
+    key: String,
+    project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<Option<String>, String> {
-    let scope = config::Scope::from_str(&cmd.scope)
-        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", cmd.scope))?;
+    let s = config::Scope::from_str(&scope)
+        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", scope))?;
     let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.config_read(&scope, &cmd.key, cmd.project_root.as_deref())
+    mgr.config_read(&s, &key, project_root.as_deref())
 }
 
 #[tauri::command]
 fn config_set(
-    cmd: ConfigCmd,
+    scope: String,
+    key: String,
+    value: String,
+    project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<(), String> {
-    let scope = config::Scope::from_str(&cmd.scope)
-        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", cmd.scope))?;
-    let value = cmd.value.ok_or("缺少 value 参数".to_string())?;
+    let s = config::Scope::from_str(&scope)
+        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", scope))?;
     let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.config_write(&scope, &cmd.key, &value, cmd.project_root.as_deref())
+    mgr.config_write(&s, &key, &value, project_root.as_deref())
 }
 
 #[tauri::command]
 fn config_delete(
-    cmd: ConfigCmd,
+    scope: String,
+    key: String,
+    project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<(), String> {
-    let scope = config::Scope::from_str(&cmd.scope)
-        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", cmd.scope))?;
+    let s = config::Scope::from_str(&scope)
+        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", scope))?;
     let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.config_delete(&scope, &cmd.key, cmd.project_root.as_deref())
+    mgr.config_delete(&s, &key, project_root.as_deref())
 }
 
 // ============================================
@@ -322,6 +395,8 @@ fn main() {
             highlight_python,
             get_last_project,
             get_projects,
+            get_run_targets,
+            run_target,
             config_get,
             config_set,
             config_delete,
