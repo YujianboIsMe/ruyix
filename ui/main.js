@@ -26,6 +26,8 @@ const state = {
   setupCommandBar();
   setupResponsiveTitlebar();
   setupNavigatorTabs();
+  setupTextareaSync();
+  autoOpenLastProject();
 })();
 
 // ============================================
@@ -143,11 +145,12 @@ function setupCommandBar() {
     }
   });
 
-  // 点击页面任意位置聚焦命令栏
+  // 点击页面空白区域时聚焦命令栏（不劫持编辑器、输入框等可编辑区域）
   document.addEventListener("click", (e) => {
-    if (e.target !== input && e.target.tagName !== "BUTTON") {
-      input.focus();
-    }
+    const tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" || tag === "SELECT") return;
+    if (e.target.isContentEditable || e.target.closest("[contenteditable]")) return;
+    input.focus();
   });
 }
 
@@ -210,26 +213,46 @@ async function handleOpenCommand(args) {
 
 /**
  * 处理 close 命令及其子命令
- *   close project — 关闭项目
- *   close all     — 关闭所有
+ *   close project       — 关闭项目
+ *   close all           — 关闭所有文件
+ *   close <index>       — 按序号关闭（0-based，负数为从右数，-1 是最后一个）
+ *   close other/others  — 关闭除当前外的所有文件
+ *   close left          — 关闭当前文件左边的所有文件
+ *   close right         — 关闭当前文件右边的所有文件
  */
 async function handleCloseCommand(args) {
   if (args.length === 0) {
-    setStatus("用法: close project  或  close all");
+    setStatus("用法: close project | all | <index> | other | left | right");
     return;
   }
 
-  const sub = args[0]?.toLowerCase();
+  const sub = args[0];
 
-  switch (sub) {
+  // 判断是否为数字（支持负数，如 -1 表示最后一个）
+  if (/^-?\d+$/.test(sub)) {
+    closeByIndex(parseInt(sub, 10));
+    return;
+  }
+
+  switch (sub.toLowerCase()) {
     case "project":
       closeProject();
       break;
     case "all":
       closeAll();
       break;
+    case "other":
+    case "others":
+      closeOthers();
+      break;
+    case "left":
+      closeLeft();
+      break;
+    case "right":
+      closeRight();
+      break;
     default:
-      setStatus(`未知子命令: close ${sub}。可用: project, all`);
+      setStatus(`未知子命令: close ${sub}。可用: project, all, <index>, other, left, right`);
   }
 }
 
@@ -247,18 +270,73 @@ function closeProject() {
 }
 
 function closeAll() {
-  // 关闭所有标签页
+  if (state.tabs.length === 0) {
+    setStatus("没有打开的文件");
+    return;
+  }
   state.tabs = [];
   state.activeTabId = null;
   renderTabs();
   hideEditor();
+  setStatus("已关闭所有文件");
+}
 
-  // 关闭项目
-  if (state.currentProject) {
-    closeProject();
-  } else {
-    setStatus("已关闭所有");
+/**
+ * 按序号关闭标签页。
+ * 正数: 0-based 从左到右
+ * 负数: -1-based 从右到左（-1 = 最后一个）
+ */
+function closeByIndex(index) {
+  if (state.tabs.length === 0) {
+    setStatus("没有打开的文件");
+    return;
   }
+  const i = index >= 0 ? index : state.tabs.length + index;
+  if (i < 0 || i >= state.tabs.length) {
+    setStatus(`序号超出范围: ${index}（共 ${state.tabs.length} 个文件）`);
+    return;
+  }
+  const tab = state.tabs[i];
+  closeTab(tab.id);
+  setStatus(`已关闭: ${tab.name}`);
+}
+
+/** 关闭除当前活动标签外的所有标签 */
+function closeOthers() {
+  if (state.tabs.length <= 1) {
+    setStatus("没有其他文件可关闭");
+    return;
+  }
+  const active = state.tabs.find((t) => t.id === state.activeTabId);
+  state.tabs = active ? [active] : [];
+  renderTabs();
+  setStatus("已关闭其他文件");
+}
+
+/** 关闭当前活动标签左边的所有标签 */
+function closeLeft() {
+  const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+  if (idx <= 0) {
+    setStatus("当前文件左侧没有文件");
+    return;
+  }
+  const removed = state.tabs.slice(0, idx).map((t) => t.name).join(", ");
+  state.tabs = state.tabs.slice(idx);
+  renderTabs();
+  setStatus(`已关闭左侧文件: ${removed}`);
+}
+
+/** 关闭当前活动标签右边的所有标签 */
+function closeRight() {
+  const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+  if (idx < 0 || idx >= state.tabs.length - 1) {
+    setStatus("当前文件右侧没有文件");
+    return;
+  }
+  const removed = state.tabs.slice(idx + 1).map((t) => t.name).join(", ");
+  state.tabs = state.tabs.slice(0, idx + 1);
+  renderTabs();
+  setStatus(`已关闭右侧文件: ${removed}`);
 }
 
 /**
@@ -415,7 +493,8 @@ function hideEditor() {
   document.getElementById("editor-empty").style.display = "";
   document.getElementById("editor-view").style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
-  document.getElementById("editor-code").innerHTML = "";
+  document.getElementById("editor-code-backdrop").innerHTML = "";
+  document.getElementById("editor-textarea").value = "";
 }
 
 async function highlightAndRender(tab) {
@@ -430,7 +509,6 @@ async function highlightAndRender(tab) {
       renderHighlightedCode(tab);
     }
   } catch {
-    // 高亮失败时降级为纯文本
     renderPlainCode(tab);
   }
 }
@@ -443,10 +521,12 @@ function renderHighlightedCode(tab) {
   }
 
   const gutter = document.getElementById("editor-gutter");
-  const code = document.getElementById("editor-code");
+  const backdrop = document.getElementById("editor-code-backdrop");
+  const textarea = document.getElementById("editor-textarea");
 
   let gutterHtml = "";
   let codeHtml = "";
+  let rawLines = [];
 
   for (const line of lines) {
     const n = line.line_number;
@@ -455,34 +535,34 @@ function renderHighlightedCode(tab) {
     let lineHtml = "";
     let pos = 0;
     for (const span of line.spans) {
-      // 无样式区间
       if (span.start_col > pos) {
         lineHtml += escapeHtml(line.text.slice(pos, span.start_col));
       }
-      // 高亮区间
       lineHtml +=
         `<span class="tok-${span.tag}">` +
         escapeHtml(line.text.slice(span.start_col, span.end_col)) +
         "</span>";
       pos = span.end_col;
     }
-    // 剩余文本
     if (pos < line.text.length) {
       lineHtml += escapeHtml(line.text.slice(pos));
     }
 
     codeHtml += `<div class="code-line">${lineHtml || " "}</div>`;
+    rawLines.push(line.text);
   }
 
   gutter.innerHTML = gutterHtml;
-  code.innerHTML = codeHtml;
+  backdrop.innerHTML = codeHtml;
+  textarea.value = rawLines.join("\n");
 }
 
 function renderPlainCode(tab) {
   const lines = tab.content.split("\n");
 
   const gutter = document.getElementById("editor-gutter");
-  const code = document.getElementById("editor-code");
+  const backdrop = document.getElementById("editor-code-backdrop");
+  const textarea = document.getElementById("editor-textarea");
 
   let gutterHtml = "";
   let codeHtml = "";
@@ -493,7 +573,8 @@ function renderPlainCode(tab) {
   }
 
   gutter.innerHTML = gutterHtml;
-  code.innerHTML = codeHtml;
+  backdrop.innerHTML = codeHtml;
+  textarea.value = tab.content;
 }
 
 function escapeHtml(s) {
@@ -501,6 +582,39 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+// ============================================
+// 编辑器 textarea 同步
+// ============================================
+
+function setupTextareaSync() {
+  const textarea = document.getElementById("editor-textarea");
+  if (!textarea) return;
+
+  // 用户编辑时，同步内容到 tab
+  textarea.addEventListener("input", () => {
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (!tab) return;
+
+    const newContent = textarea.value;
+    if (tab.content === newContent) return;
+
+    tab.content = newContent;
+    tab._highlighted = null;
+    tab._isPython = false;
+
+    // 实时光栅渲染 < 1000 行时更新 backdrop
+    if (newContent.split("\n").length <= 1000) {
+      renderPlainCode(tab);
+    }
+
+    // 标记为已修改
+    if (!tab._modified) {
+      tab._modified = true;
+      renderTabs();
+    }
+  });
 }
 
 // ============================================
@@ -739,6 +853,29 @@ async function toggleTreeNode(node, entry, childrenContainer, depth) {
 /**
  * @param {"info"|"error"} level
  */
+// ============================================
+// 启动时自动打开上次项目
+// ============================================
+
+async function autoOpenLastProject() {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+
+  try {
+    const lastPath = await invoke("get_last_project");
+    if (lastPath) {
+      setStatus("正在恢复上次项目...");
+      await openProject(lastPath);
+    }
+  } catch {
+    // 启动时静默失败
+  }
+}
+
+// ============================================
+// 状态栏
+// ============================================
+
 function setStatus(message, level = "info") {
   const el = document.querySelector("#statusbar .status-item");
   if (el) {

@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod config;
+
 use std::path::Path;
+use std::sync::Mutex;
 
 // ============================================
 // 辅助函数
@@ -58,7 +61,10 @@ struct LineSpan {
 // ============================================
 
 #[tauri::command]
-fn open_project(path: String) -> Result<ProjectInfo, String> {
+fn open_project(
+    path: String,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<ProjectInfo, String> {
     let p = Path::new(&path);
 
     if !p.exists() {
@@ -69,15 +75,21 @@ fn open_project(path: String) -> Result<ProjectInfo, String> {
     }
 
     let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let clean = clean_path(&canonical);
     let name = canonical
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
 
+    // 持久化到 projects 配置
+    if let Ok(cfg) = config_mgr.lock() {
+        let _ = cfg.set_current_project(&clean);
+    }
+
     Ok(ProjectInfo {
         name,
-        path: clean_path(&canonical),
+        path: clean,
     })
 }
 
@@ -96,7 +108,6 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
         let name = entry.file_name().to_string_lossy().to_string();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-        // 隐藏以 . 开始的文件夹，但不隐藏以 . 开始的文件
         if is_dir && name.starts_with('.') {
             continue;
         }
@@ -108,7 +119,6 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
         });
     }
 
-    // 文件夹在前，然后按名称字母排序（不区分大小写）
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
@@ -142,27 +152,44 @@ fn highlight_python(code: String) -> Result<Vec<LineHighlight>, String> {
     use arborium::Highlighter;
 
     let mut highlighter = Highlighter::new();
-
-    // 获取原始 highlight spans（字节偏移 + capture 名称）
     let spans = highlighter
         .highlight_spans("python", &code)
         .map_err(|e| e.to_string())?;
 
-    // 为每个 span 解析出 CSS 类名 tag
-    // 使用 theme 系统: capture 名 → tag (如 "keyword", "function", "string" 等)
     let themed: Vec<(u32, u32, &str)> = spans
         .iter()
         .filter_map(|s| {
             arborium_theme::tag_for_capture(&s.capture)
-                .map(|tag| (s.start, s.end, tag))
+                .and_then(arborium_theme::tag_to_name)
+                .map(|name| (s.start, s.end, name))
         })
         .collect();
 
-    // 将 spans 按行组织
     build_line_highlights(&code, &themed)
 }
 
-/// 将字节偏移的 spans 转换为按行组织的 highlight 数据
+/// 获取上次打开的项目路径（供前端启动时自动打开）
+#[tauri::command]
+fn get_last_project(
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<Option<String>, String> {
+    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
+    Ok(cfg.load_projects().current)
+}
+
+/// 获取所有已知项目列表
+#[tauri::command]
+fn get_projects(
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<Vec<String>, String> {
+    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
+    Ok(cfg.load_projects().list)
+}
+
+// ============================================
+// 内部函数
+// ============================================
+
 fn build_line_highlights(
     code: &str,
     spans: &[(u32, u32, &str)],
@@ -192,17 +219,32 @@ fn build_line_highlights(
             }
         }
 
+        // 排序并去重：tree-sitter 会对同一段文本产生多个重叠 capture
+        line_spans.sort_by(|a, b| a.start_col.cmp(&b.start_col));
+        let mut deduped: Vec<LineSpan> = Vec::new();
+        let mut covered = 0usize;
+        for span in line_spans {
+            if span.end_col <= covered {
+                continue;
+            }
+            let mut s = span;
+            if s.start_col < covered {
+                s.start_col = covered;
+            }
+            covered = s.end_col;
+            deduped.push(s);
+        }
+
         result.push(LineHighlight {
             line_number: line_idx + 1,
             text: line_text.to_string(),
-            spans: line_spans,
+            spans: deduped,
         });
     }
 
     Ok(result)
 }
 
-/// 计算第 N 行（1-based）在源代码中的字节偏移量
 fn line_byte_offset(source: &str, line_number: usize) -> usize {
     if line_number <= 1 {
         return 0;
@@ -221,12 +263,17 @@ fn line_byte_offset(source: &str, line_number: usize) -> usize {
 // ============================================
 
 fn main() {
+    let config_mgr = Mutex::new(config::ConfigManager::new());
+
     tauri::Builder::default()
+        .manage(config_mgr)
         .invoke_handler(tauri::generate_handler![
             open_project,
             list_dir,
             read_file,
-            highlight_python
+            highlight_python,
+            get_last_project,
+            get_projects,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

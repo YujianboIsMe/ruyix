@@ -33,6 +33,13 @@ html, body {
   user-select: none;
 }
 
+/* 编辑器区域内允许文本选择 */
+.editor-code-backdrop,
+.editor-textarea,
+.editor-gutter {
+  user-select: text;
+}
+
 #app {
   display: flex;
   flex-direction: column;
@@ -454,7 +461,7 @@ html, body {
 .editor-view {
   flex: 1;
   display: flex;
-  overflow: auto;
+  overflow: auto;  /* 唯一滚动容器 —— 垂直/水平滚动都在这里 */
 }
 
 /* --- Gutter（行号） --- */
@@ -467,6 +474,10 @@ html, body {
   text-align: right;
   user-select: none;
   flex-shrink: 0;
+  /* 水平滚动时行号固定在左侧 */
+  position: sticky;
+  left: 0;
+  z-index: 1;
 }
 
 .gutter-line {
@@ -479,22 +490,49 @@ html, body {
   opacity: 0.6;
 }
 
-/* --- 代码区 --- */
+/* --- 代码区：背景高亮 + 透明 textarea 叠加（CSS Grid） --- */
 
-.editor-code {
+.editor-code-container {
   flex: 1;
-  padding: 8px 0;
-  overflow: auto;
+  display: grid;
+  min-height: 0;
+}
+
+/* Grid 叠加：backdrop 和 textarea 占据同一网格单元 */
+.editor-code-backdrop,
+.editor-textarea {
+  grid-area: 1 / 1;
+  /* 水平 padding 保持一致：光标与高亮文字对齐的关键 */
+  padding: 8px 16px;
   font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
   font-size: 13px;
   line-height: 20px;
+  white-space: pre;
+  tab-size: 4;
+  /* 不裁剪内容、不产生独立滚动条，由父级 .editor-view 统一滚动 */
+  overflow: visible;
+}
+
+.editor-code-backdrop {
+  z-index: 1;
   color: var(--text-primary);
+  pointer-events: none;
+}
+
+.editor-textarea {
+  z-index: 2;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
 }
 
 .code-line {
   height: 20px;
   line-height: 20px;
-  padding: 0 16px;
+  padding: 0;
   white-space: pre;
 }
 
