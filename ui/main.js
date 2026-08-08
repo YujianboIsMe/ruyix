@@ -35,9 +35,11 @@ const state = {
 // ============================================
 
 function getTauriWindow() {
-  if (window.__TAURI__ && window.__TAURI__.window) {
-    return window.__TAURI__.window.appWindow;
-  }
+  const w = window.__TAURI__?.window;
+  if (!w) return null;
+  if (w.appWindow) return w.appWindow;
+  if (typeof w.getCurrentWindow === "function") return w.getCurrentWindow();
+  if (typeof w.getCurrent === "function") return w.getCurrent();
   return null;
 }
 
@@ -65,19 +67,32 @@ function setupWindowControls() {
   const btnMaximize = document.getElementById("btn-maximize");
   const btnClose = document.getElementById("btn-close");
 
-  btnMinimize?.addEventListener("click", () => {
+  btnMinimize?.addEventListener("click", async () => {
     const win = getTauriWindow();
-    if (win) win.minimize();
+    if (win) { win.minimize(); return; }
+    // fallback: invoke window plugin
+    const invoke = getTauriInvoke();
+    if (invoke) {
+      try { await invoke("plugin:window|minimize"); } catch {}
+    }
   });
 
-  btnMaximize?.addEventListener("click", () => {
+  btnMaximize?.addEventListener("click", async () => {
     const win = getTauriWindow();
-    if (win) win.toggleMaximize();
+    if (win) { win.toggleMaximize(); return; }
+    const invoke = getTauriInvoke();
+    if (invoke) {
+      try { await invoke("plugin:window|toggle_maximize"); } catch {}
+    }
   });
 
-  btnClose?.addEventListener("click", () => {
+  btnClose?.addEventListener("click", async () => {
     const win = getTauriWindow();
-    if (win) win.close();
+    if (win) { win.close(); return; }
+    const invoke = getTauriInvoke();
+    if (invoke) {
+      try { await invoke("plugin:window|close"); } catch {}
+    }
   });
 
   // 双击标题栏 drag region 切换最大化

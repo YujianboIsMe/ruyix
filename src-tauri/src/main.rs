@@ -219,6 +219,8 @@ async fn run_target(cmd: String) -> Result<RunOutput, String> {
 
         let output = Command::new(&program)
             .args(&args)
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("PYTHONUTF8", "1")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
