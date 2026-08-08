@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Darkhorse Code</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="xterm.css" />
+  <script src="xterm.js"></script>
 </head>
 <body>
   <div id="app">
@@ -64,13 +66,13 @@
             </div>
             <div id="nav-panel-terminal" class="nav-panel">
               <ul id="terminal-list" class="terminal-list">
-                <li>PowerShell</li>
-                <li>Cmd</li>
-                <li>Ubuntu</li>
-                <li>Claude</li>
-                <li>Python</li>
-                <li>Node.js</li>
-                <li>Git Bash</li>
+                <li data-cmd="powershell.exe">PowerShell</li>
+                <li data-cmd="cmd.exe">Cmd</li>
+                <li data-cmd="wsl.exe">Ubuntu</li>
+                <li data-cmd="claude">Claude</li>
+                <li data-cmd="python.exe">Python</li>
+                <li data-cmd="node.exe">Node.js</li>
+                <li data-cmd="&quot;C:\Program Files\Git\git-bash.exe&quot;">Git Bash</li>
               </ul>
             </div>
             <div id="nav-panel-target" class="nav-panel">
@@ -94,6 +96,9 @@
                 <div id="editor-code-backdrop" class="editor-code-backdrop"></div>
                 <textarea id="editor-textarea" class="editor-textarea" spellcheck="false"></textarea>
               </div>
+            </div>
+            <div id="terminal-view" class="terminal-view" style="display:none">
+              <div id="terminal-container" class="terminal-container"></div>
             </div>
           </div>
         </section>

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod pty;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -237,8 +238,73 @@ async fn run_target(cmd: String) -> Result<RunOutput, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// 启动交互式终端进程（不等待，独立窗口）
+#[tauri::command]
+fn spawn_terminal(cmd: String) -> Result<(), String> {
+    let parts = split_cmd(&cmd);
+    if parts.is_empty() {
+        return Err("空命令".to_string());
+    }
+
+    let program = &parts[0];
+    let args = &parts[1..];
+
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map_err(|e| format!("启动失败: {}", e))?;
+
+    Ok(())
+}
+
+// ============================================
+// PTY 终端命令
+// ============================================
+
+#[tauri::command]
+fn pty_spawn(
+    window: tauri::Window,
+    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
+    cmd: String,
+    tab_id: String,
+) -> Result<(), String> {
+    let mut mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.spawn(window, tab_id, &cmd)
+}
+
+#[tauri::command]
+fn pty_write(
+    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
+    tab_id: String,
+    data: String,
+) -> Result<(), String> {
+    let mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.write(&tab_id, &data)
+}
+
+#[tauri::command]
+fn pty_resize(
+    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
+    tab_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    let mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.resize(&tab_id, rows, cols)
+}
+
+#[tauri::command]
+fn pty_close(
+    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
+    tab_id: String,
+) -> Result<(), String> {
+    let mut mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.close(&tab_id);
+    Ok(())
+}
+
 /// 按空格拆分命令行，支持引号包裹，保留 `\`（不转义）
-fn split_cmd(cmd: &str) -> Vec<String> {
+pub fn split_cmd(cmd: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut in_quote = false;
@@ -387,9 +453,11 @@ fn config_delete(
 
 fn main() {
     let config_mgr = Mutex::new(config::ConfigManager::new());
+    let pty_mgr = Mutex::new(pty::PtyManager::new());
 
     tauri::Builder::default()
         .manage(config_mgr)
+        .manage(pty_mgr)
         .invoke_handler(tauri::generate_handler![
             open_project,
             list_dir,
@@ -399,6 +467,11 @@ fn main() {
             get_projects,
             get_run_targets,
             run_target,
+            spawn_terminal,
+            pty_spawn,
+            pty_write,
+            pty_resize,
+            pty_close,
             config_get,
             config_set,
             config_delete,

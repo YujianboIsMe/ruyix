@@ -27,6 +27,7 @@ const state = {
   setupResponsiveTitlebar();
   setupNavigatorTabs();
   setupTextareaSync();
+  setupTerminalList();
   await autoOpenLastProject();
 })();
 
@@ -160,11 +161,12 @@ function setupCommandBar() {
     }
   });
 
-  // 点击页面空白区域时聚焦命令栏（不劫持编辑器、输入框等可编辑区域）
+  // 点击页面空白区域时聚焦命令栏（不劫持编辑器、终端、输入框等可编辑区域）
   document.addEventListener("click", (e) => {
     const tag = e.target.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" || tag === "SELECT") return;
     if (e.target.isContentEditable || e.target.closest("[contenteditable]")) return;
+    if (e.target.closest("#terminal-container")) return;
     input.focus();
   });
 }
@@ -678,10 +680,13 @@ function switchTab(tabId) {
 
   showEditor();
   if (tab._isTerminal) {
-    // 终端标签页：恢复文本区域为只读
-    const textarea = document.getElementById("editor-textarea");
-    if (textarea) textarea.readOnly = true;
-    return; // 内容和 gutter 已在 renderTerminalOutput 中设置
+    // xterm.js 终端标签页
+    hideEditorView();
+    showTerminalView();
+    if (tab._term) {
+      tab._term.focus();
+    }
+    return;
   }
   if (tab._highlighted) {
     renderHighlightedCode(tab);
@@ -694,6 +699,19 @@ function closeTab(tabId) {
   const idx = state.tabs.findIndex((t) => t.id === tabId);
   if (idx === -1) return;
 
+  const tab = state.tabs[idx];
+
+  // PTY 终端清理
+  if (tab._isTerminal) {
+    const invoke = getTauriInvoke();
+    if (invoke) {
+      invoke("pty_close", { tabId: tab.id }).catch(() => {});
+    }
+    if (tab._ptyUnlisten) tab._ptyUnlisten();
+    if (tab._term) tab._term.dispose();
+    hideTerminalView();
+  }
+
   state.tabs.splice(idx, 1);
 
   if (state.tabs.length === 0) {
@@ -701,13 +719,14 @@ function closeTab(tabId) {
     renderTabs();
     hideEditor();
   } else {
-    // 激活相邻标签
     const next = state.tabs[Math.min(idx, state.tabs.length - 1)];
     switchTab(next.id);
   }
 }
 
-// ============================================
+function hideEditorView() {
+  document.getElementById("editor-view").style.display = "none";
+}
 // 编辑区渲染
 // ============================================
 
@@ -719,6 +738,7 @@ function showEditor() {
 function hideEditor() {
   document.getElementById("editor-empty").style.display = "";
   document.getElementById("editor-view").style.display = "none";
+  document.getElementById("terminal-view").style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
   document.getElementById("editor-code-backdrop").innerHTML = "";
   document.getElementById("editor-textarea").value = "";
@@ -1093,6 +1113,134 @@ function renderTerminalOutput(tab, text) {
   backdrop.innerHTML = codeHtml;
   textarea.value = text;
   textarea.readOnly = true;
+}
+
+// ============================================
+// 终端资源列表
+// ============================================
+
+function setupTerminalList() {
+  const list = document.getElementById("terminal-list");
+  if (!list) return;
+
+  list.querySelectorAll("li").forEach((li) => {
+    li.addEventListener("click", () => {
+      const cmd = li.dataset.cmd;
+      const name = li.textContent.trim();
+      if (cmd) spawnTerminal(name, cmd);
+    });
+    li.style.cursor = "pointer";
+  });
+}
+
+async function spawnTerminal(name, cmd) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
+
+  if (typeof Terminal === "undefined") {
+    setStatus("xterm.js 未加载", "error");
+    return;
+  }
+
+  const tabId = "term-" + Date.now().toString();
+
+  const tab = {
+    id: tabId,
+    name,
+    path: "",
+    content: cmd,
+    _isTerminal: true,
+  };
+  state.tabs.push(tab);
+  renderTabs();
+  switchTab(tabId);
+
+  // 隐藏编辑器，显示终端容器
+  showTerminalView();
+
+  setStatus(`正在启动 ${name}...`);
+
+  try {
+    // 启动 PTY
+    await invoke("pty_spawn", { cmd, tabId });
+
+    // 创建 xterm.js 终端
+    const term = new Terminal({
+      rows: 24,
+      cols: 100,
+      cursorBlink: true,
+      fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace',
+      fontSize: 13,
+      theme: {
+        background: "#1e1e1e",
+        foreground: "#d4d4d4",
+        cursor: "#ffffff",
+        selectionBackground: "#264f78",
+      },
+    });
+
+    const container = document.getElementById("terminal-container");
+    container.innerHTML = "";
+    term.open(container);
+    term.focus();
+
+    // 保存 xterm 实例到 tab
+    tab._term = term;
+
+    // 用户输入 → PTY
+    term.onData((data) => {
+      invoke("pty_write", { tabId, data }).catch(() => {});
+    });
+
+    // PTY 输出 → 终端显示
+    const unlisten = await listenToPty(tabId, term);
+
+    // PTY 退出
+    const unlistenExit = await listenToPtyExit(tabId, term, name);
+
+    tab._ptyUnlisten = () => { unlisten(); unlistenExit(); };
+
+    setStatus(`${name} 已启动`);
+  } catch (err) {
+    setStatus(`启动失败: ${err}`, "error");
+  }
+}
+
+/** 监听 PTY 输出事件 */
+async function listenToPty(tabId, term) {
+  const eventName = `pty-out-${tabId}`;
+  // Tauri 2 事件监听
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    return window.__TAURI__.event.listen(eventName, (event) => {
+      term.write(event.payload);
+    });
+  }
+  // fallback: 使用 core.invoke 轮询 (shouldn't happen)
+  return () => {};
+}
+
+/** 监听 PTY 退出事件 */
+async function listenToPtyExit(tabId, term, name) {
+  const eventName = `pty-exit-${tabId}`;
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    return window.__TAURI__.event.listen(eventName, () => {
+      term.write(`\r\n[${name} 已退出]\r\n`);
+    });
+  }
+  return () => {};
+}
+
+function showTerminalView() {
+  document.getElementById("editor-empty").style.display = "none";
+  document.getElementById("editor-view").style.display = "none";
+  document.getElementById("terminal-view").style.display = "";
+}
+
+function hideTerminalView() {
+  document.getElementById("terminal-view").style.display = "none";
 }
 
 // ============================================

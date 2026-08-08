@@ -593,6 +593,25 @@ html, body {
   background: var(--bg-primary);
 }
 
+/* --- xterm.js 终端容器 --- */
+
+.terminal-view {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  background: #000;
+}
+
+.terminal-container {
+  flex: 1;
+  padding: 4px;
+}
+
+.terminal-container .xterm {
+  height: 100%;
+  padding: 4px;
+}
+
 /* --- 语法高亮颜色 (VS Code Dark+ 风格) --- */
 
 .tok-comment { color: #6a9955; font-style: italic; }
