@@ -3,8 +3,12 @@
 mod config;
 mod pty;
 
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::sync::Mutex;
+
+/// CREATE_NEW_CONSOLE — 为新进程创建独立控制台窗口
+const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
 // ============================================
 // 辅助函数
@@ -149,24 +153,29 @@ fn read_file(path: String) -> Result<FileContent, String> {
 }
 
 #[tauri::command]
-fn highlight_python(code: String) -> Result<Vec<LineHighlight>, String> {
-    use arborium::Highlighter;
+async fn highlight_python(code: String) -> Result<Vec<LineHighlight>, String> {
+    // 在后台线程中执行 CPU 密集的语法高亮，避免阻塞异步运行时
+    tauri::async_runtime::spawn_blocking(move || {
+        use arborium::Highlighter;
 
-    let mut highlighter = Highlighter::new();
-    let spans = highlighter
-        .highlight_spans("python", &code)
-        .map_err(|e| e.to_string())?;
+        let mut highlighter = Highlighter::new();
+        let spans = highlighter
+            .highlight_spans("python", &code)
+            .map_err(|e| e.to_string())?;
 
-    let themed: Vec<(u32, u32, &str)> = spans
-        .iter()
-        .filter_map(|s| {
-            arborium_theme::tag_for_capture(&s.capture)
-                .and_then(arborium_theme::tag_to_name)
-                .map(|name| (s.start, s.end, name))
-        })
-        .collect();
+        let themed: Vec<(u32, u32, &str)> = spans
+            .iter()
+            .filter_map(|s| {
+                arborium_theme::tag_for_capture(&s.capture)
+                    .and_then(arborium_theme::tag_to_name)
+                    .map(|name| (s.start, s.end, name))
+            })
+            .collect();
 
-    build_line_highlights(&code, &themed)
+        build_line_highlights(&code, &themed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 获取上次打开的项目路径（供前端启动时自动打开）
@@ -238,7 +247,7 @@ async fn run_target(cmd: String) -> Result<RunOutput, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// 启动交互式终端进程（不等待，独立窗口）
+/// 在新控制台窗口中启动终端程序（CREATE_NEW_CONSOLE 标志，不经过 PTY）
 #[tauri::command]
 fn spawn_terminal(cmd: String) -> Result<(), String> {
     let parts = split_cmd(&cmd);
@@ -249,8 +258,11 @@ fn spawn_terminal(cmd: String) -> Result<(), String> {
     let program = &parts[0];
     let args = &parts[1..];
 
+    // CREATE_NEW_CONSOLE 为 CLI 程序（powershell、python 等）创建独立窗口
+    // GUI 程序（如 git-bash.exe）会自行创建窗口，此标志对其无影响
     std::process::Command::new(program)
         .args(args)
+        .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
         .map_err(|e| format!("启动失败: {}", e))?;
 

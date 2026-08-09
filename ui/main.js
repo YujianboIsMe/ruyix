@@ -680,10 +680,13 @@ function switchTab(tabId) {
 
   showEditor();
   if (tab._isTerminal) {
-    // xterm.js 终端标签页
+    // xterm.js 终端标签页 — 重新挂载到容器中
     hideEditorView();
     showTerminalView();
     if (tab._term) {
+      const container = document.getElementById("terminal-container");
+      container.innerHTML = "";
+      tab._term.open(container);
       tab._term.focus();
     }
     return;
@@ -1123,14 +1126,44 @@ function setupTerminalList() {
   const list = document.getElementById("terminal-list");
   if (!list) return;
 
-  list.querySelectorAll("li").forEach((li) => {
-    li.addEventListener("click", () => {
-      const cmd = li.dataset.cmd;
-      const name = li.textContent.trim();
-      if (cmd) spawnTerminal(name, cmd);
-    });
-    li.style.cursor = "pointer";
+  // 事件委托：在 <ul> 上统一监听
+  list.addEventListener("click", (e) => {
+    const li = e.target.closest("li");
+    if (!li) return;
+
+    const nameEl = li.querySelector(".terminal-name");
+    const name = nameEl ? nameEl.textContent.trim() : "";
+    const cmd = li.dataset.cmd;
+    if (!cmd) return;
+
+    // 点击 🪟 图标 → 新窗口打开
+    if (e.target.closest(".terminal-new-window")) {
+      const windowCmd = li.dataset.cmdWindow || cmd;
+      spawnInNewWindow(name, windowCmd);
+      return;
+    }
+
+    // 点击文字 → 模拟终端（PTY）
+    spawnTerminal(name, cmd);
   });
+}
+
+/**
+ * 在新操作系统窗口中启动终端程序（不经过 PTY）
+ */
+async function spawnInNewWindow(name, cmd) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
+
+  try {
+    await invoke("spawn_terminal", { cmd });
+    setStatus(`${name} 已在新窗口中启动`);
+  } catch (err) {
+    setStatus(`启动失败: ${err}`, "error");
+  }
 }
 
 async function spawnTerminal(name, cmd) {

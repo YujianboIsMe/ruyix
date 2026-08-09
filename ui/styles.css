@@ -347,6 +347,9 @@ html, body {
 }
 
 .terminal-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   padding: 5px 8px;
   font-size: 13px;
   color: var(--text-primary);
@@ -358,11 +361,34 @@ html, body {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.terminal-list li::before {
+.terminal-list .terminal-name {
+  flex: 1;
+  cursor: pointer;
+}
+
+.terminal-list .terminal-name::before {
   content: ">_ ";
   color: var(--accent);
   font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
   font-size: 11px;
+}
+
+.terminal-new-window {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 2px 4px;
+  font-size: 14px;
+  opacity: 0.45;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+  line-height: 1;
+  user-select: none;
+}
+
+.terminal-new-window:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 /* --- 运行目标列表 --- */
