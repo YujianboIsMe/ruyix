@@ -1,11 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod config;
 mod pty;
 
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::sync::Mutex;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::Emitter;
+use tauri::Manager;
 
 /// CREATE_NEW_CONSOLE — 为新进程创建独立控制台窗口
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
@@ -153,14 +157,20 @@ fn read_file(path: String) -> Result<FileContent, String> {
 }
 
 #[tauri::command]
-async fn highlight_python(code: String) -> Result<Vec<LineHighlight>, String> {
+fn write_file(path: String, content: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    std::fs::write(p, &content).map_err(|e| format!("保存失败: {}", e))
+}
+
+#[tauri::command]
+async fn highlight_code(language: String, code: String) -> Result<Vec<LineHighlight>, String> {
     // 在后台线程中执行 CPU 密集的语法高亮，避免阻塞异步运行时
     tauri::async_runtime::spawn_blocking(move || {
         use arborium::Highlighter;
 
         let mut highlighter = Highlighter::new();
         let spans = highlighter
-            .highlight_spans("python", &code)
+            .highlight_spans(&language, &code)
             .map_err(|e| e.to_string())?;
 
         let themed: Vec<(u32, u32, &str)> = spans
@@ -416,6 +426,19 @@ fn line_byte_offset(source: &str, line_number: usize) -> usize {
 }
 
 // ============================================
+// AI 命令
+// ============================================
+
+#[tauri::command]
+async fn ai_translate(
+    input: String,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    project_root: Option<String>,
+) -> Result<String, String> {
+    ai::translate(&config_mgr, project_root.as_deref(), &input).await
+}
+
+// ============================================
 // Config 命令
 // ============================================
 
@@ -470,11 +493,32 @@ fn main() {
     tauri::Builder::default()
         .manage(config_mgr)
         .manage(pty_mgr)
+        .setup(|app| {
+            // 注册原生 Ctrl+S 快捷键 — 即使 WebView2 拦截了 JS 的 Ctrl+S，
+            // 原生菜单 accelerator 仍能在 OS 层面捕获该组合键
+            let save = MenuItemBuilder::with_id("save", "保存")
+                .accelerator("CmdOrCtrl+S")
+                .build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&save)
+                .build()?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
+        .on_menu_event(|app_handle, event| {
+            if event.id() == "save" {
+                // 通知前端执行保存
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.emit("menu-save", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             open_project,
             list_dir,
             read_file,
-            highlight_python,
+            write_file,
+            highlight_code,
             get_last_project,
             get_projects,
             get_run_targets,
@@ -487,6 +531,7 @@ fn main() {
             config_get,
             config_set,
             config_delete,
+            ai_translate,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

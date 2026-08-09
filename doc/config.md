@@ -61,3 +61,12 @@ darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts
 darkhorse.code.run.target0.name="pdf转储es"
 ```
 target0 是用户随意取的名字，不是系统递增的。
+
+### AI
+AI配置同样遵循配置四级配置机制。
+
+配置项
+darkhorse.code.ai.api_key
+darkhorse.code.ai.api_url
+darkhorse.code.ai.model
+darkhorse.code.ai.alias 如果没有指定，则取darkhorse.code.ai.model

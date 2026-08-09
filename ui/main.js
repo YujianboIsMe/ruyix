@@ -17,19 +17,27 @@ const state = {
 // 初始化
 // ============================================
 
-(async function init() {
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
-    return;
-  }
+async function initApp() {
   setupWindowControls();
   setupCommandBar();
   setupResponsiveTitlebar();
   setupNavigatorTabs();
   setupTextareaSync();
   setupTerminalList();
-  await autoOpenLastProject();
-})();
+  setupKeyboardShortcuts();
+  setupHelpMenu();
+  try {
+    await autoOpenLastProject();
+  } catch (err) {
+    setStatus(`恢复项目失败: ${err}`, "error");
+  }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initApp);
+} else {
+  initApp();
+}
 
 // ============================================
 // Tauri API 辅助函数
@@ -178,7 +186,7 @@ function setupCommandBar() {
 /**
  * 解析并执行命令
  */
-async function handleCommand(raw) {
+async function handleCommand(raw, _fromAi = false) {
   const parts = raw.split(/\s+/);
   const verb = parts[0]?.toLowerCase();
 
@@ -192,8 +200,53 @@ async function handleCommand(raw) {
     case "config":
       await handleConfigCommand(raw);
       break;
+    case "help":
+      openHelp();
+      break;
     default:
-      setStatus(`未知命令: ${verb}`, "error");
+      // 标准命令未命中 → 调用 AI 翻译（防止递归）
+      if (!_fromAi) {
+        await handleAiCommand(raw);
+      } else {
+        setStatus(`未知命令: ${verb}`, "error");
+      }
+  }
+}
+
+/**
+ * AI 命令：将自然语言翻译为标准命令后执行
+ */
+async function handleAiCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
+
+  setStatus("正在思考...");
+  try {
+    const result = await invoke("ai_translate", { input: raw });
+
+    // AI 返回了 (不支持) 提示
+    if (result.startsWith("不支持")) {
+      setStatus(result, "error");
+      return;
+    }
+
+    // 闲聊回复（不是标准命令动词开头）→ 直接显示
+    const firstWord = result.split(/\s+/)[0]?.toLowerCase();
+    if (!["open", "close", "config"].includes(firstWord)) {
+      setStatus(result);
+      return;
+    }
+
+    // AI 返回的标准命令，逐行执行（禁止递归 AI）
+    const lines = result.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    for (const line of lines) {
+      await handleCommand(line, true);
+    }
+  } catch (err) {
+    setStatus(`AI 命令失败: ${err}`, "error");
   }
 }
 
@@ -621,10 +674,11 @@ async function openFile(path) {
     renderTabs();
     switchTab(tab.id);
 
-    // 高亮 Python 文件
+    // 语法高亮：根据扩展名确定语言
     const ext = name.split(".").pop()?.toLowerCase();
-    if (ext === "py") {
-      await highlightAndRender(tab);
+    const lang = extToLanguage(ext);
+    if (lang) {
+      await highlightAndRender(tab, lang);
     } else {
       renderPlainCode(tab);
     }
@@ -644,14 +698,16 @@ function renderTabs() {
   if (!bar) return;
 
   bar.innerHTML = state.tabs
-    .map(
-      (t) => `
+    .map((t) => {
+      const icon = t._isHelp ? "🔒" : t._isTerminal ? "🖥️" : fileIcon(t.name);
+      return `
     <div class="tab-item${t.id === state.activeTabId ? " active" : ""}"
          data-tab-id="${t.id}" title="${t.path}">
+      <span class="tab-icon">${icon}</span>
       <span class="tab-name">${escapeHtml(t.name)}</span>
       <span class="tab-close" data-close="${t.id}">&times;</span>
-    </div>`
-    )
+    </div>`;
+    })
     .join("");
 
   // 点击切换标签
@@ -679,6 +735,7 @@ function switchTab(tabId) {
   if (!tab) return;
 
   showEditor();
+  hideTerminalView();
   if (tab._isTerminal) {
     // xterm.js 终端标签页 — 重新挂载到容器中
     hideEditorView();
@@ -695,6 +752,10 @@ function switchTab(tabId) {
     renderHighlightedCode(tab);
   } else {
     renderPlainCode(tab);
+  }
+  if (tab._isHelp) {
+    const textarea = document.getElementById("editor-textarea");
+    if (textarea) textarea.readOnly = true;
   }
 }
 
@@ -747,14 +808,14 @@ function hideEditor() {
   document.getElementById("editor-textarea").value = "";
 }
 
-async function highlightAndRender(tab) {
+async function highlightAndRender(tab, language) {
   const invoke = getTauriInvoke();
   if (!invoke) return;
 
   try {
-    const lines = await invoke("highlight_python", { code: tab.content });
+    const lines = await invoke("highlight_code", { language, code: tab.content });
     tab._highlighted = lines;
-    tab._isPython = true;
+    tab._language = language;
     if (tab.id === state.activeTabId) {
       renderHighlightedCode(tab);
     }
@@ -836,6 +897,205 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
+/** 文件扩展名 → arborium 语言名 */
+function extToLanguage(ext) {
+  const map = {
+    py: "python",
+    rs: "rust",
+    html: "html",
+    htm: "html",
+    css: "css",
+    js: "javascript",
+    mjs: "javascript",
+    cjs: "javascript",
+    md: "markdown",
+    markdown: "markdown",
+  };
+  return map[ext] || null;
+}
+
+/** 文件名 → 标签页图标 */
+function fileIcon(name) {
+  const ext = name.split(".").pop()?.toLowerCase();
+  const iconMap = {
+    py: "🐍",
+    rs: "⛓️",
+    html: "🌏",
+    htm: "🌏",
+    css: "🏁",
+    js: "📔",
+    mjs: "📔",
+    cjs: "📔",
+  };
+  return iconMap[ext] || "📄";
+}
+
+// ============================================
+// 键盘快捷键
+// ============================================
+
+function setupKeyboardShortcuts() {
+  const isSaveShortcut = (e) =>
+    (e.ctrlKey || e.metaKey) &&
+    (e.code === "KeyS" || e.key === "s" || e.key === "S" || e.keyCode === 83);
+
+  const handleSave = (e) => {
+    if (isSaveShortcut(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      saveCurrentFile().catch((err) => setStatus(`保存失败: ${err}`, "error"));
+    }
+  };
+
+  // 策略 1: window 捕获阶段 — 最早拦截 WebView2 可能的行为
+  window.addEventListener("keydown", handleSave, true);
+
+  // 策略 2: document 冒泡阶段 — 兜底
+  document.addEventListener("keydown", handleSave, false);
+
+  // 策略 3: 编辑器 textarea 直连 — 编辑时焦点在此处
+  const textarea = document.getElementById("editor-textarea");
+  if (textarea) {
+    textarea.addEventListener("keydown", handleSave);
+  }
+
+  // 策略 4: 监听 Rust 端原生菜单快捷键事件（WebView2 拦截 JS Ctrl+S 时的兜底方案）
+  try {
+    const tauriEvent = window.__TAURI__?.event;
+    if (tauriEvent && typeof tauriEvent.listen === "function") {
+      tauriEvent.listen("menu-save", () => {
+        saveCurrentFile().catch((err) => setStatus(`保存失败: ${err}`, "error"));
+      });
+    }
+  } catch {
+    // 浏览器开发模式忽略
+  }
+}
+
+async function saveCurrentFile() {
+  const tab = state.tabs.find((t) => t.id === state.activeTabId);
+  if (!tab || tab._isTerminal) return;
+  if (!tab.path) {
+    setStatus("无法保存: 文件路径未知", "error");
+    return;
+  }
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
+
+  try {
+    await invoke("write_file", { path: tab.path, content: tab.content });
+
+    // 清除修改标记
+    tab._modified = false;
+    renderTabs();
+
+    // 如果之前有语法高亮，保存后重新高亮
+    if (tab._language) {
+      await highlightAndRender(tab, tab._language);
+    }
+
+    setStatus(`已保存: ${tab.name}`);
+  } catch (err) {
+    setStatus(`保存失败: ${err}`, "error");
+  }
+}
+
+// ============================================
+// 帮助页
+// ============================================
+
+const HELP_TEXT = `Darkhorse Code 帮助
+====================
+
+命令系统
+--------
+open project <路径>        打开项目文件夹
+open file <路径>           打开文件
+close project              关闭当前项目
+close all                  关闭所有标签页
+close <序号>               按序号关闭标签页（负数从右数，-1 最后一个）
+close other                关闭除当前外的所有标签页
+close left                 关闭当前左侧所有标签页
+close right                关闭当前右侧所有标签页
+config add|get|update|remove|delete [-g|-p|-r] <key>[=<value>]
+                           配置管理（默认 -r 运行时）
+
+快捷键
+------
+Ctrl+S                     保存当前文件
+
+语法高亮支持
+------------
+Python                     .py
+Rust                       .rs
+HTML（含嵌入 CSS/JS）       .html, .htm
+CSS                        .css
+JavaScript                 .js, .mjs, .cjs
+Markdown                   .md, .markdown
+
+联系方式
+--------
+CSDN 关注 醒过来摸鱼，私信即可。
+`;
+
+function setupHelpMenu() {
+  const btn = document.getElementById("menu-help");
+  if (!btn) return;
+
+  btn.addEventListener("click", () => openHelp());
+  btn.style.cursor = "pointer";
+
+  // 帮助页返回按钮
+  document.getElementById("btn-help-back")?.addEventListener("click", () => hideHelpPage());
+}
+
+function openHelp() {
+  if (!state.currentProject) {
+    showHelpPage();
+  } else {
+    openHelpTab();
+  }
+}
+
+function showHelpPage() {
+  document.getElementById("welcome-page").style.display = "none";
+  document.getElementById("help-page").style.display = "";
+}
+
+function hideHelpPage() {
+  document.getElementById("help-page").style.display = "none";
+  document.getElementById("welcome-page").style.display = "";
+}
+
+function openHelpTab() {
+  // 已存在帮助标签页则切换
+  const existing = state.tabs.find((t) => t._isHelp);
+  if (existing) {
+    switchTab(existing.id);
+    return;
+  }
+
+  const tab = {
+    id: "help-" + Date.now().toString(),
+    name: "帮助",
+    path: "",
+    content: HELP_TEXT,
+    _isHelp: true,
+  };
+  state.tabs.push(tab);
+  renderTabs();
+  switchTab(tab.id);
+  renderPlainCode(tab);
+
+  const textarea = document.getElementById("editor-textarea");
+  if (textarea) textarea.readOnly = true;
+}
+
 // ============================================
 // 编辑器 textarea 同步
 // ============================================
@@ -854,7 +1114,7 @@ function setupTextareaSync() {
 
     tab.content = newContent;
     tab._highlighted = null;
-    tab._isPython = false;
+    tab._language = null;
 
     // 实时光栅渲染 < 1000 行时更新 backdrop
     if (newContent.split("\n").length <= 1000) {
@@ -935,8 +1195,10 @@ function setupResponsiveTitlebar() {
 function showWelcomePage() {
   const welcome = document.getElementById("welcome-page");
   const project = document.getElementById("project-workspace");
+  const help = document.getElementById("help-page");
   if (welcome) welcome.style.display = "";
   if (project) project.style.display = "none";
+  if (help) help.style.display = "none";
 
   // 清空标签页和编辑器
   state.tabs = [];
@@ -948,8 +1210,10 @@ function showWelcomePage() {
 function showProjectWorkspace() {
   const welcome = document.getElementById("welcome-page");
   const project = document.getElementById("project-workspace");
+  const help = document.getElementById("help-page");
   if (welcome) welcome.style.display = "none";
   if (project) project.style.display = "";
+  if (help) help.style.display = "none";
 
   // 加载项目文件树和运行目标
   if (state.currentProject) {
@@ -1409,16 +1673,21 @@ async function toggleTreeNode(node, entry, childrenContainer, depth) {
 
 async function autoOpenLastProject() {
   const invoke = getTauriInvoke();
-  if (!invoke) return;
+  if (!invoke) {
+    setStatus("Tauri API 不可用");
+    return;
+  }
 
   try {
     const lastPath = await invoke("get_last_project");
-    if (lastPath) {
-      setStatus("正在恢复上次项目...");
-      await openProject(lastPath);
+    if (!lastPath) {
+      setStatus("没有上次项目记录");
+      return;
     }
-  } catch {
-    // 启动时静默失败
+    setStatus(`正在恢复项目: ${lastPath}`);
+    await openProject(lastPath);
+  } catch (err) {
+    setStatus(`恢复项目失败: ${err}`, "error");
   }
 }
 

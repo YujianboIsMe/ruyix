@@ -18,7 +18,7 @@
           <span class="menu-item">编辑</span>
           <span class="menu-item">选择</span>
           <span class="menu-item">查看</span>
-          <span class="menu-item">帮助</span>
+          <span class="menu-item" id="menu-help">帮助</span>
         </nav>
       </div>
       <div class="titlebar-center" data-tauri-drag-region>
@@ -49,6 +49,44 @@
         </div>
         <h1 class="welcome-title">最好用的IDE，个人使用</h1>
         <p id="welcome-subtitle" class="welcome-subtitle">Darkhorse Code</p>
+      </div>
+
+      <!-- 帮助页（无项目时替换欢迎页） -->
+      <div id="help-page" class="help-page" style="display:none">
+        <div class="help-content">
+          <h1>帮助</h1>
+
+          <h2>命令系统</h2>
+          <table class="help-table">
+            <tr><th>命令</th><th>说明</th></tr>
+            <tr><td><code>open project &lt;路径&gt;</code></td><td>打开项目文件夹</td></tr>
+            <tr><td><code>open file &lt;路径&gt;</code></td><td>打开文件</td></tr>
+            <tr><td><code>close project</code></td><td>关闭当前项目</td></tr>
+            <tr><td><code>close all</code></td><td>关闭所有标签页</td></tr>
+            <tr><td><code>close &lt;序号&gt;</code></td><td>按序号关闭标签页（负数从右数）</td></tr>
+            <tr><td><code>close other</code></td><td>关闭除当前外的标签页</td></tr>
+            <tr><td><code>close left</code></td><td>关闭当前标签页左侧所有</td></tr>
+            <tr><td><code>close right</code></td><td>关闭当前标签页右侧所有</td></tr>
+            <tr><td><code>config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td>配置管理</td></tr>
+          </table>
+          <p class="help-note">快捷键：<kbd>Ctrl+S</kbd> 保存当前文件</p>
+
+          <h2>语法高亮支持</h2>
+          <table class="help-table">
+            <tr><th>语言</th><th>扩展名</th></tr>
+            <tr><td>Python</td><td>.py</td></tr>
+            <tr><td>Rust</td><td>.rs</td></tr>
+            <tr><td>HTML（含嵌入 CSS/JS）</td><td>.html, .htm</td></tr>
+            <tr><td>CSS</td><td>.css</td></tr>
+            <tr><td>JavaScript</td><td>.js, .mjs, .cjs</td></tr>
+            <tr><td>Markdown</td><td>.md, .markdown</td></tr>
+          </table>
+
+          <h2>联系方式</h2>
+          <p>CSDN 关注 <strong>醒过来摸鱼</strong>，私信即可。</p>
+
+          <button id="btn-help-back" class="help-back-btn">← 返回</button>
+        </div>
       </div>
 
       <!-- 状态二：项目工作区（打开项目后显示） -->
@@ -144,7 +182,7 @@
         type="text"
         id="command-input"
         class="command-input"
-        placeholder="输入命令，回车执行..."
+        placeholder="任意输入，回车执行，最懂你的IDE"
         autofocus
       />
     </div>
