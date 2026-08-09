@@ -6,6 +6,7 @@ Tauri 2 + Monaco Editor + Rust后端
 核心优势是把编辑器渲染交给久经考验的Monaco，后端用Rust处理所有重逻辑，通信走Tauri原生IPC替代WebSocket。
 语法高亮架构：tree-sitter+ arborium
 终端架构：xterm.js + Rust PTY
+
 ## 界面
 [界面](doc/ui.md)
 

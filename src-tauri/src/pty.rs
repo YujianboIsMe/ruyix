@@ -32,6 +32,7 @@ impl PtyManager {
         window: tauri::Window,
         tab_id: String,
         cmd: &str,
+        cwd: Option<&str>,
     ) -> Result<(), String> {
         let parts = crate::split_cmd(cmd);
         if parts.is_empty() {
@@ -62,9 +63,14 @@ impl PtyManager {
         ));
         let master = Arc::new(Mutex::new(pty_pair.master));
 
-        let mut cmd_builder = CommandBuilder::new(&parts[0]);
+        // Windows: 处理 .cmd 脚本（如 npm 全局安装的 claude）
+        let program = crate::resolve_windows_cmd(&parts[0]);
+        let mut cmd_builder = CommandBuilder::new(&program);
         cmd_builder.args(&parts[1..]);
-        cmd_builder.cwd(std::env::current_dir().unwrap_or_default());
+        cmd_builder.cwd(
+            cwd.map(|p| std::path::PathBuf::from(p))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+        );
         cmd_builder.env("PYTHONIOENCODING", "utf-8");
         cmd_builder.env("PYTHONUTF8", "1");
         cmd_builder.env("TERM", "xterm-256color");

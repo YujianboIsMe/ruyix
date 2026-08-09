@@ -163,6 +163,38 @@ fn write_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn create_file(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if p.exists() {
+        return Err(format!("文件已存在: {}", p.display()));
+    }
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建父目录失败: {}", e))?;
+    }
+    std::fs::write(p, "").map_err(|e| format!("创建文件失败: {}", e))
+}
+
+#[tauri::command]
+fn create_dir(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {}", e))
+}
+
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("路径不存在: {}", p.display()));
+    }
+    if p.is_dir() {
+        std::fs::remove_dir_all(p).map_err(|e| format!("删除目录失败: {}", e))
+    } else {
+        std::fs::remove_file(p).map_err(|e| format!("删除文件失败: {}", e))
+    }
+}
+
+#[tauri::command]
 async fn highlight_code(language: String, code: String) -> Result<Vec<LineHighlight>, String> {
     // 在后台线程中执行 CPU 密集的语法高亮，避免阻塞异步运行时
     tauri::async_runtime::spawn_blocking(move || {
@@ -224,26 +256,30 @@ struct RunOutput {
 }
 
 #[tauri::command]
-async fn run_target(cmd: String) -> Result<RunOutput, String> {
+async fn run_target(cmd: String, project_root: Option<String>) -> Result<RunOutput, String> {
     let parts = split_cmd(&cmd);
     if parts.is_empty() {
         return Err("空命令".to_string());
     }
 
-    let program = parts[0].clone();
+    let program = resolve_windows_cmd(&parts[0]);
     let args = parts[1..].to_vec();
 
     // 后台线程执行，避免阻塞 UI
     tauri::async_runtime::spawn_blocking(move || {
         use std::process::Command;
 
-        let output = Command::new(&program)
-            .args(&args)
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
+            .stderr(std::process::Stdio::piped());
+        if let Some(ref dir) = project_root {
+            cmd.current_dir(dir);
+        }
+
+        let output = cmd.output()
             .map_err(|e| format!("执行失败: {}", e))?;
 
         Ok(RunOutput {
@@ -259,22 +295,23 @@ async fn run_target(cmd: String) -> Result<RunOutput, String> {
 
 /// 在新控制台窗口中启动终端程序（CREATE_NEW_CONSOLE 标志，不经过 PTY）
 #[tauri::command]
-fn spawn_terminal(cmd: String) -> Result<(), String> {
+fn spawn_terminal(cmd: String, project_root: Option<String>) -> Result<(), String> {
     let parts = split_cmd(&cmd);
     if parts.is_empty() {
         return Err("空命令".to_string());
     }
 
-    let program = &parts[0];
+    let program = resolve_windows_cmd(&parts[0]);
     let args = &parts[1..];
 
     // CREATE_NEW_CONSOLE 为 CLI 程序（powershell、python 等）创建独立窗口
     // GUI 程序（如 git-bash.exe）会自行创建窗口，此标志对其无影响
-    std::process::Command::new(program)
-        .args(args)
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .map_err(|e| format!("启动失败: {}", e))?;
+    let mut c = std::process::Command::new(program);
+    c.args(args).creation_flags(CREATE_NEW_CONSOLE);
+    if let Some(ref dir) = project_root {
+        c.current_dir(dir);
+    }
+    c.spawn().map_err(|e| format!("启动失败: {}", e))?;
 
     Ok(())
 }
@@ -289,9 +326,10 @@ fn pty_spawn(
     pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
     cmd: String,
     tab_id: String,
+    project_root: Option<String>,
 ) -> Result<(), String> {
     let mut mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.spawn(window, tab_id, &cmd)
+    mgr.spawn(window, tab_id, &cmd, project_root.as_deref())
 }
 
 #[tauri::command]
@@ -355,6 +393,25 @@ pub fn split_cmd(cmd: &str) -> Vec<String> {
         parts.push(cur);
     }
     parts
+}
+
+/// Windows: 无扩展名的程序可能是 npm 全局脚本（如 claude、code）
+/// 磁盘上同名无扩展名文件是 Unix shell 脚本，真正可执行的是 .cmd 版本
+pub(crate) fn resolve_windows_cmd(program: &str) -> String {
+    if cfg!(windows) {
+        let p = std::path::Path::new(program);
+        if p.extension().is_none() {
+            if let Ok(path_var) = std::env::var("PATH") {
+                for dir in path_var.split(';') {
+                    let candidate = std::path::Path::new(dir).join(format!("{}.cmd", program));
+                    if candidate.exists() {
+                        return format!("{}.cmd", program);
+                    }
+                }
+            }
+        }
+    }
+    program.to_string()
 }
 
 fn build_line_highlights(
@@ -518,6 +575,9 @@ fn main() {
             list_dir,
             read_file,
             write_file,
+            create_file,
+            create_dir,
+            delete_path,
             highlight_code,
             get_last_project,
             get_projects,

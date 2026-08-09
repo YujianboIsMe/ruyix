@@ -152,544 +152,6 @@ async function updateMaximizeIcon() {
 }
 
 // ============================================
-// 命令栏
-// ============================================
-
-function setupCommandBar() {
-  const input = document.getElementById("command-input");
-  if (!input) return;
-
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      const cmd = input.value.trim();
-      if (cmd) {
-        handleCommand(cmd);
-        input.value = "";
-      }
-    }
-  });
-
-  // 点击页面空白区域时聚焦命令栏（不劫持编辑器、终端、输入框等可编辑区域）
-  document.addEventListener("click", (e) => {
-    const tag = e.target.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" || tag === "SELECT") return;
-    if (e.target.isContentEditable || e.target.closest("[contenteditable]")) return;
-    if (e.target.closest("#terminal-container")) return;
-    input.focus();
-  });
-}
-
-// ============================================
-// 命令解析与分发
-// ============================================
-
-/**
- * 解析并执行命令
- */
-async function handleCommand(raw, _fromAi = false) {
-  const parts = raw.split(/\s+/);
-  const verb = parts[0]?.toLowerCase();
-
-  switch (verb) {
-    case "open":
-      await handleOpenCommand(parts.slice(1));
-      break;
-    case "close":
-      await handleCloseCommand(parts.slice(1));
-      break;
-    case "config":
-      await handleConfigCommand(raw);
-      break;
-    case "help":
-      openHelp();
-      break;
-    default:
-      // 标准命令未命中 → 调用 AI 翻译（防止递归）
-      if (!_fromAi) {
-        await handleAiCommand(raw);
-      } else {
-        setStatus(`未知命令: ${verb}`, "error");
-      }
-  }
-}
-
-/**
- * AI 命令：将自然语言翻译为标准命令后执行
- */
-async function handleAiCommand(raw) {
-  const invoke = getTauriInvoke();
-  if (!invoke) {
-    setStatus("Tauri API 不可用");
-    return;
-  }
-
-  setStatus("正在思考...");
-  try {
-    const result = await invoke("ai_translate", { input: raw });
-
-    // AI 返回了 (不支持) 提示
-    if (result.startsWith("不支持")) {
-      setStatus(result, "error");
-      return;
-    }
-
-    // 闲聊回复（不是标准命令动词开头）→ 直接显示
-    const firstWord = result.split(/\s+/)[0]?.toLowerCase();
-    if (!["open", "close", "config"].includes(firstWord)) {
-      setStatus(result);
-      return;
-    }
-
-    // AI 返回的标准命令，逐行执行（禁止递归 AI）
-    const lines = result.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-    for (const line of lines) {
-      await handleCommand(line, true);
-    }
-  } catch (err) {
-    setStatus(`AI 命令失败: ${err}`, "error");
-  }
-}
-
-/**
- * 处理 open 命令及其子命令
- *   open project <path>  — 打开项目
- *   open file <path>     — 打开文件 (待实现)
- */
-async function handleOpenCommand(args) {
-  if (args.length === 0) {
-    setStatus("用法: open project <路径>  或  open file <路径>");
-    return;
-  }
-
-  const sub = args[0]?.toLowerCase();
-  const targetPath = args.slice(1).join(" ");
-
-  switch (sub) {
-    case "project":
-      if (!targetPath) {
-        setStatus("用法: open project <项目文件夹路径>");
-        return;
-      }
-      await openProject(targetPath);
-      break;
-    case "file":
-      if (!targetPath) {
-        setStatus("用法: open file <文件路径>");
-        return;
-      }
-      await openFile(targetPath);
-      break;
-    default:
-      setStatus(`未知子命令: open ${sub}。可用: project, file`);
-  }
-}
-
-/**
- * 处理 close 命令及其子命令
- *   close project       — 关闭项目
- *   close all           — 关闭所有文件
- *   close <index>       — 按序号关闭（0-based，负数为从右数，-1 是最后一个）
- *   close other/others  — 关闭除当前外的所有文件
- *   close left          — 关闭当前文件左边的所有文件
- *   close right         — 关闭当前文件右边的所有文件
- */
-async function handleCloseCommand(args) {
-  if (args.length === 0) {
-    setStatus("用法: close project | all | <index> | other | left | right");
-    return;
-  }
-
-  const sub = args[0];
-
-  // 判断是否为数字（支持负数，如 -1 表示最后一个）
-  if (/^-?\d+$/.test(sub)) {
-    closeByIndex(parseInt(sub, 10));
-    return;
-  }
-
-  switch (sub.toLowerCase()) {
-    case "project":
-      closeProject();
-      break;
-    case "all":
-      closeAll();
-      break;
-    case "other":
-    case "others":
-      closeOthers();
-      break;
-    case "left":
-      closeLeft();
-      break;
-    case "right":
-      closeRight();
-      break;
-    default:
-      setStatus(`未知子命令: close ${sub}。可用: project, all, <index>, other, left, right`);
-  }
-}
-
-// ============================================
-// config 命令
-// ============================================
-
-/**
- * 解析 config 命令
- * 格式: config <action> [-g|-p|-r] [key] 或 config <action> [-g|-p|-r] key="value"
- * 默认 scope 为 -r (runtime)
- */
-async function handleConfigCommand(raw) {
-  // 去掉 "config " 前缀
-  const rest = raw.slice("config".length).trim();
-  if (!rest) {
-    setStatus(
-      "用法: config <add|get|update|remove|delete> [-g|-p|-r] [darkhorse.code.<section>.<key>[=value]]"
-    );
-    return;
-  }
-
-  // 解析: action scope key=value
-  // 分词：保留引号内容
-  const tokens = parseConfigTokens(rest);
-  if (tokens.length === 0) {
-    setStatus("用法: config <add|get|update|remove|delete> ...");
-    return;
-  }
-
-  const actions = ["add", "get", "update", "remove", "delete"];
-  let idx = 0;
-
-  // 子命令
-  const action = tokens[idx]?.toLowerCase();
-  if (!actions.includes(action)) {
-    setStatus(`未知 config 子命令: ${action}。可用: ${actions.join(", ")}`);
-    return;
-  }
-  idx++;
-
-  // scope 标志
-  let scope = "r";
-  if (tokens[idx] === "-g" || tokens[idx] === "-p" || tokens[idx] === "-r") {
-    scope = tokens[idx].slice(1);
-    idx++;
-  }
-
-  // key[=value]
-  const kv = tokens.slice(idx).join(" "); // 剩余的合并
-  const eqIdx = kv.indexOf("=");
-  const key = eqIdx >= 0 ? kv.slice(0, eqIdx).trim() : kv.trim();
-  const value = eqIdx >= 0 ? kv.slice(eqIdx + 1).trim() : null;
-
-  // 去掉 value 外层的引号
-  let cleanValue = value;
-  if (cleanValue) {
-    if (
-      (cleanValue.startsWith('"') && cleanValue.endsWith('"')) ||
-      (cleanValue.startsWith("'") && cleanValue.endsWith("'"))
-    ) {
-      cleanValue = cleanValue.slice(1, -1);
-    }
-  }
-
-  if (!key) {
-    setStatus("缺少配置键 (格式: darkhorse.code.<section>.<key>)");
-    return;
-  }
-
-  await executeConfigAction(action, scope, key, cleanValue);
-}
-
-/**
- * 分词：按空格分割但保留引号内内容
- */
-function parseConfigTokens(s) {
-  const tokens = [];
-  let i = 0;
-  while (i < s.length) {
-    // 跳过空白
-    while (i < s.length && s[i] === " ") i++;
-    if (i >= s.length) break;
-
-    // 引号包裹
-    if (s[i] === '"' || s[i] === "'") {
-      const quote = s[i];
-      i++;
-      let tok = "";
-      while (i < s.length && s[i] !== quote) {
-        if (s[i] === "\\" && i + 1 < s.length) {
-          tok += s[i + 1];
-          i += 2;
-        } else {
-          tok += s[i];
-          i++;
-        }
-      }
-      i++; // 跳过闭合引号
-      tokens.push(tok);
-    } else {
-      let tok = "";
-      while (i < s.length && s[i] !== " ") {
-        tok += s[i];
-        i++;
-      }
-      tokens.push(tok);
-    }
-  }
-  return tokens;
-}
-
-/**
- * 执行配置操作
- */
-async function executeConfigAction(action, scope, key, value) {
-  const invoke = getTauriInvoke();
-  if (!invoke) {
-    setStatus("Tauri API 不可用");
-    return;
-  }
-
-  const scopeMap = { g: "global", p: "project", r: "runtime" };
-
-  // 从 state 取项目根路径（确保不为空字符串）
-  const projectRoot = state.currentProject?.path || undefined;
-  if (projectRoot === undefined && state.currentProject) {
-    setStatus(`内部错误: 项目已打开但 path 为空 (${JSON.stringify(state.currentProject)})`, "error");
-    return;
-  }
-
-  // -p 需要已打开项目
-  if (scope === "p" && !projectRoot) {
-    setStatus("未打开项目，无法使用项目配置 (-p)。请先 open project <路径>", "error");
-    return;
-  }
-
-  switch (action) {
-    case "add":
-      {
-        try {
-          const existing = await invoke("config_get", {
-            scope: scopeMap[scope],
-            key,
-            projectRoot,
-          });
-          if (existing != null) {
-            setStatus(`配置已存在: ${key} = ${existing}`, "error");
-            return;
-          }
-        } catch {
-          // get 失败视为不存在
-        }
-        try {
-          await invoke("config_set", { scope: scopeMap[scope], key, value, projectRoot });
-          setStatus(`已添加: ${key} = ${value}`);
-        } catch (err) {
-          setStatus(`添加失败: ${err}`, "error");
-        }
-      }
-      break;
-
-    case "get":
-      {
-        try {
-          const val = await invoke("config_get", { scope: scopeMap[scope], key, projectRoot });
-          if (val == null) {
-            setStatus(`配置不存在: ${key}`, "error");
-          } else {
-            setStatus(`${key} = ${val}`);
-          }
-        } catch (err) {
-          setStatus(`读取失败: ${err}`, "error");
-        }
-      }
-      break;
-
-    case "update":
-      {
-        try {
-          await invoke("config_set", { scope: scopeMap[scope], key, value, projectRoot });
-          setStatus(`已更新: ${key} = ${value}`);
-        } catch (err) {
-          setStatus(`更新失败: ${err}`, "error");
-        }
-      }
-      break;
-
-    case "remove":
-    case "delete":
-      {
-        try {
-          await invoke("config_delete", { scope: scopeMap[scope], key, projectRoot });
-          setStatus(`已删除: ${key}`);
-        } catch (err) {
-          setStatus(`删除失败: ${err}`, "error");
-        }
-      }
-      break;
-  }
-}
-
-// ============================================
-// close 命令实现
-// ============================================
-
-function closeProject() {
-  if (!state.currentProject) {
-    setStatus("没有打开的项目");
-    return;
-  }
-
-  const name = state.currentProject.name;
-  state.currentProject = null;
-  updateTitlebarTitle();
-  showWelcomePage();
-  setStatus(`已关闭项目: ${name}`);
-}
-
-function closeAll() {
-  if (state.tabs.length === 0) {
-    setStatus("没有打开的文件");
-    return;
-  }
-  state.tabs = [];
-  state.activeTabId = null;
-  renderTabs();
-  hideEditor();
-  setStatus("已关闭所有文件");
-}
-
-/**
- * 按序号关闭标签页。
- * 正数: 0-based 从左到右
- * 负数: -1-based 从右到左（-1 = 最后一个）
- */
-function closeByIndex(index) {
-  if (state.tabs.length === 0) {
-    setStatus("没有打开的文件");
-    return;
-  }
-  const i = index >= 0 ? index : state.tabs.length + index;
-  if (i < 0 || i >= state.tabs.length) {
-    setStatus(`序号超出范围: ${index}（共 ${state.tabs.length} 个文件）`);
-    return;
-  }
-  const tab = state.tabs[i];
-  closeTab(tab.id);
-  setStatus(`已关闭: ${tab.name}`);
-}
-
-/** 关闭除当前活动标签外的所有标签 */
-function closeOthers() {
-  if (state.tabs.length <= 1) {
-    setStatus("没有其他文件可关闭");
-    return;
-  }
-  const active = state.tabs.find((t) => t.id === state.activeTabId);
-  state.tabs = active ? [active] : [];
-  renderTabs();
-  setStatus("已关闭其他文件");
-}
-
-/** 关闭当前活动标签左边的所有标签 */
-function closeLeft() {
-  const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
-  if (idx <= 0) {
-    setStatus("当前文件左侧没有文件");
-    return;
-  }
-  const removed = state.tabs.slice(0, idx).map((t) => t.name).join(", ");
-  state.tabs = state.tabs.slice(idx);
-  renderTabs();
-  setStatus(`已关闭左侧文件: ${removed}`);
-}
-
-/** 关闭当前活动标签右边的所有标签 */
-function closeRight() {
-  const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
-  if (idx < 0 || idx >= state.tabs.length - 1) {
-    setStatus("当前文件右侧没有文件");
-    return;
-  }
-  const removed = state.tabs.slice(idx + 1).map((t) => t.name).join(", ");
-  state.tabs = state.tabs.slice(0, idx + 1);
-  renderTabs();
-  setStatus(`已关闭右侧文件: ${removed}`);
-}
-
-/**
- * 调用后端打开项目
- */
-async function openProject(path) {
-  const invoke = getTauriInvoke();
-
-  if (!invoke) {
-    // 浏览器开发模式 — 模拟打开项目
-    setStatus("Tauri API 不可用 (浏览器模式)");
-    return;
-  }
-
-  try {
-    setStatus("正在打开项目...");
-    const info = await invoke("open_project", { path });
-
-    // 保存项目信息
-    state.currentProject = info;
-
-    // 切换为项目工作区视图
-    showProjectWorkspace();
-    updateTitlebarTitle();
-    setStatus(`已打开项目: ${info.path}`);
-  } catch (err) {
-    setStatus(`打开项目失败: ${err}`, "error");
-  }
-}
-
-/**
- * 调用后端打开文件，创建标签页并高亮
- */
-async function openFile(path) {
-  const invoke = getTauriInvoke();
-  if (!invoke) {
-    setStatus("Tauri API 不可用 (浏览器模式)");
-    return;
-  }
-
-  // 检查是否已打开
-  const existing = state.tabs.find((t) => t.path === path);
-  if (existing) {
-    switchTab(existing.id);
-    setStatus(`已切换到: ${existing.name}`);
-    return;
-  }
-
-  try {
-    setStatus("正在读取文件...");
-    const file = await invoke("read_file", { path });
-
-    // 提取文件名
-    const name = file.path.split(/[/\\]/).pop() || file.path;
-
-    // 创建标签页
-    const tab = { id: Date.now().toString(), name, path: file.path, content: file.content };
-    state.tabs.push(tab);
-    renderTabs();
-    switchTab(tab.id);
-
-    // 语法高亮：根据扩展名确定语言
-    const ext = name.split(".").pop()?.toLowerCase();
-    const lang = extToLanguage(ext);
-    if (lang) {
-      await highlightAndRender(tab, lang);
-    } else {
-      renderPlainCode(tab);
-    }
-
-    setStatus(`已打开: ${name}`);
-  } catch (err) {
-    setStatus(`打开文件失败: ${err}`, "error");
-  }
-}
-
-// ============================================
 // 标签页管理
 // ============================================
 
@@ -728,6 +190,9 @@ function renderTabs() {
 }
 
 function switchTab(tabId) {
+  // 边界层：切换标签页前保存当前 tab
+  if (window._saveBeforeSwitch) window._saveBeforeSwitch();
+
   state.activeTabId = tabId;
   renderTabs();
 
@@ -757,6 +222,7 @@ function switchTab(tabId) {
     const textarea = document.getElementById("editor-textarea");
     if (textarea) textarea.readOnly = true;
   }
+  updateOutline(tab);
 }
 
 function closeTab(tabId) {
@@ -931,6 +397,135 @@ function fileIcon(name) {
 }
 
 // ============================================
+// 大纲
+// ============================================
+
+function updateOutline(tab) {
+  const content = document.getElementById("outline-content");
+  if (!content) return;
+
+  const ext = tab.name.split(".").pop()?.toLowerCase();
+  let items;
+
+  if (ext === "md" || ext === "markdown") {
+    items = parseMarkdownOutline(tab.content);
+  } else if (ext === "rs") {
+    items = parseRustOutline(tab.content);
+  } else if (ext === "py") {
+    items = parsePythonOutline(tab.content);
+  } else {
+    content.innerHTML =
+      '<div class="outline-placeholder">大纲（支持 Markdown / Rust / Python）</div>';
+    return;
+  }
+
+  if (items.length === 0) {
+    content.innerHTML = '<div class="outline-placeholder">无大纲</div>';
+    return;
+  }
+
+  let html = "";
+  for (const h of items) {
+    const indent = (h.level - 1) * 16;
+    html +=
+      `<div class="outline-item" style="padding-left:${indent}px" data-line="${h.line}">` +
+      `<span class="outline-dot">•</span>` +
+      `${escapeHtml(h.text)}` +
+      `</div>`;
+  }
+  content.innerHTML = html;
+
+  content.querySelectorAll(".outline-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const line = parseInt(el.dataset.line, 10);
+      const lineHeight = 20;
+      const scrollTop = Math.max(0, (line - 1) * lineHeight);
+      document.querySelector(".editor-view")?.scrollTo(0, scrollTop);
+    });
+  });
+}
+
+function parseMarkdownOutline(content) {
+  const headings = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^(#{1,3})\s+(.+)$/);
+    if (match) {
+      headings.push({
+        level: match[1].length,
+        text: match[2].trim(),
+        line: i + 1,
+      });
+    }
+  }
+  return headings;
+}
+
+function parseRustOutline(content) {
+  const items = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    // 计算缩进层级（每 4 空格或 1 tab 为一级，上限 3）
+    const indent = raw.match(/^(\s*)/)[1];
+    const indentLen = indent.replace(/\t/g, "    ").length;
+    const level = Math.min(Math.floor(indentLen / 4) + 1, 3);
+
+    const trimmed = raw.trimStart();
+    let match;
+    if ((match = trimmed.match(/^fn\s+(\w+)/))) {
+      items.push({ level, text: `fn ${match[1]}()`, line: i + 1 });
+    } else if ((match = trimmed.match(/^pub\s+fn\s+(\w+)/))) {
+      items.push({ level, text: `fn ${match[1]}()`, line: i + 1 });
+    } else if ((match = trimmed.match(/^struct\s+(\w+)/))) {
+      items.push({ level, text: `struct ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^pub\s+struct\s+(\w+)/))) {
+      items.push({ level, text: `struct ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^enum\s+(\w+)/))) {
+      items.push({ level, text: `enum ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^pub\s+enum\s+(\w+)/))) {
+      items.push({ level, text: `enum ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^trait\s+(\w+)/))) {
+      items.push({ level, text: `trait ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^pub\s+trait\s+(\w+)/))) {
+      items.push({ level, text: `trait ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^impl\b\s*(.+)/))) {
+      const detail = match[1].trim().replace(/\s*\{\s*$/, "");
+      items.push({ level, text: `impl ${detail}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^mod\s+(\w+)/))) {
+      items.push({ level, text: `mod ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^pub\s+mod\s+(\w+)/))) {
+      items.push({ level, text: `mod ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^macro_rules!\s*(\w+)/))) {
+      items.push({ level, text: `macro ${match[1]}!`, line: i + 1 });
+    }
+  }
+  return items;
+}
+
+function parsePythonOutline(content) {
+  const items = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const indent = raw.match(/^(\s*)/)[1];
+    const indentLen = indent.replace(/\t/g, "    ").length;
+    const level = Math.min(Math.floor(indentLen / 4) + 1, 3);
+
+    const trimmed = raw.trimStart();
+    let match;
+    if ((match = trimmed.match(/^class\s+(\w+)/))) {
+      items.push({ level, text: `class ${match[1]}`, line: i + 1 });
+    } else if ((match = trimmed.match(/^async\s+def\s+(\w+)/))) {
+      items.push({ level, text: `async def ${match[1]}()`, line: i + 1 });
+    } else if ((match = trimmed.match(/^def\s+(\w+)/))) {
+      items.push({ level, text: `def ${match[1]}()`, line: i + 1 });
+    }
+  }
+  return items;
+}
+
+// ============================================
 // 键盘快捷键
 // ============================================
 
@@ -1008,41 +603,6 @@ async function saveCurrentFile() {
 // ============================================
 // 帮助页
 // ============================================
-
-const HELP_TEXT = `Darkhorse Code 帮助
-====================
-
-命令系统
---------
-open project <路径>        打开项目文件夹
-open file <路径>           打开文件
-close project              关闭当前项目
-close all                  关闭所有标签页
-close <序号>               按序号关闭标签页（负数从右数，-1 最后一个）
-close other                关闭除当前外的所有标签页
-close left                 关闭当前左侧所有标签页
-close right                关闭当前右侧所有标签页
-config add|get|update|remove|delete [-g|-p|-r] <key>[=<value>]
-                           配置管理（默认 -r 运行时）
-
-快捷键
-------
-Ctrl+S                     保存当前文件
-
-语法高亮支持
-------------
-Python                     .py
-Rust                       .rs
-HTML（含嵌入 CSS/JS）       .html, .htm
-CSS                        .css
-JavaScript                 .js, .mjs, .cjs
-Markdown                   .md, .markdown
-
-联系方式
---------
-CSDN 关注 醒过来摸鱼，私信即可。
-`;
-
 function setupHelpMenu() {
   const btn = document.getElementById("menu-help");
   if (!btn) return;
@@ -1104,10 +664,14 @@ function setupTextareaSync() {
   const textarea = document.getElementById("editor-textarea");
   if (!textarea) return;
 
-  // 用户编辑时，同步内容到 tab
+  let debounceTimer = null;
+
+  // ============================================
+  // 核心层：输入事件 + 防抖（1 秒后自动保存）
+  // ============================================
   textarea.addEventListener("input", () => {
     const tab = state.tabs.find((t) => t.id === state.activeTabId);
-    if (!tab) return;
+    if (!tab || tab._isTerminal || tab._isHelp) return;
 
     const newContent = textarea.value;
     if (tab.content === newContent) return;
@@ -1116,17 +680,65 @@ function setupTextareaSync() {
     tab._highlighted = null;
     tab._language = null;
 
-    // 实时光栅渲染 < 1000 行时更新 backdrop
     if (newContent.split("\n").length <= 1000) {
       renderPlainCode(tab);
     }
 
-    // 标记为已修改
     if (!tab._modified) {
       tab._modified = true;
       renderTabs();
     }
+
+    // 防抖：重置计时器
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      doAutoSave(tab);
+    }, 1000);
   });
+
+  // ============================================
+  // 边界层：失焦 / 切换标签页时立刻保存
+  // ============================================
+  textarea.addEventListener("blur", () => {
+    clearTimeout(debounceTimer);
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (tab && tab._modified && !tab._isTerminal && !tab._isHelp) {
+      doAutoSave(tab);
+    }
+  });
+
+  // 供外部调用：切换标签页前保存当前 tab
+  window._saveBeforeSwitch = () => {
+    clearTimeout(debounceTimer);
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (tab && tab._modified && !tab._isTerminal && !tab._isHelp) {
+      doAutoSave(tab);
+    }
+  };
+
+  // ============================================
+  // 兜底层：每 5 分钟长间隔定时器
+  // ============================================
+  setInterval(() => {
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (tab && tab._modified && !tab._isTerminal && !tab._isHelp) {
+      doAutoSave(tab);
+    }
+  }, 5 * 60 * 1000);
+}
+
+async function doAutoSave(tab) {
+  if (!tab || !tab.path || !tab._modified) return;
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    await invoke("write_file", { path: tab.path, content: tab.content });
+    tab._modified = false;
+    renderTabs();
+    // 后台静默保存不弹提示，但保存失败时提示
+  } catch {
+    // 静默失败，定时器下次会重试
+  }
 }
 
 // ============================================
@@ -1333,7 +945,7 @@ async function runTargetCmd(name, cmd) {
 
   try {
     setStatus(`正在运行: ${name}`);
-    const result = await invoke("run_target", { cmd });
+    const result = await invoke("run_target", { cmd, projectRoot: state.currentProject?.path });
 
     let output = `> ${cmd}\n`;
 
@@ -1423,7 +1035,7 @@ async function spawnInNewWindow(name, cmd) {
   }
 
   try {
-    await invoke("spawn_terminal", { cmd });
+    await invoke("spawn_terminal", { cmd, projectRoot: state.currentProject?.path });
     setStatus(`${name} 已在新窗口中启动`);
   } catch (err) {
     setStatus(`启动失败: ${err}`, "error");
@@ -1462,7 +1074,7 @@ async function spawnTerminal(name, cmd) {
 
   try {
     // 启动 PTY
-    await invoke("pty_spawn", { cmd, tabId });
+    await invoke("pty_spawn", { cmd, tabId, projectRoot: state.currentProject?.path });
 
     // 创建 xterm.js 终端
     const term = new Terminal({
@@ -1592,7 +1204,7 @@ function renderTreeEntry(entry, container, depth) {
   // 图标
   const icon = document.createElement("span");
   icon.className = entry.is_dir ? "tree-icon tree-icon--folder" : "tree-icon tree-icon--file";
-  icon.textContent = entry.is_dir ? "📁" : "📄";
+  icon.textContent = entry.is_dir ? "📁" : fileIcon(entry.name);
   node.appendChild(icon);
 
   // 名称

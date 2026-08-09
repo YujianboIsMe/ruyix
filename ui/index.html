@@ -47,8 +47,8 @@
             <path d="M24 28h32M24 38h24M24 48h16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
           </svg>
         </div>
-        <h1 class="welcome-title">最好用的IDE，个人使用</h1>
-        <p id="welcome-subtitle" class="welcome-subtitle">Darkhorse Code</p>
+        <h1 class="welcome-title">最懂你的IDE</h1>
+        <p id="welcome-subtitle" class="welcome-subtitle">不花哨，不废话。你要什么，它做什么。</p>
       </div>
 
       <!-- 帮助页（无项目时替换欢迎页） -->
@@ -67,6 +67,10 @@
             <tr><td><code>close other</code></td><td>关闭除当前外的标签页</td></tr>
             <tr><td><code>close left</code></td><td>关闭当前标签页左侧所有</td></tr>
             <tr><td><code>close right</code></td><td>关闭当前标签页右侧所有</td></tr>
+            <tr><td><code>new py|rs|md|c &lt;名称&gt;</code></td><td>创建文件（自动加后缀）</td></tr>
+            <tr><td><code>new file &lt;相对路径&gt;</code></td><td>创建文件</td></tr>
+            <tr><td><code>new folder|dir &lt;相对路径&gt;</code></td><td>创建目录</td></tr>
+            <tr><td><code>del|delete|remove|rm &lt;相对路径&gt;</code></td><td>删除文件/目录（弹窗确认）</td></tr>
             <tr><td><code>config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td>配置管理</td></tr>
           </table>
           <p class="help-note">快捷键：<kbd>Ctrl+S</kbd> 保存当前文件</p>
@@ -166,7 +170,7 @@
         <!-- 大纲区 -->
         <aside id="outline" class="outline">
           <div class="outline-header">大纲</div>
-          <div class="outline-content">
+          <div id="outline-content" class="outline-content">
             <div class="outline-placeholder">
               大纲（待实现）
             </div>
@@ -196,6 +200,7 @@
     </footer>
   </div>
 
+  <script src="command.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

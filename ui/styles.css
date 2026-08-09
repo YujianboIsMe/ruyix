@@ -21,6 +21,22 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  scrollbar-color: #c1c1c1 transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
 }
 
 html, body {
@@ -817,6 +833,28 @@ html, body {
   color: var(--text-secondary);
   font-size: 12px;
   font-style: italic;
+}
+
+.outline-item {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 3px 12px 3px 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 2px;
+}
+
+.outline-item:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.outline-dot {
+  margin-right: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
 }
 
 /* ============================================
