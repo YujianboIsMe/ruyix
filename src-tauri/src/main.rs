@@ -194,6 +194,89 @@ fn delete_path(path: String) -> Result<(), String> {
     }
 }
 
+/// 执行状态返回
+#[derive(serde::Serialize)]
+struct ExecuteStatus {
+    /// None = 未知, Some(true) = 可运行, Some(false) = 不可运行
+    known: Option<bool>,
+    /// 如果可运行，是否已有运行目标绑定了该文件
+    has_target: bool,
+    /// 绑定的目标名称（若有）
+    target_name: Option<String>,
+}
+
+#[tauri::command]
+fn get_execute_status(
+    path: String,
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<ExecuteStatus, String> {
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string();
+    if ext.is_empty() {
+        return Ok(ExecuteStatus { known: Some(false), has_target: false, target_name: None });
+    }
+
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    let exec_map = mgr.load_execute_map();
+    let known = exec_map.get(&ext).copied();
+
+    let mut has_target = false;
+    let mut target_name = None;
+    if known == Some(true) {
+        if let Some(root) = project_root {
+            if let Ok(targets) = mgr.load_run_targets(Some(&root)) {
+                for t in &targets {
+                    if let Some(ref cmd) = t.cmd {
+                        if cmd.contains(&path) {
+                            has_target = true;
+                            target_name = t.name.clone().or_else(|| Some(t.key.clone()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(ExecuteStatus { known, has_target, target_name })
+}
+
+#[tauri::command]
+fn set_execute_entry(
+    ext: String,
+    can_run: bool,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.save_execute_entry(&ext, can_run)
+}
+
+#[tauri::command]
+async fn ai_execute_check(
+    path: String,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<String, String> {
+    ai::check_executable(&config_mgr, &path).await
+}
+
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+#[tauri::command]
+fn rename_path(from: String, to: String) -> Result<(), String> {
+    let src = Path::new(&from);
+    if !src.exists() {
+        return Err(format!("路径不存在: {}", src.display()));
+    }
+    std::fs::rename(src, Path::new(&to))
+        .map_err(|e| format!("重命名失败: {}", e))
+}
+
 #[tauri::command]
 async fn highlight_code(language: String, code: String) -> Result<Vec<LineHighlight>, String> {
     // 在后台线程中执行 CPU 密集的语法高亮，避免阻塞异步运行时
@@ -578,6 +661,11 @@ fn main() {
             create_file,
             create_dir,
             delete_path,
+            get_execute_status,
+            set_execute_entry,
+            ai_execute_check,
+            path_exists,
+            rename_path,
             highlight_code,
             get_last_project,
             get_projects,

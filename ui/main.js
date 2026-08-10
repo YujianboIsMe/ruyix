@@ -18,6 +18,18 @@ const state = {
 // ============================================
 
 async function initApp() {
+  // 初始化多语言
+  await I18N.init();
+
+  // 设置语言菜单
+  setupLanguageMenu();
+
+  // 设置右键菜单
+  setupContextMenu();
+
+  // 初始状态：无项目，导航区显示项目列表
+  showWelcomePage();
+
   setupWindowControls();
   setupCommandBar();
   setupResponsiveTitlebar();
@@ -29,8 +41,87 @@ async function initApp() {
   try {
     await autoOpenLastProject();
   } catch (err) {
-    setStatus(`恢复项目失败: ${err}`, "error");
+    setStatus(I18N.t("project.restore_fail", { err }));
   }
+}
+
+// ============================================
+// 语言菜单
+// ============================================
+
+function setupLanguageMenu() {
+  const menuLang = document.getElementById("menu-lang");
+  const dropdown = document.getElementById("menu-lang-dropdown");
+  if (!menuLang || !dropdown) return;
+
+  menuLang.addEventListener("click", (e) => {
+    e.stopPropagation();
+    dropdown.style.display = dropdown.style.display === "none" ? "" : "none";
+  });
+
+  document.addEventListener("click", () => {
+    dropdown.style.display = "none";
+  });
+
+  dropdown.querySelectorAll("[data-lang]").forEach((item) => {
+    item.addEventListener("click", async () => {
+      await I18N.setLang(item.dataset.lang);
+      dropdown.style.display = "none";
+      refreshI18nUI();
+    });
+  });
+}
+
+/**
+ * 语言切换后刷新 UI 中所有可翻译内容
+ */
+function refreshI18nUI() {
+  // 状态栏
+  setStatus(I18N.t("statusbar.ready"));
+
+  // 标题栏（无项目时）
+  if (!state.currentProject) {
+    updateTitlebarTitle();
+  }
+
+  // 欢迎页
+  const titleEl = document.querySelector(".welcome-title");
+  const subtitleEl = document.querySelector(".welcome-subtitle");
+  if (titleEl) titleEl.textContent = I18N.t("welcome.title");
+  if (subtitleEl) subtitleEl.textContent = I18N.t("welcome.subtitle");
+
+  // 编辑器空状态
+  const emptyEl = document.querySelector("#editor-empty p");
+  if (emptyEl) emptyEl.textContent = I18N.t("editor.empty");
+
+  // 大纲头部
+  const outlineHeader = document.querySelector(".outline-header");
+  if (outlineHeader) outlineHeader.textContent = I18N.t("outline.header");
+
+  // 命令栏 placeholder
+  const cmdInput = document.getElementById("command-input");
+  if (cmdInput) cmdInput.placeholder = I18N.t("command.prompt");
+
+  // 导航标签
+  const tabProjects = document.querySelector('.nav-tab[data-tab="projects"]');
+  const tabFiles = document.querySelector('.nav-tab[data-tab="files"]');
+  const tabTerminal = document.querySelector('.nav-tab[data-tab="terminal"]');
+  const tabTarget = document.querySelector('.nav-tab[data-tab="target"]');
+  if (tabProjects) tabProjects.textContent = I18N.t("nav.tab_projects");
+  if (tabFiles) tabFiles.textContent = I18N.t("nav.tab_files");
+  if (tabTerminal) tabTerminal.textContent = I18N.t("nav.tab_terminal");
+  if (tabTarget) tabTarget.textContent = I18N.t("nav.tab_targets");
+
+  // 文件树、项目列表、运行目标需要重新加载
+  if (state.currentProject) {
+    loadFileTree(state.currentProject.path);
+    loadRunTargets();
+  } else {
+    loadProjectList();
+  }
+
+  // 标题栏最大化/还原按钮 title
+  updateMaximizeIcon();
 }
 
 if (document.readyState === "loading") {
@@ -382,16 +473,30 @@ function extToLanguage(ext) {
 
 /** 文件名 → 标签页图标 */
 function fileIcon(name) {
+  // 全名匹配优先级（用于 .gitignore 等）
+  const full = name.toLowerCase();
+  if (full === ".gitignore" || full === "gitignore") return "🚫";
+
   const ext = name.split(".").pop()?.toLowerCase();
   const iconMap = {
     py: "🐍",
-    rs: "⛓️",
+    rs: "🦀",
     html: "🌏",
     htm: "🌏",
-    css: "🏁",
-    js: "📔",
-    mjs: "📔",
-    cjs: "📔",
+    css: "🎨",
+    js: "Ⓙ",
+    mjs: "Ⓙ",
+    cjs: "Ⓙ",
+    md: "Ⓜ️",
+    markdown: "Ⓜ️",
+    png: "🖼️",
+    jpg: "🖼️",
+    jpeg: "🖼️",
+    ico: "🖼️",
+    icon: "🖼️",
+    gitignore: "🚫",
+    toml: "⚙️",
+    json: "🧩",
   };
   return iconMap[ext] || "📄";
 }
@@ -539,7 +644,7 @@ function setupKeyboardShortcuts() {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
-      saveCurrentFile().catch((err) => setStatus(`保存失败: ${err}`, "error"));
+      saveCurrentFile().catch((err) => setStatus(I18N.t("save.fail", { err }), "error"));
     }
   };
 
@@ -560,7 +665,7 @@ function setupKeyboardShortcuts() {
     const tauriEvent = window.__TAURI__?.event;
     if (tauriEvent && typeof tauriEvent.listen === "function") {
       tauriEvent.listen("menu-save", () => {
-        saveCurrentFile().catch((err) => setStatus(`保存失败: ${err}`, "error"));
+        saveCurrentFile().catch((err) => setStatus(I18N.t("save.fail", { err }), "error"));
       });
     }
   } catch {
@@ -572,13 +677,13 @@ async function saveCurrentFile() {
   const tab = state.tabs.find((t) => t.id === state.activeTabId);
   if (!tab || tab._isTerminal) return;
   if (!tab.path) {
-    setStatus("无法保存: 文件路径未知", "error");
+    setStatus(I18N.t("save.no_path"), "error");
     return;
   }
 
   const invoke = getTauriInvoke();
   if (!invoke) {
-    setStatus("Tauri API 不可用");
+    setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
@@ -594,9 +699,9 @@ async function saveCurrentFile() {
       await highlightAndRender(tab, tab._language);
     }
 
-    setStatus(`已保存: ${tab.name}`);
+    setStatus(I18N.t("save.ok", { name: tab.name }));
   } catch (err) {
-    setStatus(`保存失败: ${err}`, "error");
+    setStatus(I18N.t("save.fail", { err }), "error");
   }
 }
 
@@ -623,13 +728,24 @@ function openHelp() {
 }
 
 function showHelpPage() {
-  document.getElementById("welcome-page").style.display = "none";
-  document.getElementById("help-page").style.display = "";
+  // 导航区保持可见；编辑区显示帮助内容
+  const welcome = document.getElementById("welcome-content");
+  const help = document.getElementById("help-page");
+  const editorBody = document.getElementById("editor-body");
+  if (welcome) welcome.style.display = "none";
+  if (help) help.style.display = "";
+  if (editorBody) editorBody.style.display = "none";
 }
 
 function hideHelpPage() {
-  document.getElementById("help-page").style.display = "none";
-  document.getElementById("welcome-page").style.display = "";
+  const help = document.getElementById("help-page");
+  if (help) help.style.display = "none";
+  // 恢复到适合当前项目状态的视图
+  if (state.currentProject) {
+    showProjectWorkspace();
+  } else {
+    showWelcomePage();
+  }
 }
 
 function openHelpTab() {
@@ -644,7 +760,7 @@ function openHelpTab() {
     id: "help-" + Date.now().toString(),
     name: "帮助",
     path: "",
-    content: HELP_TEXT,
+    content: getHelpText(),
     _isHelp: true,
   };
   state.tabs.push(tab);
@@ -693,6 +809,7 @@ function setupTextareaSync() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       doAutoSave(tab);
+      updateOutline(tab);
     }, 1000);
   });
 
@@ -805,32 +922,84 @@ function setupResponsiveTitlebar() {
 // ============================================
 
 function showWelcomePage() {
-  const welcome = document.getElementById("welcome-page");
-  const project = document.getElementById("project-workspace");
+  // project-workspace 始终可见，无需切换 display
+  const welcome = document.getElementById("welcome-content");
   const help = document.getElementById("help-page");
+  const editorBody = document.getElementById("editor-body");
   if (welcome) welcome.style.display = "";
-  if (project) project.style.display = "none";
   if (help) help.style.display = "none";
+  if (editorBody) editorBody.style.display = "none";
+
+  // 导航区：只显示项目列表 tab
+  setNavigatorMode("projects");
 
   // 清空标签页和编辑器
   state.tabs = [];
   state.activeTabId = null;
   renderTabs();
   hideEditor();
+
+  // 加载项目列表
+  loadProjectList();
 }
 
 function showProjectWorkspace() {
-  const welcome = document.getElementById("welcome-page");
-  const project = document.getElementById("project-workspace");
+  const welcome = document.getElementById("welcome-content");
   const help = document.getElementById("help-page");
+  const editorBody = document.getElementById("editor-body");
   if (welcome) welcome.style.display = "none";
-  if (project) project.style.display = "";
   if (help) help.style.display = "none";
+  if (editorBody) editorBody.style.display = "";
+
+  // 导航区：显示项目标签
+  setNavigatorMode("project");
 
   // 加载项目文件树和运行目标
   if (state.currentProject) {
     loadFileTree(state.currentProject.path);
     loadRunTargets();
+  }
+}
+
+/**
+ * 设置导航区标签显示模式
+ * @param {"projects" | "project"} mode
+ */
+function setNavigatorMode(mode) {
+  const tabProjects = document.querySelector('.nav-tab[data-tab="projects"]');
+  const tabFiles = document.querySelector('.nav-tab[data-tab="files"]');
+  const tabTerminal = document.querySelector('.nav-tab[data-tab="terminal"]');
+  const tabTarget = document.querySelector('.nav-tab[data-tab="target"]');
+
+  const panelProjects = document.getElementById("nav-panel-projects");
+  const panelFiles = document.getElementById("nav-panel-files");
+  const panelTerminal = document.getElementById("nav-panel-terminal");
+  const panelTarget = document.getElementById("nav-panel-target");
+
+  if (mode === "projects") {
+    // 显示项目列表 tab，隐藏其他
+    if (tabProjects) tabProjects.style.display = "";
+    if (tabFiles) tabFiles.style.display = "none";
+    if (tabTerminal) tabTerminal.style.display = "none";
+    if (tabTarget) tabTarget.style.display = "none";
+
+    // 停用所有 tab/panel，激活项目列表
+    document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".nav-panel").forEach(p => p.classList.remove("active"));
+    if (tabProjects) tabProjects.classList.add("active");
+    if (panelProjects) panelProjects.classList.add("active");
+  } else {
+    // 显示项目相关 tab，隐藏项目列表 tab
+    if (tabProjects) tabProjects.style.display = "none";
+    if (tabFiles) tabFiles.style.display = "";
+    if (tabTerminal) tabTerminal.style.display = "";
+    if (tabTarget) tabTarget.style.display = "";
+
+    // 停用所有 tab/panel，激活文件 tab
+    document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".nav-panel").forEach(p => p.classList.remove("active"));
+    if (tabFiles) tabFiles.classList.add("active");
+    if (panelFiles) panelFiles.classList.add("active");
   }
 }
 
@@ -856,8 +1025,333 @@ function setupNavigatorTabs() {
       if (tab.dataset.tab === "target") {
         loadRunTargets();
       }
+
+      // 切换到项目列表标签时刷新
+      if (tab.dataset.tab === "projects") {
+        loadProjectList();
+      }
     });
   });
+}
+
+// ============================================
+// 右键菜单
+// ============================================
+
+let _ctxPath = null;
+let _ctxIsDir = false;
+
+function setupContextMenu() {
+  const menu = document.getElementById("context-menu");
+  const fileTree = document.getElementById("file-tree");
+  if (!menu || !fileTree) return;
+
+  // 禁止浏览器默认右键菜单（仅文件树区域）
+  fileTree.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const node = e.target.closest(".tree-node");
+    if (!node) return;
+    _ctxPath = node.dataset.path;
+    _ctxIsDir = node.dataset.isDir === "true";
+    showContextMenu(menu, e.clientX, e.clientY, _ctxIsDir);
+  });
+
+  // 菜单项点击
+  menu.addEventListener("click", async (e) => {
+    const item = e.target.closest(".context-menu-item");
+    if (!item || item.classList.contains("context-menu-sep")) return;
+    const action = item.dataset.action;
+    hideContextMenu(menu);
+    if (!_ctxPath) return;
+
+    switch (action) {
+      case "delete":
+        await deleteFileOrFolder(_ctxPath);
+        break;
+      case "rename":
+        await renameFileOrFolder(_ctxPath);
+        break;
+      case "newfile":
+        await createFileInFolder(_ctxPath);
+        break;
+      case "run":
+        await handleContextRun(_ctxPath);
+        break;
+      case "try-run":
+        await handleContextTryRun(_ctxPath);
+        break;
+    }
+  });
+
+  // 点击外部关闭
+  document.addEventListener("click", () => hideContextMenu(menu));
+}
+
+async function showContextMenu(menu, x, y, isDir) {
+  // 文件夹 vs 文件
+  menu.querySelectorAll(".context-menu-folder-only").forEach(el => el.style.display = isDir ? "" : "none");
+  const fileItems = menu.querySelectorAll(".context-menu-file-only");
+  const runItem = menu.querySelector('[data-action="run"]');
+  const tryRunItem = menu.querySelector('[data-action="try-run"]');
+
+  if (isDir) {
+    fileItems.forEach(el => el.style.display = "none");
+  } else if (_ctxPath && state.currentProject) {
+    // 查询该文件的执行状态
+    try {
+      const invoke = getTauriInvoke();
+      if (invoke) {
+        const status = await invoke("get_execute_status", {
+          path: _ctxPath,
+          projectRoot: state.currentProject.path
+        });
+        if (status.known === true) {
+          if (runItem) runItem.style.display = "";
+          if (tryRunItem) tryRunItem.style.display = "none";
+        } else if (status.known === false) {
+          fileItems.forEach(el => el.style.display = "none");
+        } else {
+          // unknown
+          if (runItem) runItem.style.display = "none";
+          if (tryRunItem) tryRunItem.style.display = "";
+        }
+      }
+    } catch {
+      fileItems.forEach(el => el.style.display = "none");
+    }
+  }
+
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  menu.style.display = "";
+}
+
+/** 右键"运行"：已有目标→执行，无目标→创建 */
+async function handleContextRun(fullPath) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    const status = await invoke("get_execute_status", {
+      path: fullPath,
+      projectRoot: state.currentProject?.path
+    });
+    if (status.has_target && status.target_name) {
+      // 情况1: 已有目标 → 执行
+      const targets = await invoke("get_run_targets", { projectRoot: state.currentProject?.path });
+      const target = targets.find(t => (t.name || t.key) === status.target_name);
+      if (target && target.cmd) {
+        await runTargetCmd(status.target_name, target.cmd);
+      }
+    } else {
+      // 情况2: 无目标 → 自动创建
+      const name = fullPath.split(/[/\\]/).pop() || fullPath;
+      const ext = name.split(".").pop() || "";
+      // 尝试从 execute.toml 获取命令模板（AI 试跑时可能已存储）
+      // 默认: 用扩展名推测
+      const cmdMap = { py: "python {file}", rs: "cargo run", js: "node {file}" };
+      const cmd = (cmdMap[ext] || "python {file}").replace("{file}", fullPath);
+      await handleCommand("run " + name + "=" + cmd, true);
+    }
+  } catch (err) {
+    setStatus("运行失败: " + err, "error");
+  }
+}
+
+/** 右键"试跑"：询问 LLM 是否可以运行 */
+async function handleContextTryRun(fullPath) {
+  setStatus(I18N.t("status.thinking"));
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    const result = await invoke("ai_execute_check", { path: fullPath });
+    if (!result || !result.trim()) {
+      setStatus("试跑失败: AI 返回为空，请重试", "error");
+      return;
+    }
+    const ext = (fullPath.split(".").pop() || "").toLowerCase();
+    const upper = result.trim().toUpperCase();
+
+    if (upper.startsWith("YES")) {
+      // 可运行 — 提取命令模板
+      let cmdTemplate = upper.startsWith("YES|") ? result.slice(result.indexOf("|") + 1).trim() : ("python {file}");
+      // 替换占位符
+      const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
+      const name = fullPath.split(/[/\\]/).pop() || fullPath;
+      // 记录 + 自动创建运行目标
+      await invoke("set_execute_entry", { ext, canRun: true });
+      await handleCommand("run " + name + "=" + cmd, true);
+      setStatus("已记住并创建运行目标: ." + ext + " → " + cmd);
+    } else if (upper.startsWith("CONDITIONAL")) {
+      const detail = upper.startsWith("CONDITIONAL|") ? result.slice(result.indexOf("|") + 1).trim() : result;
+      setStatus("功能待开发: " + detail, "error");
+    } else {
+      // NO 或其他
+      if (ext) await invoke("set_execute_entry", { ext, canRun: false });
+      setStatus("已记住: ." + ext + " 不可运行 (AI: " + result.slice(0, 60) + ")");
+    }
+  } catch (err) {
+    setStatus("试跑失败: " + err, "error");
+  }
+}
+
+/** 全路径 → 相对于项目根的路径 */
+function toRelativePath(fullPath) {
+  if (!state.currentProject) return fullPath;
+  const root = state.currentProject.path + '\\';
+  return fullPath.startsWith(root) ? fullPath.slice(root.length) : fullPath;
+}
+
+function hideContextMenu(menu) {
+  menu.style.display = "none";
+}
+
+// ============================================
+// 自定义弹窗（替换浏览器 confirm / prompt）
+// ============================================
+
+/**
+ * 确认弹窗，返回 true/false
+ */
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("modal-overlay");
+    const titleEl = document.getElementById("modal-title");
+    const bodyEl = document.getElementById("modal-body");
+    const inputRow = document.getElementById("modal-input-row");
+    const okBtn = document.getElementById("modal-btn-ok");
+    const cancelBtn = document.getElementById("modal-btn-cancel");
+
+    titleEl.textContent = title;
+    bodyEl.textContent = message;
+    inputRow.style.display = "none";
+    okBtn.textContent = I18N.t("modal.ok") || "确认";
+    cancelBtn.textContent = I18N.t("modal.cancel") || "取消";
+    overlay.style.display = "";
+
+    const cleanup = () => { overlay.style.display = "none"; };
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+
+    okBtn.onclick = onOk;
+    cancelBtn.onclick = onCancel;
+    overlay.onclick = (e) => { if (e.target === overlay) onCancel(); };
+
+    const onKey = (e) => {
+      if (e.key === "Escape") { document.removeEventListener("keydown", onKey); onCancel(); }
+      if (e.key === "Enter") { document.removeEventListener("keydown", onKey); onOk(); }
+    };
+    document.addEventListener("keydown", onKey);
+
+    document.getElementById("modal-input")?.blur();
+    okBtn.focus();
+  });
+}
+
+/**
+ * 输入弹窗，返回输入的字符串或 null
+ */
+function showPrompt(title, defaultValue) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("modal-overlay");
+    const titleEl = document.getElementById("modal-title");
+    const bodyEl = document.getElementById("modal-body");
+    const inputRow = document.getElementById("modal-input-row");
+    const inputEl = document.getElementById("modal-input");
+    const okBtn = document.getElementById("modal-btn-ok");
+    const cancelBtn = document.getElementById("modal-btn-cancel");
+
+    titleEl.textContent = title;
+    bodyEl.textContent = "";
+    inputRow.style.display = "";
+    inputEl.value = defaultValue || "";
+    inputEl.select();
+    okBtn.textContent = I18N.t("modal.ok") || "确认";
+    cancelBtn.textContent = I18N.t("modal.cancel") || "取消";
+    overlay.style.display = "";
+
+    const cleanup = () => { overlay.style.display = "none"; };
+    const onOk = () => { cleanup(); resolve(inputEl.value.trim() || null); };
+    const onCancel = () => { cleanup(); resolve(null); };
+
+    okBtn.onclick = onOk;
+    cancelBtn.onclick = onCancel;
+    overlay.onclick = (e) => { if (e.target === overlay) onCancel(); };
+
+    const onKey = (e) => {
+      if (e.key === "Escape") { document.removeEventListener("keydown", onKey); onCancel(); }
+      if (e.key === "Enter") { document.removeEventListener("keydown", onKey); onOk(); }
+    };
+    document.addEventListener("keydown", onKey);
+
+    inputEl.focus();
+  });
+}
+
+async function deleteFileOrFolder(fullPath) {
+  const ok = await showConfirm('删除', I18N.t('cmd.delete.confirm', { path: fullPath }));
+  if (!ok) return;
+  await handleCommand('del ' + toRelativePath(fullPath), true);
+}
+
+async function renameFileOrFolder(fullPath) {
+  const oldName = fullPath.split(/[/\\]/).pop() || fullPath;
+  const newName = await showPrompt('重命名', oldName);
+  if (!newName || newName === oldName) return;
+  await handleCommand('rename ' + toRelativePath(fullPath) + ' ' + newName, true);
+}
+
+async function createFileInFolder(fullPath) {
+  const name = await showPrompt('新建文件', '');
+  if (!name) return;
+  await handleCommand('new file ' + toRelativePath(fullPath) + '\\' + name, true);
+}
+
+// ============================================
+// 项目列表（无项目时显示在导航区）
+// ============================================
+
+async function loadProjectList() {
+  const list = document.getElementById("project-list");
+  if (!list) return;
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    list.innerHTML = '<span class="project-list-empty">Tauri API 不可用</span>';
+    return;
+  }
+
+  try {
+    const projects = await invoke("get_projects");
+
+    if (!projects || projects.length === 0) {
+      list.innerHTML = '<span class="project-list-empty">暂无历史项目<br>请使用 open project &lt;路径&gt; 打开项目</span>';
+      return;
+    }
+
+    list.innerHTML = projects
+      .map((path) => {
+        const name = path.split(/[/\\]/).pop() || path;
+        return `
+        <div class="project-list-item" data-path="${escapeHtml(path)}">
+          <span class="project-icon">📁</span>
+          <div class="project-info">
+            <div class="project-name">${escapeHtml(name)}</div>
+            <div class="project-path">${escapeHtml(path)}</div>
+          </div>
+        </div>`;
+      })
+      .join("");
+
+    // 点击打开项目
+    list.querySelectorAll(".project-list-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const path = el.dataset.path;
+        if (path) openProject(path);
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<span class="project-list-empty">加载失败: ${err}</span>`;
+  }
 }
 
 // ============================================
@@ -915,7 +1409,7 @@ async function loadRunTargets() {
 async function runTargetCmd(name, cmd) {
   const invoke = getTauriInvoke();
   if (!invoke) {
-    setStatus("Tauri API 不可用");
+    setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
@@ -944,7 +1438,7 @@ async function runTargetCmd(name, cmd) {
   renderTerminalOutput(tab, `> ${cmd}\n\n正在执行...`);
 
   try {
-    setStatus(`正在运行: ${name}`);
+    setStatus(I18N.t("run.executing", { name }));
     const result = await invoke("run_target", { cmd, projectRoot: state.currentProject?.path });
 
     let output = `> ${cmd}\n`;
@@ -965,10 +1459,10 @@ async function runTargetCmd(name, cmd) {
     }
 
     renderTerminalOutput(tab, output);
-    setStatus(`${name} 执行完毕 (exit: ${result.exit_code ?? "?"})`);
+    setStatus(I18N.t("run.done", { name, code: result.exit_code ?? "?" }));
   } catch (err) {
     renderTerminalOutput(tab, `> ${cmd}\n\n[错误] ${err}`);
-    setStatus(`运行失败: ${err}`, "error");
+    setStatus(I18N.t("run.fail", { err }), "error");
   }
 }
 
@@ -1030,27 +1524,27 @@ function setupTerminalList() {
 async function spawnInNewWindow(name, cmd) {
   const invoke = getTauriInvoke();
   if (!invoke) {
-    setStatus("Tauri API 不可用");
+    setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
   try {
     await invoke("spawn_terminal", { cmd, projectRoot: state.currentProject?.path });
-    setStatus(`${name} 已在新窗口中启动`);
+    setStatus(I18N.t("terminal.spawned", { name }));
   } catch (err) {
-    setStatus(`启动失败: ${err}`, "error");
+    setStatus(I18N.t("terminal.spawn_fail", { err }), "error");
   }
 }
 
 async function spawnTerminal(name, cmd) {
   const invoke = getTauriInvoke();
   if (!invoke) {
-    setStatus("Tauri API 不可用");
+    setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
   if (typeof Terminal === "undefined") {
-    setStatus("xterm.js 未加载", "error");
+    setStatus(I18N.t("terminal.xterm_missing"), "error");
     return;
   }
 
@@ -1070,7 +1564,7 @@ async function spawnTerminal(name, cmd) {
   // 隐藏编辑器，显示终端容器
   showTerminalView();
 
-  setStatus(`正在启动 ${name}...`);
+  setStatus(I18N.t("terminal.starting", { name }));
 
   try {
     // 启动 PTY
@@ -1112,9 +1606,9 @@ async function spawnTerminal(name, cmd) {
 
     tab._ptyUnlisten = () => { unlisten(); unlistenExit(); };
 
-    setStatus(`${name} 已启动`);
+    setStatus(I18N.t("terminal.started", { name }));
   } catch (err) {
-    setStatus(`启动失败: ${err}`, "error");
+    setStatus(I18N.t("terminal.spawn_fail", { err }), "error");
   }
 }
 
@@ -1195,16 +1689,15 @@ function renderTreeEntry(entry, container, depth) {
   node.dataset.path = entry.path;
   node.dataset.isDir = entry.is_dir;
 
-  // 箭头（仅目录显示）
-  const arrow = document.createElement("span");
-  arrow.className = entry.is_dir ? "tree-arrow" : "tree-arrow hidden";
-  arrow.textContent = "▶";
-  node.appendChild(arrow);
-
-  // 图标
+  // 图标（目录用单图标，文件用文件图标）
   const icon = document.createElement("span");
-  icon.className = entry.is_dir ? "tree-icon tree-icon--folder" : "tree-icon tree-icon--file";
-  icon.textContent = entry.is_dir ? "📁" : fileIcon(entry.name);
+  if (entry.is_dir) {
+    icon.className = "tree-icon tree-icon--folder";
+    icon.textContent = "➡️";
+  } else {
+    icon.className = "tree-icon tree-icon--file";
+    icon.textContent = fileIcon(entry.name);
+  }
   node.appendChild(icon);
 
   // 名称
@@ -1226,7 +1719,9 @@ function renderTreeEntry(entry, container, depth) {
     node.addEventListener("click", () => toggleTreeNode(node, entry, childrenContainer, depth));
   } else {
     // 双击打开文件
-    node.addEventListener("dblclick", () => openFile(entry.path));
+    // 走命令系统：计算相对路径，统一入口
+    const relPath = toRelativePath(entry.path);
+    node.addEventListener("dblclick", () => handleCommand("open file " + relPath));
   }
 
   container.appendChild(node);
@@ -1239,36 +1734,47 @@ function renderTreeEntry(entry, container, depth) {
  * 展开/折叠目录节点（懒加载）
  */
 async function toggleTreeNode(node, entry, childrenContainer, depth) {
-  const arrow = node.querySelector(".tree-arrow");
+  const icon = node.querySelector(".tree-icon--folder");
+  // 用 data-expanded 追踪展开状态
+  const expanded = node.dataset.expanded === "true";
 
   // 如果已经展开，折叠
-  if (arrow.classList.contains("expanded")) {
-    arrow.classList.remove("expanded");
+  if (expanded) {
+    node.dataset.expanded = "false";
+    if (icon) icon.textContent = "➡️";
     childrenContainer.style.display = "none";
     return;
   }
 
-  // 展开
-  arrow.classList.add("expanded");
+  // 展开：先显示加载中
+  node.dataset.expanded = "true";
 
   // 懒加载子节点
-  if (childrenContainer.children.length === 0) {
+  let hasChildren = childrenContainer.children.length > 0;
+  if (!hasChildren) {
     const invoke = getTauriInvoke();
     if (!invoke) return;
 
     try {
       const entries = await invoke("list_dir", { path: entry.path });
-      for (const child of entries) {
-        renderTreeEntry(child, childrenContainer, depth + 1);
+      if (entries.length > 0) {
+        for (const child of entries) {
+          renderTreeEntry(child, childrenContainer, depth + 1);
+        }
+        hasChildren = true;
       }
     } catch {
       const err = document.createElement("span");
       err.className = "file-tree-placeholder";
-      err.textContent = "读取失败";
+      err.textContent = I18N.t("filetree.error");
       childrenContainer.appendChild(err);
     }
   }
 
+  // 根据子节点情况设置图标
+  if (icon) {
+    icon.textContent = hasChildren ? "⬇️" : "🈳";
+  }
   childrenContainer.style.display = "";
 }
 
@@ -1286,20 +1792,24 @@ async function toggleTreeNode(node, entry, childrenContainer, depth) {
 async function autoOpenLastProject() {
   const invoke = getTauriInvoke();
   if (!invoke) {
-    setStatus("Tauri API 不可用");
+    // 无 Tauri API → 直接显示项目列表模式
+    showWelcomePage();
+    setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
   try {
     const lastPath = await invoke("get_last_project");
     if (!lastPath) {
-      setStatus("没有上次项目记录");
+      showWelcomePage();
+      setStatus(I18N.t("project.welcome"));
       return;
     }
-    setStatus(`正在恢复项目: ${lastPath}`);
+    setStatus(I18N.t("project.restoring", { path: lastPath }));
     await openProject(lastPath);
   } catch (err) {
-    setStatus(`恢复项目失败: ${err}`, "error");
+    showWelcomePage();
+    setStatus(I18N.t("project.restore_fail", { err }), "error");
   }
 }
 

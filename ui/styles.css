@@ -104,6 +104,38 @@ html, body {
   background: var(--hover-bg);
 }
 
+/* 语言下拉菜单 */
+.menu-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 120px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 1000;
+  padding: 4px 0;
+}
+
+.menu-dropdown-item {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: default;
+  white-space: nowrap;
+}
+
+.menu-dropdown-item:hover {
+  background: var(--accent);
+}
+
+.menu-dropdown-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 8px;
+}
+
 .titlebar-center {
   flex: 1;
   display: flex;
@@ -167,14 +199,15 @@ html, body {
   overflow: hidden;
 }
 
-/* --- 状态一：欢迎页 --- */
+/* --- 状态一：欢迎内容（无项目时在编辑区显示） --- */
 
-#welcome-page {
+#welcome-content {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: 32px;
 }
 
 .welcome {
@@ -182,10 +215,42 @@ html, body {
   animation: fadeIn 0.5s ease-out;
 }
 
-.welcome-icon {
+/* 九宫格 */
+.welcome-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  max-width: 600px;
+  width: 100%;
+}
+
+.welcome-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 18px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.welcome-card:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: var(--accent);
+}
+
+.welcome-card-icon {
+  font-size: 22px;
+}
+
+.welcome-card-sub {
+  font-size: 11px;
   color: var(--text-secondary);
-  margin-bottom: 24px;
-  opacity: 0.6;
 }
 
 .welcome-title {
@@ -796,6 +861,188 @@ html, body {
 .tok-attr-value { color: #ce9178; }
 .tok-doctype { color: #808080; }
 .tok-entity { color: #4ec9b0; }
+
+/* --- 自定义弹窗 --- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(2px);
+}
+
+.modal-box {
+  min-width: 360px;
+  max-width: 480px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  overflow: hidden;
+  animation: modalIn 0.15s ease-out;
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.95) translateY(-8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.modal-title {
+  padding: 14px 20px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 4px 20px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.modal-input-row {
+  padding: 0 20px 16px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  outline: none;
+}
+
+.modal-input:focus {
+  border-color: var(--accent);
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 20px 14px;
+}
+
+.modal-btn {
+  padding: 6px 20px;
+  font-size: 12px;
+  font-family: inherit;
+  border: none;
+  border-radius: 4px;
+  cursor: default;
+  transition: background 0.15s;
+}
+
+.modal-btn-ok {
+  color: #fff;
+  background: var(--accent);
+}
+
+.modal-btn-ok:hover {
+  background: #1a8ad4;
+}
+
+.modal-btn-cancel {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.modal-btn-cancel:hover {
+  background: #555;
+}
+
+/* --- 右键菜单 --- */
+
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 140px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  padding: 4px 0;
+}
+
+.context-menu-item {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: default;
+  white-space: nowrap;
+}
+
+.context-menu-item:hover {
+  background: var(--accent);
+}
+
+.context-menu-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 3px 8px;
+}
+
+/* --- 项目列表 --- */
+
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-list-item {
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-list-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.project-list-item .project-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.project-list-item .project-info {
+  overflow: hidden;
+}
+
+.project-list-item .project-name {
+  font-weight: 500;
+}
+
+.project-list-item .project-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-list-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
 
 /* 大纲区 */
 .outline {

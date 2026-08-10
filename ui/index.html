@@ -18,6 +18,13 @@
           <span class="menu-item">编辑</span>
           <span class="menu-item">选择</span>
           <span class="menu-item">查看</span>
+          <span class="menu-item" id="menu-lang" style="position:relative">
+            语言 ▾
+            <div class="menu-dropdown" id="menu-lang-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-lang="zh-CN">中文</div>
+              <div class="menu-dropdown-item" data-lang="en">English</div>
+            </div>
+          </span>
           <span class="menu-item" id="menu-help">帮助</span>
         </nav>
       </div>
@@ -39,71 +46,21 @@
 
     <!-- 工作区 -->
     <main id="workspace">
-      <!-- 状态一：欢迎页（无项目时显示） -->
-      <div id="welcome-page" class="welcome">
-        <div class="welcome-icon">
-          <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
-            <rect x="8" y="12" width="64" height="56" rx="6" stroke="currentColor" stroke-width="2.5" fill="none"/>
-            <path d="M24 28h32M24 38h24M24 48h16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-          </svg>
-        </div>
-        <h1 class="welcome-title">最懂你的IDE</h1>
-        <p id="welcome-subtitle" class="welcome-subtitle">不花哨，不废话。你要什么，它做什么。</p>
-      </div>
-
-      <!-- 帮助页（无项目时替换欢迎页） -->
-      <div id="help-page" class="help-page" style="display:none">
-        <div class="help-content">
-          <h1>帮助</h1>
-
-          <h2>命令系统</h2>
-          <table class="help-table">
-            <tr><th>命令</th><th>说明</th></tr>
-            <tr><td><code>open project &lt;路径&gt;</code></td><td>打开项目文件夹</td></tr>
-            <tr><td><code>open file &lt;路径&gt;</code></td><td>打开文件</td></tr>
-            <tr><td><code>close project</code></td><td>关闭当前项目</td></tr>
-            <tr><td><code>close all</code></td><td>关闭所有标签页</td></tr>
-            <tr><td><code>close &lt;序号&gt;</code></td><td>按序号关闭标签页（负数从右数）</td></tr>
-            <tr><td><code>close other</code></td><td>关闭除当前外的标签页</td></tr>
-            <tr><td><code>close left</code></td><td>关闭当前标签页左侧所有</td></tr>
-            <tr><td><code>close right</code></td><td>关闭当前标签页右侧所有</td></tr>
-            <tr><td><code>new py|rs|md|c &lt;名称&gt;</code></td><td>创建文件（自动加后缀）</td></tr>
-            <tr><td><code>new file &lt;相对路径&gt;</code></td><td>创建文件</td></tr>
-            <tr><td><code>new folder|dir &lt;相对路径&gt;</code></td><td>创建目录</td></tr>
-            <tr><td><code>del|delete|remove|rm &lt;相对路径&gt;</code></td><td>删除文件/目录（弹窗确认）</td></tr>
-            <tr><td><code>config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td>配置管理</td></tr>
-          </table>
-          <p class="help-note">快捷键：<kbd>Ctrl+S</kbd> 保存当前文件</p>
-
-          <h2>语法高亮支持</h2>
-          <table class="help-table">
-            <tr><th>语言</th><th>扩展名</th></tr>
-            <tr><td>Python</td><td>.py</td></tr>
-            <tr><td>Rust</td><td>.rs</td></tr>
-            <tr><td>HTML（含嵌入 CSS/JS）</td><td>.html, .htm</td></tr>
-            <tr><td>CSS</td><td>.css</td></tr>
-            <tr><td>JavaScript</td><td>.js, .mjs, .cjs</td></tr>
-            <tr><td>Markdown</td><td>.md, .markdown</td></tr>
-          </table>
-
-          <h2>联系方式</h2>
-          <p>CSDN 关注 <strong>醒过来摸鱼</strong>，私信即可。</p>
-
-          <button id="btn-help-back" class="help-back-btn">← 返回</button>
-        </div>
-      </div>
-
-      <!-- 状态二：项目工作区（打开项目后显示） -->
-      <div id="project-workspace" class="project-layout" style="display:none">
+      <!-- 项目工作区始终可见 -->
+      <div id="project-workspace" class="project-layout">
         <!-- 导航区：多标签页侧边栏 -->
         <aside id="navigator" class="navigator">
           <div class="nav-tabs">
-            <button class="nav-tab active" data-tab="files">项目文件</button>
+            <button class="nav-tab active" data-tab="projects">项目列表</button>
+            <button class="nav-tab" data-tab="files">项目文件</button>
             <button class="nav-tab" data-tab="terminal">终端资源</button>
             <button class="nav-tab" data-tab="target">运行目标</button>
           </div>
           <div class="nav-content">
-            <div id="nav-panel-files" class="nav-panel active">
+            <div id="nav-panel-projects" class="nav-panel active">
+              <div id="project-list" class="project-list"></div>
+            </div>
+            <div id="nav-panel-files" class="nav-panel">
               <div id="file-tree" class="file-tree"></div>
             </div>
             <div id="nav-panel-terminal" class="nav-panel">
@@ -149,6 +106,61 @@
         <section id="editor-area" class="editor-area">
           <!-- 标签页栏 -->
           <div id="tab-bar" class="tab-bar"></div>
+          <!-- 欢迎内容（无项目时显示） -->
+          <div id="welcome-content" class="welcome" style="display:none">
+            <div class="welcome-grid">
+              <div class="welcome-card"><span class="welcome-card-icon">🌐</span><span>多语种支持</span><span class="welcome-card-sub">中/英/Emoji 自由切换</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🐍</span><span>任意编程语言</span><span class="welcome-card-sub">语法高亮全覆盖</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">💻</span><span>丰富终端类型</span><span class="welcome-card-sub">PTY 原生模拟体验</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">⌨️</span><span>文本命令架构</span><span class="welcome-card-sub">键盘驱动，效率至上</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🧠</span><span>自我成长</span><span class="welcome-card-sub">AI 翻译自然语言为精确命令</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🔒</span><span>AI 安全可控</span><span class="welcome-card-sub">本地处理，数据不外泄</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">⚡</span><span>Rust 轻量极速</span><span class="welcome-card-sub">二进制不足 10MB</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🛡️</span><span>Rust 内存安全</span><span class="welcome-card-sub">编译期消灭崩溃</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🔗</span><span>Rust 并发安全</span><span class="welcome-card-sub">无畏多线程</span></div>
+            </div>
+            <h1 class="welcome-title" style="margin-top:24px">darkhorse-code</h1>
+            <p id="welcome-subtitle" class="welcome-subtitle">越来越懂你</p>
+          </div>
+
+          <!-- 帮助页 -->
+          <div id="help-page" class="help-page" style="display:none">
+            <div class="help-content">
+              <h1>帮助</h1>
+              <h2>命令系统</h2>
+              <table class="help-table">
+                <tr><th>命令</th><th>说明</th></tr>
+                <tr><td><code>open project &lt;路径&gt;</code></td><td>打开项目文件夹</td></tr>
+                <tr><td><code>open file &lt;路径&gt;</code></td><td>打开文件</td></tr>
+                <tr><td><code>close project</code></td><td>关闭当前项目</td></tr>
+                <tr><td><code>close all</code></td><td>关闭所有标签页</td></tr>
+                <tr><td><code>close &lt;序号&gt;</code></td><td>按序号关闭标签页（负数从右数）</td></tr>
+                <tr><td><code>close other</code></td><td>关闭除当前外的标签页</td></tr>
+                <tr><td><code>close left</code></td><td>关闭当前标签页左侧所有</td></tr>
+                <tr><td><code>close right</code></td><td>关闭当前标签页右侧所有</td></tr>
+                <tr><td><code>new py|rs|md|c &lt;名称&gt;</code></td><td>创建文件（自动加后缀）</td></tr>
+                <tr><td><code>new file &lt;相对路径&gt;</code></td><td>创建文件</td></tr>
+                <tr><td><code>new folder|dir &lt;相对路径&gt;</code></td><td>创建目录</td></tr>
+                <tr><td><code>del|delete|remove|rm &lt;相对路径&gt;</code></td><td>删除文件/目录（弹窗确认）</td></tr>
+                <tr><td><code>config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td>配置管理</td></tr>
+              </table>
+              <p class="help-note">快捷键：<kbd>Ctrl+S</kbd> 保存当前文件</p>
+              <h2>语法高亮支持</h2>
+              <table class="help-table">
+                <tr><th>语言</th><th>扩展名</th></tr>
+                <tr><td>Python</td><td>.py</td></tr>
+                <tr><td>Rust</td><td>.rs</td></tr>
+                <tr><td>HTML（含嵌入 CSS/JS）</td><td>.html, .htm</td></tr>
+                <tr><td>CSS</td><td>.css</td></tr>
+                <tr><td>JavaScript</td><td>.js, .mjs, .cjs</td></tr>
+                <tr><td>Markdown</td><td>.md, .markdown</td></tr>
+              </table>
+              <h2>联系方式</h2>
+              <p>CSDN 关注 <strong>醒过来摸鱼</strong>，私信即可。</p>
+              <button id="btn-help-back" class="help-back-btn">← 返回</button>
+            </div>
+          </div>
+
           <!-- 编辑器主体：gutter + 代码区 -->
           <div id="editor-body" class="editor-body">
             <div id="editor-empty" class="editor-empty">
@@ -200,6 +212,32 @@
     </footer>
   </div>
 
+  <!-- 自定义右键菜单 -->
+  <div id="context-menu" class="context-menu" style="display:none">
+    <div class="context-menu-item context-menu-file-only" data-action="run">▶️ 运行</div>
+    <div class="context-menu-item context-menu-file-only" data-action="try-run">🔍 试跑</div>
+    <div class="context-menu-item context-menu-sep"></div>
+    <div class="context-menu-item" data-action="delete">🗑️ 删除</div>
+    <div class="context-menu-item" data-action="rename">✏️ 重命名</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfile">📄 创建文件</div>
+  </div>
+
+  <!-- 自定义弹窗 -->
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-input-row" id="modal-input-row" style="display:none">
+        <input type="text" id="modal-input" class="modal-input" />
+      </div>
+      <div class="modal-buttons">
+        <button id="modal-btn-cancel" class="modal-btn modal-btn-cancel">取消</button>
+        <button id="modal-btn-ok" class="modal-btn modal-btn-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
   <script src="command.js"></script>
   <script src="main.js"></script>
 </body>

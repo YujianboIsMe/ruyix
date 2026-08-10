@@ -256,6 +256,48 @@ impl ConfigManager {
     }
 
     // ============================================
+    // execute.toml — 自学习：记录哪些后缀可以运行
+    // ============================================
+
+    /// 加载 execute.toml，返回 HashMap<扩展名, can_run>。
+    /// 文件格式: [py]\ncan_run = true
+    pub fn load_execute_map(&self) -> HashMap<String, bool> {
+        let path = self.global_dir.join("execute.toml");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return HashMap::new();
+        };
+        let Ok(root) = content.parse::<toml::Value>() else {
+            return HashMap::new();
+        };
+        let mut map = HashMap::new();
+        if let toml::Value::Table(t) = root {
+            for (ext, v) in t {
+                if let toml::Value::Table(inner) = v {
+                    if let Some(toml::Value::Boolean(can_run)) = inner.get("can_run") {
+                        map.insert(ext, *can_run);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// 写入一条 execute 记录
+    pub fn save_execute_entry(&self, ext: &str, can_run: bool) -> Result<(), String> {
+        let mut map = self.load_execute_map();
+        map.insert(ext.to_string(), can_run);
+        let mut root = toml::map::Map::new();
+        for (ext, can_run) in &map {
+            let mut inner = toml::map::Map::new();
+            inner.insert("can_run".to_string(), toml::Value::Boolean(*can_run));
+            root.insert(ext.clone(), toml::Value::Table(inner));
+        }
+        let toml_str = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
+        let path = self.global_dir.join("execute.toml");
+        std::fs::write(&path, toml_str).map_err(|e| format!("写入 execute.toml 失败: {}", e))
+    }
+
+    // ============================================
     // 内部辅助
     // ============================================
 

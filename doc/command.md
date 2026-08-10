@@ -13,18 +13,22 @@
               │ 未命中
               ▼
     ┌─────────────────────┐
-    │ 三级：LLM API 调用    │  DeepSeek/通义千问 → 返回 {action, params, pattern}
+    │ 二级：LLM API 调用    │  DeepSeek/通义千问 → 返回 {action, params, pattern}
     │ 执行 + 写入本地缓存    │  下次类似表达走二级
     └─────────────────────┘
 ```
 目前只支持标准命令和AI命令。
-第二级缓存暂不实现。
 此外，让大模型进行意图识别，如果是闲聊。简单回复20字以内的提供情绪价值的话语。
 如果回复预计会超过20字，则回复“你还是好好工作吧，房贷还清了吗？车贷还清了吗？”
+
+## AI上下文
+如果是打开项目的状态，把当前项目目录完整路径作为上下文发送给AI。
+这样在用户提出简短的问题后，AI可以推测出完整的绝对路径。
+
 ## open 命令
 目前有以下子命令：
 1. project 打开项目。顶部窗口显示项目的绝对路径或项目名。
-2. file
+2. file，禁止打开绝对路径文件，只能打开相对路径。
 示例：
 ```
 open project C:\Users\yujia\PycharmProjects\tmf
@@ -99,3 +103,20 @@ config add -r darkhorse.code.run.target0.name="pdf转储es"
 禁止使用绝对路径:
 - 发现 /开头，立即报错：“您没有权限！”
 - 发现C:/ D:/开头，立即报错“您没有权限！”
+
+## run 命令
+语法是
+run <name\>\=<cmd> 
+这是一个快捷命令，先转化为两条标准命令
+config add -p darkhorse.code.run.target<index>.cmd=<cmd> 
+config add -p darkhorse.code.run.target<index>.name=<name\>
+<index> 怎么计算呢？
+很简单，max(已有索引) + 1。
+
+## rename/mv 命令
+功能：重命名
+格式 rename <old-path> <new-path>
+校验：
+1. 禁止绝对路径文件，只能相对路径。
+2. 不能含有非法字符
+3. 不能与现有文件/目录重复

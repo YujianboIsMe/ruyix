@@ -1,0 +1,3 @@
+[run]
+"target0.cmd" = "cargo run"
+"target0.name" = "🛻跑跑"

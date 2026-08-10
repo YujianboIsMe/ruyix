@@ -35,6 +35,9 @@ new file <相对路径>
 new folder|dir <相对路径>
   创建目录。路径相对于项目根目录
 
+rename|mv <旧路径> <新名称>
+  重命名文件或目录。路径相对于项目根目录，新名称不可含非法字符
+
 del|delete|remove|rm <相对路径>
   删除文件或目录。路径相对于项目根目录
 
@@ -49,6 +52,10 @@ config update [-g|-p|-r] <key> <value>
 
 config remove [-g|-p|-r] <key>
   删除配置（同 delete）
+
+run <名称>=<命令>
+  快捷添加项目运行目标。系统会自动计算索引（max(已有索引)+1），无需手动指定 target 编号。
+  例如: run 构建=cargo build
 
 help
   打开帮助页
