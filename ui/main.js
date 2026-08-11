@@ -1145,11 +1145,15 @@ async function handleContextRun(fullPath) {
     } else {
       // 情况2: 无目标 → 自动创建
       const name = fullPath.split(/[/\\]/).pop() || fullPath;
-      const ext = name.split(".").pop() || "";
-      // 尝试从 execute.toml 获取命令模板（AI 试跑时可能已存储）
-      // 默认: 用扩展名推测
-      const cmdMap = { py: "python {file}", rs: "cargo run", js: "node {file}" };
-      const cmd = (cmdMap[ext] || "python {file}").replace("{file}", fullPath);
+      const dot = name.lastIndexOf(".");
+      const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+      // 命令模板：优先用后端建议，其次文件名匹配，最后扩展名匹配
+      const cmdMap = {
+        py: "python {file}", rs: "cargo run", js: "node {file}",
+        "Cargo.toml": "cargo run", "package.json": "npm start", "Makefile": "make"
+      };
+      let cmd = status.suggested_cmd || cmdMap[name] || cmdMap[ext] || "python {file}";
+      cmd = cmd.replace(/\{file\}/gi, fullPath);
       await handleCommand("run " + name + "=" + cmd, true);
     }
   } catch (err) {
@@ -1168,25 +1172,30 @@ async function handleContextTryRun(fullPath) {
       setStatus("试跑失败: AI 返回为空，请重试", "error");
       return;
     }
+    const fileName = fullPath.split(/[/\\]/).pop() || fullPath;
     const ext = (fullPath.split(".").pop() || "").toLowerCase();
     const upper = result.trim().toUpperCase();
 
-    if (upper.startsWith("YES")) {
+    if (upper.startsWith("FILE_YES")) {
+      // 因文件名而可运行（清单文件：Cargo.toml、package.json 等）
+      let cmdTemplate = upper.startsWith("FILE_YES|") ? result.slice(result.indexOf("|") + 1).trim() : ("python {file}");
+      const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
+      await invoke("set_execute_entry", { path: fullPath, canRun: true, asFile: true });
+      await handleCommand("run " + fileName + "=" + cmd, true);
+      setStatus("已记住文件名: " + fileName + " → " + cmd);
+    } else if (upper.startsWith("YES")) {
       // 可运行 — 提取命令模板
       let cmdTemplate = upper.startsWith("YES|") ? result.slice(result.indexOf("|") + 1).trim() : ("python {file}");
-      // 替换占位符
       const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
-      const name = fullPath.split(/[/\\]/).pop() || fullPath;
-      // 记录 + 自动创建运行目标
-      await invoke("set_execute_entry", { ext, canRun: true });
-      await handleCommand("run " + name + "=" + cmd, true);
+      await invoke("set_execute_entry", { path: fullPath, canRun: true, asFile: false });
+      await handleCommand("run " + fileName + "=" + cmd, true);
       setStatus("已记住并创建运行目标: ." + ext + " → " + cmd);
     } else if (upper.startsWith("CONDITIONAL")) {
       const detail = upper.startsWith("CONDITIONAL|") ? result.slice(result.indexOf("|") + 1).trim() : result;
       setStatus("功能待开发: " + detail, "error");
     } else {
       // NO 或其他
-      if (ext) await invoke("set_execute_entry", { ext, canRun: false });
+      await invoke("set_execute_entry", { path: fullPath, canRun: false, asFile: false });
       setStatus("已记住: ." + ext + " 不可运行 (AI: " + result.slice(0, 60) + ")");
     }
   } catch (err) {

@@ -203,6 +203,8 @@ struct ExecuteStatus {
     has_target: bool,
     /// 绑定的目标名称（若有）
     target_name: Option<String>,
+    /// 建议的运行命令（若来自预置清单）
+    suggested_cmd: Option<String>,
 }
 
 #[tauri::command]
@@ -211,18 +213,45 @@ fn get_execute_status(
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<ExecuteStatus, String> {
-    let ext = std::path::Path::new(&path)
+    let p = std::path::Path::new(&path);
+    let file_name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let ext = p
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-        .to_string();
-    if ext.is_empty() {
-        return Ok(ExecuteStatus { known: Some(false), has_target: false, target_name: None });
-    }
+        .to_lowercase();
 
     let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
     let exec_map = mgr.load_execute_map();
-    let known = exec_map.get(&ext).copied();
+
+    // 三层查找：预置清单 → 文件名匹配 → 扩展名匹配
+    let mut known: Option<bool> = None;
+    let mut suggested_cmd: Option<String> = None;
+
+    // 1) 预置清单（优先级最高，保证知名文件不被扩展名级条目覆盖）
+    if let Some(manifest) = config::manifest_for_path(p) {
+        known = Some(true);
+        suggested_cmd = Some(manifest.cmd.to_string());
+    }
+
+    // 2) execute.toml 文件名精确匹配
+    if known.is_none() && !file_name.is_empty() {
+        known = exec_map.get(&file_name).copied();
+    }
+
+    // 3) execute.toml 扩展名匹配
+    if known.is_none() && !ext.is_empty() {
+        known = exec_map.get(&ext).copied();
+    }
+
+    // 扩展名为空（如 Makefile、Dockerfile）且以上均未匹配 → 未知
+    if known.is_none() && ext.is_empty() {
+        known = Some(false);
+    }
 
     let mut has_target = false;
     let mut target_name = None;
@@ -231,7 +260,8 @@ fn get_execute_status(
             if let Ok(targets) = mgr.load_run_targets(Some(&root)) {
                 for t in &targets {
                     if let Some(ref cmd) = t.cmd {
-                        if cmd.contains(&path) {
+                        // 匹配：命令中包含文件路径 或 命令中包含文件名
+                        if cmd.contains(&path) || cmd.contains(&file_name) {
                             has_target = true;
                             target_name = t.name.clone().or_else(|| Some(t.key.clone()));
                             break;
@@ -241,17 +271,35 @@ fn get_execute_status(
             }
         }
     }
-    Ok(ExecuteStatus { known, has_target, target_name })
+    Ok(ExecuteStatus { known, has_target, target_name, suggested_cmd })
 }
 
 #[tauri::command]
 fn set_execute_entry(
-    ext: String,
+    path: String,
     can_run: bool,
+    as_file: Option<bool>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<(), String> {
     let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.save_execute_entry(&ext, can_run)
+    let p = std::path::Path::new(&path);
+    // 确定存储键：知名清单文件 → 文件名；否则按 as_file 决定
+    let is_file = as_file.unwrap_or(false) || config::manifest_for_path(p).is_some();
+    let key = if is_file {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+    } else {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    if key.is_empty() {
+        return Err("无法确定存储键".to_string());
+    }
+    mgr.save_execute_entry(&key, can_run)
 }
 
 #[tauri::command]

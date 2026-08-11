@@ -14,6 +14,29 @@ pub struct RunTarget {
     pub cmd: Option<String>,
 }
 
+/// 知名清单文件定义（预置为可运行）
+#[derive(Debug, Clone, Copy)]
+pub struct ManifestDef {
+    pub name: &'static str, // 文件名（小写）
+    pub cmd: &'static str,  // 建议运行命令
+}
+
+pub const MANIFEST_FILES: &[ManifestDef] = &[
+    ManifestDef { name: "cargo.toml", cmd: "cargo run" },
+    ManifestDef { name: "package.json", cmd: "npm start" },
+    ManifestDef { name: "makefile", cmd: "make" },
+];
+
+/// 根据路径返回匹配的清单定义
+pub fn manifest_for_path(path: &std::path::Path) -> Option<&'static ManifestDef> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    MANIFEST_FILES.iter().find(|m| m.name == name)
+}
+
 // ============================================
 // 配置作用域
 // ============================================
@@ -259,7 +282,8 @@ impl ConfigManager {
     // execute.toml — 自学习：记录哪些后缀可以运行
     // ============================================
 
-    /// 加载 execute.toml，返回 HashMap<扩展名, can_run>。
+    /// 加载 execute.toml，返回 HashMap<键, can_run>。
+    /// 键可以是扩展名（如 "py"）或文件名（如 "Cargo.toml"）。
     /// 文件格式: [py]\ncan_run = true
     pub fn load_execute_map(&self) -> HashMap<String, bool> {
         let path = self.global_dir.join("execute.toml");
@@ -282,15 +306,15 @@ impl ConfigManager {
         map
     }
 
-    /// 写入一条 execute 记录
-    pub fn save_execute_entry(&self, ext: &str, can_run: bool) -> Result<(), String> {
+    /// 写入一条 execute 记录（key 可以是扩展名如 "py"，或文件名如 "Cargo.toml"）
+    pub fn save_execute_entry(&self, key: &str, can_run: bool) -> Result<(), String> {
         let mut map = self.load_execute_map();
-        map.insert(ext.to_string(), can_run);
+        map.insert(key.to_string(), can_run);
         let mut root = toml::map::Map::new();
-        for (ext, can_run) in &map {
+        for (key, can_run) in &map {
             let mut inner = toml::map::Map::new();
             inner.insert("can_run".to_string(), toml::Value::Boolean(*can_run));
-            root.insert(ext.clone(), toml::Value::Table(inner));
+            root.insert(key.clone(), toml::Value::Table(inner));
         }
         let toml_str = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
         let path = self.global_dir.join("execute.toml");

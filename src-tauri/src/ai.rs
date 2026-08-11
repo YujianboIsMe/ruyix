@@ -139,13 +139,18 @@ pub async fn check_executable(
         load_ai_config(&mgr, None)?
     };
 
-    let ext = std::path::Path::new(path)
+    let p = std::path::Path::new(path);
+    let file_name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let ext = p
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
     let prompt = format!(
-        "文件路径: {}\n扩展名: .{}\n\n这个文件可以运行/执行吗？请简短回复:\n- 如果可以且不需要额外条件: YES|<运行命令模板，用 {{file}} 指代文件>\n- 如果可以但需要特定条件: CONDITIONAL|<条件说明>\n- 如果不可运行: NO",
-        path, ext
+        "文件路径: {}\n文件名: {}\n扩展名: .{}\n\n这个文件可以运行/执行吗？请只回复一个选项:\n- FILE_YES|<运行命令模板，用 {{file}} 指代文件> — 仅因文件名而可运行的清单/构建文件（如 Cargo.toml、package.json、Makefile）\n- YES|<运行命令模板> — 因其后缀类型而可运行的脚本（如 .py）\n- CONDITIONAL|<条件说明> — 可运行但需要特定条件\n- NO — 不可运行",
+        path, file_name, ext
     );
 
     let client = reqwest::Client::new();
