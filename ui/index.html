@@ -166,6 +166,7 @@
                 <tr><td>CSS</td><td>.css</td></tr>
                 <tr><td>JavaScript</td><td>.js, .mjs, .cjs</td></tr>
                 <tr><td>Markdown</td><td>.md, .markdown</td></tr>
+                <tr><td>SQL</td><td>.sql</td></tr>
               </table>
               <h2>联系方式</h2>
               <p>CSDN 关注 <strong>醒过来摸鱼</strong>，私信即可。</p>
@@ -216,9 +217,14 @@
             <div id="git-branch" class="git-branch"></div>
             <input id="git-commit-input" class="git-commit-input" type="text"
                    data-i18n-placeholder="git.commit_msg" placeholder="commit message" />
-            <div class="git-section-header" id="git-staged-header" data-i18n="git.staged">Staged</div>
+            <div class="git-section-header">
+              <span id="git-staged-header" class="git-section-title" data-i18n="git.staged">Staged</span>
+            </div>
             <div id="git-staged-tree" class="git-file-tree"></div>
-            <div class="git-section-header" id="git-unstaged-header" data-i18n="git.unstaged">Unstaged</div>
+            <div class="git-section-header">
+              <span id="git-unstaged-header" class="git-section-title" data-i18n="git.unstaged">Unstaged</span>
+              <button id="git-btn-stage-all" class="git-stage-all-btn" data-i18n-title="git.stage_all">➕</button>
+            </div>
             <div id="git-unstaged-tree" class="git-file-tree"></div>
           </div>
         </aside>

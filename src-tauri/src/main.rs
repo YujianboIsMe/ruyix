@@ -16,6 +16,10 @@ use tauri::Manager;
 /// CREATE_NEW_CONSOLE — 为新进程创建独立控制台窗口
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
+/// CREATE_NO_WINDOW — 阻止子进程新建控制台窗口（release GUI 子系统无控制台，
+/// 不加此标志控制台子进程会闪黑窗口；输出仍通过管道捕获）
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 // ============================================
 // 辅助函数
 // ============================================
@@ -522,7 +526,8 @@ async fn run_target(cmd: String, project_root: Option<String>) -> Result<RunOutp
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW);
         if let Some(ref dir) = project_root {
             cmd.current_dir(dir);
         }
@@ -1004,4 +1009,23 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ============================================
+// 测试
+// ============================================
+
+#[cfg(test)]
+mod tests {
+    use arborium::Highlighter;
+
+    /// SQL 语法高亮：验证 lang-sql feature 启用后 arborium 能识别 "sql" 语言
+    #[test]
+    fn sql_highlight_works() {
+        let mut highlighter = Highlighter::new();
+        let spans = highlighter
+            .highlight_spans("sql", "SELECT id, name FROM users WHERE age > 18;")
+            .expect("SQL 高亮失败");
+        assert!(!spans.is_empty(), "SQL 高亮应返回 span");
+    }
 }

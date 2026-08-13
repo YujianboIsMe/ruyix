@@ -15,6 +15,7 @@
 2. rust
 3. html/css/javascript. 请注意：大部分html文件里会嵌入js/css代码。
 4. markdown,只高亮、不预览
+5. sql文件
 
 ## 标签页图标
 参考[icon](./icon.md)

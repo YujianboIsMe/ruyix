@@ -1187,6 +1187,7 @@ HTML（含嵌入 CSS/JS）       .html, .htm
 CSS                        .css
 JavaScript                 .js, .mjs, .cjs
 Markdown                   .md, .markdown
+SQL                        .sql
 
 ${t("help.section_contact")}
 --------

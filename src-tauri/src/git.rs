@@ -8,6 +8,15 @@
 
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// CREATE_NO_WINDOW — 阻止子进程新建控制台窗口。
+/// release 版主程序是 GUI 子系统（无控制台），git.exe 是控制台程序，
+/// 不加此标志每次调用都会闪一个黑色终端窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 // ============================================
 // 数据结构
 // ============================================
@@ -45,10 +54,15 @@ pub struct GitOutput {
 
 /// 执行 git 命令（仅 spawn 失败才返回 Err，非零退出码由调用方判断）
 fn run_git(project_root: &str, args: &[&str]) -> Result<GitOutput, String> {
-    let output = Command::new("git")
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(project_root)
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("无法启动 git（请确认已安装 Git 并加入 PATH）: {}", e))?;
 

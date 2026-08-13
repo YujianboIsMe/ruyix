@@ -164,6 +164,11 @@ function refreshI18nUI() {
     el.placeholder = I18N.t(el.dataset.i18nPlaceholder);
   });
 
+  // title 提示（[data-i18n-title] 属性驱动）
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.title = I18N.t(el.dataset.i18nTitle);
+  });
+
   // 命令栏 placeholder
   const cmdInput = document.getElementById("command-input");
   if (cmdInput) cmdInput.placeholder = I18N.t("command.prompt");
@@ -555,6 +560,7 @@ function extToLanguage(ext) {
     cjs: "javascript",
     md: "markdown",
     markdown: "markdown",
+    sql: "sql",
   };
   return map[ext] || null;
 }
@@ -577,6 +583,7 @@ function fileIcon(name) {
     cjs: "Ⓙ",
     md: "Ⓜ️",
     markdown: "Ⓜ️",
+    sql: "🛢️",
     png: "🖼️",
     jpg: "🖼️",
     jpeg: "🖼️",
@@ -752,6 +759,11 @@ function setupOutlineTabs() {
   });
   document.getElementById("git-btn-pull")?.addEventListener("click", () => handleCommand("git pull"));
   document.getElementById("git-btn-push")?.addEventListener("click", () => handleCommand("git push"));
+
+  // unstaged 标题右侧 ➕：全部暂存
+  document.getElementById("git-btn-stage-all")?.addEventListener("click", () => {
+    handleCommand("git add -A");
+  });
 }
 
 /** 加载 Git 状态：分支名 + staged/unstaged 文件树 */
@@ -764,8 +776,11 @@ async function loadGitStatus() {
   const stagedHeader = document.getElementById("git-staged-header");
   const unstagedHeader = document.getElementById("git-unstaged-header");
 
+  const stageAllBtn = document.getElementById("git-btn-stage-all");
+
   if (!state.currentProject) {
     if (branchEl) branchEl.textContent = "";
+    if (stageAllBtn) stageAllBtn.style.display = "none";
     stagedEl.innerHTML = `<div class="git-empty">${I18N.t("git.no_project")}</div>`;
     unstagedEl.innerHTML = "";
     return;
@@ -773,6 +788,7 @@ async function loadGitStatus() {
 
   const invoke = getTauriInvoke();
   if (!invoke) {
+    if (stageAllBtn) stageAllBtn.style.display = "none";
     stagedEl.innerHTML = `<div class="git-empty">${I18N.t("status.tauri_unavail")}</div>`;
     unstagedEl.innerHTML = "";
     return;
@@ -783,6 +799,8 @@ async function loadGitStatus() {
     if (branchEl) branchEl.textContent = I18N.t("git.branch", { branch: status.branch });
     if (stagedHeader) stagedHeader.textContent = gitSectionTitle("git.staged", status.staged.length);
     if (unstagedHeader) unstagedHeader.textContent = gitSectionTitle("git.unstaged", status.unstaged.length);
+    // 没有可暂存的内容时隐藏 ➕
+    if (stageAllBtn) stageAllBtn.style.display = status.unstaged.length > 0 ? "" : "none";
     renderGitTree(stagedEl, status.staged, true);
     renderGitTree(unstagedEl, status.unstaged, false);
   } catch (err) {
@@ -790,6 +808,7 @@ async function loadGitStatus() {
     if (branchEl) branchEl.textContent = "";
     if (stagedHeader) stagedHeader.textContent = I18N.t("git.staged");
     if (unstagedHeader) unstagedHeader.textContent = I18N.t("git.unstaged");
+    if (stageAllBtn) stageAllBtn.style.display = "none";
     stagedEl.innerHTML = `<div class="git-empty">⚠ ${escapeHtml(err)}</div>`;
     unstagedEl.innerHTML = "";
   }
@@ -802,29 +821,124 @@ function gitSectionTitle(key, count) {
 /** 渲染 staged/unstaged 文件树。点击文件 → 暂存 / 取消暂存（走命令系统） */
 function renderGitTree(el, files, isStaged) {
   if (!files || files.length === 0) {
-    el.innerHTML = `<div class="git-empty">${I18N.t("git.empty")}</div>`;
+    const emptyKey = isStaged ? "git.staged_empty" : "git.unstaged_empty";
+    el.innerHTML = `<div class="git-empty">${I18N.t(emptyKey)}</div>`;
     return;
   }
 
-  el.innerHTML = files
-    .map(
-      (f) => `
-    <div class="git-file" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">
-      <span class="git-file-status git-st-${escapeHtml(f.kind.toLowerCase())}">${escapeHtml(f.kind)}</span>
-      <span class="git-file-name">${escapeHtml(f.path)}</span>
-    </div>`
-    )
-    .join("");
+  const root = buildGitTreeNodes(files);
+  el.innerHTML = renderGitNodes(root.children, 0, isStaged);
 
-  el.querySelectorAll(".git-file").forEach((item) => {
-    item.addEventListener("click", () => {
-      const path = item.dataset.path.replace(/"/g, '\\"');
-      const cmd = isStaged
-        ? `git restore --staged -- "${path}"`
-        : `git add -- "${path}"`;
-      handleCommand(cmd);
+  // 文件夹节点：点击展开/折叠；右侧 ➕ 暂存整个文件夹
+  el.querySelectorAll(".git-dir").forEach((node) => {
+    const children = node.nextElementSibling;
+    if (!children || !children.classList.contains("git-children")) return;
+    const icon = node.querySelector(".git-dir-icon");
+
+    node.addEventListener("click", (e) => {
+      if (e.target.closest(".git-stage-btn")) return;
+      if (children.style.display !== "none") {
+        children.style.display = "none";
+        if (icon) icon.textContent = "📁";
+      } else {
+        children.style.display = "";
+        if (icon) icon.textContent = "📂";
+      }
     });
   });
+
+  el.querySelectorAll(".git-file").forEach((item) => {
+    // 右侧 ➕：暂存该文件/文件夹
+    const stageBtn = item.querySelector(".git-stage-btn");
+    if (stageBtn) {
+      stageBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        stageGitPath(item.dataset.path);
+      });
+    }
+    // 文件行点击：unstaged → 暂存；staged → 取消暂存
+    if (!item.classList.contains("git-dir")) {
+      item.addEventListener("click", () => {
+        const path = item.dataset.path;
+        const cmd = isStaged
+          ? `git restore --staged -- "${path.replace(/"/g, '\\"')}"`
+          : `git add -- "${path.replace(/"/g, '\\"')}"`;
+        handleCommand(cmd);
+      });
+    }
+  });
+}
+
+/** ➕ 点击：暂存一个文件或文件夹（走命令系统） */
+function stageGitPath(path) {
+  handleCommand(`git add -- "${path.replace(/"/g, '\\"')}"`);
+}
+
+/**
+ * 将 git 状态返回的平铺文件列表构建为文件夹树。
+ * 节点: { name, path, isDir, kind, children }（kind 仅文件有）
+ */
+function buildGitTreeNodes(files) {
+  const root = { children: [] };
+  for (const f of files) {
+    const segs = f.path.split("/");
+    let node = root;
+    for (let i = 0; i < segs.length - 1; i++) {
+      let child = node.children.find((c) => c.isDir && c.name === segs[i]);
+      if (!child) {
+        child = {
+          name: segs[i],
+          path: segs.slice(0, i + 1).join("/"),
+          isDir: true,
+          kind: null,
+          children: [],
+        };
+        node.children.push(child);
+      }
+      node = child;
+    }
+    node.children.push({
+      name: segs[segs.length - 1],
+      path: f.path,
+      isDir: false,
+      kind: f.kind,
+      children: [],
+    });
+  }
+
+  // 目录在前，其余按名称排序
+  const sortRec = (n) => {
+    if (!n.children.length) return;
+    n.children.sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name));
+    n.children.forEach(sortRec);
+  };
+  sortRec(root);
+  return root;
+}
+
+/** 渲染树节点为 HTML（文件夹默认折叠） */
+function renderGitNodes(nodes, depth, isStaged) {
+  return nodes
+    .map((n) => {
+      const escPath = escapeHtml(n.path);
+      const pad = 12 + depth * 14;
+      if (n.isDir) {
+        return `
+      <div class="git-file git-dir" data-path="${escPath}" title="${escPath}" style="padding-left:${pad}px">
+        <span class="git-dir-icon">📁</span>
+        <span class="git-file-name">${escapeHtml(n.name)}</span>
+        ${isStaged ? "" : `<span class="git-stage-btn" title="${escapeHtml(I18N.t("git.stage"))}">➕</span>`}
+      </div>
+      <div class="git-children" style="display:none">${renderGitNodes(n.children, depth + 1, isStaged)}</div>`;
+      }
+      return `
+      <div class="git-file" data-path="${escPath}" title="${escPath}" style="padding-left:${pad}px">
+        <span class="git-file-status git-st-${escapeHtml(n.kind.toLowerCase())}">${escapeHtml(n.kind)}</span>
+        <span class="git-file-name">${escapeHtml(n.name)}</span>
+        ${isStaged ? "" : `<span class="git-stage-btn" title="${escapeHtml(I18N.t("git.stage"))}">➕</span>`}
+      </div>`;
+    })
+    .join("");
 }
 
 // ============================================

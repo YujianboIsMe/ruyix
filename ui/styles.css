@@ -1335,6 +1335,10 @@ html, body {
 }
 
 .git-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   padding: 4px 12px;
   font-size: 11px;
   font-weight: 600;
@@ -1343,6 +1347,37 @@ html, body {
   color: var(--text-secondary);
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
+}
+
+.git-section-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* unstaged 标题右侧 ➕：全部暂存 */
+.git-stage-all-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.git-stage-all-btn:hover {
+  color: #6a9955;
+  border-color: #6a9955;
+  background: rgba(106, 153, 85, 0.12);
 }
 
 .git-file-tree {
@@ -1378,9 +1413,44 @@ html, body {
 }
 
 .git-file-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 文件树条目右侧 ➕：暂存该文件夹/文件 */
+.git-stage-btn {
+  flex-shrink: 0;
+  margin-left: 6px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 3px;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.git-stage-btn:hover {
+  opacity: 1;
+  background: rgba(106, 153, 85, 0.2);
+}
+
+/* 文件夹节点 */
+.git-dir-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+}
+
+.git-children {
+  /* 子节点容器（文件夹展开时显示） */
 }
 
 /* git 状态字母配色 */
@@ -1390,7 +1460,7 @@ html, body {
 .git-st-r { color: #c586c0; } /* renamed   */
 .git-st-c { color: #c586c0; } /* copied    */
 .git-st-u { color: #f48771; } /* unmerged  */
-.git-st-? { color: #969696; } /* untracked */
+.git-st-\? { color: #969696; } /* untracked */
 
 .git-empty {
   padding: 6px 12px;
