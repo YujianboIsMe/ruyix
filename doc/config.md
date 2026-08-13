@@ -59,8 +59,10 @@ darkhorse.code.projects.list=["C:\Users\yujia\PycharmProjects\rag","C:\Users\yuj
 ```
 darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
 darkhorse.code.run.target0.name="pdf转储es"
+darkhorse.code.run.target0.bind=src\P05-es\pdf2es.py
 ```
-target0 是用户随意取的名字，不是系统递增的。
+target0 是用户随意取的名字，不是系统递增的（IDE不维护计数器）。
+只有IDE自动创建运行目标时，才遍历target开头的code/key，然后取最大的数字+1。
 
 ### AI
 AI配置同样遵循配置四级配置机制。
@@ -70,3 +72,29 @@ darkhorse.code.ai.api_key
 darkhorse.code.ai.api_url
 darkhorse.code.ai.model
 darkhorse.code.ai.alias 如果没有指定，则取darkhorse.code.ai.model
+
+### RAG（智搜）
+RAG 配置不走四层配置系统，独立存放于两个 rag.toml：
+
+全局配置 `~/.darkhorse/code/rag.toml`（扁平键，无 darkhorse.code 前缀）：
+```
+enabled = true
+permanently_disabled = false
+api_url = "https://api.deepseek.com/v1/embeddings"
+api_key = "sk-xxxx"            # 可选，缺省复用 darkhorse.code.ai.api_key
+model = "deepseek-embedding"   # 可选，嵌入模型名
+dim = 1024                     # 可选，向量维度，默认 1024
+```
+
+项目配置 `./.darkhorse/code/rag.toml`（索引状态，由系统自动维护）：
+```
+enabled = true
+last_indexed = "1786526560"
+files_count = 312
+
+[files]
+"src/main/Calc.java" = "a1b2c3d4"
+```
+
+修改 api_url / dim 的入口：菜单栏【智搜】→ 确认弹窗 → 接受。
+修改 dim 后旧向量库自动清空，需要全量重建索引。

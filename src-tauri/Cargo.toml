@@ -17,7 +17,12 @@ dirs = "6"
 portable-pty = "0.8"
 arborium = { version = "2", default-features = false, features = ["lang-python", "lang-rust", "lang-html", "lang-css", "lang-javascript", "lang-markdown"] }
 arborium-theme = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+base64 = "0.22"
+walkdir = "2"
+sha2 = "0.10"
+qdrant-edge = "0.8"
 
 [features]
 default = ["custom-protocol"]

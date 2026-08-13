@@ -12,6 +12,7 @@ pub struct RunTarget {
     pub key: String,
     pub name: Option<String>,
     pub cmd: Option<String>,
+    pub bind: Option<String>,
 }
 
 /// 知名清单文件定义（预置为可运行）
@@ -249,16 +250,18 @@ impl ConfigManager {
         let path = dir.join("run.toml");
         let map = self.read_toml_file(&path, "run")?;
 
-        // 按 target key 分组：target0.cmd → target0, target0.name → target0
+        // 按 key 分组：build.cmd → build, build.name → build, build.bind → build
         let mut groups: HashMap<String, Option<String>> = HashMap::new();
         let mut names: HashMap<String, Option<String>> = HashMap::new();
+        let mut binds: HashMap<String, Option<String>> = HashMap::new();
 
         for (k, v) in &map {
             if let Some(rest) = k.strip_suffix(".cmd") {
                 groups.entry(rest.to_string()).or_insert(None);
-                // 用 entry 来持有，后面统一构建
             } else if let Some(rest) = k.strip_suffix(".name") {
                 names.insert(rest.to_string(), Some(v.clone()));
+            } else if let Some(rest) = k.strip_suffix(".bind") {
+                binds.insert(rest.to_string(), Some(v.clone()));
             }
         }
 
@@ -267,10 +270,12 @@ impl ConfigManager {
         for (key, _) in &groups {
             let cmd = map.get(&format!("{}.cmd", key)).cloned();
             let name = names.get(key).cloned().flatten();
+            let bind = binds.get(key).cloned().flatten();
             targets.push(RunTarget {
                 key: key.clone(),
                 name,
                 cmd,
+                bind,
             });
         }
         // 按 key 排序
@@ -319,6 +324,39 @@ impl ConfigManager {
         let toml_str = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
         let path = self.global_dir.join("execute.toml");
         std::fs::write(&path, toml_str).map_err(|e| format!("写入 execute.toml 失败: {}", e))
+    }
+
+    // ============================================
+    // learn.lua — 自学习脚本
+    // ============================================
+
+    /// 加载项目的 learn.lua，文件不存在返回空字符串
+    pub fn load_lua_script(&self, project_root: &str) -> Result<String, String> {
+        let path = std::path::Path::new(project_root)
+            .join(".darkhorse")
+            .join("code")
+            .join("learn.lua");
+        if !path.exists() {
+            return Ok(String::new());
+        }
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 learn.lua 失败: {}", e))
+    }
+
+    /// 追加 Lua 代码到 learn.lua
+    pub fn append_lua_script(&self, project_root: &str, lua_code: &str) -> Result<(), String> {
+        let dir = std::path::Path::new(project_root)
+            .join(".darkhorse")
+            .join("code");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
+        let path = dir.join("learn.lua");
+        let entry = format!("\n{}\n", lua_code.trim());
+        let mut existing = if path.exists() {
+            std::fs::read_to_string(&path).unwrap_or_default()
+        } else {
+            String::from("-- learn.lua — 自动生成，请勿手动编辑\n")
+        };
+        existing.push_str(&entry);
+        std::fs::write(&path, existing).map_err(|e| format!("写入 learn.lua 失败: {}", e))
     }
 
     // ============================================

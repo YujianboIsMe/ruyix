@@ -126,7 +126,92 @@ pub async fn translate(
     let content = chat_resp.choices.first()
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_else(|| "不支持的操作：AI 未返回有效响应".to_string());
-    Ok(content)
+
+    eprintln!("[RUST-AI] LLM 原始返回 ({} 字节): {}", content.len(), content);
+
+    // 解析 ---COMMAND--- / ---LUA--- 两部分格式
+    let (commands, lua_code) = parse_command_lua_response(&content);
+    eprintln!("[RUST-AI] 解析 → commands: {:?}, lua_code: {} 字节",
+        commands.as_ref().map(|s| s.as_str()),
+        lua_code.as_ref().map_or(0, |s| s.len()));
+
+    let final_commands = commands.unwrap_or(content);
+    eprintln!("[RUST-AI] 最终命令: {}", final_commands);
+
+    // 保存 Lua 代码到 learn.lua
+    if let Some(root) = project_root {
+        let mgr = config_mgr.lock().map_err(|e| format!("配置锁失败: {}", e))?;
+        if let Some(lua) = lua_code {
+            eprintln!("[RUST-AI] LLM 生成了 Lua，保存到 learn.lua");
+            // LLM 生成了 Lua → 直接保存
+            if let Err(e) = mgr.append_lua_script(root, &lua) {
+                eprintln!("[RUST-AI] 保存 Lua 失败: {}", e);
+            }
+        } else if is_valid_command(&final_commands) {
+            eprintln!("[RUST-AI] LLM 未生成 Lua，自动生成 fallback");
+            // LLM 没生成 Lua → 自动生成精确匹配的 Lua
+            let auto_lua = generate_fallback_lua(input, &final_commands);
+            eprintln!("[RUST-AI] fallback Lua: {}", auto_lua);
+            if let Err(e) = mgr.append_lua_script(root, &auto_lua) {
+                eprintln!("[RUST-AI] 保存 fallback Lua 失败: {}", e);
+            }
+        } else {
+            eprintln!("[RUST-AI] 非有效命令，不保存 Lua");
+        }
+    } else {
+        eprintln!("[RUST-AI] 无项目，不保存 Lua");
+    }
+
+    Ok(final_commands)
+}
+
+/// 判断字符串是否为有效的标准命令（非闲聊、非不支持）
+fn is_valid_command(s: &str) -> bool {
+    let verbs = ["open", "close", "config", "new", "run", "help", "git",
+                 "del", "delete", "remove", "rm", "rename", "mv"];
+    let first = s.split_whitespace().next().unwrap_or("").to_lowercase();
+    verbs.contains(&first.as_str())
+}
+
+/// LLM 未生成 Lua 时，自动生成精确匹配的 fallback Lua 代码
+fn generate_fallback_lua(input: &str, command: &str) -> String {
+    // 转义 Lua 字符串中的特殊字符
+    let escaped_input = input
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    let escaped_cmd = command
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!(
+        "if input == \"{}\" then\n  return \"{}\"\nend",
+        escaped_input, escaped_cmd
+    )
+}
+
+/// 解析 LLM 响应，提取 COMMAND 和 LUA 两部分
+fn parse_command_lua_response(content: &str) -> (Option<String>, Option<String>) {
+    let cmd_marker = "---COMMAND---";
+    let lua_marker = "---LUA---";
+
+    let cmd_start = content.find(cmd_marker);
+    let lua_start = content.find(lua_marker);
+
+    let commands = cmd_start.map(|start| {
+        let begin = start + cmd_marker.len();
+        let slice = &content[begin..];
+        // 命令部分截止到 ---LUA--- 或字符串末尾
+        let end = slice.find(lua_marker).unwrap_or(slice.len());
+        slice[..end].trim().to_string()
+    });
+
+    let lua_code = lua_start.map(|start| {
+        let begin = start + lua_marker.len();
+        content[begin..].trim().to_string()
+    }).filter(|s| !s.is_empty());
+
+    (commands, lua_code)
 }
 
 /// 询问 LLM：该文件是否可以运行

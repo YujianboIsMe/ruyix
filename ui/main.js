@@ -22,7 +22,7 @@ async function initApp() {
   await I18N.init();
 
   // 设置语言菜单
-  setupLanguageMenu();
+  setupMenuBar();
 
   // 设置右键菜单
   setupContextMenu();
@@ -34,10 +34,13 @@ async function initApp() {
   setupCommandBar();
   setupResponsiveTitlebar();
   setupNavigatorTabs();
+  setupOutlineTabs();
   setupTextareaSync();
   setupTerminalList();
   setupKeyboardShortcuts();
   setupHelpMenu();
+  setupRagMenu();
+  setupRagHooks();
   try {
     await autoOpenLastProject();
   } catch (err) {
@@ -49,33 +52,95 @@ async function initApp() {
 // 语言菜单
 // ============================================
 
-function setupLanguageMenu() {
-  const menuLang = document.getElementById("menu-lang");
-  const dropdown = document.getElementById("menu-lang-dropdown");
-  if (!menuLang || !dropdown) return;
+/**
+ * 菜单栏统一设置：所有带下拉菜单的 .menu-item 统一处理 toggle 行为
+ */
+function setupMenuBar() {
+  const menuItems = document.querySelectorAll(".menu-item");
+  menuItems.forEach((menu) => {
+    const dropdown = menu.querySelector(".menu-dropdown");
+    if (!dropdown) return;
 
-  menuLang.addEventListener("click", (e) => {
-    e.stopPropagation();
-    dropdown.style.display = dropdown.style.display === "none" ? "" : "none";
-  });
-
-  document.addEventListener("click", () => {
-    dropdown.style.display = "none";
-  });
-
-  dropdown.querySelectorAll("[data-lang]").forEach((item) => {
-    item.addEventListener("click", async () => {
-      await I18N.setLang(item.dataset.lang);
-      dropdown.style.display = "none";
-      refreshI18nUI();
+    menu.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // 关闭其他下拉
+      document.querySelectorAll(".menu-dropdown").forEach((d) => {
+        if (d !== dropdown) d.style.display = "none";
+      });
+      dropdown.style.display = dropdown.style.display === "none" ? "" : "none";
     });
   });
+
+  // 点击菜单外关闭所有下拉
+  document.addEventListener("click", () => {
+    document.querySelectorAll(".menu-dropdown").forEach((d) => {
+      d.style.display = "none";
+    });
+  });
+
+  // 语言切换
+  const langDropdown = document.getElementById("menu-lang-dropdown");
+  if (langDropdown) {
+    langDropdown.querySelectorAll("[data-lang]").forEach((item) => {
+      item.addEventListener("click", async () => {
+        await I18N.setLang(item.dataset.lang);
+        langDropdown.style.display = "none";
+        refreshI18nUI();
+      });
+    });
+  }
+
+  // 项目菜单项点击（功能待实现，仅 UI）
+  const projectDropdown = document.getElementById("menu-project-dropdown");
+  if (projectDropdown) {
+    projectDropdown.querySelectorAll("[data-action]").forEach((item) => {
+      item.addEventListener("click", () => {
+        projectDropdown.style.display = "none";
+        // TODO: 实现项目新建/退出功能
+      });
+    });
+  }
+
+  updateProjectMenu();
+}
+
+/**
+ * 根据项目打开状态切换"项目"菜单的子项显示
+ */
+function updateProjectMenu() {
+  const newItem = document.querySelector('[data-action="new-project"]');
+  const closeItem = document.querySelector('[data-action="close-project"]');
+  if (!newItem || !closeItem) return;
+
+  if (state.currentProject) {
+    newItem.style.display = "none";
+    closeItem.style.display = "";
+  } else {
+    newItem.style.display = "";
+    closeItem.style.display = "none";
+  }
 }
 
 /**
  * 语言切换后刷新 UI 中所有可翻译内容
  */
 function refreshI18nUI() {
+  // ============================================
+  // 通用：[data-i18n] 属性驱动
+  // ============================================
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    const key = el.dataset.i18n;
+    if (!key) return;
+    // 仅当元素没有子元素节点时设置 textContent
+    // （有子元素的由子元素各自的 data-i18n 处理）
+    const hasElementChild = Array.from(el.childNodes).some(
+      (n) => n.nodeType === Node.ELEMENT_NODE
+    );
+    if (!hasElementChild) {
+      el.textContent = I18N.t(key);
+    }
+  });
+
   // 状态栏
   setStatus(I18N.t("statusbar.ready"));
 
@@ -94,9 +159,10 @@ function refreshI18nUI() {
   const emptyEl = document.querySelector("#editor-empty p");
   if (emptyEl) emptyEl.textContent = I18N.t("editor.empty");
 
-  // 大纲头部
-  const outlineHeader = document.querySelector(".outline-header");
-  if (outlineHeader) outlineHeader.textContent = I18N.t("outline.header");
+  // 输入框 placeholder（[data-i18n-placeholder] 属性驱动）
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    el.placeholder = I18N.t(el.dataset.i18nPlaceholder);
+  });
 
   // 命令栏 placeholder
   const cmdInput = document.getElementById("command-input");
@@ -116,12 +182,16 @@ function refreshI18nUI() {
   if (state.currentProject) {
     loadFileTree(state.currentProject.path);
     loadRunTargets();
+    loadGitStatus();
   } else {
     loadProjectList();
   }
 
   // 标题栏最大化/还原按钮 title
   updateMaximizeIcon();
+
+  // 项目菜单状态
+  updateProjectMenu();
 }
 
 if (document.readyState === "loading") {
@@ -292,6 +362,7 @@ function switchTab(tabId) {
 
   showEditor();
   hideTerminalView();
+  hideImageView();
   if (tab._isTerminal) {
     // xterm.js 终端标签页 — 重新挂载到容器中
     hideEditorView();
@@ -304,6 +375,12 @@ function switchTab(tabId) {
     }
     return;
   }
+  if (tab._isImage) {
+    hideEditorView();
+    showImageView();
+    renderImagePreview(tab);
+    return;
+  }
   if (tab._highlighted) {
     renderHighlightedCode(tab);
   } else {
@@ -313,7 +390,17 @@ function switchTab(tabId) {
     const textarea = document.getElementById("editor-textarea");
     if (textarea) textarea.readOnly = true;
   }
+  if (tab._runTarget) {
+    const textarea = document.getElementById("editor-textarea");
+    if (textarea) textarea.readOnly = true;
+  }
   updateOutline(tab);
+
+  // Git 面板可见时刷新状态（文件可能刚被修改/保存）
+  const gitPanel = document.getElementById("git-panel");
+  if (gitPanel && gitPanel.style.display !== "none" && state.currentProject) {
+    loadGitStatus();
+  }
 }
 
 function closeTab(tabId) {
@@ -360,6 +447,7 @@ function hideEditor() {
   document.getElementById("editor-empty").style.display = "";
   document.getElementById("editor-view").style.display = "none";
   document.getElementById("terminal-view").style.display = "none";
+  document.getElementById("image-view").style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
   document.getElementById("editor-code-backdrop").innerHTML = "";
   document.getElementById("editor-textarea").value = "";
@@ -631,6 +719,115 @@ function parsePythonOutline(content) {
 }
 
 // ============================================
+// 大纲区多标签（大纲 / Git）
+// ============================================
+
+function setupOutlineTabs() {
+  const tabs = document.querySelectorAll(".outline-tab");
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      tabs.forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+
+      const isGit = tab.dataset.outlineTab === "git";
+      document.getElementById("outline-content").style.display = isGit ? "none" : "";
+      document.getElementById("git-panel").style.display = isGit ? "" : "none";
+      if (isGit) loadGitStatus();
+    });
+  });
+
+  // Git 面板按钮 — 全部走命令系统统一入口
+  document.getElementById("git-btn-commit")?.addEventListener("click", () => {
+    const input = document.getElementById("git-commit-input");
+    const msg = input.value.trim();
+    if (!msg) {
+      setStatus(I18N.t("git.need_msg"), "error");
+      input.focus();
+      return;
+    }
+    // 转义引号，保证消息作为一个参数传给 git
+    const quoted = msg.replace(/"/g, '\\"');
+    handleCommand(`git commit -m "${quoted}"`);
+    input.value = "";
+  });
+  document.getElementById("git-btn-pull")?.addEventListener("click", () => handleCommand("git pull"));
+  document.getElementById("git-btn-push")?.addEventListener("click", () => handleCommand("git push"));
+}
+
+/** 加载 Git 状态：分支名 + staged/unstaged 文件树 */
+async function loadGitStatus() {
+  const stagedEl = document.getElementById("git-staged-tree");
+  const unstagedEl = document.getElementById("git-unstaged-tree");
+  if (!stagedEl || !unstagedEl) return;
+
+  const branchEl = document.getElementById("git-branch");
+  const stagedHeader = document.getElementById("git-staged-header");
+  const unstagedHeader = document.getElementById("git-unstaged-header");
+
+  if (!state.currentProject) {
+    if (branchEl) branchEl.textContent = "";
+    stagedEl.innerHTML = `<div class="git-empty">${I18N.t("git.no_project")}</div>`;
+    unstagedEl.innerHTML = "";
+    return;
+  }
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    stagedEl.innerHTML = `<div class="git-empty">${I18N.t("status.tauri_unavail")}</div>`;
+    unstagedEl.innerHTML = "";
+    return;
+  }
+
+  try {
+    const status = await invoke("git_status", { projectRoot: state.currentProject.path });
+    if (branchEl) branchEl.textContent = I18N.t("git.branch", { branch: status.branch });
+    if (stagedHeader) stagedHeader.textContent = gitSectionTitle("git.staged", status.staged.length);
+    if (unstagedHeader) unstagedHeader.textContent = gitSectionTitle("git.unstaged", status.unstaged.length);
+    renderGitTree(stagedEl, status.staged, true);
+    renderGitTree(unstagedEl, status.unstaged, false);
+  } catch (err) {
+    // 不是 git 仓库等错误 → 面板内提示
+    if (branchEl) branchEl.textContent = "";
+    if (stagedHeader) stagedHeader.textContent = I18N.t("git.staged");
+    if (unstagedHeader) unstagedHeader.textContent = I18N.t("git.unstaged");
+    stagedEl.innerHTML = `<div class="git-empty">⚠ ${escapeHtml(err)}</div>`;
+    unstagedEl.innerHTML = "";
+  }
+}
+
+function gitSectionTitle(key, count) {
+  return count > 0 ? `${I18N.t(key)} (${count})` : I18N.t(key);
+}
+
+/** 渲染 staged/unstaged 文件树。点击文件 → 暂存 / 取消暂存（走命令系统） */
+function renderGitTree(el, files, isStaged) {
+  if (!files || files.length === 0) {
+    el.innerHTML = `<div class="git-empty">${I18N.t("git.empty")}</div>`;
+    return;
+  }
+
+  el.innerHTML = files
+    .map(
+      (f) => `
+    <div class="git-file" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">
+      <span class="git-file-status git-st-${escapeHtml(f.kind.toLowerCase())}">${escapeHtml(f.kind)}</span>
+      <span class="git-file-name">${escapeHtml(f.path)}</span>
+    </div>`
+    )
+    .join("");
+
+  el.querySelectorAll(".git-file").forEach((item) => {
+    item.addEventListener("click", () => {
+      const path = item.dataset.path.replace(/"/g, '\\"');
+      const cmd = isStaged
+        ? `git restore --staged -- "${path}"`
+        : `git add -- "${path}"`;
+      handleCommand(cmd);
+    });
+  });
+}
+
+// ============================================
 // 键盘快捷键
 // ============================================
 
@@ -658,6 +855,19 @@ function setupKeyboardShortcuts() {
   const textarea = document.getElementById("editor-textarea");
   if (textarea) {
     textarea.addEventListener("keydown", handleSave);
+
+    // Tab 键插入缩进（而非切换焦点）
+    textarea.addEventListener("keydown", (e) => {
+      if (e.key === "Tab" && !textarea.readOnly) {
+        e.preventDefault();
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        textarea.setRangeText("\t", start, end, "end");
+        textarea.selectionStart = textarea.selectionEnd = start + 1;
+        // 触发 input 事件以便 setupTextareaSync 同步内容
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
   }
 
   // 策略 4: 监听 Rust 端原生菜单快捷键事件（WebView2 拦截 JS Ctrl+S 时的兜底方案）
@@ -675,7 +885,7 @@ function setupKeyboardShortcuts() {
 
 async function saveCurrentFile() {
   const tab = state.tabs.find((t) => t.id === state.activeTabId);
-  if (!tab || tab._isTerminal) return;
+  if (!tab || tab._isTerminal || tab._isImage) return;
   if (!tab.path) {
     setStatus(I18N.t("save.no_path"), "error");
     return;
@@ -699,6 +909,9 @@ async function saveCurrentFile() {
       await highlightAndRender(tab, tab._language);
     }
 
+    // 增量索引：更新智搜向量
+    if (window._ragIndexAfterSave) window._ragIndexAfterSave(tab);
+
     setStatus(I18N.t("save.ok", { name: tab.name }));
   } catch (err) {
     setStatus(I18N.t("save.fail", { err }), "error");
@@ -717,6 +930,203 @@ function setupHelpMenu() {
 
   // 帮助页返回按钮
   document.getElementById("btn-help-back")?.addEventListener("click", () => hideHelpPage());
+}
+
+// ============================================
+// 智搜菜单
+// ============================================
+
+function setupRagMenu() {
+  const btn = document.getElementById("menu-rag");
+  if (!btn) return;
+  btn.style.cursor = "pointer";
+
+  btn.addEventListener("click", async () => {
+    // 先检查是否已永久禁用
+    try {
+      const invoke = getTauriInvoke();
+      if (invoke) {
+        const cfg = await invoke("rag_get_global_config");
+        if (cfg && cfg.permanently_disabled) {
+          btn.style.display = "none";
+          return;
+        }
+      }
+    } catch {}
+
+    // 显示确认弹窗
+    showRagModal();
+  });
+
+  // 初始检查永久禁用状态
+  checkRagDisabled();
+}
+
+async function checkRagDisabled() {
+  try {
+    const invoke = getTauriInvoke();
+    if (invoke) {
+      const cfg = await invoke("rag_get_global_config");
+      if (cfg && cfg.permanently_disabled) {
+        const btn = document.getElementById("menu-rag");
+        if (btn) btn.style.display = "none";
+      }
+    }
+  } catch {}
+}
+
+function showRagModal() {
+  const overlay = document.getElementById("rag-modal-overlay");
+  if (!overlay) return;
+
+  overlay.style.display = "";
+
+  const cleanup = () => { overlay.style.display = "none"; };
+
+  document.getElementById("rag-btn-accept").onclick = async () => {
+    // 收集嵌入 API 配置（用户可修改，缺省为 DeepSeek 嵌入 API、1024 维）
+    const apiUrl = (document.getElementById("rag-api-url")?.value || "").trim();
+    if (!apiUrl) {
+      setStatus(I18N.t("rag.err_url_required"), "error");
+      return;
+    }
+    const dim = parseInt((document.getElementById("rag-dim")?.value || "").trim(), 10) || 1024;
+
+    cleanup();
+    setStatus(I18N.t("rag.starting"));
+    try {
+      const invoke = getTauriInvoke();
+      if (invoke) {
+        await invoke("rag_set_embedding_config", {
+          apiUrl,
+          dim,
+          projectRoot: state.currentProject?.path
+        });
+        await invoke("rag_reindex", { projectRoot: state.currentProject?.path });
+        setStatus(I18N.t("rag.ready"));
+      }
+    } catch (err) {
+      setStatus(I18N.t("rag.start_fail", { err }), "error");
+    }
+  };
+
+  document.getElementById("rag-btn-later").onclick = () => {
+    cleanup();
+  };
+
+  document.getElementById("rag-btn-disable").onclick = async () => {
+    cleanup();
+    try {
+      const invoke = getTauriInvoke();
+      if (invoke) {
+        await invoke("rag_disable_permanently");
+        const btn = document.getElementById("menu-rag");
+        if (btn) btn.style.display = "none";
+        setStatus("智搜已永久禁用");
+      }
+    } catch (err) {
+      setStatus("操作失败: " + err, "error");
+    }
+  };
+
+  overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+}
+
+/** 设置智搜相关钩子：增量索引、空闲卸载、进度监听 */
+function setupRagHooks() {
+  // 文件保存后增量更新索引
+  window._ragIndexAfterSave = async function (tab) {
+    if (!tab || !tab.path) return;
+    try {
+      const invoke = getTauriInvoke();
+      if (invoke) await invoke("rag_index_file", {
+        path: tab.path,
+        projectRoot: state.currentProject?.path
+      });
+    } catch { /* 静默失败 */ }
+  };
+
+  // 空闲检查定时器（每 60 秒）
+  setInterval(async () => {
+    try {
+      const invoke = getTauriInvoke();
+      if (invoke) await invoke("rag_idle_check");
+    } catch { /* 静默 */ }
+  }, 60_000);
+
+  // 监听索引进度事件
+  try {
+    const tauriEvent = window.__TAURI__?.event;
+    if (tauriEvent && typeof tauriEvent.listen === "function") {
+      tauriEvent.listen("rag-index-progress", (event) => {
+        const p = event.payload;
+        if (p.phase === "done") {
+          setStatus("索引完成");
+        } else {
+          setStatus(`索引中 ${p.current}/${p.total}...`);
+        }
+      });
+    }
+  } catch { /* 在浏览器开发模式中忽略 */ }
+}
+
+/** 在编辑区显示搜索结果 */
+function showSearchResults(results) {
+  const backdrop = document.getElementById("editor-code-backdrop");
+  const textarea = document.getElementById("editor-textarea");
+  const gutter = document.getElementById("editor-gutter");
+
+  if (results.length === 0) {
+    gutter.innerHTML = "";
+    backdrop.innerHTML = '<div class="search-empty">无结果</div>';
+    textarea.value = "";
+    textarea.readOnly = true;
+    return;
+  }
+
+  let gutterHtml = "";
+  let codeHtml = "";
+  let rawText = "";
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const lineNum = i + 1;
+    gutterHtml += `<div class="gutter-line">${lineNum}</div>`;
+
+    const pct = r.score ? Math.round(r.score * 100) : 0;
+    const pathDisplay = r.path === "—" ? "" : `<span class="search-result-path">${escapeHtml(r.path)}</span>`;
+    const scoreDisplay = r.score ? `<span class="search-result-score">${pct}%</span>` : "";
+
+    codeHtml += `<div class="code-line search-result-line" data-path="${escapeHtml(r.path || "")}">
+      ${scoreDisplay}${pathDisplay}
+      <span class="search-result-snippet">${escapeHtml(r.snippet || "")}</span>
+    </div>`;
+    rawText += (r.path || "") + "\n" + (r.snippet || "") + "\n\n";
+  }
+
+  gutter.innerHTML = gutterHtml;
+  backdrop.innerHTML = codeHtml;
+  textarea.value = rawText;
+  textarea.readOnly = true;
+
+  // 点击搜索结果跳转到文件（如果路径有效）
+  backdrop.querySelectorAll(".search-result-line[data-path]").forEach((el) => {
+    const p = el.dataset.path;
+    if (p && p !== "—" && p.includes(".")) {
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => {
+        // 打开文件
+        const relPath = toRelativePath ? toRelativePath(p) : p;
+        handleCommand("open file " + p.replace(/\\/g, "/"));
+      });
+      el.addEventListener("mouseenter", () => {
+        el.style.background = "rgba(86, 156, 214, 0.15)";
+      });
+      el.addEventListener("mouseleave", () => {
+        el.style.background = "";
+      });
+    }
+  });
 }
 
 function openHelp() {
@@ -852,7 +1262,8 @@ async function doAutoSave(tab) {
     await invoke("write_file", { path: tab.path, content: tab.content });
     tab._modified = false;
     renderTabs();
-    // 后台静默保存不弹提示，但保存失败时提示
+    // 增量索引
+    if (window._ragIndexAfterSave) window._ragIndexAfterSave(tab);
   } catch {
     // 静默失败，定时器下次会重试
   }
@@ -872,6 +1283,23 @@ function updateTitlebarTitle() {
   } else {
     titleEl.textContent = "Darkhorse Code";
     titleEl.classList.remove("has-project");
+  }
+}
+
+/**
+ * 更新操作系统窗口标题（Alt+Tab / 任务栏可见）。
+ * 打开项目时显示项目名，否则显示 Darkhorse Code。
+ */
+async function updateWindowTitle() {
+  const win = getTauriWindow();
+  if (!win || typeof win.setTitle !== "function") return;
+  try {
+    const title = state.currentProject
+      ? state.currentProject.name
+      : "Darkhorse Code";
+    await win.setTitle(title);
+  } catch {
+    // 静默失败
   }
 }
 
@@ -929,6 +1357,9 @@ function showWelcomePage() {
   if (welcome) welcome.style.display = "";
   if (help) help.style.display = "none";
   if (editorBody) editorBody.style.display = "none";
+
+  // 更新窗口标题为默认值
+  updateWindowTitle();
 
   // 导航区：只显示项目列表 tab
   setNavigatorMode("projects");
@@ -1074,6 +1505,9 @@ function setupContextMenu() {
       case "newfile":
         await createFileInFolder(_ctxPath);
         break;
+      case "newfolder":
+        await createFolderInFolder(_ctxPath);
+        break;
       case "run":
         await handleContextRun(_ctxPath);
         break;
@@ -1143,7 +1577,7 @@ async function handleContextRun(fullPath) {
         await runTargetCmd(status.target_name, target.cmd);
       }
     } else {
-      // 情况2: 无目标 → 自动创建
+      // 情况2: 无目标 → IDE 自动创建（key = target<N>）
       const name = fullPath.split(/[/\\]/).pop() || fullPath;
       const dot = name.lastIndexOf(".");
       const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
@@ -1154,7 +1588,7 @@ async function handleContextRun(fullPath) {
       };
       let cmd = status.suggested_cmd || cmdMap[name] || cmdMap[ext] || "python {file}";
       cmd = cmd.replace(/\{file\}/gi, fullPath);
-      await handleCommand("run " + name + "=" + cmd, true);
+      await autoCreateRunTarget(name, cmd, fullPath);
     }
   } catch (err) {
     setStatus("运行失败: " + err, "error");
@@ -1181,14 +1615,14 @@ async function handleContextTryRun(fullPath) {
       let cmdTemplate = upper.startsWith("FILE_YES|") ? result.slice(result.indexOf("|") + 1).trim() : ("python {file}");
       const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
       await invoke("set_execute_entry", { path: fullPath, canRun: true, asFile: true });
-      await handleCommand("run " + fileName + "=" + cmd, true);
+      await autoCreateRunTarget(fileName, cmd, fullPath);
       setStatus("已记住文件名: " + fileName + " → " + cmd);
     } else if (upper.startsWith("YES")) {
       // 可运行 — 提取命令模板
       let cmdTemplate = upper.startsWith("YES|") ? result.slice(result.indexOf("|") + 1).trim() : ("python {file}");
       const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
       await invoke("set_execute_entry", { path: fullPath, canRun: true, asFile: false });
-      await handleCommand("run " + fileName + "=" + cmd, true);
+      await autoCreateRunTarget(fileName, cmd, fullPath);
       setStatus("已记住并创建运行目标: ." + ext + " → " + cmd);
     } else if (upper.startsWith("CONDITIONAL")) {
       const detail = upper.startsWith("CONDITIONAL|") ? result.slice(result.indexOf("|") + 1).trim() : result;
@@ -1200,6 +1634,52 @@ async function handleContextTryRun(fullPath) {
     }
   } catch (err) {
     setStatus("试跑失败: " + err, "error");
+  }
+}
+
+/**
+ * IDE 自动创建运行目标。
+ * key 使用 target<N> 格式（遍历已有 target* 取 max+1）。
+ * 同时设置 bind 字段（相对路径）。
+ */
+async function autoCreateRunTarget(name, cmd, fullPath) {
+  const invoke = getTauriInvoke();
+  if (!invoke || !state.currentProject) return;
+
+  // 遍历已有 target<N> 取最大索引 + 1
+  let index = 0;
+  try {
+    const targets = await invoke("get_run_targets", { projectRoot: state.currentProject.path });
+    if (targets && targets.length > 0) {
+      let maxIdx = -1;
+      for (const t of targets) {
+        const m = (t.key || "").match(/^target(\d+)$/);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n > maxIdx) maxIdx = n;
+        }
+      }
+      index = maxIdx + 1;
+    }
+  } catch {
+    index = 0;
+  }
+
+  const targetKey = `target${index}`;
+  const cmdKey = `darkhorse.code.run.${targetKey}.cmd`;
+  const nameKey = `darkhorse.code.run.${targetKey}.name`;
+  const bindKey = `darkhorse.code.run.${targetKey}.bind`;
+
+  // 绑定相对路径
+  const relPath = toRelativePath(fullPath);
+
+  try {
+    await executeConfigAction("add", "p", cmdKey, cmd);
+    await executeConfigAction("add", "p", nameKey, name);
+    await executeConfigAction("add", "p", bindKey, relPath);
+    loadRunTargets();
+  } catch (err) {
+    setStatus("自动创建运行目标失败: " + err, "error");
   }
 }
 
@@ -1315,6 +1795,12 @@ async function createFileInFolder(fullPath) {
   await handleCommand('new file ' + toRelativePath(fullPath) + '\\' + name, true);
 }
 
+async function createFolderInFolder(fullPath) {
+  const name = await showPrompt('新建文件夹', '');
+  if (!name) return;
+  await handleCommand('new folder ' + toRelativePath(fullPath) + '\\' + name, true);
+}
+
 // ============================================
 // 项目列表（无项目时显示在导航区）
 // ============================================
@@ -1390,11 +1876,16 @@ async function loadRunTargets() {
       .map(
         (t) => `
       <div class="run-target-item" data-cmd="${escapeHtml(t.cmd || "")}" data-name="${escapeHtml(t.name || t.key)}">
-        <div class="run-target-name">
-          <span class="run-icon">&#9654;</span>
-          ${escapeHtml(t.name || t.key)}
+        <div class="run-target-info">
+          <div class="run-target-name">
+            <span class="run-icon">&#9654;</span>
+            ${escapeHtml(t.name || t.key)}
+          </div>
+          <div class="run-target-cmd">${escapeHtml(t.cmd || "（无命令）")}</div>
+          ${t.bind ? `<div class="run-target-bind" title="绑定文件">🔗 ${escapeHtml(t.bind)}</div>` : ""}
         </div>
-        <div class="run-target-cmd">${escapeHtml(t.cmd || "（无命令）")}</div>
+        <span class="run-target-edit" title="修改运行目标">&#9998;</span>
+        <span class="run-target-del" title="删除运行目标">&#128465;</span>
       </div>`
       )
       .join("");
@@ -1405,6 +1896,26 @@ async function loadRunTargets() {
         const cmd = el.dataset.cmd;
         const name = el.dataset.name;
         if (cmd) runTargetCmd(name, cmd);
+      });
+    });
+
+    // 点击编辑图标 → 通过命令系统修改
+    list.querySelectorAll(".run-target-edit").forEach((editEl) => {
+      editEl.addEventListener("click", (e) => {
+        e.stopPropagation(); // 阻止冒泡到父级触发运行
+        const item = editEl.closest(".run-target-item");
+        const name = item?.dataset.name;
+        if (name) handleCommand("run edit " + name, true);
+      });
+    });
+
+    // 点击删除图标 → 通过命令系统删除
+    list.querySelectorAll(".run-target-del").forEach((delEl) => {
+      delEl.addEventListener("click", (e) => {
+        e.stopPropagation(); // 阻止冒泡到父级触发运行
+        const item = delEl.closest(".run-target-item");
+        const name = item?.dataset.name;
+        if (name) handleCommand("run del " + name, false);
       });
     });
   } catch (err) {
@@ -1429,13 +1940,12 @@ async function runTargetCmd(name, cmd) {
     return;
   }
 
-  // 创建终端标签页
+  // 创建运行结果标签页（非终端，输出渲染到编辑器视图）
   const tab = {
     id: "run-" + Date.now().toString(),
     name,
     path: "",
     content: cmd,
-    _isTerminal: true,
     _runTarget: cmd,
   };
   state.tabs.push(tab);
@@ -1443,7 +1953,6 @@ async function runTargetCmd(name, cmd) {
   switchTab(tab.id);
 
   // 显示加载中
-  showEditor();
   renderTerminalOutput(tab, `> ${cmd}\n\n正在执行...`);
 
   try {
@@ -1495,6 +2004,7 @@ function renderTerminalOutput(tab, text) {
   backdrop.innerHTML = codeHtml;
   textarea.value = text;
   textarea.readOnly = true;
+  tab.content = text; // 同步更新 tab 内容，确保切换标签页后输出不丢失
 }
 
 // ============================================
@@ -1655,6 +2165,67 @@ function hideTerminalView() {
   document.getElementById("terminal-view").style.display = "none";
 }
 
+function showImageView() {
+  document.getElementById("image-view").style.display = "";
+}
+
+function hideImageView() {
+  document.getElementById("image-view").style.display = "none";
+}
+
+/** 支持的图片扩展名集合 */
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "icon"
+]);
+
+/** 判断扩展名是否为图片 */
+function isImageExt(ext) {
+  return IMAGE_EXTENSIONS.has(ext?.toLowerCase());
+}
+
+/** 渲染图片预览（1:1 原始尺寸） */
+function renderImagePreview(tab) {
+  const container = document.getElementById("image-container");
+  const img = document.getElementById("image-preview");
+  if (!container || !img) return;
+
+  let url;
+
+  // 方式1: 优先使用后端返回的 base64 数据
+  if (tab._imageBase64 && tab._imageMime) {
+    url = "data:" + tab._imageMime + ";base64," + tab._imageBase64;
+  }
+
+  // 方式2: 尝试使用 Tauri 2 的 convertFileSrc 获取资产 URL
+  if (!url) {
+    try {
+      const tauriCore = getTauriCore();
+      if (tauriCore && typeof tauriCore.convertFileSrc === "function") {
+        url = tauriCore.convertFileSrc(tab.path);
+      }
+    } catch {
+      // 忽略，走 fallback
+    }
+  }
+
+  // 方式3: fallback — file:// 协议
+  if (!url) {
+    url = "file:///" + tab.path.replace(/\\/g, "/");
+  }
+
+  img.src = url;
+  img.alt = tab.name;
+  img.title = tab.name + " (1:1)";
+
+  // 图片加载成功后更新状态栏显示尺寸信息
+  img.onload = () => {
+    setStatus(tab.name + " — " + img.naturalWidth + " × " + img.naturalHeight + " (1:1)");
+  };
+  img.onerror = () => {
+    setStatus(I18N.t("open.file.fail", { err: "无法加载图片: " + tab.name }), "error");
+  };
+}
+
 // ============================================
 // 文件树
 // ============================================
@@ -1665,6 +2236,12 @@ function hideTerminalView() {
 async function loadFileTree(dirPath) {
   const tree = document.getElementById("file-tree");
   if (!tree) return;
+
+  // 保存已展开的目录路径，重建后恢复
+  const expandedPaths = new Set();
+  tree.querySelectorAll(".tree-node[data-expanded='true']").forEach(node => {
+    expandedPaths.add(node.dataset.path);
+  });
 
   tree.innerHTML = "";
 
@@ -1683,8 +2260,34 @@ async function loadFileTree(dirPath) {
     for (const entry of entries) {
       renderTreeEntry(entry, tree, 0);
     }
+
+    // 恢复之前展开的目录
+    if (expandedPaths.size > 0) {
+      await restoreExpandedPaths(tree, expandedPaths);
+    }
   } catch (err) {
     tree.innerHTML = `<span class="file-tree-placeholder">读取失败: ${err}</span>`;
+  }
+}
+
+/** 恢复展开状态：按路径深度排序，浅层先展开 */
+async function restoreExpandedPaths(tree, expandedPaths) {
+  const sorted = [...expandedPaths].sort((a, b) =>
+    a.split(/[/\\]/).length - b.split(/[/\\]/).length
+  );
+
+  for (const path of sorted) {
+    let foundNode = null;
+    tree.querySelectorAll(".tree-node").forEach(n => {
+      if (n.dataset.path === path) foundNode = n;
+    });
+    if (!foundNode || foundNode.dataset.isDir !== "true" || foundNode.dataset.expanded === "true") continue;
+
+    const cc = foundNode.nextElementSibling;
+    if (cc && cc.classList.contains("tree-children")) {
+      const depth = parseInt(foundNode.style.paddingLeft) / 16 || 0;
+      await toggleTreeNode(foundNode, { path, is_dir: true }, cc, depth);
+    }
   }
 }
 

@@ -2,7 +2,9 @@
 
 mod ai;
 mod config;
+mod git;
 mod pty;
+mod rag;
 
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -49,6 +51,13 @@ struct DirEntry {
 struct FileContent {
     path: String,
     content: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct FileBase64 {
+    path: String,
+    mime: String,
+    base64: String,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -156,6 +165,44 @@ fn read_file(path: String) -> Result<FileContent, String> {
     })
 }
 
+/// 根据文件扩展名返回 MIME 类型
+fn mime_from_ext(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") | Some("icon") => "image/x-icon",
+        _ => "image/png",
+    }
+}
+
+#[tauri::command]
+fn read_file_base64(path: String) -> Result<FileBase64, String> {
+    use base64::Engine;
+
+    let p = Path::new(&path);
+
+    if !p.exists() {
+        return Err(format!("文件不存在: {}", p.display()));
+    }
+    if !p.is_file() {
+        return Err("路径不是文件".to_string());
+    }
+
+    let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
+    let mime = mime_from_ext(p);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    Ok(FileBase64 {
+        path: clean_path(p),
+        mime: mime.to_string(),
+        base64: b64,
+    })
+}
+
 #[tauri::command]
 fn write_file(path: String, content: String) -> Result<(), String> {
     let p = Path::new(&path);
@@ -259,8 +306,21 @@ fn get_execute_status(
         if let Some(root) = project_root {
             if let Ok(targets) = mgr.load_run_targets(Some(&root)) {
                 for t in &targets {
+                    // 匹配 bind 字段：显式绑定的文件路径
+                    if let Some(ref bind) = t.bind {
+                        let full_bind = std::path::Path::new(&root).join(bind);
+                        if let Ok(full) = full_bind.canonicalize() {
+                            let bind_path = clean_path(&full);
+                            let input_path = clean_path(std::path::Path::new(&path));
+                            if input_path == bind_path {
+                                has_target = true;
+                                target_name = t.name.clone().or_else(|| Some(t.key.clone()));
+                                break;
+                            }
+                        }
+                    }
+                    // 匹配 cmd 字段：命令中包含文件路径或文件名
                     if let Some(ref cmd) = t.cmd {
-                        // 匹配：命令中包含文件路径 或 命令中包含文件名
                         if cmd.contains(&path) || cmd.contains(&file_name) {
                             has_target = true;
                             target_name = t.name.clone().or_else(|| Some(t.key.clone()));
@@ -308,6 +368,63 @@ async fn ai_execute_check(
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<String, String> {
     ai::check_executable(&config_mgr, &path).await
+}
+
+/// Lua 脚本翻译：在沙箱中执行 learn.lua，匹配自然语言 → 标准命令
+#[tauri::command]
+fn lua_translate(
+    input: String,
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<Option<String>, String> {
+    eprintln!("[RUST-LUA] 输入: {}", input);
+    let root = match project_root {
+        Some(r) => r,
+        None => {
+            eprintln!("[RUST-LUA] 无项目，跳过");
+            return Ok(None);
+        }
+    };
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    let lua_content = mgr.load_lua_script(&root)?;
+    if lua_content.trim().is_empty() {
+        eprintln!("[RUST-LUA] learn.lua 为空，跳过");
+        return Ok(None);
+    }
+    eprintln!("[RUST-LUA] learn.lua 内容 ({} 字节):\n{}", lua_content.len(), lua_content);
+
+    let full_script = format!(
+        "local input = ...\n{}\nreturn nil",
+        lua_content
+    );
+
+    let lua = mlua::Lua::new();
+    // 沙箱：移除危险全局函数
+    for name in ["os", "io", "require", "loadfile", "dofile", "load"] {
+        lua.globals().set(name, mlua::Value::Nil)
+            .map_err(|e| format!("Lua 沙箱失败: {}", e))?;
+    }
+
+    let result: mlua::Value = lua.load(&full_script)
+        .call(input)
+        .map_err(|e| {
+            eprintln!("[RUST-LUA] 执行失败: {}", e);
+            format!("Lua 执行失败: {}", e)
+        })?;
+
+    eprintln!("[RUST-LUA] Lua 返回值类型: {:?}", result.type_name());
+    // 返回值：nil → None，字符串 → Some
+    if result.is_nil() {
+        eprintln!("[RUST-LUA] → nil (未命中)");
+        Ok(None)
+    } else if let Some(s) = result.as_str() {
+        let s = s.trim().to_string();
+        eprintln!("[RUST-LUA] → 命中: {}", s);
+        if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
+    } else {
+        eprintln!("[RUST-LUA] → 非字符串返回值，忽略");
+        Ok(None)
+    }
 }
 
 #[tauri::command]
@@ -494,16 +611,22 @@ fn pty_close(
     Ok(())
 }
 
-/// 按空格拆分命令行，支持引号包裹，保留 `\`（不转义）
+/// 按空格拆分命令行，支持引号包裹。
+/// 引号内 `\"` / `\'` 转义为字面引号；其余 `\` 保留（不转义）。
 pub fn split_cmd(cmd: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut in_quote = false;
     let mut quote_char = '"';
+    let mut chars = cmd.chars().peekable();
 
-    for ch in cmd.chars() {
+    while let Some(ch) = chars.next() {
         if in_quote {
-            if ch == quote_char {
+            if ch == '\\' && chars.peek() == Some(&quote_char) {
+                // 转义引号: \" 或 \' → 字面引号
+                cur.push(quote_char);
+                chars.next();
+            } else if ch == quote_char {
                 in_quote = false;
             } else {
                 cur.push(ch);
@@ -671,6 +794,141 @@ fn config_delete(
 }
 
 // ============================================
+// RAG（智搜）命令
+// ============================================
+
+#[tauri::command]
+fn rag_search(
+    query: String,
+    top_k: Option<usize>,
+    project_root: Option<String>,
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+) -> Result<Vec<rag::SearchResult>, String> {
+    let root = project_root.ok_or("未打开项目")?;
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.search(&root, &query, top_k.unwrap_or(10))
+}
+
+#[tauri::command]
+fn rag_reindex(
+    project_root: Option<String>,
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+    app_handle: tauri::AppHandle,
+) -> Result<usize, String> {
+    let root = project_root.ok_or("未打开项目")?;
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    let handle = app_handle.clone();
+    let result = mgr.full_index_with_progress(&root, &move |current, total| {
+        let _ = handle.emit("rag-index-progress", serde_json::json!({
+            "current": current,
+            "total": total,
+            "phase": "indexing"
+        }));
+    });
+    // 发送完成事件
+    let _ = app_handle.emit("rag-index-progress", serde_json::json!({
+        "current": 0, "total": 0, "phase": "done"
+    }));
+    result
+}
+
+#[tauri::command]
+fn rag_index_file(
+    path: String,
+    project_root: String,
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+) -> Result<(), String> {
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.index_file(&project_root, &path)
+}
+
+#[tauri::command]
+fn rag_remove_file(
+    path: String,
+    project_root: String,
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+) -> Result<(), String> {
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.remove_file(&project_root, &path)
+}
+
+#[tauri::command]
+fn rag_idle_check(
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+) -> Result<(), String> {
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.idle_check();
+    Ok(())
+}
+
+#[tauri::command]
+fn rag_status(
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+) -> Result<rag::IndexStatus, String> {
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    Ok(mgr.status())
+}
+
+#[tauri::command]
+fn rag_shutdown(
+    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
+) -> Result<(), String> {
+    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.shutdown();
+    Ok(())
+}
+
+#[tauri::command]
+fn rag_get_global_config() -> Result<rag::GlobalRagConfig, String> {
+    Ok(rag::load_global_rag_config())
+}
+
+#[tauri::command]
+fn rag_disable_permanently() -> Result<(), String> {
+    let mut cfg = rag::load_global_rag_config();
+    cfg.permanently_disabled = true;
+    cfg.enabled = false;
+    rag::save_global_rag_config(&cfg)
+}
+
+#[tauri::command]
+fn rag_set_embedding_config(
+    api_url: String,
+    api_key: Option<String>,
+    model: Option<String>,
+    dim: Option<usize>,
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let mut cfg = rag::load_global_rag_config();
+    cfg.api_url = Some(api_url.trim().to_string());
+    cfg.api_key = match api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(k) => Some(k),
+        None => {
+            // 缺省时复用 AI 配置的 api_key（runtime → project → global）
+            let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+            let mut key = None;
+            for scope in [config::Scope::Runtime, config::Scope::Project, config::Scope::Global] {
+                if scope == config::Scope::Project && project_root.is_none() {
+                    continue;
+                }
+                if let Ok(Some(v)) = mgr.config_read(&scope, "darkhorse.code.ai.api_key", project_root.as_deref()) {
+                    if !v.is_empty() {
+                        key = Some(v);
+                        break;
+                    }
+                }
+            }
+            key
+        }
+    };
+    cfg.model = model.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    cfg.dim = Some(dim.unwrap_or(rag::DEFAULT_DIM));
+    cfg.enabled = true;
+    rag::save_global_rag_config(&cfg)
+}
+
+// ============================================
 // 入口
 // ============================================
 
@@ -681,6 +939,7 @@ fn main() {
     tauri::Builder::default()
         .manage(config_mgr)
         .manage(pty_mgr)
+        .manage(Mutex::new(rag::RagManager::new()))
         .setup(|app| {
             // 注册原生 Ctrl+S 快捷键 — 即使 WebView2 拦截了 JS 的 Ctrl+S，
             // 原生菜单 accelerator 仍能在 OS 层面捕获该组合键
@@ -705,6 +964,7 @@ fn main() {
             open_project,
             list_dir,
             read_file,
+            read_file_base64,
             write_file,
             create_file,
             create_dir,
@@ -712,6 +972,7 @@ fn main() {
             get_execute_status,
             set_execute_entry,
             ai_execute_check,
+            lua_translate,
             path_exists,
             rename_path,
             highlight_code,
@@ -728,6 +989,18 @@ fn main() {
             config_set,
             config_delete,
             ai_translate,
+            git::git_status,
+            git::git_run,
+            rag_search,
+            rag_reindex,
+            rag_index_file,
+            rag_remove_file,
+            rag_idle_check,
+            rag_status,
+            rag_shutdown,
+            rag_get_global_config,
+            rag_disable_permanently,
+            rag_set_embedding_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -14,18 +14,30 @@
     <header id="titlebar" data-tauri-drag-region>
       <div class="titlebar-left">
         <nav class="menu-bar">
-          <span class="menu-item">文件</span>
-          <span class="menu-item">编辑</span>
-          <span class="menu-item">选择</span>
-          <span class="menu-item">查看</span>
-          <span class="menu-item" id="menu-lang" style="position:relative">
-            语言 ▾
-            <div class="menu-dropdown" id="menu-lang-dropdown" style="display:none">
-              <div class="menu-dropdown-item" data-lang="zh-CN">中文</div>
-              <div class="menu-dropdown-item" data-lang="en">English</div>
+          <!-- 项目 -->
+          <span class="menu-item" id="menu-project" style="position:relative">
+            <span data-i18n="menu.project">项目</span>
+            <div class="menu-dropdown" id="menu-project-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-action="new-project" data-i18n="menu.project.new">新建</div>
+              <div class="menu-dropdown-item" data-action="close-project" data-i18n="menu.project.close">退出</div>
             </div>
           </span>
-          <span class="menu-item" id="menu-help">帮助</span>
+          <!-- 语言 -->
+          <span class="menu-item" id="menu-lang" style="position:relative">
+            <span data-i18n="menu.lang">语言 ▾</span>
+            <div class="menu-dropdown" id="menu-lang-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-lang="zh-CN" data-i18n="menu.lang.zh">中文</div>
+              <div class="menu-dropdown-item" data-lang="en" data-i18n="menu.lang.en">English</div>
+            </div>
+          </span>
+          <!-- 智搜 -->
+          <span class="menu-item" id="menu-rag" style="position:relative">
+            <span data-i18n="menu.rag">智搜</span>
+          </span>
+          <!-- 帮助 -->
+          <span class="menu-item" id="menu-help" style="position:relative">
+            <span data-i18n="menu.help">帮助</span>
+          </span>
         </nav>
       </div>
       <div class="titlebar-center" data-tauri-drag-region>
@@ -176,16 +188,38 @@
             <div id="terminal-view" class="terminal-view" style="display:none">
               <div id="terminal-container" class="terminal-container"></div>
             </div>
+            <div id="image-view" class="image-view" style="display:none">
+              <div id="image-container" class="image-container">
+                <img id="image-preview" src="" alt="" />
+              </div>
+            </div>
           </div>
         </section>
 
-        <!-- 大纲区 -->
+        <!-- 大纲区：多标签（大纲 / Git） -->
         <aside id="outline" class="outline">
-          <div class="outline-header">大纲</div>
+          <div class="outline-tabs">
+            <button class="outline-tab active" data-outline-tab="outline" data-i18n="outline.header">大纲</button>
+            <button class="outline-tab" data-outline-tab="git">Git</button>
+          </div>
           <div id="outline-content" class="outline-content">
             <div class="outline-placeholder">
-              大纲（待实现）
+              大纲（支持 Markdown / Rust / Python）
             </div>
+          </div>
+          <div id="git-panel" class="git-panel" style="display:none">
+            <div class="git-actions">
+              <button id="git-btn-commit" class="git-btn git-btn-primary" data-i18n="git.btn_commit">Commit ✅</button>
+              <button id="git-btn-pull" class="git-btn" data-i18n="git.btn_pull">Pull 📥</button>
+              <button id="git-btn-push" class="git-btn" data-i18n="git.btn_push">Push 📤</button>
+            </div>
+            <div id="git-branch" class="git-branch"></div>
+            <input id="git-commit-input" class="git-commit-input" type="text"
+                   data-i18n-placeholder="git.commit_msg" placeholder="commit message" />
+            <div class="git-section-header" id="git-staged-header" data-i18n="git.staged">Staged</div>
+            <div id="git-staged-tree" class="git-file-tree"></div>
+            <div class="git-section-header" id="git-unstaged-header" data-i18n="git.unstaged">Unstaged</div>
+            <div id="git-unstaged-tree" class="git-file-tree"></div>
           </div>
         </aside>
       </div>
@@ -214,12 +248,13 @@
 
   <!-- 自定义右键菜单 -->
   <div id="context-menu" class="context-menu" style="display:none">
-    <div class="context-menu-item context-menu-file-only" data-action="run">▶️ 运行</div>
-    <div class="context-menu-item context-menu-file-only" data-action="try-run">🔍 试跑</div>
+    <div class="context-menu-item context-menu-file-only" data-action="run" data-i18n="ctx.run">▶️ 运行</div>
+    <div class="context-menu-item context-menu-file-only" data-action="try-run" data-i18n="ctx.try_run">🔍 试跑</div>
     <div class="context-menu-item context-menu-sep"></div>
-    <div class="context-menu-item" data-action="delete">🗑️ 删除</div>
-    <div class="context-menu-item" data-action="rename">✏️ 重命名</div>
-    <div class="context-menu-item context-menu-folder-only" data-action="newfile">📄 创建文件</div>
+    <div class="context-menu-item" data-action="delete" data-i18n="ctx.delete">🗑️ 删除</div>
+    <div class="context-menu-item" data-action="rename" data-i18n="ctx.rename">✏️ 重命名</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfile" data-i18n="ctx.new_file">📄 创建文件</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfolder" data-i18n="ctx.new_folder">📁 创建文件夹</div>
   </div>
 
   <!-- 自定义弹窗 -->
@@ -233,6 +268,37 @@
       <div class="modal-buttons">
         <button id="modal-btn-cancel" class="modal-btn modal-btn-cancel">取消</button>
         <button id="modal-btn-ok" class="modal-btn modal-btn-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RAG 智搜确认弹窗 -->
+  <div id="rag-modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal-box" style="max-width:480px">
+      <div class="modal-title" data-i18n="rag.modal_title">启用智能搜索</div>
+      <div class="modal-body">
+        <p data-i18n="rag.modal_desc">使用该功能需要：</p>
+        <ol style="padding-left:18px;line-height:1.8;color:var(--text-secondary);font-size:13px">
+          <li data-i18n="rag.modal_item1">将项目代码发送到在线嵌入 API 进行向量编码</li>
+          <li data-i18n="rag.modal_item2">启动本地向量数据库（qdrant-edge 嵌入式，内存占用低）</li>
+          <li data-i18n="rag.modal_item3">对项目中的源代码和文档建立语义索引（首次约 1–5 分钟，取决于网络速度）</li>
+          <li data-i18n="rag.modal_item4">代码会发送到您填写的嵌入 API 进行编码，请确认该服务可信。</li>
+        </ol>
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="rag.api_url_label">嵌入模型 API 地址</label>
+        <input type="text" id="rag-api-url" class="modal-input" placeholder="https://api.deepseek.com/v1/embeddings" value="https://api.deepseek.com/v1/embeddings" />
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="rag.dim_label">向量维度</label>
+        <input type="number" id="rag-dim" class="modal-input" value="1024" />
+      </div>
+      <div class="modal-buttons" style="justify-content:space-between">
+        <button id="rag-btn-disable" class="modal-btn" style="background:transparent;color:#f48771" data-i18n="rag.btn_disable">永久禁用</button>
+        <div>
+          <button id="rag-btn-later" class="modal-btn modal-btn-cancel" data-i18n="rag.btn_later">暂不接受</button>
+          <button id="rag-btn-accept" class="modal-btn modal-btn-ok" data-i18n="rag.btn_accept">接受</button>
+        </div>
       </div>
     </div>
   </div>

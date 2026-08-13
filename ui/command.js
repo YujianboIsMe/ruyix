@@ -73,6 +73,12 @@ async function handleCommand(raw, _fromAi = false) {
     case "help":
       openHelp();
       break;
+    case "search":
+      await handleSearchCommand(parts.slice(1));
+      break;
+    case "git":
+      await handleGitCommand(raw, _fromAi);
+      break;
     default:
       // 标准命令未命中 → 调用 AI 翻译（防止递归）
       if (!_fromAi) {
@@ -98,6 +104,101 @@ async function handleRunCommand(raw) {
     return;
   }
 
+  // ============================================
+  // 删除语法: run del/delete/remove/rm <name>
+  // ============================================
+  const delMatch = rest.match(/^(del|delete|remove|rm)\s+(.+)$/i);
+  if (delMatch) {
+    const targetName = delMatch[2].trim();
+    if (!targetName) {
+      setStatus(I18N.t("cmd.run.del_usage"), "error");
+      return;
+    }
+    if (!state.currentProject) {
+      setStatus(I18N.t("cmd.run.no_project"), "error");
+      return;
+    }
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+      setStatus(I18N.t("status.tauri_unavail"));
+      return;
+    }
+    try {
+      const projectRoot = state.currentProject?.path || undefined;
+      const targets = await invoke("get_run_targets", { projectRoot });
+      // 按 name 或 key 查找
+      const target = (targets || []).find(
+        (t) => t.name === targetName || t.key === targetName
+      );
+      if (!target) {
+        setStatus(I18N.t("cmd.run.del_not_found", { name: targetName }), "error");
+        return;
+      }
+      const cmdKey = `darkhorse.code.run.${target.key}.cmd`;
+      const nameKey = `darkhorse.code.run.${target.key}.name`;
+      const bindKey = `darkhorse.code.run.${target.key}.bind`;
+      await executeConfigAction("remove", "p", cmdKey);
+      await executeConfigAction("remove", "p", nameKey);
+      // bind 可能不存在，忽略错误
+      try { await executeConfigAction("remove", "p", bindKey); } catch {}
+      setStatus(I18N.t("cmd.run.del_ok", { name: targetName }));
+      loadRunTargets();
+    } catch (err) {
+      setStatus(I18N.t("cmd.run.del_fail", { err }), "error");
+    }
+    return;
+  }
+
+  // ============================================
+  // 编辑语法: run edit <name>
+  // ============================================
+  const editMatch = rest.match(/^edit\s+(.+)$/i);
+  if (editMatch) {
+    const targetName = editMatch[1].trim();
+    if (!state.currentProject) {
+      setStatus(I18N.t("cmd.run.no_project"), "error");
+      return;
+    }
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+      setStatus(I18N.t("status.tauri_unavail"));
+      return;
+    }
+    try {
+      const projectRoot = state.currentProject?.path || undefined;
+      const targets = await invoke("get_run_targets", { projectRoot });
+      const target = (targets || []).find(
+        (t) => t.name === targetName || t.key === targetName
+      );
+      if (!target) {
+        setStatus(I18N.t("cmd.run.del_not_found", { name: targetName }), "error");
+        return;
+      }
+
+      const cmdKey = `darkhorse.code.run.${target.key}.cmd`;
+      const nameKey = `darkhorse.code.run.${target.key}.name`;
+
+      // 提示用户输入新名称
+      const newName = await showPrompt("修改运行目标名称", target.name);
+      if (!newName) return;
+
+      // 提示用户输入新命令
+      const newCmd = await showPrompt("修改运行目标命令", target.cmd || "");
+      if (!newCmd) return;
+
+      await executeConfigAction("update", "p", nameKey, newName);
+      await executeConfigAction("update", "p", cmdKey, newCmd);
+      setStatus(I18N.t("cmd.run.edit_ok", { name: newName }));
+      loadRunTargets();
+    } catch (err) {
+      setStatus(I18N.t("cmd.run.edit_fail", { err }), "error");
+    }
+    return;
+  }
+
+  // ============================================
+  // 添加语法: run <name>=<cmd>
+  // ============================================
   const eqIdx = rest.indexOf("=");
   if (eqIdx < 0) {
     setStatus(I18N.t("cmd.run.no_eq"), "error");
@@ -127,28 +228,25 @@ async function handleRunCommand(raw) {
     return;
   }
 
-  // 遍历现有运行目标，取最大索引 + 1（避免删除后索引重复）
-  let index = 0;
+  // 用户手动创建：以用户提供的名称作为 key
+  const cmdKey = `darkhorse.code.run.${name}.cmd`;
+  const nameKey = `darkhorse.code.run.${name}.name`;
+
+  // 检查是否已存在同名目标
   try {
     const projectRoot = state.currentProject?.path || undefined;
-    const targets = await invoke("get_run_targets", { projectRoot });
-    if (targets && targets.length > 0) {
-      let maxIdx = -1;
-      for (const t of targets) {
-        const m = t.key.match(/^target(\d+)$/);
-        if (m) {
-          const n = parseInt(m[1], 10);
-          if (n > maxIdx) maxIdx = n;
-        }
-      }
-      index = maxIdx + 1;
+    const existing = await invoke("config_get", {
+      scope: "project",
+      key: cmdKey,
+      projectRoot,
+    });
+    if (existing != null) {
+      setStatus(I18N.t("cmd.run.exists", { name }), "error");
+      return;
     }
   } catch {
-    index = 0;
+    // 忽略查询错误
   }
-
-  const cmdKey = `darkhorse.code.run.target${index}.cmd`;
-  const nameKey = `darkhorse.code.run.target${index}.name`;
 
   // 依次写入两个配置项
   try {
@@ -165,43 +263,161 @@ async function handleRunCommand(raw) {
     return;
   }
 
-  setStatus(I18N.t("cmd.run.success", { name, cmd, index }));
+  setStatus(I18N.t("cmd.run.success", { name, cmd }));
   loadRunTargets();
 }
 
 /**
- * AI 命令：将自然语言翻译为标准命令后执行
+ * 智搜命令
+ *   search <关键词>      语义搜索
+ *   search reindex       重建索引
+ *   search status        索引状态
+ *   search off           关闭智搜
  */
-async function handleAiCommand(raw) {
+async function handleSearchCommand(args) {
+  if (!state.currentProject) {
+    setStatus(I18N.t("cmd.search.no_project"), "error");
+    return;
+  }
+
   const invoke = getTauriInvoke();
   if (!invoke) {
     setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
+  const sub = args.join(" ").trim();
+
+  if (!sub || sub.toLowerCase() === "status") {
+    try {
+      const status = await invoke("rag_status");
+      showSearchResults([
+        { path: "—", snippet: "智搜状态: " + (status.enabled ? "已启用" : "未启用"), score: 0 },
+        { path: "—", snippet: "嵌入API: " + (status.api_configured ? (status.api_url || "已配置") : "未配置"), score: 0 },
+        { path: "—", snippet: "qdrant: " + (status.qdrant_running ? "运行中" : "未运行"), score: 0 },
+        { path: "—", snippet: "已索引文件: " + status.files_indexed, score: 0 },
+        { path: "—", snippet: "上次索引: " + (status.last_indexed || "从未"), score: 0 },
+      ]);
+    } catch (err) {
+      setStatus(I18N.t("cmd.search.fail", { err }), "error");
+    }
+    return;
+  }
+
+  if (sub.toLowerCase() === "reindex") {
+    setStatus(I18N.t("cmd.search.reindexing"));
+    try {
+      const count = await invoke("rag_reindex", { projectRoot: state.currentProject.path });
+      setStatus("索引完成: " + count + " 个文件");
+    } catch (err) {
+      setStatus(I18N.t("cmd.search.fail", { err }), "error");
+    }
+    return;
+  }
+
+  if (sub.toLowerCase() === "off") {
+    try {
+      await invoke("rag_shutdown");
+      setStatus(I18N.t("cmd.search.off"));
+    } catch (err) {
+      setStatus(I18N.t("cmd.search.fail", { err }), "error");
+    }
+    return;
+  }
+
+  // 语义搜索
+  setStatus(I18N.t("cmd.search.searching"));
+  try {
+    const topK = 10;
+    const results = await invoke("rag_search", { query: sub, topK, projectRoot: state.currentProject.path });
+    if (results.length === 0) {
+      setStatus(I18N.t("cmd.search.no_results"));
+      showSearchResults([]);
+    } else {
+      showSearchResults(results);
+      setStatus(results.length + " 个结果");
+    }
+  } catch (err) {
+    // qdrant 未运行等错误
+    setStatus(I18N.t("cmd.search.unavailable", { err }), "error");
+    // 提示用户启用智搜
+    showSearchResults([
+      { path: "—", snippet: "智搜未启用。请点击菜单栏【智搜】启用该功能。", score: 0 }
+    ]);
+  }
+}
+
+/**
+ * AI 命令：将自然语言翻译为标准命令后执行
+ */
+async function handleAiCommand(raw) {
+  console.log("[AI] 输入:", raw);
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+
+  // ============================================
+  // 二级：先尝试 Lua 脚本（零网络开销）
+  // ============================================
+  if (state.currentProject) {
+    try {
+      const luaResult = await invoke("lua_translate", {
+        input: raw,
+        projectRoot: state.currentProject.path
+      });
+      console.log("[AI] Lua 返回:", luaResult);
+      if (luaResult) {
+        // Lua 命中 → 直接执行命令，不再调用 LLM
+        const lines = luaResult.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+        console.log("[AI] Lua 命令:", lines);
+        for (const line of lines) {
+          await handleCommand(line, true);
+        }
+        setStatus("⚡ Lua: " + luaResult);
+        return;
+      }
+    } catch (err) {
+      console.warn("[AI] Lua 异常:", err);
+      // Lua 失败 → 静默降级到 LLM
+    }
+  }
+
+  // ============================================
+  // 三级：LLM API 调用
+  // ============================================
   setStatus(I18N.t("status.thinking"));
   try {
-    const result = await invoke("ai_translate", { input: raw });
+    const result = await invoke("ai_translate", {
+      input: raw,
+      projectRoot: state.currentProject?.path || undefined
+    });
+    console.log("[AI] LLM 原始返回:", JSON.stringify(result));
 
     // AI 返回了 (不支持) 提示
     if (result.startsWith("不支持")) {
+      console.log("[AI] → 不支持");
       setStatus(result, "error");
       return;
     }
 
     // 闲聊回复（不是标准命令动词开头）→ 直接显示
     const firstWord = result.split(/\s+/)[0]?.toLowerCase();
-    if (!["open", "close", "config", "new", "run", "help", "del", "delete", "remove", "rm", "rename", "mv"].includes(firstWord)) {
+    if (!["open", "close", "config", "new", "run", "help", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
+      console.log("[AI] → 闲聊:", result);
       setStatus(result);
       return;
     }
 
     // AI 返回的标准命令，逐行执行（禁止递归 AI）
     const lines = result.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    console.log("[AI] → 执行命令:", lines);
     for (const line of lines) {
       await handleCommand(line, true);
     }
   } catch (err) {
+    console.error("[AI] LLM 异常:", err);
     setStatus(I18N.t("project.ai_fail", { err }), "error");
   }
 }
@@ -388,6 +604,8 @@ async function handleDeleteCommand(raw, skipConfirm = false) {
     // 关闭已打开的标签页
     const tab = state.tabs.find((t) => t.path === fullPath);
     if (tab) closeTab(tab.id);
+    // 从智搜索引中移除
+    try { await invoke("rag_remove_file", { path: rawPath, projectRoot: state.currentProject?.path }); } catch {}
     loadFileTree(state.currentProject.path);
   } catch (err) {
     setStatus(I18N.t("cmd.delete.failed", { err }), "error");
@@ -442,6 +660,102 @@ async function handleRenameCommand(args) {
   } catch (err) {
     setStatus(I18N.t("cmd.rename.fail", { err }), "error");
   }
+}
+
+// ============================================
+// git 命令
+// ============================================
+
+/**
+ * git 命令：直接执行系统 git 命令（不设计子命令 DSL，原样透传给 git）
+ * 语法: git <任意 git 子命令>，例如 git status / git add -A / git commit -m "x"
+ * - AI 路径（_fromAi=true）：输出到编辑区终端标签页
+ * - GUI / 命令栏路径（_fromAi=false）：状态栏提示 + 刷新 Git 面板
+ */
+async function handleGitCommand(raw, _fromAi = false) {
+  const rest = raw.replace(/^\S+\s*/, "").trim();
+  if (!rest) {
+    setStatus(I18N.t("git.usage"), "error");
+    return;
+  }
+  if (!state.currentProject) {
+    setStatus(I18N.t("git.no_project"), "error");
+    return;
+  }
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+
+  if (_fromAi) {
+    await runGitInTab(rest);
+    return;
+  }
+
+  // GUI 路径：静默执行
+  setStatus(I18N.t("git.executing", { cmd: rest }));
+  try {
+    const out = await invoke("git_run", { args: rest, projectRoot: state.currentProject.path });
+    if (out.exit_code === 0) {
+      setStatus(I18N.t("git.done", { cmd: rest }));
+    } else {
+      const errMsg = (out.stderr || out.stdout || "").trim().split("\n")[0] || "未知错误";
+      setStatus(I18N.t("git.fail", { cmd: rest, err: errMsg }), "error");
+    }
+  } catch (err) {
+    setStatus(I18N.t("git.fail", { cmd: rest, err }), "error");
+  }
+  if (typeof loadGitStatus === "function") await loadGitStatus();
+}
+
+/**
+ * 在编辑区打开输出标签页执行 git 命令（AI 路径）
+ */
+async function runGitInTab(rest) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+
+  const verb = rest.split(/\s+/)[0] || "git";
+  const tab = {
+    id: "git-" + Date.now().toString(),
+    name: "git " + verb,
+    path: "",
+    content: "git " + rest,
+    _runTarget: true,
+  };
+  state.tabs.push(tab);
+  renderTabs();
+  switchTab(tab.id);
+  renderTerminalOutput(tab, `> git ${rest}\n\n${I18N.t("runtarget.executing")}`);
+
+  try {
+    const result = await invoke("git_run", { args: rest, projectRoot: state.currentProject?.path });
+    let output = `> git ${rest}\n`;
+    if (result.stdout) {
+      output += result.stdout;
+      if (!result.stdout.endsWith("\n")) output += "\n";
+    }
+    if (result.stderr) {
+      output += result.stderr;
+      if (!result.stderr.endsWith("\n")) output += "\n";
+    }
+    if (result.exit_code != null) {
+      output += `\n[进程退出，代码: ${result.exit_code}]`;
+    } else {
+      output += `\n[进程结束]`;
+    }
+    renderTerminalOutput(tab, output);
+    if (result.exit_code === 0) {
+      setStatus(I18N.t("git.done", { cmd: rest }));
+    } else {
+      setStatus(I18N.t("git.fail", { cmd: rest, err: "exit " + result.exit_code }), "error");
+    }
+  } catch (err) {
+    renderTerminalOutput(tab, `> git ${rest}\n\n[错误] ${err}`);
+    setStatus(I18N.t("git.fail", { cmd: rest, err }), "error");
+  }
+  if (typeof loadGitStatus === "function") await loadGitStatus();
 }
 
 // ============================================
@@ -655,7 +969,9 @@ function closeProject() {
 
   const name = state.currentProject.name;
   state.currentProject = null;
+  if (typeof updateProjectMenu === "function") updateProjectMenu();
   updateTitlebarTitle();
+  if (typeof updateWindowTitle === "function") updateWindowTitle();
   showWelcomePage();
   setStatus(I18N.t("close.project.ok", { name }));
 }
@@ -749,9 +1065,13 @@ async function openProject(path) {
     // 保存项目信息
     state.currentProject = info;
 
+    // 更新项目菜单状态
+    if (typeof updateProjectMenu === "function") updateProjectMenu();
+
     // 切换为项目工作区视图
     showProjectWorkspace();
     updateTitlebarTitle();
+    if (typeof updateWindowTitle === "function") updateWindowTitle();
     setStatus(I18N.t("open.project.ok", { path: info.path }));
   } catch (err) {
     setStatus(I18N.t("open.project.fail", { err }), "error");
@@ -779,12 +1099,37 @@ async function openFile(path) {
     return;
   }
 
+  // 提取文件名和扩展名
+  const name = fullPath.split(/[/\\]/).pop() || fullPath;
+  const ext = name.split(".").pop()?.toLowerCase();
+
+  // 图片文件：读取 base64 数据用于预览
+  if (typeof isImageExt === "function" && isImageExt(ext)) {
+    try {
+      setStatus(I18N.t("open.file.reading"));
+      const data = await invoke("read_file_base64", { path: fullPath });
+      const tab = {
+        id: Date.now().toString(),
+        name,
+        path: data.path || fullPath,
+        content: "",
+        _isImage: true,
+        _imageMime: data.mime,
+        _imageBase64: data.base64,
+      };
+      state.tabs.push(tab);
+      renderTabs();
+      switchTab(tab.id);
+      setStatus(I18N.t("open.file.ok", { name }));
+    } catch (err) {
+      setStatus(I18N.t("open.file.fail", { err }), "error");
+    }
+    return;
+  }
+
   try {
     setStatus(I18N.t("open.file.reading"));
     const file = await invoke("read_file", { path: fullPath });
-
-    // 提取文件名
-    const name = file.path.split(/[/\\]/).pop() || file.path;
 
     // 创建标签页
     const tab = { id: Date.now().toString(), name, path: file.path, content: file.content };
@@ -793,7 +1138,6 @@ async function openFile(path) {
     switchTab(tab.id);
 
     // 语法高亮：根据扩展名确定语言
-    const ext = name.split(".").pop()?.toLowerCase();
     const lang = extToLanguage(ext);
     if (lang) {
       await highlightAndRender(tab, lang);
