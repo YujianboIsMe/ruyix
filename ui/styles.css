@@ -281,6 +281,7 @@ html, body {
   font-weight: 300;
   color: var(--text-primary);
   letter-spacing: 0.5px;
+  margin-top: 24px;
   margin-bottom: 8px;
 }
 

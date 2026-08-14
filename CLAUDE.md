@@ -33,16 +33,16 @@ darkhorse-code is an IDE built on **Tauri 2 + Rust backend**, aiming to eventual
 ├── ui/                   # Frontend (vanilla HTML/CSS/JS)
 │   ├── index.html        # Full layout: titlebar, workspace, command bar, statusbar
 │   ├── styles.css        # Dark IDE theme + syntax highlighting colors
-│   ├── i18n.js           # Multi-language: I18N.init / setLang / setEmoji / t()
+│   ├── i18n.js           # Multi-language: I18N.init / setLang / getLang / t()
 │   ├── command.js        # Command parser, dispatcher, all command implementations
 │   ├── main.js           # UI state, file tree, tabs, xterm, context menu, modal
+│   ├── welcome-zh.html   # Welcome page (Chinese), injected by loadWelcome()
+│   ├── welcome-en.html   # Welcome page (English), injected by loadWelcome()
 │   ├── xterm.js          # xterm.js library (vendored)
 │   ├── xterm.css         # xterm.js styles (vendored)
 │   └── lang/             # Language files
 │       ├── zh-CN.json    # 🇨🇳 Chinese (default)
-│       ├── en.json       # 🇬🇧 English
-│       ├── emoji-zh.json # 🌸 汉字 + 假名语法壳 + Emoji
-│       └── emoji-en.json # 🌸 English + 假名语法壳 + Emoji
+│       └── en.json       # 🇬🇧 English
 ├── doc/                  # Design docs (Chinese)
 └── Cargo.toml            # Workspace manifest
 ```
@@ -143,8 +143,9 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 ## UI Components
 
 ### Welcome Page
-- 3×3 CSS grid of feature cards (no SVG, no PNG)
-- Bottom text: `darkhorse-code` / `越来越懂你` (not internationalized)
+- 3×3 CSS grid of feature cards (no SVG, no PNG), grouped into 3 dimension rows with labels: 功能 / 性能 / 智能 (Features / Performance / Intelligence)
+- Content lives in `welcome-zh.html` / `welcome-en.html`, fetched by `loadWelcome()` based on `I18N.getLang()` and injected into `#welcome-content` (token-guarded against races)
+- Bottom text: `darkhorse-code` / `越来越懂你` (zh) or `The more you use it, the more it understands you.` (en)
 
 ### Context Menu (file tree right-click)
 - Folder: Delete / Rename / Create File

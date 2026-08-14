@@ -147,6 +147,31 @@ function updateProjectMenu() {
   }
 }
 
+// 欢迎页加载令牌：防止并发加载时旧请求覆盖新内容
+let _welcomeLoadToken = 0;
+
+/**
+ * 按当前语言加载欢迎页内容（welcome-zh.html / welcome-en.html）
+ * 独立文件便于维护；失败时保留现有内容
+ */
+async function loadWelcome() {
+  const lang = I18N.getLang() || "zh-CN";
+  const file = lang === "en" ? "welcome-en.html" : "welcome-zh.html";
+  const token = ++_welcomeLoadToken;
+
+  try {
+    const base = window.location.origin || "https://darkhorse-code.localhost";
+    const resp = await fetch(`${base}/${file}`);
+    if (!resp.ok) return;
+    const html = await resp.text();
+    if (token !== _welcomeLoadToken) return; // 已有更新的加载请求，丢弃本次结果
+    const container = document.getElementById("welcome-content");
+    if (container) container.innerHTML = html;
+  } catch {
+    // 加载失败：保留现有内容
+  }
+}
+
 /**
  * 语言切换后刷新 UI 中所有可翻译内容
  */
@@ -175,11 +200,8 @@ function refreshI18nUI() {
     updateTitlebarTitle();
   }
 
-  // 欢迎页
-  const titleEl = document.querySelector(".welcome-title");
-  const subtitleEl = document.querySelector(".welcome-subtitle");
-  if (titleEl) titleEl.textContent = I18N.t("welcome.title");
-  if (subtitleEl) subtitleEl.textContent = I18N.t("welcome.subtitle");
+  // 欢迎页：按当前语言加载对应文件（welcome-zh.html / welcome-en.html）
+  loadWelcome();
 
   // 编辑器空状态
   const emptyEl = document.querySelector("#editor-empty p");
