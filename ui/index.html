@@ -26,8 +26,12 @@
           <span class="menu-item" id="menu-lang" style="position:relative">
             <span data-i18n="menu.lang">语言 ▾</span>
             <div class="menu-dropdown" id="menu-lang-dropdown" style="display:none">
-              <div class="menu-dropdown-item" data-lang="zh-CN" data-i18n="menu.lang.zh">中文</div>
-              <div class="menu-dropdown-item" data-lang="en" data-i18n="menu.lang.en">English</div>
+              <div class="menu-dropdown-item" data-lang="zh-CN">
+                <span data-i18n="menu.lang.zh">中文</span><span class="lang-check">✔️</span>
+              </div>
+              <div class="menu-dropdown-item" data-lang="en">
+                <span data-i18n="menu.lang.en">English</span><span class="lang-check">✔️</span>
+              </div>
             </div>
           </span>
           <!-- 智搜 -->
@@ -121,15 +125,21 @@
           <!-- 欢迎内容（无项目时显示） -->
           <div id="welcome-content" class="welcome" style="display:none">
             <div class="welcome-grid">
-              <div class="welcome-card"><span class="welcome-card-icon">🌐</span><span>多语种支持</span><span class="welcome-card-sub">中/英/Emoji 自由切换</span></div>
+              <!-- 第一行：功能维度 -->
+              <div class="welcome-row-label">功能</div>
+              <div class="welcome-card"><span class="welcome-card-icon">🌐</span><span>多语种支持</span><span class="welcome-card-sub">中/英 自由切换</span></div>
               <div class="welcome-card"><span class="welcome-card-icon">🐍</span><span>任意编程语言</span><span class="welcome-card-sub">语法高亮全覆盖</span></div>
               <div class="welcome-card"><span class="welcome-card-icon">💻</span><span>丰富终端类型</span><span class="welcome-card-sub">PTY 原生模拟体验</span></div>
-              <div class="welcome-card"><span class="welcome-card-icon">⌨️</span><span>文本命令架构</span><span class="welcome-card-sub">键盘驱动，效率至上</span></div>
-              <div class="welcome-card"><span class="welcome-card-icon">🧠</span><span>自我成长</span><span class="welcome-card-sub">AI 翻译自然语言为精确命令</span></div>
-              <div class="welcome-card"><span class="welcome-card-icon">🔒</span><span>AI 安全可控</span><span class="welcome-card-sub">本地处理，数据不外泄</span></div>
+              <!-- 第二行：性能维度 -->
+              <div class="welcome-row-label">性能</div>
               <div class="welcome-card"><span class="welcome-card-icon">⚡</span><span>Rust 轻量极速</span><span class="welcome-card-sub">二进制不足 10MB</span></div>
               <div class="welcome-card"><span class="welcome-card-icon">🛡️</span><span>Rust 内存安全</span><span class="welcome-card-sub">编译期消灭崩溃</span></div>
               <div class="welcome-card"><span class="welcome-card-icon">🔗</span><span>Rust 并发安全</span><span class="welcome-card-sub">无畏多线程</span></div>
+              <!-- 第三行：智能维度 -->
+              <div class="welcome-row-label">智能</div>
+              <div class="welcome-card"><span class="welcome-card-icon">⌨️</span><span>文本命令架构</span><span class="welcome-card-sub">键盘驱动，效率至上</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🧠</span><span>自我成长</span><span class="welcome-card-sub">AI 翻译自然语言为精确命令</span></div>
+              <div class="welcome-card"><span class="welcome-card-icon">🔒</span><span>AI 安全可控</span><span class="welcome-card-sub">本地处理，数据不外泄</span></div>
             </div>
             <h1 class="welcome-title" style="margin-top:24px">darkhorse-code</h1>
             <p id="welcome-subtitle" class="welcome-subtitle">越来越懂你</p>

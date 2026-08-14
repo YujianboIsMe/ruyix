@@ -21,6 +21,9 @@ async function initApp() {
   // 初始化多语言
   await I18N.init();
 
+  // 应用已保存的语言（翻译 HTML 中的硬编码文案）
+  refreshI18nUI();
+
   // 设置语言菜单
   setupMenuBar();
 
@@ -63,11 +66,14 @@ function setupMenuBar() {
 
     menu.addEventListener("click", (e) => {
       e.stopPropagation();
-      // 关闭其他下拉
+      // 点击下拉项时：不切换本下拉（子项自行处理关闭），只关闭其他下拉
+      const onItem = !!e.target.closest(".menu-dropdown-item");
       document.querySelectorAll(".menu-dropdown").forEach((d) => {
         if (d !== dropdown) d.style.display = "none";
       });
-      dropdown.style.display = dropdown.style.display === "none" ? "" : "none";
+      if (!onItem) {
+        dropdown.style.display = dropdown.style.display === "none" ? "" : "none";
+      }
     });
   });
 
@@ -86,22 +92,42 @@ function setupMenuBar() {
         await I18N.setLang(item.dataset.lang);
         langDropdown.style.display = "none";
         refreshI18nUI();
+        updateLangMenu();
       });
     });
+    // 初始状态：当前语言项显示 ✔️
+    updateLangMenu();
   }
 
-  // 项目菜单项点击（功能待实现，仅 UI）
+  // 项目菜单项点击：统一走命令系统
   const projectDropdown = document.getElementById("menu-project-dropdown");
   if (projectDropdown) {
     projectDropdown.querySelectorAll("[data-action]").forEach((item) => {
-      item.addEventListener("click", () => {
+      item.addEventListener("click", async () => {
         projectDropdown.style.display = "none";
-        // TODO: 实现项目新建/退出功能
+        const action = item.dataset.action;
+        if (action === "close-project") {
+          await handleCommand("close project");
+        } else if (action === "new-project") {
+          const path = await showPrompt("打开项目", "");
+          if (path) await handleCommand("open project " + path);
+        }
       });
     });
   }
 
   updateProjectMenu();
+}
+
+/**
+ * 语言菜单选中标记：当前语言项后面显示 ✔️
+ */
+function updateLangMenu() {
+  const current = I18N.getLang();
+  document.querySelectorAll("#menu-lang-dropdown [data-lang]").forEach((item) => {
+    const check = item.querySelector(".lang-check");
+    if (check) check.style.display = item.dataset.lang === current ? "" : "none";
+  });
 }
 
 /**
@@ -463,14 +489,20 @@ async function highlightAndRender(tab, language) {
   if (!invoke) return;
 
   try {
-    const lines = await invoke("highlight_code", { language, code: tab.content });
+    // 快照：请求返回时若内容已变化，丢弃过期的高亮结果
+    const snapshot = tab.content;
+    const lines = await invoke("highlight_code", { language, code: snapshot });
+    if (tab.content !== snapshot) return;
     tab._highlighted = lines;
     tab._language = language;
     if (tab.id === state.activeTabId) {
       renderHighlightedCode(tab);
     }
   } catch {
-    renderPlainCode(tab);
+    // 高亮失败：仅当该标签页仍处于激活状态时才渲染纯文本
+    if (tab.id === state.activeTabId) {
+      renderPlainCode(tab);
+    }
   }
 }
 
@@ -1116,8 +1148,13 @@ function showRagModal() {
           dim,
           projectRoot: state.currentProject?.path
         });
-        await invoke("rag_reindex", { projectRoot: state.currentProject?.path });
-        setStatus(I18N.t("rag.ready"));
+        const res = await invoke("rag_reindex", { projectRoot: state.currentProject?.path });
+        if (res && res.rebuild_note) {
+          // 旧向量库无法加载，已自动备份重建
+          setStatus(I18N.t("rag.ready") + "（" + res.rebuild_note + "）");
+        } else {
+          setStatus(I18N.t("rag.ready"));
+        }
       }
     } catch (err) {
       setStatus(I18N.t("rag.start_fail", { err }), "error");
@@ -1317,8 +1354,8 @@ function setupTextareaSync() {
     if (tab.content === newContent) return;
 
     tab.content = newContent;
+    // 丢弃过期的高亮数据；语言由扩展名决定保持不变，保存后据此重新高亮
     tab._highlighted = null;
-    tab._language = null;
 
     if (newContent.split("\n").length <= 1000) {
       renderPlainCode(tab);
@@ -1376,6 +1413,10 @@ async function doAutoSave(tab) {
     await invoke("write_file", { path: tab.path, content: tab.content });
     tab._modified = false;
     renderTabs();
+    // 保存后重新高亮（自动保存路径；blur/切标签页保存同样走这里）
+    if (tab._language) {
+      await highlightAndRender(tab, tab._language);
+    }
     // 增量索引
     if (window._ragIndexAfterSave) window._ragIndexAfterSave(tab);
   } catch {
@@ -1585,6 +1626,14 @@ function setupNavigatorTabs() {
 
 let _ctxPath = null;
 let _ctxIsDir = false;
+let _ctxIsRoot = false;
+
+/** Windows 路径归一化比较（分隔符、尾斜杠、大小写无关） */
+function samePath(a, b) {
+  if (!a || !b) return false;
+  const norm = (p) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
 
 function setupContextMenu() {
   const menu = document.getElementById("context-menu");
@@ -1594,10 +1643,23 @@ function setupContextMenu() {
   // 禁止浏览器默认右键菜单（仅文件树区域）
   fileTree.addEventListener("contextmenu", (e) => {
     e.preventDefault();
-    const node = e.target.closest(".tree-node");
-    if (!node) return;
-    _ctxPath = node.dataset.path;
-    _ctxIsDir = node.dataset.isDir === "true";
+    let node = e.target.closest(".tree-node");
+    if (!node) {
+      // 空白区域：优先归属到已展开目录，否则视为项目根目录
+      const cc = e.target.closest(".tree-children");
+      node = cc ? cc.previousElementSibling : null;
+    }
+    if (node) {
+      _ctxPath = node.dataset.path;
+      _ctxIsDir = node.dataset.isDir === "true";
+      _ctxIsRoot = samePath(_ctxPath, state.currentProject?.path);
+    } else if (state.currentProject) {
+      _ctxPath = state.currentProject.path;
+      _ctxIsDir = true;
+      _ctxIsRoot = true;
+    } else {
+      return;
+    }
     showContextMenu(menu, e.clientX, e.clientY, _ctxIsDir);
   });
 
@@ -1608,6 +1670,12 @@ function setupContextMenu() {
     const action = item.dataset.action;
     hideContextMenu(menu);
     if (!_ctxPath) return;
+
+    // 项目根目录不允许删除/重命名（菜单项已隐藏，此处兜底）
+    if (_ctxIsRoot && (action === "delete" || action === "rename")) {
+      setStatus(I18N.t("status.no_permission"), "error");
+      return;
+    }
 
     switch (action) {
       case "delete":
@@ -1639,6 +1707,8 @@ async function showContextMenu(menu, x, y, isDir) {
   // 文件夹 vs 文件
   menu.querySelectorAll(".context-menu-folder-only").forEach(el => el.style.display = isDir ? "" : "none");
   const fileItems = menu.querySelectorAll(".context-menu-file-only");
+  // 项目根目录只允许创建，不允许删除/重命名
+  menu.querySelectorAll('[data-action="delete"], [data-action="rename"]').forEach(el => el.style.display = _ctxIsRoot ? "none" : "");
   const runItem = menu.querySelector('[data-action="run"]');
   const tryRunItem = menu.querySelector('[data-action="try-run"]');
 
@@ -1800,8 +1870,9 @@ async function autoCreateRunTarget(name, cmd, fullPath) {
 /** 全路径 → 相对于项目根的路径 */
 function toRelativePath(fullPath) {
   if (!state.currentProject) return fullPath;
-  const root = state.currentProject.path + '\\';
-  return fullPath.startsWith(root) ? fullPath.slice(root.length) : fullPath;
+  const root = state.currentProject.path.replace(/[/\\]+$/, "");
+  if ((fullPath || "").replace(/[/\\]+$/, "") === root) return "";
+  return fullPath.startsWith(root + "\\") ? fullPath.slice(root.length + 1) : fullPath;
 }
 
 function hideContextMenu(menu) {
@@ -1906,13 +1977,15 @@ async function renameFileOrFolder(fullPath) {
 async function createFileInFolder(fullPath) {
   const name = await showPrompt('新建文件', '');
   if (!name) return;
-  await handleCommand('new file ' + toRelativePath(fullPath) + '\\' + name, true);
+  const rel = toRelativePath(fullPath);
+  await handleCommand('new file ' + (rel ? rel + '\\' : '') + name, true);
 }
 
 async function createFolderInFolder(fullPath) {
   const name = await showPrompt('新建文件夹', '');
   if (!name) return;
-  await handleCommand('new folder ' + toRelativePath(fullPath) + '\\' + name, true);
+  const rel = toRelativePath(fullPath);
+  await handleCommand('new folder ' + (rel ? rel + '\\' : '') + name, true);
 }
 
 // ============================================
@@ -2367,13 +2440,30 @@ async function loadFileTree(dirPath) {
 
   try {
     const entries = await invoke("list_dir", { path: dirPath });
+
+    // 项目根目录本身也渲染为根节点，右键可在根目录下创建文件/文件夹
+    const rootEntry = {
+      path: dirPath,
+      name: state.currentProject?.name || (dirPath.split(/[/\\]/).pop() || dirPath),
+      is_dir: true
+    };
+    const rootNode = renderTreeEntry(rootEntry, tree, 0);
+    const rootChildren = rootNode.nextElementSibling;
     if (entries.length === 0) {
-      tree.innerHTML = '<span class="file-tree-placeholder">空目录</span>';
-      return;
+      const ph = document.createElement("span");
+      ph.className = "file-tree-placeholder";
+      ph.textContent = "空目录";
+      rootChildren.appendChild(ph);
+    } else {
+      for (const entry of entries) {
+        renderTreeEntry(entry, rootChildren, 1);
+      }
     }
-    for (const entry of entries) {
-      renderTreeEntry(entry, tree, 0);
-    }
+    // 根节点默认展开
+    rootNode.dataset.expanded = "true";
+    const rootIcon = rootNode.querySelector(".tree-icon--folder");
+    if (rootIcon) rootIcon.textContent = entries.length > 0 ? "⬇️" : "🈳";
+    rootChildren.style.display = "";
 
     // 恢复之前展开的目录
     if (expandedPaths.size > 0) {
@@ -2406,6 +2496,67 @@ async function restoreExpandedPaths(tree, expandedPaths) {
 }
 
 /**
+ * 从磁盘刷新指定文件夹节点（不重建整棵树，保留子级展开状态）。
+ * 未找到该文件夹节点时返回 false。
+ */
+async function refreshTreeNode(fullPath) {
+  const tree = document.getElementById("file-tree");
+  if (!tree) return false;
+
+  let node = null;
+  tree.querySelectorAll(".tree-node").forEach((n) => {
+    if (n.dataset.isDir === "true" && samePath(n.dataset.path, fullPath)) node = n;
+  });
+  if (!node) return false;
+  const cc = node.nextElementSibling;
+  if (!cc || !cc.classList.contains("tree-children")) return false;
+
+  const invoke = getTauriInvoke();
+  if (!invoke) return false;
+
+  const entries = await invoke("list_dir", { path: node.dataset.path });
+
+  // 保存子级展开状态，刷新后恢复
+  const expandedPaths = new Set();
+  cc.querySelectorAll(".tree-node[data-expanded='true']").forEach((n) => {
+    expandedPaths.add(n.dataset.path);
+  });
+
+  const depth = parseInt(node.style.paddingLeft) / 16 || 0;
+  cc.innerHTML = "";
+
+  if (node.dataset.expanded === "true") {
+    if (entries.length === 0) {
+      const ph = document.createElement("span");
+      ph.className = "file-tree-placeholder";
+      ph.textContent = "空目录";
+      cc.appendChild(ph);
+    } else {
+      for (const entry of entries) {
+        renderTreeEntry(entry, cc, depth + 1);
+      }
+    }
+  }
+  // 折叠状态：保持容器为空，下次展开时懒加载新数据
+
+  // 更新文件夹图标（➡️ 折叠 / ⬇️ 展开有子项 / 🈳 展开为空）
+  const icon = node.querySelector(".tree-icon--folder");
+  if (icon) {
+    if (node.dataset.expanded !== "true") {
+      icon.textContent = "➡️";
+    } else {
+      icon.textContent = entries.length > 0 ? "⬇️" : "🈳";
+    }
+  }
+
+  // 恢复子级展开状态
+  if (expandedPaths.size > 0) {
+    await restoreExpandedPaths(cc, expandedPaths);
+  }
+  return true;
+}
+
+/**
  * 渲染单个树节点
  */
 function renderTreeEntry(entry, container, depth) {
@@ -2432,6 +2583,20 @@ function renderTreeEntry(entry, container, depth) {
   name.textContent = entry.name;
   node.appendChild(name);
 
+  // 刷新按钮（仅目录）：从磁盘重新读取该文件夹，走命令系统
+  if (entry.is_dir) {
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "tree-refresh";
+    refreshBtn.textContent = "🔄";
+    refreshBtn.title = I18N.t("tree.refresh");
+    refreshBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // 防止触发展开/折叠
+      const rel = toRelativePath(entry.path);
+      handleCommand("refresh" + (rel ? " " + rel : ""), true);
+    });
+    node.appendChild(refreshBtn);
+  }
+
   // 子节点容器（仅目录有）
   let childrenContainer = null;
   if (entry.is_dir) {
@@ -2454,6 +2619,7 @@ function renderTreeEntry(entry, container, depth) {
   if (childrenContainer) {
     container.appendChild(childrenContainer);
   }
+  return node;
 }
 
 /**
@@ -2475,8 +2641,8 @@ async function toggleTreeNode(node, entry, childrenContainer, depth) {
   // 展开：先显示加载中
   node.dataset.expanded = "true";
 
-  // 懒加载子节点
-  let hasChildren = childrenContainer.children.length > 0;
+  // 懒加载子节点（占位符不算子节点）
+  let hasChildren = childrenContainer.querySelector(".tree-node") !== null;
   if (!hasChildren) {
     const invoke = getTauriInvoke();
     if (!invoke) return;

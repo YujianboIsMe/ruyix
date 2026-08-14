@@ -126,6 +126,12 @@ html, body {
   white-space: nowrap;
 }
 
+/* 语言菜单：当前选中项的 ✔️ 标记 */
+.lang-check {
+  margin-left: 8px;
+  font-size: 11px;
+}
+
 .menu-dropdown-item:hover {
   background: var(--accent);
 }
@@ -222,6 +228,23 @@ html, body {
   gap: 10px;
   max-width: 600px;
   width: 100%;
+}
+
+/* 维度行标签：功能 / 性能 / 智能，横跨整行 */
+.welcome-row-label {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent);
+  font-size: 12px;
+  letter-spacing: 4px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.welcome-row-label:first-child {
+  margin-top: 0;
 }
 
 .welcome-card {
@@ -509,6 +532,23 @@ html, body {
 
 .tree-children {
   /* 子节点容器 */
+}
+
+/* 文件夹行最右侧的从磁盘刷新按钮 */
+.tree-refresh {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 6px 0 4px;
+  opacity: 0.5;
+}
+
+.tree-refresh:hover {
+  opacity: 1;
 }
 
 /* --- 终端资源列表 --- */

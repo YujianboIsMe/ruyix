@@ -105,6 +105,7 @@ The command system is the **one and only bridge** between frontend GUI and Rust 
 | `new py\|rs\|md\|c\|file\|folder` | `handleNewCommand` | Uses `resolveProjectPath()` |
 | `del\|delete\|remove\|rm` | `handleDeleteCommand` | `skipConfirm` param for GUI path |
 | `rename\|mv` | `handleRenameCommand` | `rename <old> <new>`, validates illegal chars, checks target exists |
+| `refresh [<path>]` | `handleRefreshCommand` | No arg = whole tree; arg = targeted folder refresh (`refreshTreeNode`), keeps expansion state |
 | `run <name>=<cmd>` | `handleRunCommand` | Shortcut: two `config add -p` calls, index = max(existing)+1 |
 | `help` | `openHelp()` | |
 | *unknown* | `handleAiCommand` | Falls through to LLM translation |

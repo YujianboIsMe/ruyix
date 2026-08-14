@@ -7,6 +7,7 @@ window.I18N = (() => {
   const LANG_KEY = "darkhorse.code.ui.lang";
 
   let _data = {};
+  let _lang = "zh-CN";
 
   async function init() {
     const invoke = getTauriInvoke();
@@ -18,6 +19,7 @@ window.I18N = (() => {
         if (v === "en") lang = "en";
       } catch {}
     }
+    _lang = lang;
 
     try {
       const base = window.location.origin || "https://darkhorse-code.localhost";
@@ -28,6 +30,10 @@ window.I18N = (() => {
     } catch {
       // 降级：空字典，t() 返回 key 本身
     }
+  }
+
+  function getLang() {
+    return _lang;
   }
 
   async function setLang(lang) {
@@ -53,5 +59,5 @@ window.I18N = (() => {
     return s;
   }
 
-  return { init, setLang, t };
+  return { init, setLang, getLang, t };
 })();

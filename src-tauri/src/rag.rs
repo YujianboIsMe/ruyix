@@ -52,6 +52,8 @@ pub struct IndexStatus {
     pub files_indexed: usize,
     pub last_indexed: Option<String>,
     pub progress: Option<IndexProgress>,
+    /// 向量库重建说明（旧数据无法加载时非空，提醒用户重新索引）
+    pub rebuild_note: Option<String>,
 }
 
 /// 项目 rag.toml 配置
@@ -139,6 +141,23 @@ pub struct QdrantSearchHit {
     pub payload: Option<serde_json::Value>,
 }
 
+/// qdrant 启动结果
+pub enum StartOutcome {
+    /// 正常启动（首次建库，或成功加载旧库）
+    Started,
+    /// 旧数据无法加载：已自动备份并重建空库，需重新建立索引
+    Rebuilt { reason: String },
+}
+
+/// rag_reindex 命令返回值
+#[derive(Debug, Clone, Serialize)]
+pub struct ReindexResult {
+    /// 本次索引的文件数
+    pub indexed: usize,
+    /// 向量库重建说明（旧数据无法加载时非空）
+    pub rebuild_note: Option<String>,
+}
+
 // ============================================
 // QdrantManager — 嵌入式 EdgeShard
 // ============================================
@@ -168,9 +187,9 @@ impl QdrantManager {
     }
 
     /// 打开或创建嵌入式 shard（懒加载，不使用时占 0 资源）
-    pub fn start(&mut self) -> Result<(), String> {
+    pub fn start(&mut self) -> Result<StartOutcome, String> {
         if self.shard.is_some() {
-            return Ok(());
+            return Ok(StartOutcome::Started);
         }
 
         // 维度变化 → 旧向量无法复用，清空数据目录重建（需要重新索引）
@@ -203,16 +222,76 @@ impl QdrantManager {
             ..Default::default()
         };
 
-        // 先尝试加载已有数据，失败则新建
-        let shard = match EdgeShard::load(&self.data_dir, Some(config.clone())) {
-            Ok(s) => s,
-            Err(_) => EdgeShard::new(&self.data_dir, config)
-                .map_err(|e| format!("创建 qdrant shard 失败: {}", e))?,
-        };
+        // 先尝试加载已有数据，失败时区分两种情况：
+        // 1. 无旧数据 → 正常首次建库
+        // 2. 有旧数据但加载失败（维度/格式不兼容、损坏等）→ 保留原始错误，
+        //    自动备份旧目录后重建空库（向量可从 API 重新生成）
+        match EdgeShard::load(&self.data_dir, Some(config.clone())) {
+            Ok(s) => {
+                self.shard = Some(s);
+                let _ = std::fs::write(&marker, self.dim.to_string());
+                Ok(StartOutcome::Started)
+            }
+            Err(load_err) if self.has_old_data() => {
+                let backup_dir = self.backup_dir();
+                std::fs::rename(&self.data_dir, &backup_dir).map_err(|e| {
+                    format!(
+                        "旧向量库无法加载（{}），且备份到 {} 失败（{}）。请手动删除 {} 后重试",
+                        load_err,
+                        backup_dir.display(),
+                        e,
+                        self.data_dir.display()
+                    )
+                })?;
+                let _ = std::fs::create_dir_all(&self.data_dir);
+                self.shard = Some(
+                    EdgeShard::new(&self.data_dir, config)
+                        .map_err(|e| format!("重建 qdrant shard 失败: {}", e))?,
+                );
+                let _ = std::fs::write(&marker, self.dim.to_string());
+                Ok(StartOutcome::Rebuilt {
+                    reason: format!(
+                        "旧向量库无法加载（{}），已自动备份到 {} 并重建空库，需要重新建立索引",
+                        load_err,
+                        backup_dir.display()
+                    ),
+                })
+            }
+            Err(_) => {
+                // 无旧数据 → 正常首次建库
+                self.shard = Some(
+                    EdgeShard::new(&self.data_dir, config)
+                        .map_err(|e| format!("创建 qdrant shard 失败: {}", e))?,
+                );
+                let _ = std::fs::write(&marker, self.dim.to_string());
+                Ok(StartOutcome::Started)
+            }
+        }
+    }
 
-        let _ = std::fs::write(&marker, self.dim.to_string());
-        self.shard = Some(shard);
-        Ok(())
+    /// 数据目录下是否残留旧数据（segments 或 wal 中有任何非隐藏条目）
+    fn has_old_data(&self) -> bool {
+        ["segments", "wal"].iter().any(|sub| {
+            let Ok(entries) = std::fs::read_dir(self.data_dir.join(sub)) else {
+                return false;
+            };
+            entries
+                .flatten()
+                .any(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        })
+    }
+
+    /// 旧数据备份目录：qdrant.bak-<时间戳毫秒>（与数据目录同级）
+    fn backup_dir(&self) -> PathBuf {
+        let mut name = self.data_dir.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(
+            ".bak-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        self.data_dir.with_file_name(name)
     }
 
     /// 关闭 shard（Drop 时自动 flush）
@@ -461,6 +540,10 @@ pub struct RagManager {
     embed: Option<EmbeddingClient>,
     pub config: ProjectRagConfig,
     pub progress: IndexProgress,
+    /// 最近一次向量库重建的说明（用于提示用户重新索引）
+    pub rebuild_note: Option<String>,
+    /// 当前已加载配置所属的项目根目录（切换项目时重新加载 rag.toml）
+    config_project: Option<String>,
 }
 
 impl RagManager {
@@ -470,6 +553,8 @@ impl RagManager {
             embed: None,
             config: ProjectRagConfig::default(),
             progress: IndexProgress { phase: "idle".to_string(), current: 0, total: 0 },
+            rebuild_note: None,
+            config_project: None,
         }
     }
 
@@ -482,6 +567,16 @@ impl RagManager {
         if path.exists() {
             let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
             self.config = toml::from_str(&content).unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    /// 确保 self.config 属于当前项目：切换项目时重新加载其 rag.toml
+    fn ensure_project(&mut self, project_root: &str) -> Result<(), String> {
+        if self.config_project.as_deref() != Some(project_root) {
+            self.config = ProjectRagConfig::default();
+            self.load_config(project_root)?;
+            self.config_project = Some(project_root.to_string());
         }
         Ok(())
     }
@@ -502,14 +597,22 @@ impl RagManager {
         load_global_rag_config().dim.unwrap_or(DEFAULT_DIM)
     }
 
-    /// 启动 qdrant（维度变化时自动重建空库）
-    fn ensure_qdrant(&mut self) -> Result<(), String> {
+    /// 启动 qdrant（维度变化时自动重建空库；旧数据无法加载时自动备份重建）
+    fn ensure_qdrant(&mut self) -> Result<StartOutcome, String> {
         let dim = self.current_dim();
         if self.qdrant.dim() != dim {
             self.qdrant.stop();
             self.qdrant = QdrantManager::new(dim);
         }
         self.qdrant.start()
+    }
+
+    /// 处理向量库重建结果：记录说明并作废旧 hash 记录（强制全量重编）
+    fn on_rebuilt(&mut self, project_root: &str, reason: String) {
+        self.rebuild_note = Some(reason);
+        self.config.files.clear();
+        self.config.files_count = 0;
+        let _ = self.save_config(project_root);
     }
 
     /// 构建嵌入客户端（未配置 API 地址时报错）
@@ -523,8 +626,10 @@ impl RagManager {
 
     /// 初始化 RAG：启动 qdrant + 构建嵌入客户端
     pub fn init(&mut self, project_root: &str) -> Result<(), String> {
-        self.load_config(project_root)?;
-        self.ensure_qdrant()?;
+        self.ensure_project(project_root)?;
+        if let StartOutcome::Rebuilt { reason } = self.ensure_qdrant()? {
+            self.on_rebuilt(project_root, reason);
+        }
         self.ensure_embed()
     }
 
@@ -539,7 +644,10 @@ impl RagManager {
             return Err(format!("项目路径不存在: {}", project_root));
         }
 
-        self.ensure_qdrant()?;
+        self.ensure_project(project_root)?;
+        if let StartOutcome::Rebuilt { reason } = self.ensure_qdrant()? {
+            self.on_rebuilt(project_root, reason);
+        }
         self.ensure_embed()?;
 
         // 向量库为空（首次索引或维度变更后清空）→ 重置 hash 记录，强制全量编码
@@ -615,6 +723,8 @@ impl RagManager {
         self.config.files = new_files;
         self.config.files_count = count;
         self.config.last_indexed = Some(chrono_now());
+        // 持久化 hash 记录：重启后未变化的文件跳过重新编码
+        let _ = self.save_config(project_root);
 
         Ok(count)
     }
@@ -670,11 +780,16 @@ impl RagManager {
 
     /// 增量索引单文件
     pub fn index_file(&mut self, project_root: &str, abs_path: &str) -> Result<(), String> {
+        self.ensure_project(project_root)?;
         if self.config.files_count == 0 {
             // 还没建过索引，跳过
             return Ok(());
         }
-        self.ensure_qdrant()?;
+        if let StartOutcome::Rebuilt { reason } = self.ensure_qdrant()? {
+            // 向量库刚重建 → 增量索引作废，等待全量重建
+            self.on_rebuilt(project_root, reason);
+            return Ok(());
+        }
         self.ensure_embed()?;
 
         let p = PathBuf::from(abs_path);
@@ -712,15 +827,22 @@ impl RagManager {
 
         self.config.files.insert(rel_path, hash);
         self.config.files_count = self.config.files.len();
+        // 持久化 hash 记录（与 remove_file 保持一致）
+        let _ = self.save_config(project_root);
         Ok(())
     }
 
     /// 删除单个文件索引
     pub fn remove_file(&mut self, project_root: &str, rel_path: &str) -> Result<(), String> {
+        self.ensure_project(project_root)?;
         if self.config.files_count == 0 {
             return Ok(());
         }
-        self.ensure_qdrant()?;
+        if let StartOutcome::Rebuilt { reason } = self.ensure_qdrant()? {
+            // 向量库刚重建 → 无需删除，等待全量重建
+            self.on_rebuilt(project_root, reason);
+            return Ok(());
+        }
         self.qdrant.delete_points(rel_path)?;
         config_files_remove(&mut self.config, rel_path);
         let _ = self.save_config(project_root);
@@ -732,6 +854,7 @@ impl RagManager {
 
     /// 搜索
     pub fn search(&mut self, project_root: &str, query: &str, top_k: usize) -> Result<Vec<SearchResult>, String> {
+        self.ensure_project(project_root)?;
         if !self.qdrant.is_running() || self.embed.is_none() {
             self.init(project_root)?;
         }
@@ -779,6 +902,7 @@ impl RagManager {
             } else {
                 None
             },
+            rebuild_note: self.rebuild_note.clone(),
         }
     }
 }

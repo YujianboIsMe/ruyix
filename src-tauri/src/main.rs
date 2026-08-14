@@ -819,7 +819,7 @@ fn rag_reindex(
     project_root: Option<String>,
     rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
     app_handle: tauri::AppHandle,
-) -> Result<usize, String> {
+) -> Result<rag::ReindexResult, String> {
     let root = project_root.ok_or("未打开项目")?;
     let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
     let handle = app_handle.clone();
@@ -834,7 +834,14 @@ fn rag_reindex(
     let _ = app_handle.emit("rag-index-progress", serde_json::json!({
         "current": 0, "total": 0, "phase": "done"
     }));
-    result
+    let indexed = result?;
+    let rebuild_note = mgr
+        .rebuild_note
+        .clone();
+    Ok(rag::ReindexResult {
+        indexed,
+        rebuild_note,
+    })
 }
 
 #[tauri::command]

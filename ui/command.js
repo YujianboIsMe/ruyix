@@ -57,6 +57,9 @@ async function handleCommand(raw, _fromAi = false) {
     case "new":
       await handleNewCommand(parts.slice(1));
       break;
+    case "refresh":
+      await handleRefreshCommand(parts.slice(1));
+      break;
     case "del":
     case "delete":
     case "remove":
@@ -291,13 +294,18 @@ async function handleSearchCommand(args) {
   if (!sub || sub.toLowerCase() === "status") {
     try {
       const status = await invoke("rag_status");
-      showSearchResults([
+      const rows = [
         { path: "—", snippet: "智搜状态: " + (status.enabled ? "已启用" : "未启用"), score: 0 },
         { path: "—", snippet: "嵌入API: " + (status.api_configured ? (status.api_url || "已配置") : "未配置"), score: 0 },
         { path: "—", snippet: "qdrant: " + (status.qdrant_running ? "运行中" : "未运行"), score: 0 },
         { path: "—", snippet: "已索引文件: " + status.files_indexed, score: 0 },
         { path: "—", snippet: "上次索引: " + (status.last_indexed || "从未"), score: 0 },
-      ]);
+      ];
+      // 向量库重建提示（旧数据无法加载时）
+      if (status.rebuild_note) {
+        rows.push({ path: "—", snippet: "注意: " + status.rebuild_note, score: 0 });
+      }
+      showSearchResults(rows);
     } catch (err) {
       setStatus(I18N.t("cmd.search.fail", { err }), "error");
     }
@@ -307,8 +315,10 @@ async function handleSearchCommand(args) {
   if (sub.toLowerCase() === "reindex") {
     setStatus(I18N.t("cmd.search.reindexing"));
     try {
-      const count = await invoke("rag_reindex", { projectRoot: state.currentProject.path });
-      setStatus("索引完成: " + count + " 个文件");
+      const res = await invoke("rag_reindex", { projectRoot: state.currentProject.path });
+      let msg = "索引完成: " + res.indexed + " 个文件";
+      if (res.rebuild_note) msg += "（" + res.rebuild_note + "）";
+      setStatus(msg);
     } catch (err) {
       setStatus(I18N.t("cmd.search.fail", { err }), "error");
     }
@@ -560,6 +570,48 @@ async function handleNewCommand(args) {
     }
   } else {
     setStatus(I18N.t("cmd.new.unknown", { sub }));
+  }
+}
+
+// ============================================
+// refresh 命令 — 从磁盘刷新文件树
+// ============================================
+
+/**
+ * refresh            刷新整个文件树（项目根目录）
+ * refresh <相对路径>  刷新指定文件夹（保持展开状态）
+ */
+async function handleRefreshCommand(args) {
+  if (!state.currentProject) {
+    setStatus(I18N.t("cmd.run.no_project"), "error");
+    return;
+  }
+
+  // 无参数：整树刷新（含根目录新增/删除的文件）
+  if (args.length === 0 || args.every((a) => a === "")) {
+    try {
+      await loadFileTree(state.currentProject.path);
+      setStatus(I18N.t("cmd.refresh.ok"));
+    } catch (err) {
+      setStatus(I18N.t("cmd.refresh.failed", { err }), "error");
+    }
+    return;
+  }
+
+  // 带参数：定向刷新指定文件夹
+  const rawPath = args.join(" ");
+  const base = resolveProjectPath(rawPath);
+  if (!base) return;
+
+  try {
+    const ok = await refreshTreeNode(base);
+    if (ok) {
+      setStatus(I18N.t("cmd.refresh.dir_ok", { path: rawPath }));
+    } else {
+      setStatus(I18N.t("cmd.refresh.not_found", { path: rawPath }), "error");
+    }
+  } catch (err) {
+    setStatus(I18N.t("cmd.refresh.failed", { err }), "error");
   }
 }
 
@@ -1169,6 +1221,7 @@ ${t("help.cmd_close_right")}                ${t("help.desc_close_right")}
 ${t("help.cmd_new_type")}       ${t("help.desc_new_type")}
 ${t("help.cmd_new_file")}          ${t("help.desc_new_file")}
 ${t("help.cmd_new_folder")}    ${t("help.desc_new_folder")}
+${t("help.cmd_refresh")}          ${t("help.desc_refresh")}
 ${t("help.cmd_del")} ${t("help.desc_del")}
 ${t("help.cmd_rename")}             ${t("help.desc_rename")}
 ${t("help.cmd_run")}             ${t("help.desc_run")}
