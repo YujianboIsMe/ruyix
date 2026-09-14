@@ -99,7 +99,7 @@ The command system is the **one and only bridge** between frontend GUI and Rust 
 
 | Verb | Handler | Notes |
 |------|---------|-------|
-| `open project\|file` | `handleOpenCommand` | File paths must be relative; `resolveProjectPath()` enforces |
+| `open project\|file` | `handleOpenCommand` | File paths must be relative; `resolveProjectPath()` enforces. `open project <other>` = switch: auto `teardownProject()` (close PTYs, clear tabs) then open; same path → "already current" status |
 | `close project\|all\|<idx>\|other\|left\|right` | `handleCloseCommand` | |
 | `config add\|get\|update\|remove` | `handleConfigCommand` | `-g`/`-p`/`-r` scope flags, default `-r` |
 | `new py\|rs\|md\|c\|file\|folder` | `handleNewCommand` | Uses `resolveProjectPath()` |
@@ -107,6 +107,7 @@ The command system is the **one and only bridge** between frontend GUI and Rust 
 | `rename\|mv` | `handleRenameCommand` | `rename <old> <new>`, validates illegal chars, checks target exists |
 | `refresh [<path>]` | `handleRefreshCommand` | No arg = whole tree; arg = targeted folder refresh (`refreshTreeNode`), keeps expansion state |
 | `run <name>=<cmd>` | `handleRunCommand` | Shortcut: two `config add -p` calls, index = max(existing)+1 |
+| `project lang\|edit\|delete\|migrate` | `handleProjectCommand` | `project lang <lang> <path>` sets language (path = remainder, may contain spaces); `project edit "<path>" "<name>" <lang>` updates name+icon (quote-aware, path read-only); `project delete <path>` removes from list (remainder path; does NOT delete the folder); `project migrate` migrates legacy path-only project config |
 | `help` | `openHelp()` | |
 | *unknown* | `handleAiCommand` | Falls through to LLM translation |
 
@@ -152,6 +153,10 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 - File: Delete / Rename
 - All routed through `handleCommand()`
 
+### Titlebar Project Switcher
+- Click the project name in the titlebar (`#project-switch-trigger`, `-webkit-app-region: no-drag`) → dropdown of `get_projects` (current project highlighted + ✔), click = switch via `handleCommand("open project ...")`
+- Dropdown is `.menu-dropdown` so `setupMenuBar`'s outside-click-close covers it; rebuilt on each open by `renderProjectSwitchDropdown()`
+
 ### Custom Modal
 - `showConfirm(title, message)` → `Promise<boolean>`
 - `showPrompt(title, defaultValue)` → `Promise<string|null>`
@@ -180,9 +185,13 @@ Known config keys:
 
 | Command | Signature | Notes |
 |---------|-----------|-------|
-| `open_project` | `(path)` → `ProjectInfo` | Sets current project in global config |
+| `open_project` | `(path)` → `ProjectInfo` | Sets current project in global config; `ProjectInfo { name, path, lang }` |
 | `get_last_project` | `()` → `Option<String>` | |
-| `get_projects` | `()` → `Vec<String>` | All known project paths |
+| `get_projects` | `()` → `Vec<ProjectEntry>` | All known projects; `ProjectEntry { name, path, lang }`, lang ∈ PROJECT_LANGS (10 values, default `unknown`) |
+| `set_project_lang` | `(path, lang)` → `()` | Validates lang against PROJECT_LANGS |
+| `update_project` | `(path, name, lang)` → `()` | Updates name+lang (path immutable); rejects empty name / invalid lang |
+| `delete_project` | `(path)` → `()` | Removes entry from list (folder untouched); clears `current` if it matches |
+| `migrate_projects` | `()` → `usize` | Converts legacy path-string `projects.list` entries to `ProjectEntry` (name = folder basename, lang = unknown), rewrites projects.toml; returns migrated count |
 | `get_run_targets` | `(project_root?)` → `Vec<RunTarget>` | |
 | `list_dir` | `(path)` → `Vec<DirEntry>` | |
 | `read_file` | `(path)` → `FileContent` | |

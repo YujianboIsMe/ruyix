@@ -8,6 +8,10 @@ edition = "2024"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# 多实例检测：Windows 命名互斥体
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

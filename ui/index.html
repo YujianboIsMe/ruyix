@@ -19,6 +19,7 @@
             <span data-i18n="menu.project">项目</span>
             <div class="menu-dropdown" id="menu-project-dropdown" style="display:none">
               <div class="menu-dropdown-item" data-action="new-project" data-i18n="menu.project.new">新建</div>
+              <div class="menu-dropdown-item" data-action="migrate-config" data-i18n="menu.project.migrate">迁移配置</div>
               <div class="menu-dropdown-item" data-action="close-project" data-i18n="menu.project.close">退出</div>
             </div>
           </span>
@@ -45,7 +46,13 @@
         </nav>
       </div>
       <div class="titlebar-center" data-tauri-drag-region>
-        <span id="titlebar-title" class="titlebar-title">Darkhorse Code</span>
+        <!-- 点击项目名快速切换项目（no-drag 保证可点击） -->
+        <div id="project-switch-trigger" class="project-switch-trigger"
+             data-tauri-drag-region="false" data-i18n-title="titlebar.switch_project">
+          <span id="titlebar-title" class="titlebar-title">Darkhorse Code</span>
+          <span id="project-switch-arrow" class="project-switch-arrow" style="display:none">▾</span>
+          <div id="project-switch-dropdown" class="menu-dropdown project-switch-dropdown" style="display:none"></div>
+        </div>
       </div>
       <div class="titlebar-right">
         <button class="window-btn" id="btn-minimize" title="最小化">
@@ -132,7 +139,7 @@
               <h2>命令系统</h2>
               <table class="help-table">
                 <tr><th>命令</th><th>说明</th></tr>
-                <tr><td><code>open project &lt;路径&gt;</code></td><td>打开项目文件夹</td></tr>
+                <tr><td><code>open project &lt;路径&gt;</code></td><td>打开 / 切换项目文件夹</td></tr>
                 <tr><td><code>open file &lt;路径&gt;</code></td><td>打开文件</td></tr>
                 <tr><td><code>close project</code></td><td>关闭当前项目</td></tr>
                 <tr><td><code>close all</code></td><td>关闭所有标签页</td></tr>
@@ -295,6 +302,29 @@
           <button id="rag-btn-later" class="modal-btn modal-btn-cancel" data-i18n="rag.btn_later">暂不接受</button>
           <button id="rag-btn-accept" class="modal-btn modal-btn-ok" data-i18n="rag.btn_accept">接受</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改项目弹窗 -->
+  <div id="project-edit-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box" style="max-width:420px">
+      <div class="modal-title" data-i18n="project.edit.title">修改项目</div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.name_label">名称</label>
+        <input type="text" id="project-edit-name" class="modal-input" />
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.icon_label">图标</label>
+        <div id="project-edit-icons" class="project-icon-options"></div>
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.path_label">路径（不可修改）</label>
+        <div id="project-edit-path" class="project-edit-path"></div>
+      </div>
+      <div class="modal-buttons">
+        <button id="project-edit-cancel" class="modal-btn modal-btn-cancel" data-i18n="modal.cancel">取消</button>
+        <button id="project-edit-ok" class="modal-btn modal-btn-ok" data-i18n="modal.ok">确认</button>
       </div>
     </div>
   </div>

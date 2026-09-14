@@ -36,6 +36,7 @@ async function initApp() {
   setupWindowControls();
   setupCommandBar();
   setupResponsiveTitlebar();
+  setupProjectSwitcher();
   setupNavigatorTabs();
   setupOutlineTabs();
   setupTextareaSync();
@@ -111,6 +112,8 @@ function setupMenuBar() {
         } else if (action === "new-project") {
           const path = await showPrompt("打开项目", "");
           if (path) await handleCommand("open project " + path);
+        } else if (action === "migrate-config") {
+          await handleCommand("project migrate");
         }
       });
     });
@@ -1447,6 +1450,81 @@ async function doAutoSave(tab) {
 }
 
 // ============================================
+// 标题栏 — 项目切换下拉
+// ============================================
+
+/**
+ * 标题栏项目名 → 快速切换下拉：
+ * 点击弹出项目列表（get_projects），当前项目 ✔ 标记，点击即切换（走命令系统）。
+ */
+function setupProjectSwitcher() {
+  const trigger = document.getElementById("project-switch-trigger");
+  const dropdown = document.getElementById("project-switch-dropdown");
+  if (!trigger || !dropdown) return;
+
+  trigger.addEventListener("click", async (e) => {
+    e.stopPropagation(); // 阻止 setupMenuBar 的全局关闭监听立即收起
+    // 打开本下拉前先关闭其他下拉
+    document.querySelectorAll(".menu-dropdown").forEach((d) => {
+      if (d !== dropdown) d.style.display = "none";
+    });
+    if (dropdown.style.display === "none") {
+      await renderProjectSwitchDropdown(dropdown);
+      dropdown.style.display = "";
+    } else {
+      dropdown.style.display = "none";
+    }
+  });
+
+  dropdown.addEventListener("click", async (e) => {
+    const item = e.target.closest(".project-switch-item");
+    if (!item || !item.dataset.path) return;
+    e.stopPropagation();
+    dropdown.style.display = "none";
+    // 转义引号与反斜杠，保证命令解析（parseQuotedTokens）还原
+    const escArg = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    await handleCommand(`open project "${escArg(item.dataset.path)}"`);
+  });
+}
+
+/**
+ * 渲染切换下拉：项目列表，当前项目高亮 + ✔
+ */
+async function renderProjectSwitchDropdown(dropdown) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    dropdown.innerHTML = `<div class="menu-dropdown-item">${I18N.t("status.tauri_unavail")}</div>`;
+    return;
+  }
+
+  try {
+    const projects = await invoke("get_projects");
+    if (!projects || projects.length === 0) {
+      dropdown.innerHTML = `<div class="menu-dropdown-item">${I18N.t("projectlist.empty")}</div>`;
+      return;
+    }
+
+    const cur = state.currentProject ? state.currentProject.path : null;
+    dropdown.innerHTML = projects
+      .map((p) => {
+        const name = p.name || p.path.split(/[/\\]/).pop() || p.path;
+        const lang = p.lang || "unknown";
+        const isCur = !!cur && samePath(cur, p.path);
+        return `
+        <div class="project-switch-item${isCur ? " current" : ""}" data-path="${escapeHtml(p.path)}">
+          <span class="project-icon" title="${escapeHtml(I18N.t(`lang.${lang}`))}">${projectLangIcon(lang)}</span>
+          <span class="project-switch-name">${escapeHtml(name)}</span>
+          <span class="project-switch-path" title="${escapeHtml(p.path)}">${escapeHtml(p.path)}</span>
+          <span class="project-switch-check">${isCur ? "✔️" : ""}</span>
+        </div>`;
+      })
+      .join("");
+  } catch (err) {
+    dropdown.innerHTML = `<div class="menu-dropdown-item">${I18N.t("projectlist.load_error", { err })}</div>`;
+  }
+}
+
+// ============================================
 // 标题栏 — 项目路径显示 (响应式)
 // ============================================
 
@@ -1461,6 +1539,10 @@ function updateTitlebarTitle() {
     titleEl.textContent = "Darkhorse Code";
     titleEl.classList.remove("has-project");
   }
+
+  // 项目切换下拉箭头：仅打开项目时显示
+  const arrow = document.getElementById("project-switch-arrow");
+  if (arrow) arrow.style.display = state.currentProject ? "" : "none";
 }
 
 /**
@@ -2014,13 +2096,35 @@ async function createFolderInFolder(fullPath) {
 // 项目列表（无项目时显示在导航区）
 // ============================================
 
+/**
+ * 项目语言定义：key 与后端 PROJECT_LANGS 对应，图标与标签（i18n lang.*）
+ */
+const PROJECT_LANGS = [
+  { key: "unknown", icon: "Ⓤ" },
+  { key: "mix", icon: "Ⓜ" },
+  { key: "java", icon: "Ⓙ" },
+  { key: "c", icon: "Ⓒ" },
+  { key: "python", icon: "Ⓟ" },
+  { key: "rust", icon: "Ⓡ" },
+  { key: "web", icon: "Ⓦ" },
+  { key: "golang", icon: "Ⓖ" },
+  { key: "document", icon: "Ⓓ" },
+  { key: "kotlin", icon: "Ⓚ" },
+];
+
+/** 语言 key → 图标 */
+function projectLangIcon(lang) {
+  const entry = PROJECT_LANGS.find((l) => l.key === lang);
+  return entry ? entry.icon : PROJECT_LANGS[0].icon;
+}
+
 async function loadProjectList() {
   const list = document.getElementById("project-list");
   if (!list) return;
 
   const invoke = getTauriInvoke();
   if (!invoke) {
-    list.innerHTML = '<span class="project-list-empty">Tauri API 不可用</span>';
+    list.innerHTML = `<span class="project-list-empty">${I18N.t("status.tauri_unavail")}</span>`;
     return;
   }
 
@@ -2028,34 +2132,147 @@ async function loadProjectList() {
     const projects = await invoke("get_projects");
 
     if (!projects || projects.length === 0) {
-      list.innerHTML = '<span class="project-list-empty">暂无历史项目<br>请使用 open project &lt;路径&gt; 打开项目</span>';
+      list.innerHTML = `<span class="project-list-empty">${I18N.t("projectlist.empty")}<br>${I18N.t("projectlist.hint")}</span>`;
       return;
     }
 
     list.innerHTML = projects
-      .map((path) => {
-        const name = path.split(/[/\\]/).pop() || path;
+      .map((p) => {
+        const name = p.name || p.path.split(/[/\\]/).pop() || p.path;
+        const lang = p.lang || "unknown";
+        const icon = projectLangIcon(lang);
         return `
-        <div class="project-list-item" data-path="${escapeHtml(path)}">
-          <span class="project-icon">📁</span>
+        <div class="project-list-item" data-path="${escapeHtml(p.path)}" data-name="${escapeHtml(name)}" data-lang="${escapeHtml(lang)}">
+          <span class="project-icon" title="${escapeHtml(I18N.t(`lang.${lang}`))}">${icon}</span>
           <div class="project-info">
             <div class="project-name">${escapeHtml(name)}</div>
-            <div class="project-path">${escapeHtml(path)}</div>
+            <div class="project-path" title="${escapeHtml(p.path)}">${escapeHtml(p.path)}</div>
           </div>
+          <span class="project-item-edit" title="${escapeHtml(I18N.t("projectlist.edit"))}">✍️</span>
+          <span class="project-item-del" title="${escapeHtml(I18N.t("projectlist.del"))}">🗑️</span>
         </div>`;
       })
       .join("");
 
-    // 点击打开项目
+    // 点击行打开项目；✍️ 修改项目；🗑️ 从列表删除（都走命令系统）
     list.querySelectorAll(".project-list-item").forEach((el) => {
       el.addEventListener("click", () => {
         const path = el.dataset.path;
         if (path) openProject(path);
       });
+
+      const editBtn = el.querySelector(".project-item-edit");
+      if (editBtn) {
+        editBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const result = await showProjectEditModal(
+            el.dataset.path,
+            el.dataset.name,
+            el.dataset.lang
+          );
+          if (result) {
+            // 转义引号与反斜杠，保证命令解析（parseQuotedTokens）还原
+            const escArg = (s) =>
+              String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+            await handleCommand(
+              `project edit "${escArg(result.path)}" "${escArg(result.name)}" ${result.lang}`
+            );
+          }
+        });
+      }
+
+      const delBtn = el.querySelector(".project-item-del");
+      if (delBtn) {
+        delBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const ok = await showConfirm(
+            I18N.t("project.delete.confirm_title"),
+            I18N.t("project.delete.confirm", { path: el.dataset.path })
+          );
+          if (ok) await handleCommand(`project delete ${el.dataset.path}`);
+        });
+      }
     });
   } catch (err) {
-    list.innerHTML = `<span class="project-list-empty">加载失败: ${err}</span>`;
+    list.innerHTML = `<span class="project-list-empty">${I18N.t("projectlist.load_error", { err })}</span>`;
   }
+}
+
+/**
+ * 修改项目弹窗：可改名称与图标（语言），路径只读。
+ * 返回 { path, name, lang } 或 null（取消）。
+ */
+function showProjectEditModal(path, name, lang) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("project-edit-modal");
+    const nameInput = document.getElementById("project-edit-name");
+    const pathText = document.getElementById("project-edit-path");
+    const iconWrap = document.getElementById("project-edit-icons");
+    if (!overlay || !nameInput || !pathText || !iconWrap) {
+      resolve(null);
+      return;
+    }
+
+    let selected = lang || "unknown";
+    nameInput.value = name || "";
+    pathText.textContent = path || "";
+    pathText.title = path || "";
+
+    // 渲染图标选择（10 种语言）
+    iconWrap.innerHTML = "";
+    PROJECT_LANGS.forEach((l) => {
+      const btn = document.createElement("span");
+      btn.className = "project-icon-option" + (l.key === selected ? " selected" : "");
+      btn.textContent = l.icon;
+      btn.title = I18N.t(`lang.${l.key}`);
+      btn.addEventListener("click", () => {
+        selected = l.key;
+        iconWrap
+          .querySelectorAll(".project-icon-option")
+          .forEach((el) => el.classList.remove("selected"));
+        btn.classList.add("selected");
+      });
+      iconWrap.appendChild(btn);
+    });
+
+    const okBtn = document.getElementById("project-edit-ok");
+    const cancelBtn = document.getElementById("project-edit-cancel");
+    okBtn.textContent = I18N.t("modal.ok") || "确认";
+    cancelBtn.textContent = I18N.t("modal.cancel") || "取消";
+
+    const cleanup = () => {
+      overlay.style.display = "none";
+      document.removeEventListener("keydown", onKey);
+    };
+    const onOk = () => {
+      const newName = nameInput.value.trim();
+      if (!newName) {
+        setStatus(I18N.t("project.edit.name_empty"), "error");
+        return;
+      }
+      cleanup();
+      resolve({ path: path || "", name: newName, lang: selected });
+    };
+    const onCancel = () => {
+      cleanup();
+      resolve(null);
+    };
+
+    okBtn.onclick = onOk;
+    cancelBtn.onclick = onCancel;
+    overlay.onclick = (e) => {
+      if (e.target === overlay) onCancel();
+    };
+
+    const onKey = (e) => {
+      if (e.key === "Escape") onCancel();
+      if (e.key === "Enter") onOk();
+    };
+    document.addEventListener("keydown", onKey);
+
+    overlay.style.display = "";
+    nameInput.focus();
+  });
 }
 
 // ============================================
@@ -2713,6 +2930,12 @@ async function autoOpenLastProject() {
   }
 
   try {
+    // 已有其他实例运行时，不自动打开上次项目（重复打开同一项目毫无意义）
+    if (await invoke("is_another_instance")) {
+      showWelcomePage();
+      setStatus(I18N.t("project.other_instance"));
+      return;
+    }
     const lastPath = await invoke("get_last_project");
     if (!lastPath) {
       showWelcomePage();

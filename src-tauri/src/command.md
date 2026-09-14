@@ -9,7 +9,8 @@
 # DSL 命令参考
 
 open project <项目文件夹路径>
-  打开项目。路径需是绝对路径，如 D:\projects\my-app
+  打开或切换项目。路径需是绝对路径，如 D:\projects\my-app。
+  若已打开其他项目，会自动关闭当前项目并切换，无需先 close project
 
 open file <文件路径>
   打开文件。路径相对于项目根目录

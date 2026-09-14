@@ -3,6 +3,7 @@
 mod ai;
 mod config;
 mod git;
+mod instance;
 mod pty;
 mod rag;
 
@@ -42,6 +43,7 @@ fn clean_path(p: &Path) -> String {
 struct ProjectInfo {
     name: String,
     path: String,
+    lang: String,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -104,14 +106,17 @@ fn open_project(
         .to_string_lossy()
         .to_string();
 
-    // 持久化到 projects 配置
-    if let Ok(cfg) = config_mgr.lock() {
-        let _ = cfg.set_current_project(&clean);
-    }
+    // 持久化到 projects 配置（返回保存的项目语言）
+    let lang = config_mgr
+        .lock()
+        .map_err(|e| e.to_string())?
+        .set_current_project(&clean, &name)
+        .unwrap_or_else(|_| config::default_lang());
 
     Ok(ProjectInfo {
         name,
         path: clean,
+        lang,
     })
 }
 
@@ -472,6 +477,12 @@ async fn highlight_code(language: String, code: String) -> Result<Vec<LineHighli
     .map_err(|e| e.to_string())?
 }
 
+/// 是否有其他实例正在运行（第二实例不自动打开上次项目）
+#[tauri::command]
+fn is_another_instance() -> bool {
+    instance::is_other_instance()
+}
+
 /// 获取上次打开的项目路径（供前端启动时自动打开）
 #[tauri::command]
 fn get_last_project(
@@ -481,13 +492,55 @@ fn get_last_project(
     Ok(cfg.load_projects().current)
 }
 
-/// 获取所有已知项目列表
+/// 获取所有已知项目列表（含 name/path/lang）
 #[tauri::command]
 fn get_projects(
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<config::ProjectEntry>, String> {
     let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
     Ok(cfg.load_projects().list)
+}
+
+/// 设置项目语言
+#[tauri::command]
+fn set_project_lang(
+    path: String,
+    lang: String,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
+    cfg.set_project_lang(&path, &lang)
+}
+
+/// 更新项目名称与语言（路径不可修改）
+#[tauri::command]
+fn update_project(
+    path: String,
+    name: String,
+    lang: String,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
+    cfg.update_project(&path, &name, &lang)
+}
+
+/// 从项目列表删除项目（不删除项目文件夹）
+#[tauri::command]
+fn delete_project(
+    path: String,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<(), String> {
+    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
+    cfg.delete_project(&path)
+}
+
+/// 迁移旧版项目配置（纯路径列表 → name/path/lang 条目），返回迁移数量
+#[tauri::command]
+fn migrate_projects(
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<usize, String> {
+    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
+    cfg.migrate_projects()
 }
 
 #[tauri::command]
@@ -988,8 +1041,13 @@ fn main() {
             path_exists,
             rename_path,
             highlight_code,
+            is_another_instance,
             get_last_project,
             get_projects,
+            set_project_lang,
+            update_project,
+            delete_project,
+            migrate_projects,
             get_run_targets,
             run_target,
             spawn_terminal,

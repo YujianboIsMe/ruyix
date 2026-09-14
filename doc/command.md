@@ -52,7 +52,8 @@
 
 ## open 命令
 目前有以下子命令：
-1. project 打开项目。顶部窗口显示项目的绝对路径或项目名。
+1. project 打开/切换项目。顶部窗口显示项目的绝对路径或项目名。
+   已打开其他项目时，open project 会自动关闭当前项目并切换（无需先 close project）；打开的是当前项目则直接提示。
 2. file，禁止打开绝对路径文件，只能打开相对路径。
 示例：
 ```
@@ -167,3 +168,43 @@ run rm 测试
 1. 禁止绝对路径文件，只能相对路径。
 2. 不能含有非法字符
 3. 不能与现有文件/目录重复
+
+## project 命令
+项目属性管理。
+
+子命令：
+- lang 设置项目语言
+- edit 修改项目名称与图标（路径不可修改）
+- delete 从项目列表删除项目
+- migrate 迁移旧版项目配置
+
+### project lang
+```
+project lang <语言> <项目路径>
+```
+语言可选值：unknown/mix/java/c/python/rust/web/golang/document/kotlin
+（见[config.md](config.md) 的语言表）
+路径取 lang 之后的剩余部分，可含空格。
+
+### project edit
+```
+project edit "<项目路径>" "<名称>" <语言>
+```
+路径与名称须加引号（可含空格），语言是最后一个参数。
+项目条目上的 ✍️ 按钮打开弹窗修改，确认后即执行此命令。
+
+### project delete
+```
+project delete <项目路径>
+```
+从项目列表移除条目（不删除项目文件夹）。
+路径取 delete 之后的剩余部分，可含空格，外层引号会自动去除。
+项目条目上的 🗑️ 按钮经确认弹窗后执行此命令。
+
+### project migrate
+```
+project migrate
+```
+把旧版项目配置（纯路径列表）迁移为新格式（name/path/lang），
+旧项目语言全部默认 unknown。
+等价于菜单【项目→迁移配置】。

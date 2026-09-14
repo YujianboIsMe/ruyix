@@ -46,9 +46,46 @@ toml文件的文件名也是前缀的一部分
 所以在~/.darkhorse/code/projects.toml里保存项目
 项目配置项举例（标准运行时）
 ```
-darkhorse.code.projects.current="C:\Users\yujia\PycharmProjects\tmf"
-darkhorse.code.projects.list=["C:\Users\yujia\PycharmProjects\rag","C:\Users\yujia\PycharmProjects\tmf"]
+[projects]
+current = 'C:\Users\yujia\PycharmProjects\tmf'
+
+[[projects.list]]
+name = 'rag'
+path = 'C:\Users\yujia\PycharmProjects\rag'
+lang = 'python'
+
+[[projects.list]]
+name = 'tmf'
+path = 'C:\Users\yujia\PycharmProjects\tmf'
+lang = 'unknown'
 ```
+
+项目属性（0.0.2，未来扩展）：
+1. name 项目名称
+2. path 项目路径
+3. lang 项目语言，默认为 unknown（未知语言）
+
+语言可选值（10种）：
+| key | 图标 | 说明 |
+|:---:|:---:|------|
+| unknown | Ⓤ | 未知语言 |
+| mix | Ⓜ | 混合语言 |
+| java | Ⓙ | Java语言 |
+| c | Ⓒ | C/C++/C#语言 |
+| python | Ⓟ | Python语言 |
+| rust | Ⓡ | Rust语言 |
+| web | Ⓦ | Html/JavaScript/CSS语言 |
+| golang | Ⓖ | Golang语言 |
+| document | Ⓓ | Document或笔记类：pdf/word/markdown |
+| kotlin | Ⓚ | Kotlin语言 |
+
+旧版配置（0.0.1）只有纯路径列表：
+```
+[projects]
+current = 'C:\Users\yujia\PycharmProjects\tmf'
+list = ['C:\Users\yujia\PycharmProjects\rag', 'C:\Users\yujia\PycharmProjects\tmf']
+```
+读取时兼容旧版（自动补默认 name/lang），通过菜单【项目→迁移配置】或命令 `project migrate` 显式迁移为新格式。
 
 ### 运行
 运行目标通过配置来持久化

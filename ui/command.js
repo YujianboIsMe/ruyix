@@ -82,6 +82,9 @@ async function handleCommand(raw, _fromAi = false) {
     case "git":
       await handleGitCommand(raw, _fromAi);
       break;
+    case "project":
+      await handleProjectCommand(raw);
+      break;
     default:
       // 标准命令未命中 → 调用 AI 翻译（防止递归）
       if (!_fromAi) {
@@ -268,6 +271,101 @@ async function handleRunCommand(raw) {
 
   setStatus(I18N.t("cmd.run.success", { name, cmd }));
   loadRunTargets();
+}
+
+/**
+ * project 命令：项目属性管理
+ * 语法:
+ *   project lang <语言> <项目路径>                设置项目语言（路径取 lang 之后的剩余部分）
+ *   project edit "<项目路径>" "<名称>" <语言>     修改项目名称与图标（路径不可修改）
+ *   project delete <项目路径>                     从项目列表删除（路径取剩余部分，可含空格）
+ *   project migrate                              迁移旧版项目配置（纯路径列表 → name/path/lang 条目）
+ */
+async function handleProjectCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_browser"));
+    return;
+  }
+
+  const rest = raw.slice("project".length).trim();
+  if (!rest) {
+    setStatus(I18N.t("cmd.project.usage"));
+    return;
+  }
+
+  // project lang <lang> <path>
+  const langMatch = rest.match(/^lang\s+(\S+)\s+(.+)$/i);
+  if (langMatch) {
+    const lang = langMatch[1].toLowerCase();
+    const path = langMatch[2].trim();
+    try {
+      await invoke("set_project_lang", { path, lang });
+      setStatus(I18N.t("project.lang.ok", { lang: I18N.t(`lang.${lang}`) || lang }));
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.lang.fail", { err }), "error");
+    }
+    return;
+  }
+
+  // project edit "<path>" "<name>" <lang>
+  const editMatch = rest.match(/^edit\s+(.+)$/i);
+  if (editMatch) {
+    // parseQuotedTokens：保留 Windows 路径反斜杠，引号内可含空格
+    const args = parseQuotedTokens(editMatch[1]);
+    if (args.length !== 3) {
+      setStatus(I18N.t("cmd.project.edit_usage"));
+      return;
+    }
+    const [path, name, lang] = args;
+    try {
+      await invoke("update_project", { path, name, lang: lang.toLowerCase() });
+      setStatus(I18N.t("project.edit.ok", { name }));
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.edit.fail", { err }), "error");
+    }
+    return;
+  }
+
+  // project delete <path>（路径取剩余部分，自动去除外层引号）
+  const delMatch = rest.match(/^delete\s+(.+)$/i);
+  if (delMatch) {
+    let path = delMatch[1].trim();
+    if (
+      (path.startsWith('"') && path.endsWith('"')) ||
+      (path.startsWith("'") && path.endsWith("'"))
+    ) {
+      path = path.slice(1, -1);
+    }
+    try {
+      await invoke("delete_project", { path });
+      setStatus(I18N.t("project.delete.ok", { path }));
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.delete.fail", { err }), "error");
+    }
+    return;
+  }
+
+  // project migrate
+  if (/^migrate$/i.test(rest)) {
+    try {
+      const count = await invoke("migrate_projects");
+      if (count > 0) {
+        setStatus(I18N.t("project.migrate.ok", { count }));
+      } else {
+        setStatus(I18N.t("project.migrate.none"));
+      }
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.migrate.fail", { err }), "error");
+    }
+    return;
+  }
+
+  setStatus(I18N.t("cmd.project.usage"));
 }
 
 /**
@@ -881,6 +979,51 @@ async function handleConfigCommand(raw) {
 }
 
 /**
+ * 分词：按空格分割但保留引号内内容。
+ * 与 parseConfigTokens 不同：引号内反斜杠原样保留（兼容 Windows 路径），
+ * 仅 \" 和 \\ 作为转义处理。
+ */
+function parseQuotedTokens(s) {
+  const tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    // 跳过空白
+    while (i < s.length && s[i] === " ") i++;
+    if (i >= s.length) break;
+
+    // 引号包裹
+    if (s[i] === '"' || s[i] === "'") {
+      const quote = s[i];
+      i++;
+      let tok = "";
+      while (i < s.length && s[i] !== quote) {
+        if (
+          s[i] === "\\" &&
+          i + 1 < s.length &&
+          (s[i + 1] === quote || s[i + 1] === "\\")
+        ) {
+          tok += s[i + 1];
+          i += 2;
+        } else {
+          tok += s[i];
+          i++;
+        }
+      }
+      i++; // 跳过闭合引号
+      tokens.push(tok);
+    } else {
+      let tok = "";
+      while (i < s.length && s[i] !== " ") {
+        tok += s[i];
+        i++;
+      }
+      tokens.push(tok);
+    }
+  }
+  return tokens;
+}
+
+/**
  * 分词：按空格分割但保留引号内内容
  */
 function parseConfigTokens(s) {
@@ -1013,6 +1156,30 @@ async function executeConfigAction(action, scope, key, value) {
 // close 命令实现
 // ============================================
 
+/**
+ * 清场当前项目：逐个关闭终端 PTY、清空标签页、回到欢迎页。
+ * 关闭项目与切换项目（openProject）共用。
+ */
+function teardownProject() {
+  // 逐个关闭终端标签页的 PTY 进程，避免关闭/切换项目后进程泄漏
+  const invoke = getTauriInvoke();
+  if (invoke) {
+    state.tabs.forEach((t) => {
+      if (t._isTerminal) {
+        invoke("pty_close", { tabId: t.id }).catch(() => {});
+        if (t._ptyUnlisten) t._ptyUnlisten();
+        if (t._term) t._term.dispose();
+      }
+    });
+  }
+
+  state.currentProject = null;
+  if (typeof updateProjectMenu === "function") updateProjectMenu();
+  updateTitlebarTitle();
+  if (typeof updateWindowTitle === "function") updateWindowTitle();
+  showWelcomePage();
+}
+
 function closeProject() {
   if (!state.currentProject) {
     setStatus(I18N.t("close.project.none"));
@@ -1020,11 +1187,7 @@ function closeProject() {
   }
 
   const name = state.currentProject.name;
-  state.currentProject = null;
-  if (typeof updateProjectMenu === "function") updateProjectMenu();
-  updateTitlebarTitle();
-  if (typeof updateWindowTitle === "function") updateWindowTitle();
-  showWelcomePage();
+  teardownProject();
   setStatus(I18N.t("close.project.ok", { name }));
 }
 
@@ -1108,6 +1271,17 @@ async function openProject(path) {
     // 浏览器开发模式 — 模拟打开项目
     setStatus(I18N.t("status.tauri_browser"));
     return;
+  }
+
+  // 已是当前项目：直接返回
+  if (state.currentProject && samePath(state.currentProject.path, path)) {
+    setStatus(I18N.t("open.project.already"));
+    return;
+  }
+
+  // 切换项目：先清场当前项目（关 PTY、清标签页、回欢迎页）
+  if (state.currentProject) {
+    teardownProject();
   }
 
   try {
@@ -1227,6 +1401,10 @@ ${t("help.cmd_rename")}             ${t("help.desc_rename")}
 ${t("help.cmd_run")}             ${t("help.desc_run")}
 ${t("help.cmd_config")}
                            ${t("help.desc_config")} ${t("help.desc_config_scope")}
+${t("help.cmd_project_lang")} ${t("help.desc_project_lang")}
+${t("help.cmd_project_edit")} ${t("help.desc_project_edit")}
+${t("help.cmd_project_delete")} ${t("help.desc_project_delete")}
+${t("help.cmd_project_migrate")}   ${t("help.desc_project_migrate")}
 
 ${t("help.section_shortcuts")}
 ------

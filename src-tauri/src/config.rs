@@ -64,10 +64,78 @@ impl Scope {
 // Projects 配置
 // ============================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// 项目语言可选值（下拉列表顺序）
+pub const PROJECT_LANGS: &[&str] = &[
+    "unknown", "mix", "java", "c", "python", "rust", "web", "golang", "document", "kotlin",
+];
+
+/// 默认项目语言
+pub fn default_lang() -> String {
+    "unknown".to_string()
+}
+
+/// 从路径提取文件夹名作为项目名
+fn name_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// 项目条目：名称 + 路径 + 语言（未来可扩展更多属性）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectEntry {
+    pub name: String,
+    pub path: String,
+    #[serde(default = "default_lang")]
+    pub lang: String,
+}
+
+/// 项目列表条目：兼容旧版纯路径字符串
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ProjectListEntry {
+    Legacy(String),
+    Entry(ProjectEntry),
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ProjectsConfig {
     pub current: Option<String>,
-    pub list: Vec<String>,
+    pub list: Vec<ProjectEntry>,
+}
+
+impl<'de> Deserialize<'de> for ProjectsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            current: Option<String>,
+            #[serde(default)]
+            list: Vec<ProjectListEntry>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let list = raw
+            .list
+            .into_iter()
+            .map(|e| match e {
+                // 旧版：纯路径字符串 → 补上默认 name/lang
+                ProjectListEntry::Legacy(path) => ProjectEntry {
+                    name: name_from_path(&path),
+                    path,
+                    lang: default_lang(),
+                },
+                ProjectListEntry::Entry(entry) => entry,
+            })
+            .collect();
+        Ok(ProjectsConfig {
+            current: raw.current,
+            list,
+        })
+    }
 }
 
 // ============================================
@@ -83,21 +151,21 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new() -> Self {
-        let global_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".darkhorse")
-            .join("code");
+        Self::new_with_dir(
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".darkhorse")
+                .join("code"),
+        )
+    }
 
+    /// 使用指定配置目录（测试用）
+    pub fn new_with_dir(global_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&global_dir);
-
         Self {
             global_dir,
             runtime: HashMap::new(),
         }
-    }
-
-    pub fn global_dir(&self) -> &PathBuf {
-        &self.global_dir
     }
 
     // ============================================
@@ -228,12 +296,100 @@ impl ConfigManager {
         fs::write(self.projects_path(), toml_str).map_err(|e| format!("写入配置失败: {}", e))
     }
 
-    pub fn set_current_project(&self, project_path: &str) -> Result<(), String> {
+    /// 记录当前项目。返回该条目保存的语言（已有条目保留原语言，新条目默认 unknown）。
+    pub fn set_current_project(
+        &self,
+        project_path: &str,
+        project_name: &str,
+    ) -> Result<String, String> {
         let mut cfg = self.load_projects();
-        cfg.list.retain(|p| p != project_path);
-        cfg.list.push(project_path.to_string());
+        // 保留已有条目的语言，仅刷新名称
+        let lang = cfg
+            .list
+            .iter()
+            .find(|e| e.path == project_path)
+            .map(|e| e.lang.clone())
+            .unwrap_or_else(default_lang);
+        cfg.list.retain(|e| e.path != project_path);
+        cfg.list.push(ProjectEntry {
+            name: project_name.to_string(),
+            path: project_path.to_string(),
+            lang: lang.clone(),
+        });
         cfg.current = Some(project_path.to_string());
+        self.save_projects(&cfg)?;
+        Ok(lang)
+    }
+
+    /// 设置项目语言
+    pub fn set_project_lang(&self, project_path: &str, lang: &str) -> Result<(), String> {
+        if !PROJECT_LANGS.contains(&lang) {
+            return Err(format!("未知语言: {}", lang));
+        }
+        let mut cfg = self.load_projects();
+        let entry = cfg
+            .list
+            .iter_mut()
+            .find(|e| e.path == project_path)
+            .ok_or_else(|| format!("项目不在列表中: {}", project_path))?;
+        entry.lang = lang.to_string();
         self.save_projects(&cfg)
+    }
+
+    /// 更新项目名称与语言（路径不可修改）
+    pub fn update_project(&self, path: &str, name: &str, lang: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("项目名称不能为空".to_string());
+        }
+        if !PROJECT_LANGS.contains(&lang) {
+            return Err(format!("未知语言: {}", lang));
+        }
+        let mut cfg = self.load_projects();
+        let entry = cfg
+            .list
+            .iter_mut()
+            .find(|e| e.path == path)
+            .ok_or_else(|| format!("项目不在列表中: {}", path))?;
+        entry.name = name.trim().to_string();
+        entry.lang = lang.to_string();
+        self.save_projects(&cfg)
+    }
+
+    /// 从项目列表删除条目（不删除项目文件夹）。若删除的是当前项目，同时清空 current。
+    pub fn delete_project(&self, path: &str) -> Result<(), String> {
+        let mut cfg = self.load_projects();
+        let before = cfg.list.len();
+        cfg.list.retain(|e| e.path != path);
+        if cfg.list.len() == before {
+            return Err(format!("项目不在列表中: {}", path));
+        }
+        if cfg.current.as_deref() == Some(path) {
+            cfg.current = None;
+        }
+        self.save_projects(&cfg)
+    }
+
+    /// 迁移旧版配置：把 projects.list 里的纯路径字符串转换为带 name/lang 的条目，
+    /// 并写回新格式。返回迁移的旧条目数量（0 = 无需迁移）。
+    pub fn migrate_projects(&self) -> Result<usize, String> {
+        let content = match fs::read_to_string(self.projects_path()) {
+            Ok(s) => s,
+            Err(_) => return Ok(0), // 文件不存在，无需迁移
+        };
+        // 检查 list 中是否还有纯字符串条目
+        let legacy_count = toml::from_str::<toml::Value>(&content)
+            .ok()
+            .and_then(|v| {
+                let list = v.get("projects")?.get("list")?.as_array()?;
+                Some(list.iter().filter(|x| x.is_str()).count())
+            })
+            .unwrap_or(0);
+        if legacy_count == 0 {
+            return Ok(0); // 已是新格式
+        }
+        let cfg = self.load_projects(); // load_projects 会把旧字符串转成新条目
+        self.save_projects(&cfg)?;
+        Ok(legacy_count)
     }
 
     // ============================================
@@ -453,5 +609,176 @@ impl ConfigManager {
 
         let toml_str = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
         fs::write(path, toml_str).map_err(|e| format!("写入配置失败: {}", e))
+    }
+}
+
+// ============================================
+// 测试
+// ============================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct File {
+        projects: ProjectsConfig,
+    }
+
+    /// 旧版配置（纯路径列表）能解析为带默认 name/lang 的条目
+    #[test]
+    fn legacy_path_list_parses_to_entries() {
+        let legacy = r#"
+[projects]
+current = 'C:\foo\bar'
+list = ['C:\foo\bar', 'C:\baz\qux']
+"#;
+        let cfg: ProjectsConfig = toml::from_str::<File>(legacy).unwrap().projects;
+        assert_eq!(cfg.current.as_deref(), Some(r"C:\foo\bar"));
+        assert_eq!(cfg.list.len(), 2);
+        assert_eq!(cfg.list[0].name, "bar");
+        assert_eq!(cfg.list[0].path, r"C:\foo\bar");
+        assert_eq!(cfg.list[0].lang, "unknown");
+        assert_eq!(cfg.list[1].name, "qux");
+        assert_eq!(cfg.list[1].lang, "unknown");
+    }
+
+    /// 新版配置（name/path/lang 条目）正常解析，缺省 lang 补默认值
+    #[test]
+    fn new_format_parses_with_default_lang() {
+        let new_fmt = r#"
+[projects]
+current = 'C:\foo\bar'
+
+[[projects.list]]
+name = 'bar'
+path = 'C:\foo\bar'
+lang = 'python'
+
+[[projects.list]]
+name = 'qux'
+path = 'C:\baz\qux'
+"#;
+        let cfg: ProjectsConfig = toml::from_str::<File>(new_fmt).unwrap().projects;
+        assert_eq!(cfg.list.len(), 2);
+        assert_eq!(cfg.list[0].lang, "python");
+        assert_eq!(cfg.list[1].lang, "unknown");
+    }
+
+    /// 新格式序列化后能读回（round-trip）
+    #[test]
+    fn roundtrip() {
+        let cfg = ProjectsConfig {
+            current: Some(r"C:\foo\bar".to_string()),
+            list: vec![ProjectEntry {
+                name: "bar".to_string(),
+                path: r"C:\foo\bar".to_string(),
+                lang: "python".to_string(),
+            }],
+        };
+        let toml_str = toml::to_string_pretty(&File { projects: cfg }).unwrap();
+        let parsed: ProjectsConfig = toml::from_str::<File>(&toml_str).unwrap().projects;
+        assert_eq!(parsed.current.as_deref(), Some(r"C:\foo\bar"));
+        assert_eq!(parsed.list.len(), 1);
+        assert_eq!(parsed.list[0].name, "bar");
+        assert_eq!(parsed.list[0].lang, "python");
+    }
+
+    /// 语言可选值：10 种，第一种为 unknown（默认）
+    #[test]
+    fn langs_list_has_ten_entries() {
+        assert_eq!(PROJECT_LANGS.len(), 10);
+        assert_eq!(PROJECT_LANGS[0], "unknown");
+    }
+
+    /// migrate_projects：旧版纯路径列表 → 新格式，返回迁移数量；再次迁移返回 0
+    #[test]
+    fn migrate_projects_rewrites_legacy_file() {
+        let dir = std::env::temp_dir().join(format!("dhc-config-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let legacy = r#"
+[projects]
+current = 'C:\foo\bar'
+list = ['C:\foo\bar', 'C:\baz\qux']
+"#;
+        fs::write(dir.join("projects.toml"), legacy).unwrap();
+
+        let mgr = ConfigManager::new_with_dir(dir.clone());
+        // 第一次迁移：2 个旧条目
+        assert_eq!(mgr.migrate_projects().unwrap(), 2);
+
+        let cfg = mgr.load_projects();
+        assert_eq!(cfg.list.len(), 2);
+        assert_eq!(cfg.list[0].name, "bar");
+        assert_eq!(cfg.list[0].lang, "unknown");
+        assert_eq!(cfg.list[1].name, "qux");
+        assert_eq!(cfg.current.as_deref(), Some(r"C:\foo\bar"));
+
+        // 已是新格式：无需迁移
+        assert_eq!(mgr.migrate_projects().unwrap(), 0);
+
+        // 设置语言并持久化
+        mgr.set_project_lang(r"C:\baz\qux", "python").unwrap();
+        let cfg2 = mgr.load_projects();
+        assert_eq!(cfg2.list[1].lang, "python");
+
+        // 非法语言被拒绝
+        assert!(mgr.set_project_lang(r"C:\baz\qux", "bogus").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// update_project：改名称与语言；delete_project：删除条目并清空 current
+    #[test]
+    fn update_and_delete_project() {
+        let dir = std::env::temp_dir().join(format!("dhc-config-test2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let new_fmt = r#"
+[projects]
+current = 'C:\foo\bar'
+
+[[projects.list]]
+name = 'bar'
+path = 'C:\foo\bar'
+lang = 'unknown'
+
+[[projects.list]]
+name = 'qux'
+path = 'C:\baz\qux'
+lang = 'unknown'
+"#;
+        fs::write(dir.join("projects.toml"), new_fmt).unwrap();
+
+        let mgr = ConfigManager::new_with_dir(dir.clone());
+
+        // 修改名称与语言
+        mgr.update_project(r"C:\foo\bar", " 我的项目 ", "rust").unwrap();
+        let cfg = mgr.load_projects();
+        assert_eq!(cfg.list[0].name, "我的项目"); // trim 生效
+        assert_eq!(cfg.list[0].lang, "rust");
+        assert_eq!(cfg.list[0].path, r"C:\foo\bar"); // 路径不变
+
+        // 空名称被拒绝
+        assert!(mgr.update_project(r"C:\foo\bar", "  ", "rust").is_err());
+        // 非法语言被拒绝
+        assert!(mgr.update_project(r"C:\foo\bar", "ok", "bogus").is_err());
+        // 不存在的项目被拒绝
+        assert!(mgr.update_project(r"C:\nope", "x", "rust").is_err());
+
+        // 删除当前项目：条目移除且 current 清空
+        mgr.delete_project(r"C:\foo\bar").unwrap();
+        let cfg = mgr.load_projects();
+        assert_eq!(cfg.list.len(), 1);
+        assert_eq!(cfg.list[0].path, r"C:\baz\qux");
+        assert!(cfg.current.is_none());
+
+        // 删除不存在的项目报错
+        assert!(mgr.delete_project(r"C:\foo\bar").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
