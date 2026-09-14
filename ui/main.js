@@ -618,6 +618,7 @@ function extToLanguage(ext) {
     md: "markdown",
     markdown: "markdown",
     sql: "sql",
+    java: "java",
   };
   return map[ext] || null;
 }
@@ -641,6 +642,7 @@ function fileIcon(name) {
     md: "Ⓜ️",
     markdown: "Ⓜ️",
     sql: "🛢️",
+    java: "☕",
     png: "🖼️",
     jpg: "🖼️",
     jpeg: "🖼️",
@@ -670,14 +672,15 @@ function updateOutline(tab) {
     items = parseRustOutline(tab.content);
   } else if (ext === "py") {
     items = parsePythonOutline(tab.content);
+  } else if (ext === "java") {
+    items = parseJavaOutline(tab.content);
   } else {
-    content.innerHTML =
-      '<div class="outline-placeholder">大纲（支持 Markdown / Rust / Python）</div>';
+    content.innerHTML = `<div class="outline-placeholder">${I18N.t("outline.placeholder")}</div>`;
     return;
   }
 
   if (items.length === 0) {
-    content.innerHTML = '<div class="outline-placeholder">无大纲</div>';
+    content.innerHTML = `<div class="outline-placeholder">${I18N.t("outline.none")}</div>`;
     return;
   }
 
@@ -777,6 +780,74 @@ function parsePythonOutline(content) {
       items.push({ level, text: `async def ${match[1]}()`, line: i + 1 });
     } else if ((match = trimmed.match(/^def\s+(\w+)/))) {
       items.push({ level, text: `def ${match[1]}()`, line: i + 1 });
+    }
+  }
+  return items;
+}
+
+/** Java 类级别名（修饰符 + 声明的组合） */
+const JAVA_MODIFIER =
+  "(?:public|protected|private|static|final|abstract|synchronized|native|transient|volatile|strictfp|default|sealed|non-sealed)";
+/** 类型声明：class / interface / enum / record（含修饰符前缀，如 public final） */
+const JAVA_TYPE_DECL = new RegExp(
+  `^(?:${JAVA_MODIFIER}\\s+)*(class|interface|enum|record)\\s+(\\w+)`
+);
+/** 注解类型声明：@interface Foo */
+const JAVA_ANNOTATION_TYPE = new RegExp(
+  `^(?:${JAVA_MODIFIER}\\s+)*@interface\\s+(\\w+)`
+);
+/** 构造方法：类名首字母大写 + 参数表，行尾是 { 或 throws（用于与普通调用区分） */
+const JAVA_CONSTRUCTOR = new RegExp(
+  `^(?:${JAVA_MODIFIER}\\s+)*([A-Z]\\w*)\\s*\\([^)]*\\)\\s*(?:throws\\s+[\\w,.\\s]+)?\\{?\\s*$`
+);
+/**
+ * 方法声明：`修饰符 返回类型 名字(`
+ * 要求“类型与名字之间必须有空格”，据此排除调用语句（`System.out.println(` 无空格、`foo(` 无类型）。
+ */
+const JAVA_METHOD = new RegExp(
+  `^(?:${JAVA_MODIFIER}\\s+)*([\\w<>\\[\\],.?]+)\\s+(\\w+)\\s*\\(`
+);
+/**
+ * 字段：必须带访问修饰符或 static/transient/volatile —— 这些不可能是局部变量。
+ * 只写 final 的语句可能是方法内局部变量，故意不收。
+ */
+const JAVA_FIELD = new RegExp(
+  `^(?:(?:public|protected|private|static|transient|volatile)\\s+)+(?:final\\s+)*` +
+    `([\\w<>\\[\\],.?]+)\\s+(\\w+)\\s*(?:=[^;]*)?;\\s*$`
+);
+/** 语句关键字开头：不是声明，直接跳过（含 return/if 等误命中来源） */
+const JAVA_STATEMENT_KEYWORD =
+  /^(return|throw|break|continue|assert|if|for|while|switch|do|else|catch|case|import|package|new|yield|try)\b/;
+
+function parseJavaOutline(content) {
+  const items = [];
+  const lines = content.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    // 缩进层级：类体成员 = 2 级，方法体内部 ≥ 3 级（用于过滤局部变量）
+    const indent = raw.match(/^(\s*)/)[1];
+    const indentLen = indent.replace(/\t/g, "    ").length;
+    const level = Math.min(Math.floor(indentLen / 4) + 1, 3);
+
+    // 剥掉行首注解（@Override / @SuppressWarnings("x")），再判断内容
+    const line = raw.replace(/^(?:@\w+(?:\([^)]*\))?\s*)+/, "").trim();
+    if (!line || line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) {
+      continue;
+    }
+    if (JAVA_STATEMENT_KEYWORD.test(line)) continue;
+
+    let match;
+    if ((match = raw.trim().match(JAVA_ANNOTATION_TYPE))) {
+      items.push({ level, text: `@interface ${match[1]}`, line: i + 1 });
+    } else if ((match = line.match(JAVA_TYPE_DECL))) {
+      items.push({ level, text: `${match[1]} ${match[2]}`, line: i + 1 });
+    } else if ((match = line.match(JAVA_CONSTRUCTOR))) {
+      items.push({ level, text: `${match[1]}()`, line: i + 1 });
+    } else if ((match = line.match(JAVA_METHOD))) {
+      items.push({ level, text: `${match[2]}()`, line: i + 1 });
+    } else if (level <= 2 && (match = line.match(JAVA_FIELD))) {
+      items.push({ level, text: `${match[1]} ${match[2]}`, line: i + 1 });
     }
   }
   return items;

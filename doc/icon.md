@@ -10,6 +10,7 @@
 - html文件，图标🌏
 - css文件，图标🎨
 - js文件，图标Ⓙ
+- java文件，图标☕
 - md文件，图标Ⓜ️
 - png/jpg/jpeg/icon文件，图标🖼️
 - .gitignore文件🚫

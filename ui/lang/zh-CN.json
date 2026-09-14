@@ -28,7 +28,7 @@
   "outline.header": "大纲",
   "outline.empty": "大纲（待实现）",
   "outline.none": "无大纲",
-  "outline.placeholder": "大纲（支持 Markdown / Rust / Python）",
+  "outline.placeholder": "大纲（支持 Markdown / Rust / Python / Java）",
   "statusbar.ready": "就绪",
   "statusbar.encoding": "UTF-8",
   "statusbar.rust": "Rust 2024",

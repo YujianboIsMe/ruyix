@@ -28,7 +28,7 @@
   "outline.header": "Outline",
   "outline.empty": "Outline (coming soon)",
   "outline.none": "No outline",
-  "outline.placeholder": "Outline (Markdown / Rust / Python)",
+  "outline.placeholder": "Outline (Markdown / Rust / Python / Java)",
   "statusbar.ready": "Ready",
   "statusbar.encoding": "UTF-8",
   "statusbar.rust": "Rust 2024",

@@ -16,6 +16,11 @@
 3. html/css/javascript. 请注意：大部分html文件里会嵌入js/css代码。
 4. markdown,只高亮、不预览
 5. sql文件
+6. java文件（`.java`）
+
+> 新增语言的落地位置：`src-tauri/Cargo.toml` 的 arborium `lang-*` feature、
+> `ui/main.js` 的 `extToLanguage()`（扩展名 → arborium 语言名）与 `fileIcon()`（标签页/文件树图标）。
+> 三者缺一，表现为"打开文件没有高亮"。
 
 ## 标签页图标
 参考[icon](./icon.md)

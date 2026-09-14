@@ -1082,6 +1082,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use arborium::Highlighter;
 
     /// SQL 语法高亮：验证 lang-sql feature 启用后 arborium 能识别 "sql" 语言
@@ -1092,5 +1093,64 @@ mod tests {
             .highlight_spans("sql", "SELECT id, name FROM users WHERE age > 18;")
             .expect("SQL 高亮失败");
         assert!(!spans.is_empty(), "SQL 高亮应返回 span");
+    }
+
+    /// Java 语法高亮：验证 lang-java feature 启用后 arborium 能识别 "java" 语言
+    #[test]
+    fn java_highlight_works() {
+        let mut highlighter = Highlighter::new();
+        let src = "public class Main {\n    public static void main(String[] args) {\n        // 打印\n        System.out.println(\"hello\");\n    }\n}";
+        let spans = highlighter
+            .highlight_spans("java", src)
+            .expect("Java 高亮失败");
+        assert!(!spans.is_empty(), "Java 高亮应返回 span");
+
+        // 关键字 public/class/static 应被识别为关键字或类型捕获
+        let captures: Vec<&str> = spans.iter().map(|s| s.capture.as_str()).collect();
+        assert!(
+            captures.iter().any(|c| c.contains("keyword")),
+            "Java 应至少产生一个 keyword 捕获，实际: {:?}",
+            captures
+        );
+
+        // 注释与字符串也应被捕获
+        assert!(
+            captures.iter().any(|c| c.contains("comment")),
+            "Java 应捕获注释，实际: {:?}",
+            captures
+        );
+        assert!(
+            captures.iter().any(|c| c.contains("string")),
+            "Java 应捕获字符串，实际: {:?}",
+            captures
+        );
+
+        // 走一遍 highlight_code 的映射链路：capture → theme tag → CSS 类名
+        // 若此步为空，说明前端拿不到任何 span（表现为"无高亮"）
+        let themed: Vec<(u32, u32, &str)> = spans
+            .iter()
+            .filter_map(|s| {
+                arborium_theme::tag_for_capture(&s.capture)
+                    .and_then(arborium_theme::tag_to_name)
+                    .map(|name| (s.start, s.end, name))
+            })
+            .collect();
+        assert!(!themed.is_empty(), "Java 捕获应能映射到主题 tag");
+        for expected in ["keyword", "string", "comment", "type"] {
+            assert!(
+                themed.iter().any(|(_, _, name)| *name == expected),
+                "Java 高亮应包含 {} 主题 tag，实际: {:?}",
+                expected,
+                themed.iter().map(|(_, _, n)| *n).collect::<Vec<_>>()
+            );
+        }
+
+        // 端到端：行级高亮结果应携带 span（前端据此渲染 <span class="tok-*">）
+        let lines = build_line_highlights(src, &themed).expect("构建行级高亮失败");
+        assert_eq!(lines.len(), 6, "6 行源码应生成 6 行高亮");
+        assert!(
+            lines.iter().any(|l| !l.spans.is_empty()),
+            "至少一行应包含高亮 span"
+        );
     }
 }
