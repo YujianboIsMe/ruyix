@@ -99,8 +99,8 @@ async function handleCommand(raw, _fromAi = false) {
  * run 命令：快捷添加运行目标
  * 语法: run <name>=<cmd>
  * 等价于:
- *   config add -p darkhorse.code.run.target<N>.cmd=<cmd>
- *   config add -p darkhorse.code.run.target<N>.name=<name>
+ *   config add -p ruyix.code.run.target<N>.cmd=<cmd>
+ *   config add -p ruyix.code.run.target<N>.name=<name>
  * 其中 <N> = 现有运行目标数量
  */
 async function handleRunCommand(raw) {
@@ -140,9 +140,9 @@ async function handleRunCommand(raw) {
         setStatus(I18N.t("cmd.run.del_not_found", { name: targetName }), "error");
         return;
       }
-      const cmdKey = `darkhorse.code.run.${target.key}.cmd`;
-      const nameKey = `darkhorse.code.run.${target.key}.name`;
-      const bindKey = `darkhorse.code.run.${target.key}.bind`;
+      const cmdKey = `ruyix.code.run.${target.key}.cmd`;
+      const nameKey = `ruyix.code.run.${target.key}.name`;
+      const bindKey = `ruyix.code.run.${target.key}.bind`;
       await executeConfigAction("remove", "p", cmdKey);
       await executeConfigAction("remove", "p", nameKey);
       // bind 可能不存在，忽略错误
@@ -181,8 +181,8 @@ async function handleRunCommand(raw) {
         return;
       }
 
-      const cmdKey = `darkhorse.code.run.${target.key}.cmd`;
-      const nameKey = `darkhorse.code.run.${target.key}.name`;
+      const cmdKey = `ruyix.code.run.${target.key}.cmd`;
+      const nameKey = `ruyix.code.run.${target.key}.name`;
 
       // 提示用户输入新名称
       const newName = await showPrompt("修改运行目标名称", target.name);
@@ -235,8 +235,8 @@ async function handleRunCommand(raw) {
   }
 
   // 用户手动创建：以用户提供的名称作为 key
-  const cmdKey = `darkhorse.code.run.${name}.cmd`;
-  const nameKey = `darkhorse.code.run.${name}.name`;
+  const cmdKey = `ruyix.code.run.${name}.cmd`;
+  const nameKey = `ruyix.code.run.${name}.name`;
 
   // 检查是否已存在同名目标
   try {

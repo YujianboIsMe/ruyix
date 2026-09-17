@@ -30,10 +30,10 @@ npm error enoent Could not read package.json: Error: ENOENT: no such file or dir
 <项目根>\
 ├── admin-web\
 │   └── package.json
-└── .darkhorse\code\run.toml
+└── .ruyix\code\run.toml
 ```
 
-2. `<项目根>\.darkhorse\code\run.toml`：
+2. `<项目根>\.ruyix\code\run.toml`：
 
 ```toml
 [run]

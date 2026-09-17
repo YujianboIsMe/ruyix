@@ -27,7 +27,7 @@
 ### 设计目标
 
 - **二级（Lua）是第一道缓存**：LLM 每次翻译成功后，不仅返回标准命令，还生成一段 Lua 模式匹配代码追加到 `learn.lua`。下次相同或类似的自然语言输入被 Lua 捕获，不再调用 LLM。
-- **逐项目学习**：`learn.lua` 存放在项目根目录的 `.darkhorse/code/learn.lua`，每个项目的习惯独立积累。
+- **逐项目学习**：`learn.lua` 存放在项目根目录的 `.ruyix/code/learn.lua`，每个项目的习惯独立积累。
 - **渐进升级**：脚本从简单的字符串匹配开始，随着 LLM 不断更新，逐步覆盖更多模式。
 - **Lua 选择理由**：
   - 解释器可嵌入 Rust 二进制（mlua），零外部依赖
@@ -98,10 +98,10 @@ index已0开始，从左到右
 
 举例
 ``` 
-config add -p darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
-config add -p darkhorse.code.run.target0.name="pdf转储es"
-config add -r darkhorse.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
-config add -r darkhorse.code.run.target0.name="pdf转储es"
+config add -p ruyix.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
+config add -p ruyix.code.run.target0.name="pdf转储es"
+config add -r ruyix.code.run.target0.cmd="C:\Users\yujia\PycharmProjects\rag\.venv\Scripts\python.exe C:\Users\yujia\PycharmProjects\rag\src\P05-es\pdf2es.py"
+config add -r ruyix.code.run.target0.name="pdf转储es"
 ```
 
 ## new 命令
@@ -138,8 +138,8 @@ config add -r darkhorse.code.run.target0.name="pdf转储es"
 
 ### 添加run
 这是一个快捷命令，先转化为两条标准命令
-config add -p darkhorse.code.run.target<index>.cmd=<cmd> 
-config add -p darkhorse.code.run.target<index>.name=<name\>
+config add -p ruyix.code.run.target<index>.cmd=<cmd> 
+config add -p ruyix.code.run.target<index>.name=<name\>
 <index> 怎么计算呢？
 很简单，max(已有索引) + 1。
 

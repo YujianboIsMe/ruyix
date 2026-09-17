@@ -5,9 +5,9 @@
 //!   qdrant-edge (嵌入式，进程内) → 向量存储与检索
 //!
 //! 存储路径：
-//!   ~/.darkhorse/code/qdrant/     qdrant 数据
-//!   ~/.darkhorse/code/rag.toml    全局 RAG 配置（嵌入 API 地址/密钥/维度）
-//!   ./.darkhorse/code/rag.toml    项目索引状态
+//!   ~/.ruyix/code/qdrant/     qdrant 数据
+//!   ~/.ruyix/code/rag.toml    全局 RAG 配置（嵌入 API 地址/密钥/维度）
+//!   ./.ruyix/code/rag.toml    项目索引状态
 
 use qdrant_edge::{
     Condition, CountRequest, Distance, EdgeConfig, EdgeShard, EdgeVectorParams, FieldCondition,
@@ -74,7 +74,7 @@ pub struct GlobalRagConfig {
     pub permanently_disabled: bool,
     /// 在线嵌入 API 地址（OpenAI 兼容），如 https://api.deepseek.com/v1/embeddings
     pub api_url: Option<String>,
-    /// API 密钥（缺省时复用 darkhorse.code.ai.api_key）
+    /// API 密钥（缺省时复用 ruyix.code.ai.api_key）
     pub api_key: Option<String>,
     /// 嵌入模型名，默认 deepseek-embedding
     pub model: Option<String>,
@@ -106,7 +106,7 @@ const EXCLUDED_DIRS: &[&str] = &[
     "coverage",
     ".idea",
     ".vscode",
-    ".darkhorse",
+    ".ruyix",
 ];
 
 const EXCLUDED_EXTENSIONS: &[&str] = &[
@@ -182,7 +182,7 @@ impl QdrantManager {
     pub fn new(dim: usize) -> Self {
         let data_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".darkhorse")
+            .join(".ruyix")
             .join("code")
             .join("qdrant");
         Self {
@@ -492,7 +492,9 @@ impl EmbeddingClient {
                 text.chars().take(300).collect::<String>()
             );
             if self.api_key.is_none() {
-                msg.push_str("（未配置 API Key，请先执行: config add -g darkhorse.code.ai.api_key <你的密钥>）");
+                msg.push_str(
+                    "（未配置 API Key，请先执行: config add -g ruyix.code.ai.api_key <你的密钥>）",
+                );
             }
             return Err(msg);
         }
@@ -564,7 +566,7 @@ impl RagManager {
     /// 读取项目 rag.toml
     pub fn load_config(&mut self, project_root: &str) -> Result<(), String> {
         let path = PathBuf::from(project_root)
-            .join(".darkhorse")
+            .join(".ruyix")
             .join("code")
             .join("rag.toml");
         if path.exists() {
@@ -586,7 +588,7 @@ impl RagManager {
 
     /// 保存项目 rag.toml
     pub fn save_config(&self, project_root: &str) -> Result<(), String> {
-        let dir = PathBuf::from(project_root).join(".darkhorse").join("code");
+        let dir = PathBuf::from(project_root).join(".ruyix").join("code");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join("rag.toml");
         let toml_str = toml::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
@@ -944,7 +946,7 @@ fn config_files_remove(config: &mut ProjectRagConfig, rel_path: &str) {
 pub fn load_global_rag_config() -> GlobalRagConfig {
     let path = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".darkhorse")
+        .join(".ruyix")
         .join("code")
         .join("rag.toml");
     if path.exists()
@@ -959,7 +961,7 @@ pub fn load_global_rag_config() -> GlobalRagConfig {
 pub fn save_global_rag_config(cfg: &GlobalRagConfig) -> Result<(), String> {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".darkhorse")
+        .join(".ruyix")
         .join("code");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("rag.toml");

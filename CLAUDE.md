@@ -14,7 +14,7 @@ follows Google JS / HTML / CSS / JSON style guides. Full rules: `doc/编码规�
 cargo fmt --check                  # Rust 格式（rustfmt.toml: max_width 100 等）
 node scripts/check-style.js        # JS/HTML/CSS/JSON 风格（零依赖，0 error 才算过）
 cargo clippy --all-targets         # 静态检查，必须 0 warning
-cargo test -p darkhorse-code       # 单元测试
+cargo test -p ruyix       # 单元测试
 ```
 
 Notes: `ui/xterm.js` / `ui/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
@@ -22,7 +22,7 @@ no npm/bundler, so never add npm tooling — `scripts/check-style.js` is the sty
 
 ## Project Vision
 
-darkhorse-code is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Monaco Editor. Currently the editor is a custom implementation using a transparent `<textarea>` overlaid on a syntax-highlighted backdrop via CSS Grid.
+ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Monaco Editor. Currently the editor is a custom implementation using a transparent `<textarea>` overlaid on a syntax-highlighted backdrop via CSS Grid.
 
 **Architecture principle**: The command system is the **sole bridge** between frontend and backend. All GUI operations (context menu, buttons, clicks) MUST route through `handleCommand()`. No `invoke()` calls from UI event handlers — that creates AI integration blind spots.
 
@@ -145,7 +145,7 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
   emoji: true | false          (overlay toggle, independent)
 ```
 
-- Config keys: `darkhorse.code.ui.lang`, `darkhorse.code.ui.emoji`
+- Config keys: `ruyix.code.ui.lang`, `ruyix.code.ui.emoji`
 - `I18N.init()` reads config, loads the right JSON file
 - `I18N.t(key, params)` returns translated string with `{param}` substitution
 - `I18N.setLang()` / `I18N.setEmoji()` persist to config
@@ -155,16 +155,16 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 ## AI Integration (ai.rs)
 
 - System prompt: `src-tauri/src/command.md` compiled via `include_str!`
-- Emoji mode: `src-tauri/src/command-emoji.md` (selected when `darkhorse.code.ui.emoji == "true"`)
+- Emoji mode: `src-tauri/src/command-emoji.md` (selected when `ruyix.code.ui.emoji == "true"`)
 - Project context: When project is open, project root path is prepended to user message
-- All AI config read from `darkhorse.code.ai.*` keys (runtime → project → global fallback)
+- All AI config read from `ruyix.code.ai.*` keys (runtime → project → global fallback)
 
 ## UI Components
 
 ### Welcome Page
 - 3×3 CSS grid of feature cards (no SVG, no PNG), grouped into 3 dimension rows with labels: 功能 / 性能 / 智能 (Features / Performance / Intelligence)
 - Content lives in `welcome-zh.html` / `welcome-en.html`, fetched by `loadWelcome()` based on `I18N.getLang()` and injected into `#welcome-content` (token-guarded against races)
-- Bottom text: `darkhorse-code` / `越来越懂你` (zh) or `The more you use it, the more it understands you.` (en)
+- Bottom text: `ruyix` / `越来越懂你` (zh) or `The more you use it, the more it understands you.` (en)
 
 ### Context Menu (file tree right-click)
 - Folder: Delete / Rename / Create File
@@ -187,17 +187,17 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 
 ## Config System (config.rs)
 
-Three scopes with prefix `darkhorse.code`:
+Three scopes with prefix `ruyix.code`:
 | Scope | Flag | Storage |
 |-------|------|---------|
-| Global | `-g` | `~/.darkhorse/code/<section>.toml` |
-| Project | `-p` | `<project_root>/.darkhorse/code/<section>.toml` |
+| Global | `-g` | `~/.ruyix/code/<section>.toml` |
+| Project | `-p` | `<project_root>/.ruyix/code/<section>.toml` |
 | Runtime | `-r` | In-memory HashMap (not persisted) |
 
 Known config keys:
-- `darkhorse.code.ai.api_key` / `api_url` / `model`
-- `darkhorse.code.ui.lang` / `darkhorse.code.ui.emoji`
-- `darkhorse.code.run.target<N>.cmd` / `target<N>.name`
+- `ruyix.code.ai.api_key` / `api_url` / `model`
+- `ruyix.code.ui.lang` / `ruyix.code.ui.emoji`
+- `ruyix.code.run.target<N>.cmd` / `target<N>.name`
 
 ## Tauri Commands (main.rs)
 

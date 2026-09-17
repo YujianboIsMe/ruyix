@@ -4,7 +4,7 @@
  */
 
 window.I18N = (() => {
-  const LANG_KEY = "darkhorse.code.ui.lang";
+  const LANG_KEY = "ruyix.code.ui.lang";
 
   let _data = {};
   let _lang = "zh-CN";
@@ -22,7 +22,7 @@ window.I18N = (() => {
     _lang = lang;
 
     try {
-      const base = window.location.origin || "https://darkhorse-code.localhost";
+      const base = window.location.origin || "https://ruyix.localhost";
       const resp = await fetch(`${base}/lang/${lang}.json`);
       if (resp.ok) {
         _data = await resp.json();

@@ -1,6 +1,6 @@
 //! 多实例检测。
 //!
-//! 通过 Windows 命名互斥体判断是否已有其他 darkhorse-code 实例在运行：
+//! 通过 Windows 命名互斥体判断是否已有其他 ruyix 实例在运行：
 //! 首个实例创建互斥体并持有句柄直到进程退出（由操作系统自动释放），
 //! 后续实例创建时发现互斥体已存在，即说明已有实例在运行。
 
@@ -26,7 +26,7 @@ fn detect() -> bool {
     static GUARD: OnceLock<isize> = OnceLock::new();
 
     // "Local\\" 前缀：互斥体仅在当前登录会话内可见
-    let name: Vec<u16> = "Local\\darkhorse-code-instance-mutex"
+    let name: Vec<u16> = "Local\\ruyix-instance-mutex"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -68,7 +68,7 @@ mod tests {
     /// 使用测试专用名，避免与正在运行的实例互相干扰。
     #[test]
     fn duplicate_mutex_reports_already_exists() {
-        let name: Vec<u16> = "Local\\darkhorse-code-instance-mutex-test"
+        let name: Vec<u16> = "Local\\ruyix-instance-mutex-test"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();

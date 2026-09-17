@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// 配置键前缀
-pub const PREFIX: &str = "darkhorse.code";
+pub const PREFIX: &str = "ruyix.code";
 
 /// 运行目标
 #[derive(Debug, Clone, Serialize)]
@@ -163,7 +163,7 @@ impl ConfigManager {
         Self::new_with_dir(
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".darkhorse")
+                .join(".ruyix")
                 .join("code"),
         )
     }
@@ -181,9 +181,9 @@ impl ConfigManager {
     // 通用配置读写
     // ============================================
 
-    /// 读取配置值。key 格式: darkhorse.code.<section>.<path>
-    /// scope=global → ~/.darkhorse/code/<section>.toml
-    /// scope=project → <project_root>/.darkhorse/code/<section>.toml
+    /// 读取配置值。key 格式: ruyix.code.<section>.<path>
+    /// scope=global → ~/.ruyix/code/<section>.toml
+    /// scope=project → <project_root>/.ruyix/code/<section>.toml
     /// scope=runtime → 内存
     pub fn config_read(
         &self,
@@ -501,7 +501,7 @@ impl ConfigManager {
     /// 加载项目的 learn.lua，文件不存在返回空字符串
     pub fn load_lua_script(&self, project_root: &str) -> Result<String, String> {
         let path = std::path::Path::new(project_root)
-            .join(".darkhorse")
+            .join(".ruyix")
             .join("code")
             .join("learn.lua");
         if !path.exists() {
@@ -513,7 +513,7 @@ impl ConfigManager {
     /// 追加 Lua 代码到 learn.lua
     pub fn append_lua_script(&self, project_root: &str, lua_code: &str) -> Result<(), String> {
         let dir = std::path::Path::new(project_root)
-            .join(".darkhorse")
+            .join(".ruyix")
             .join("code");
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
         let path = dir.join("learn.lua");
@@ -532,7 +532,7 @@ impl ConfigManager {
     // ============================================
 
     /// 拆分 key 为 (section, sub_key)
-    /// "darkhorse.code.run.target0.cmd" → ("run", "target0.cmd")
+    /// "ruyix.code.run.target0.cmd" → ("run", "target0.cmd")
     fn split_key(&self, key: &str) -> Result<(String, String), String> {
         let rest = key
             .strip_prefix(PREFIX)
@@ -567,9 +567,7 @@ impl ConfigManager {
 
     fn resolve_project_dir(&self, project_root: Option<&str>) -> Result<PathBuf, String> {
         match project_root {
-            Some(root) if !root.is_empty() => {
-                Ok(PathBuf::from(root).join(".darkhorse").join("code"))
-            }
+            Some(root) if !root.is_empty() => Ok(PathBuf::from(root).join(".ruyix").join("code")),
             Some(_) => Err("项目路径为空字符串".to_string()),
             None => Err("未打开项目，无法使用项目配置 (-p)".to_string()),
         }

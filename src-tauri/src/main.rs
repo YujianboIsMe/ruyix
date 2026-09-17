@@ -1078,7 +1078,7 @@ fn rag_set_embedding_config(
                     continue;
                 }
                 if let Ok(Some(v)) =
-                    mgr.config_read(&scope, "darkhorse.code.ai.api_key", project_root.as_deref())
+                    mgr.config_read(&scope, "ruyix.code.ai.api_key", project_root.as_deref())
                     && !v.is_empty()
                 {
                     key = Some(v);

@@ -163,7 +163,7 @@ async function loadWelcome() {
   const token = ++_welcomeLoadToken;
 
   try {
-    const base = window.location.origin || "https://darkhorse-code.localhost";
+    const base = window.location.origin || "https://ruyix.localhost";
     const resp = await fetch(`${base}/${file}`);
     if (!resp.ok) return;
     const html = await resp.text();
@@ -2144,9 +2144,9 @@ async function createRunTargets(fullPath, specs) {
       used.add(name);
 
       const targetKey = `target${index}`;
-      await executeConfigAction("add", "p", `darkhorse.code.run.${targetKey}.cmd`, spec.cmd);
-      await executeConfigAction("add", "p", `darkhorse.code.run.${targetKey}.name`, name);
-      await executeConfigAction("add", "p", `darkhorse.code.run.${targetKey}.bind`, relPath);
+      await executeConfigAction("add", "p", `ruyix.code.run.${targetKey}.cmd`, spec.cmd);
+      await executeConfigAction("add", "p", `ruyix.code.run.${targetKey}.name`, name);
+      await executeConfigAction("add", "p", `ruyix.code.run.${targetKey}.bind`, relPath);
       created.push(name);
       index += 1;
     }

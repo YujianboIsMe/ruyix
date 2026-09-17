@@ -55,7 +55,7 @@ fn load_ai_config(
     mgr: &ConfigManager,
     project_root: Option<&str>,
 ) -> Result<(String, String, String), String> {
-    let api_url = read_ai_config(mgr, "darkhorse.code.ai.api_url", project_root)
+    let api_url = read_ai_config(mgr, "ruyix.code.ai.api_url", project_root)
         .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string());
     let api_url = if api_url.ends_with("/chat/completions") {
         api_url
@@ -63,14 +63,13 @@ fn load_ai_config(
         format!("{}/chat/completions", api_url.trim_end_matches('/'))
     };
 
-    let api_key =
-        read_ai_config(mgr, "darkhorse.code.ai.api_key", project_root).ok_or_else(|| {
-            "请先配置 API Key:\n\
-         config add -g darkhorse.code.ai.api_key <你的密钥>"
-                .to_string()
-        })?;
+    let api_key = read_ai_config(mgr, "ruyix.code.ai.api_key", project_root).ok_or_else(|| {
+        "请先配置 API Key:\n\
+         config add -g ruyix.code.ai.api_key <你的密钥>"
+            .to_string()
+    })?;
 
-    let model = read_ai_config(mgr, "darkhorse.code.ai.model", project_root)
+    let model = read_ai_config(mgr, "ruyix.code.ai.model", project_root)
         .unwrap_or_else(|| "deepseek-chat".to_string());
 
     Ok((api_url, api_key, model))
@@ -87,7 +86,7 @@ pub async fn translate(
             .lock()
             .map_err(|e| format!("配置锁失败: {}", e))?;
         let (api_url, api_key, model) = load_ai_config(&mgr, project_root)?;
-        let lang = read_ai_config(&mgr, "darkhorse.code.ui.lang", project_root)
+        let lang = read_ai_config(&mgr, "ruyix.code.ui.lang", project_root)
             .unwrap_or_else(|| "zh-CN".to_string());
         (api_url, api_key, model, lang)
     };

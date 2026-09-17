@@ -29,7 +29,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    darkhorse-code                       │
+│                    ruyix                       │
 │                                                         │
 │  ┌──────────┐    ┌──────────────┐    ┌──────────────┐  │
 │  │ 菜单栏    │    │  命令栏      │    │  编辑区       │  │
@@ -54,12 +54,12 @@
 │  └────────────┘  └────────────┘  └───────────────┘   │
 │                                                         │
 │  存储路径:                                               │
-│  ~/.darkhorse/code/                                     │
+│  ~/.ruyix/code/                                     │
 │  ├── rag.toml   (全局配置：API地址/密钥/模型/维度)        │
 │  └── qdrant/    (向量数据库)                             │
 │                                                         │
 │  项目索引:                                               │
-│  ./.darkhorse/code/rag.toml    (索引状态：已索引文件列表)  │
+│  ./.ruyix/code/rag.toml    (索引状态：已索引文件列表)  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -73,7 +73,7 @@
 | 默认地址 | `https://api.deepseek.com/v1/embeddings` |
 | 默认模型 | `deepseek-embedding` |
 | 向量维度 | 默认 1024，可在启用弹窗中修改 |
-| 认证 | `Authorization: Bearer <api_key>`；未单独配置时复用 `darkhorse.code.ai.api_key` |
+| 认证 | `Authorization: Bearer <api_key>`；未单独配置时复用 `ruyix.code.ai.api_key` |
 | 批量调用 | 索引时每 10 个文件一次请求，减少网络往返 |
 
 选型理由：
@@ -92,7 +92,7 @@
 | 磁盘占用 | 约 (文件数 × 维度 × 4) 字节，1000 个文件 × 1024 维约 4MB |
 | 启动方式 | 按需懒加载，`search off` 时关闭 |
 
-维度变更处理：`~/.darkhorse/code/qdrant/vector-dim` 记录当前维度。
+维度变更处理：`~/.ruyix/code/qdrant/vector-dim` 记录当前维度。
 修改维度后自动清空向量库重建，索引 hash 记录一并重置，全量重新编码。
 
 ---
@@ -105,7 +105,7 @@
 `.java`, `.js`, `.ts`, `.jsx`, `.tsx`, `.py`, `.rs`, `.go`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.vue`, `.svelte`, `.html`, `.css`, `.scss`, `.less`, `.md`, `.rst`, `.txt`, `.toml`, `.yaml`, `.yml`, `.json`, `.xml`, `.sql`, `.sh`, `.bat`, `.ps1`, `.proto`, `.graphql`
 
 **排除**：
-- 目录：`node_modules/`, `.git/`, `target/`, `.venv/`, `venv/`, `__pycache__/`, `dist/`, `build/`, `.next/`, `out/`, `coverage/`, `.idea/`, `.vscode/`, `.darkhorse/`
+- 目录：`node_modules/`, `.git/`, `target/`, `.venv/`, `venv/`, `__pycache__/`, `dist/`, `build/`, `.next/`, `out/`, `coverage/`, `.idea/`, `.vscode/`, `.ruyix/`
 - 文件：`*.lock`, `*.min.js`, `*.min.css`, `*.map`, `*.pyc`, `*.class`, `*.o`, `*.so`, `*.dll`, `*.exe`, `*.bin`, `*.png`, `*.jpg`, 等二进制/媒体文件
 
 ### 切分策略
@@ -124,7 +124,7 @@ tree-sitter 结构化切分（函数/类级别 chunk）在路线图中，尚未�
 | 重建索引 | 手动触发 | `search reindex` 命令 |
 | 维度修改 | 手动触发 | 清空旧索引，全量重新编码 |
 
-索引状态保存在 `./.darkhorse/code/rag.toml`：
+索引状态保存在 `./.ruyix/code/rag.toml`：
 ```toml
 enabled = true
 model = ""
@@ -235,23 +235,23 @@ search off                 # 关闭智搜（停止 qdrant）
 | 暂不接受 | 关闭弹窗，下次点击【智搜】再次弹窗 |
 | 永久禁用 | 设置 `permanently_disabled = true`（全局配置），隐藏【智搜】菜单项 |
 
-API Key 缺省时自动复用 AI 配置 `darkhorse.code.ai.api_key`（runtime → project → global）。
+API Key 缺省时自动复用 AI 配置 `ruyix.code.ai.api_key`（runtime → project → global）。
 若未配置 Key 且嵌入 API 返回认证错误，状态栏会提示先执行
-`config add -g darkhorse.code.ai.api_key <你的密钥>`。
+`config add -g ruyix.code.ai.api_key <你的密钥>`。
 
 ### 配置持久化
 
-全局配置 `~/.darkhorse/code/rag.toml`（扁平键，不走四层配置系统）：
+全局配置 `~/.ruyix/code/rag.toml`（扁平键，不走四层配置系统）：
 ```toml
 enabled = true
 permanently_disabled = false
 api_url = "https://api.deepseek.com/v1/embeddings"
-api_key = "sk-xxxx"            # 可选，缺省复用 darkhorse.code.ai.api_key
+api_key = "sk-xxxx"            # 可选，缺省复用 ruyix.code.ai.api_key
 model = "deepseek-embedding"   # 可选，嵌入模型名
 dim = 1024                     # 可选，向量维度，默认 1024
 ```
 
-项目配置 `./.darkhorse/code/rag.toml`：
+项目配置 `./.ruyix/code/rag.toml`：
 ```toml
 enabled = true
 last_indexed = "1786526560"
@@ -284,11 +284,11 @@ files_count = 312
 
 ## 安全与隐私
 
-- **向量数据在本机**：qdrant 数据只存储在本地磁盘 `~/.darkhorse/code/qdrant/`
+- **向量数据在本机**：qdrant 数据只存储在本地磁盘 `~/.ruyix/code/qdrant/`
 - **代码会离开本机**：文件内容和查询词会被发送到用户填写的嵌入 API 进行编码。
   请确认该服务可信。这是与本地模型方案（全离线）的本质区别。
 - **不收集**：本 IDE 自身不收集任何数据
-- **认证**：API Key 存储于本地配置文件 `~/.darkhorse/code/rag.toml`，仅随请求发送到嵌入 API
+- **认证**：API Key 存储于本地配置文件 `~/.ruyix/code/rag.toml`，仅随请求发送到嵌入 API
 
 ---
 

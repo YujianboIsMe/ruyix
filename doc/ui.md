@@ -19,7 +19,7 @@
 九宫格用AI润色下。
 
 ### 欢迎文本：
-> darkhorse-code，越来越懂你
+> ruyix，越来越懂你
 
 ## 菜单
 待定
@@ -78,4 +78,4 @@ chromium自带的弹窗和现有UI风格不符合。
 所以我们要自己设计一个弹窗，与现有UI风格一致。
 
 ## 窗口
-当开启多个darkhorse-code进程时，在Windows系统的窗口预览（Alt+Tab）里，这两个窗口的标题必须显示为项目名，若未打开项目则显示Darkhorse Code。
+当开启多个ruyix进程时，在Windows系统的窗口预览（Alt+Tab）里，这两个窗口的标题必须显示为项目名，若未打开项目则显示Darkhorse Code。
