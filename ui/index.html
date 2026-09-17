@@ -207,23 +207,44 @@
             </div>
           </div>
           <div id="git-panel" class="git-panel" style="display:none">
-            <div class="git-actions">
-              <button id="git-btn-commit" class="git-btn git-btn-primary" data-i18n="git.btn_commit">Commit ✅</button>
-              <button id="git-btn-pull" class="git-btn" data-i18n="git.btn_pull">Pull 📥</button>
-              <button id="git-btn-push" class="git-btn" data-i18n="git.btn_push">Push 📤</button>
+            <!-- 非仓库：仓库初始化引导视图（git_status.is_repo=false 时显示） -->
+            <div id="git-init-view" class="git-init-view" style="display:none">
+              <div class="git-init-icon">🌱</div>
+              <div class="git-init-title" data-i18n="git.init.title">当前项目还不是 Git 仓库</div>
+              <div class="git-init-desc" data-i18n="git.init.desc">初始化后即可在此查看改动、提交与推送</div>
+              <div class="git-init-actions">
+                <button id="git-btn-init" class="git-btn git-btn-primary" data-i18n="git.init.btn">初始化仓库</button>
+                <button id="git-btn-init-remote" class="git-btn" disabled
+                        data-i18n="git.remote.add" data-i18n-title="git.remote.need_init">添加远程仓库</button>
+              </div>
+              <div class="git-init-hint" data-i18n="git.remote.need_init">初始化仓库后才能添加远程仓库</div>
             </div>
-            <div id="git-branch" class="git-branch"></div>
-            <input id="git-commit-input" class="git-commit-input" type="text"
-                   data-i18n-placeholder="git.commit_msg" placeholder="commit message" />
-            <div class="git-section-header">
-              <span id="git-staged-header" class="git-section-title" data-i18n="git.staged">Staged</span>
+
+            <!-- 仓库视图：分支 / 远程提示 / 提交输入 / staged + unstaged -->
+            <div id="git-repo-view" class="git-repo-view">
+              <div class="git-actions">
+                <button id="git-btn-commit" class="git-btn git-btn-primary" data-i18n="git.btn_commit">Commit ✅</button>
+                <button id="git-btn-pull" class="git-btn" data-i18n="git.btn_pull">Pull 📥</button>
+                <button id="git-btn-push" class="git-btn" data-i18n="git.btn_push">Push 📤</button>
+              </div>
+              <div id="git-branch" class="git-branch"></div>
+              <!-- 已初始化但未配置远程仓库时的提示条 -->
+              <div id="git-remote-banner" class="git-banner" style="display:none">
+                <span class="git-banner-text" data-i18n="git.remote.missing">尚未配置远程仓库</span>
+                <button id="git-btn-add-remote" class="git-banner-btn" data-i18n="git.remote.add">添加远程仓库</button>
+              </div>
+              <input id="git-commit-input" class="git-commit-input" type="text"
+                     data-i18n-placeholder="git.commit_msg" placeholder="commit message" />
+              <div class="git-section-header">
+                <span id="git-staged-header" class="git-section-title" data-i18n="git.staged">Staged</span>
+              </div>
+              <div id="git-staged-tree" class="git-file-tree"></div>
+              <div class="git-section-header">
+                <span id="git-unstaged-header" class="git-section-title" data-i18n="git.unstaged">Unstaged</span>
+                <button id="git-btn-stage-all" class="git-stage-all-btn" data-i18n-title="git.stage_all">➕</button>
+              </div>
+              <div id="git-unstaged-tree" class="git-file-tree"></div>
             </div>
-            <div id="git-staged-tree" class="git-file-tree"></div>
-            <div class="git-section-header">
-              <span id="git-unstaged-header" class="git-section-title" data-i18n="git.unstaged">Unstaged</span>
-              <button id="git-btn-stage-all" class="git-stage-all-btn" data-i18n-title="git.stage_all">➕</button>
-            </div>
-            <div id="git-unstaged-tree" class="git-file-tree"></div>
           </div>
         </aside>
       </div>

@@ -1646,6 +1646,103 @@ html, body {
   word-break: break-all;
 }
 
+/* --- 仓库视图容器（与非仓库引导视图互斥显示） --- */
+.git-repo-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* --- 非仓库：仓库初始化引导视图 --- */
+.git-init-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px 12px;
+  text-align: center;
+}
+
+.git-init-icon {
+  font-size: 24px;
+}
+
+.git-init-title {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.git-init-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.git-init-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* 纵向排列时按钮高度略大，便于点击 */
+.git-init-actions .git-btn {
+  padding: 6px 0;
+}
+
+.git-init-hint {
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.git-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* --- 已初始化但未配置远程仓库的提示条 --- */
+.git-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 0 8px 6px;
+  padding: 4px 8px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.35);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.git-banner-text {
+  font-size: 11px;
+  color: #e2c08d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-banner-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: #ffffff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-banner-btn:hover {
+  background: #1b8fd4;
+}
+
 /* ============================================
    命令区 / Command Bar
    ============================================ */

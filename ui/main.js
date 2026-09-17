@@ -892,9 +892,17 @@ function setupOutlineTabs() {
   document.getElementById("git-btn-stage-all")?.addEventListener("click", () => {
     handleCommand("git add -A");
   });
+
+  // 非仓库引导视图：初始化仓库（初始化后 loadGitStatus 会自动切换为仓库视图）
+  document.getElementById("git-btn-init")?.addEventListener("click", () => handleCommand("git init"));
+  // 仓库视图顶部提示条：添加 / 更新远程仓库
+  document.getElementById("git-btn-add-remote")?.addEventListener("click", addRemoteRepo);
 }
 
-/** 加载 Git 状态：分支名 + staged/unstaged 文件树 */
+/** 最近一次 git_status 结果：供"添加远程仓库"判断是否已有 origin / 是否仓库 */
+let _gitStatusCache = null;
+
+/** 加载 Git 状态：分支名 + 远程地址 + staged/unstaged 文件树 */
 async function loadGitStatus() {
   const stagedEl = document.getElementById("git-staged-tree");
   const unstagedEl = document.getElementById("git-unstaged-tree");
@@ -903,11 +911,14 @@ async function loadGitStatus() {
   const branchEl = document.getElementById("git-branch");
   const stagedHeader = document.getElementById("git-staged-header");
   const unstagedHeader = document.getElementById("git-unstaged-header");
+  const remoteBanner = document.getElementById("git-remote-banner");
 
   const stageAllBtn = document.getElementById("git-btn-stage-all");
 
   if (!state.currentProject) {
+    showGitRepoView();
     if (branchEl) branchEl.textContent = "";
+    if (remoteBanner) remoteBanner.style.display = "none";
     if (stageAllBtn) stageAllBtn.style.display = "none";
     stagedEl.innerHTML = `<div class="git-empty">${I18N.t("git.no_project")}</div>`;
     unstagedEl.innerHTML = "";
@@ -916,6 +927,8 @@ async function loadGitStatus() {
 
   const invoke = getTauriInvoke();
   if (!invoke) {
+    showGitRepoView();
+    if (remoteBanner) remoteBanner.style.display = "none";
     if (stageAllBtn) stageAllBtn.style.display = "none";
     stagedEl.innerHTML = `<div class="git-empty">${I18N.t("status.tauri_unavail")}</div>`;
     unstagedEl.innerHTML = "";
@@ -924,7 +937,22 @@ async function loadGitStatus() {
 
   try {
     const status = await invoke("git_status", { projectRoot: state.currentProject.path });
-    if (branchEl) branchEl.textContent = I18N.t("git.branch", { branch: status.branch });
+    _gitStatusCache = status;
+
+    // 非 git 仓库 → 展示仓库初始化引导（不是错误状态）
+    if (!status.is_repo) {
+      showGitInitView();
+      return;
+    }
+
+    showGitRepoView();
+    if (branchEl) {
+      branchEl.textContent = status.remote
+        ? I18N.t("git.branch_with_remote", { branch: status.branch, remote: status.remote })
+        : I18N.t("git.branch", { branch: status.branch });
+    }
+    // 已初始化但未配置远程仓库 → 顶部提示 + 添加入口
+    if (remoteBanner) remoteBanner.style.display = status.remote ? "none" : "";
     if (stagedHeader) stagedHeader.textContent = gitSectionTitle("git.staged", status.staged.length);
     if (unstagedHeader) unstagedHeader.textContent = gitSectionTitle("git.unstaged", status.unstaged.length);
     // 没有可暂存的内容时隐藏 ➕
@@ -932,14 +960,63 @@ async function loadGitStatus() {
     renderGitTree(stagedEl, status.staged, true);
     renderGitTree(unstagedEl, status.unstaged, false);
   } catch (err) {
-    // 不是 git 仓库等错误 → 面板内提示
+    // 真正的异常（如未安装 git）→ 面板内提示
+    showGitRepoView();
     if (branchEl) branchEl.textContent = "";
+    if (remoteBanner) remoteBanner.style.display = "none";
     if (stagedHeader) stagedHeader.textContent = I18N.t("git.staged");
     if (unstagedHeader) unstagedHeader.textContent = I18N.t("git.unstaged");
     if (stageAllBtn) stageAllBtn.style.display = "none";
     stagedEl.innerHTML = `<div class="git-empty">⚠ ${escapeHtml(err)}</div>`;
     unstagedEl.innerHTML = "";
   }
+}
+
+/** 展示仓库视图（staged/unstaged），隐藏初始化引导 */
+function showGitRepoView() {
+  const initView = document.getElementById("git-init-view");
+  const repoView = document.getElementById("git-repo-view");
+  if (initView) initView.style.display = "none";
+  if (repoView) repoView.style.display = "";
+}
+
+/** 展示仓库初始化引导视图（非 git 仓库）：隐藏 staged/unstaged 相关区域 */
+function showGitInitView() {
+  const initView = document.getElementById("git-init-view");
+  const repoView = document.getElementById("git-repo-view");
+  if (initView) initView.style.display = "";
+  if (repoView) repoView.style.display = "none";
+  if (_gitStatusCache) _gitStatusCache.is_repo = false;
+}
+
+/**
+ * 添加远程仓库：走命令系统（git remote add / 已存在则 set-url 覆盖）
+ * 地址由 showPrompt 弹窗收集，做前缀格式校验
+ */
+async function addRemoteRepo() {
+  if (!state.currentProject) {
+    setStatus(I18N.t("git.no_project"), "error");
+    return;
+  }
+  if (!_gitStatusCache || !_gitStatusCache.is_repo) {
+    setStatus(I18N.t("git.remote.need_init"), "error");
+    return;
+  }
+
+  const url = await showPrompt(I18N.t("git.remote.prompt_title"), "");
+  if (url === null) return;
+  const trimmed = url.trim();
+  if (!trimmed) return;
+
+  // 基础格式校验：http(s) / ssh / git / file 协议或 scp 风格 git@host:path
+  if (!/^(https?:\/\/|ssh:\/\/|git:\/\/|file:\/\/|git@)/i.test(trimmed)) {
+    setStatus(I18N.t("git.remote.invalid"), "error");
+    return;
+  }
+
+  // 已有 origin → set-url 覆盖；否则 add（P3 推荐）
+  const verb = _gitStatusCache.remote ? "set-url" : "add";
+  handleCommand(`git remote ${verb} origin "${trimmed}"`);
 }
 
 function gitSectionTitle(key, count) {

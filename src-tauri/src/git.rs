@@ -2,9 +2,9 @@
 //! 直接调用系统 git（不引入 git 库依赖），在项目根目录下运行。
 //!
 //! 两个命令：
-//! - `git_status`  — `git status --porcelain` 解析为 staged/unstaged 文件列表
-//! - `git_run`     — 执行任意 git 子命令（AI 返回的 git 命令、GUI 的
-//!                   stage/unstage/commit/pull/push 都走这里）
+//! - `git_status` — `git status --porcelain` 解析为 staged/unstaged 文件列表
+//! - `git_run` — 执行任意 git 子命令（AI 返回的 git 命令、GUI 的
+//!   stage/unstage/commit/pull/push 都走这里）
 
 use std::process::Command;
 
@@ -33,10 +33,14 @@ pub struct GitFile {
 
 #[derive(serde::Serialize, Clone)]
 pub struct GitStatus {
+    /// 项目根是否位于 git 仓库中（`rev-parse --is-inside-work-tree`）
+    pub is_repo: bool,
     /// 当前分支名（无提交的新仓库为 "(no commits)"）
     pub branch: String,
     /// 工作区是否干净
     pub clean: bool,
+    /// origin 远程地址（未配置远程仓库时为 None）
+    pub remote: Option<String>,
     pub staged: Vec<GitFile>,
     pub unstaged: Vec<GitFile>,
 }
@@ -93,7 +97,29 @@ pub async fn git_status(project_root: String) -> Result<GitStatus, String> {
 }
 
 fn status_impl(project_root: &str) -> Result<GitStatus, String> {
-    // 当前分支（无提交的新仓库会失败，降级显示）
+    // 1) 是否在 git 仓库内。用 rev-parse 而不是检测 .git 目录：
+    //    项目根位于父目录仓库内时，git 语义上也算"在仓库中"，状态面板应能正常工作。
+    let inside = run_git(project_root, &["rev-parse", "--is-inside-work-tree"])?;
+    if inside.exit_code != Some(0) || inside.stdout.trim() != "true" {
+        // 非仓库：不是错误，交由前端渲染"仓库初始化引导"视图
+        return Ok(GitStatus {
+            is_repo: false,
+            branch: String::new(),
+            clean: true,
+            remote: None,
+            staged: Vec::new(),
+            unstaged: Vec::new(),
+        });
+    }
+
+    // 2) origin 远程地址（未配置远程仓库时命令失败，降级为 None）
+    let remote = run_git(project_root, &["remote", "get-url", "origin"])
+        .ok()
+        .filter(|o| o.exit_code == Some(0))
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // 3) 当前分支（无提交的新仓库会失败，降级显示）
     let branch = run_git(project_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .filter(|o| o.exit_code == Some(0))
@@ -143,8 +169,10 @@ fn status_impl(project_root: &str) -> Result<GitStatus, String> {
     unstaged.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(GitStatus {
+        is_repo: true,
         branch,
         clean: staged.is_empty() && unstaged.is_empty(),
+        remote,
         staged,
         unstaged,
     })
@@ -165,4 +193,127 @@ pub async fn git_run(project_root: String, args: String) -> Result<GitOutput, St
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ============================================
+// 测试
+// ============================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 临时目录，Drop 时自动清理
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("系统时间异常")
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "dh-code-git-test-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+            TempDir(dir)
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 在指定目录执行 git 命令（测试辅助）
+    fn git_in(dir: &str, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("无法启动 git，请确认已安装 Git 并加入 PATH");
+        assert!(
+            out.status.success(),
+            "git {:?} 失败: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// 非仓库目录：应返回 is_repo=false 的初始状态，而不是 Err
+    /// （回归测试：修复前这里返回 "fatal: not a git repository" 错误）
+    #[test]
+    fn non_repo_returns_init_state_not_error() {
+        let dir = TempDir::new("plain");
+        std::fs::write(dir.0.join("main.rs"), "fn main() {}").expect("写入文件失败");
+
+        let status = status_impl(&dir.path()).expect("非仓库不应报错");
+        assert!(!status.is_repo, "普通目录不应被判定为 git 仓库");
+        assert!(status.branch.is_empty(), "非仓库不应有分支名");
+        assert!(status.remote.is_none(), "非仓库不应有远程地址");
+        assert!(status.staged.is_empty() && status.unstaged.is_empty());
+    }
+
+    /// git init 后：is_repo=true、无远程仓库、未跟踪文件进入 unstaged
+    #[test]
+    fn fresh_repo_has_no_remote_and_lists_untracked() {
+        let dir = TempDir::new("fresh");
+        std::fs::write(dir.0.join("main.rs"), "fn main() {}").expect("写入文件失败");
+        git_in(&dir.path(), &["init"]);
+
+        let status = status_impl(&dir.path()).expect("仓库状态读取失败");
+        assert!(status.is_repo, "git init 后应判定为仓库");
+        assert!(status.remote.is_none(), "新仓库不应有 origin");
+        assert_eq!(status.branch, "(no commits)", "新仓库无提交时分支应降级显示");
+        assert!(
+            status.unstaged.iter().any(|f| f.path == "main.rs"),
+            "未跟踪文件应出现在 unstaged，实际: {:?}",
+            status.unstaged.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// 配置 origin 后：remote 字段应回读地址，工作区脏状态正确
+    #[test]
+    fn repo_with_origin_reports_remote_url() {
+        let dir = TempDir::new("remote");
+        git_in(&dir.path(), &["init"]);
+        git_in(
+            &dir.path(),
+            &["remote", "add", "origin", "https://example.com/demo.git"],
+        );
+
+        let status = status_impl(&dir.path()).expect("仓库状态读取失败");
+        assert!(status.is_repo);
+        assert_eq!(
+            status.remote.as_deref(),
+            Some("https://example.com/demo.git")
+        );
+        assert!(status.clean, "空仓库应为干净状态");
+    }
+
+    /// 集成：走 UI 的真实链路 git_run("init") 后，状态应从"非仓库"翻转为"仓库"
+    /// （对应前端【初始化仓库】按钮 → handleCommand("git init") → git_run → 刷新面板）
+    #[test]
+    fn git_run_init_flips_status_to_repo() {
+        let dir = TempDir::new("init-flow");
+        assert!(
+            !status_impl(&dir.path()).expect("读取状态失败").is_repo,
+            "初始化前不应是仓库"
+        );
+
+        let out = tauri::async_runtime::block_on(git_run(dir.path(), "init".to_string()))
+            .expect("git init 执行失败");
+        assert_eq!(out.exit_code, Some(0), "git init 应成功: {}", out.stderr);
+
+        let status = status_impl(&dir.path()).expect("读取状态失败");
+        assert!(status.is_repo, "git init 后状态应翻转为仓库");
+        assert!(status.remote.is_none(), "尚未配置远程仓库");
+    }
 }
