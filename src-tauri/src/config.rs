@@ -645,6 +645,17 @@ impl ConfigManager {
 mod tests {
     use super::*;
 
+    /// 测试用项目路径：name_from_path 依赖平台路径分隔符，
+    /// Windows 用反斜杠盘符路径，Unix 用斜杠路径，两个平台各测真实场景
+    #[cfg(windows)]
+    const PATH_A: &str = r"C:\foo\bar";
+    #[cfg(windows)]
+    const PATH_B: &str = r"C:\baz\qux";
+    #[cfg(not(windows))]
+    const PATH_A: &str = "/foo/bar";
+    #[cfg(not(windows))]
+    const PATH_B: &str = "/baz/qux";
+
     #[derive(Serialize, Deserialize)]
     struct File {
         projects: ProjectsConfig,
@@ -653,16 +664,12 @@ mod tests {
     /// 旧版配置（纯路径列表）能解析为带默认 name/lang 的条目
     #[test]
     fn legacy_path_list_parses_to_entries() {
-        let legacy = r#"
-[projects]
-current = 'C:\foo\bar'
-list = ['C:\foo\bar', 'C:\baz\qux']
-"#;
-        let cfg: ProjectsConfig = toml::from_str::<File>(legacy).unwrap().projects;
-        assert_eq!(cfg.current.as_deref(), Some(r"C:\foo\bar"));
+        let legacy = format!("[projects]\ncurrent = '{PATH_A}'\nlist = ['{PATH_A}', '{PATH_B}']\n");
+        let cfg: ProjectsConfig = toml::from_str::<File>(&legacy).unwrap().projects;
+        assert_eq!(cfg.current.as_deref(), Some(PATH_A));
         assert_eq!(cfg.list.len(), 2);
         assert_eq!(cfg.list[0].name, "bar");
-        assert_eq!(cfg.list[0].path, r"C:\foo\bar");
+        assert_eq!(cfg.list[0].path, PATH_A);
         assert_eq!(cfg.list[0].lang, "unknown");
         assert_eq!(cfg.list[1].name, "qux");
         assert_eq!(cfg.list[1].lang, "unknown");
@@ -723,11 +730,7 @@ path = 'C:\baz\qux'
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        let legacy = r#"
-[projects]
-current = 'C:\foo\bar'
-list = ['C:\foo\bar', 'C:\baz\qux']
-"#;
+        let legacy = format!("[projects]\ncurrent = '{PATH_A}'\nlist = ['{PATH_A}', '{PATH_B}']\n");
         fs::write(dir.join("projects.toml"), legacy).unwrap();
 
         let mgr = ConfigManager::new_with_dir(dir.clone());
@@ -739,18 +742,18 @@ list = ['C:\foo\bar', 'C:\baz\qux']
         assert_eq!(cfg.list[0].name, "bar");
         assert_eq!(cfg.list[0].lang, "unknown");
         assert_eq!(cfg.list[1].name, "qux");
-        assert_eq!(cfg.current.as_deref(), Some(r"C:\foo\bar"));
+        assert_eq!(cfg.current.as_deref(), Some(PATH_A));
 
         // 已是新格式：无需迁移
         assert_eq!(mgr.migrate_projects().unwrap(), 0);
 
         // 设置语言并持久化
-        mgr.set_project_lang(r"C:\baz\qux", "python").unwrap();
+        mgr.set_project_lang(PATH_B, "python").unwrap();
         let cfg2 = mgr.load_projects();
         assert_eq!(cfg2.list[1].lang, "python");
 
         // 非法语言被拒绝
-        assert!(mgr.set_project_lang(r"C:\baz\qux", "bogus").is_err());
+        assert!(mgr.set_project_lang(PATH_B, "bogus").is_err());
 
         let _ = fs::remove_dir_all(&dir);
     }

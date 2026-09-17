@@ -8,6 +8,7 @@ mod pty;
 mod rag;
 mod runner;
 
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -16,10 +17,12 @@ use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 
 /// CREATE_NEW_CONSOLE — 为新进程创建独立控制台窗口
+#[cfg(windows)]
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
 /// CREATE_NO_WINDOW — 阻止子进程新建控制台窗口（release GUI 子系统无控制台，
 /// 不加此标志控制台子进程会闪黑窗口；输出仍通过管道捕获）
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ============================================
@@ -649,8 +652,10 @@ async fn run_target(
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW);
+            .stderr(std::process::Stdio::piped());
+        // Windows 专属：阻止子进程闪黑控制台窗口（见 CREATE_NO_WINDOW 说明）
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
         if let Some(ref dir) = run_dir {
             cmd.current_dir(dir);
         }
@@ -679,10 +684,13 @@ fn spawn_terminal(cmd: String, project_root: Option<String>) -> Result<(), Strin
     let program = resolve_windows_cmd(&parts[0]);
     let args = &parts[1..];
 
-    // CREATE_NEW_CONSOLE 为 CLI 程序（powershell、python 等）创建独立窗口
-    // GUI 程序（如 git-bash.exe）会自行创建窗口，此标志对其无影响
+    // CLI 程序（powershell、python 等）在 Windows 上需 CREATE_NEW_CONSOLE
+    // 创建独立窗口；GUI 程序（如 git-bash.exe）会自行创建窗口，此标志对其无影响。
+    // macOS/Linux 上 spawn 默认不新建终端窗口，由调用方所在的终端决定呈现。
     let mut c = std::process::Command::new(program);
-    c.args(args).creation_flags(CREATE_NEW_CONSOLE);
+    c.args(args);
+    #[cfg(windows)]
+    c.creation_flags(CREATE_NEW_CONSOLE);
     if let Some(ref dir) = project_root {
         c.current_dir(dir);
     }
@@ -1293,6 +1301,12 @@ mod tests {
         p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
     }
 
+    /// 期望路径对齐 canonicalize 结果：resolve_run_dir 返回真实路径，
+    /// 而 macOS 的 temp_dir() 是 /private/var 的符号链接（/var/...），未解析
+    fn canon(p: &std::path::Path) -> String {
+        clean_path(&p.canonicalize().expect("canonicalize 失败"))
+    }
+
     #[test]
     fn run_dir_defaults_to_project_root() {
         let proj = TempProj::new("root");
@@ -1309,17 +1323,24 @@ mod tests {
     }
 
     /// 复现用例：bind = admin-web\package.json、cmd = npm start
-    /// 期望工作目录是 <项目根>\admin-web（修复前是项目根 → 报错）
+    /// 期望工作目录是 <项目根>/admin-web（修复前是项目根 → 报错）
     #[test]
     fn run_dir_uses_bind_file_parent_dir() {
         let proj = TempProj::new("bind");
         proj.write("admin-web/package.json", "{\"name\":\"admin-web\"}");
 
-        for bind in [r"admin-web\package.json", "admin-web/package.json"] {
+        // Windows 配置里的 bind 可能写作反斜杠分隔；
+        // Unix 上反斜杠是普通文件名字符，不作为分隔符解析，只测正斜杠
+        #[cfg(windows)]
+        let binds = [r"admin-web\package.json", "admin-web/package.json"];
+        #[cfg(not(windows))]
+        let binds = ["admin-web/package.json"];
+
+        for bind in binds {
             let dir = resolve_run_dir(Some(&proj.path()), Some(bind)).expect("应解析出工作目录");
             assert_eq!(
                 norm(&dir),
-                norm(&format!("{}\\admin-web", proj.path())),
+                norm(&canon(&proj.0.join("admin-web"))),
                 "bind={} 时应在该文件所在目录运行",
                 bind
             );
@@ -1333,7 +1354,7 @@ mod tests {
         let dir = resolve_run_dir(Some(&proj.path()), Some("package.json")).expect("应有工作目录");
         assert_eq!(
             norm(&dir),
-            norm(&proj.path()),
+            norm(&canon(&proj.0)),
             "根目录下的清单文件 → 项目根"
         );
     }
@@ -1343,7 +1364,7 @@ mod tests {
         let proj = TempProj::new("dirbind");
         std::fs::create_dir_all(proj.0.join("admin-web")).expect("创建目录失败");
         let dir = resolve_run_dir(Some(&proj.path()), Some("admin-web")).expect("应有工作目录");
-        assert_eq!(norm(&dir), norm(&format!("{}\\admin-web", proj.path())));
+        assert_eq!(norm(&dir), norm(&canon(&proj.0.join("admin-web"))));
     }
 
     #[test]
@@ -1379,17 +1400,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    /// 端到端：走真实 run_target（Windows 命令解析 + 工作目录设置），
-    /// 用 `cmd /c cd` 回显实际工作目录
+    /// 端到端：走真实 run_target（命令解析 + 工作目录设置），
+    /// Windows 用 `cmd /c cd`、Unix 用 `pwd` 回显实际工作目录
     #[test]
     fn run_target_executes_in_bind_dir() {
         let proj = TempProj::new("e2e");
         proj.write("admin-web/package.json", "{}");
 
+        #[cfg(windows)]
+        let (cmd, bind) = ("cmd /c cd", r"admin-web\package.json");
+        #[cfg(not(windows))]
+        let (cmd, bind) = ("pwd", "admin-web/package.json");
+
         let out = tauri::async_runtime::block_on(run_target(
-            "cmd /c cd".to_string(),
+            cmd.to_string(),
             Some(proj.path()),
-            Some(r"admin-web\package.json".to_string()),
+            Some(bind.to_string()),
         ))
         .expect("run_target 执行失败");
 
