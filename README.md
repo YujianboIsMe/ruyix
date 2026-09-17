@@ -9,7 +9,20 @@
 | 源仓库（GitCode） | <https://gitcode.com/m0_66201040/darkhorse-code> |
 | 当前仓库（GitHub） | <https://github.com/YujianboIsMe/newest-ai-code> |
 
-- 源仓库与当前仓库**由同一作者开发与维护**，作者：俞建波 `<yujianboisme@outlook.com>`
+### 关于作者身份
+
+本项目的全部代码**均由同一位作者编写**。作者最初以**女性程序员**的身份
+（笔名「醒过来摸鱼」，CSDN 同名账号）在 GitCode 上发布并维护本项目；
+现迁移至 GitHub，改以本名署名。
+
+- 现用署名：俞建波 `<yujianboisme@outlook.com>`
+- 早期署名：醒过来摸鱼 `<you@example.com>`（作者本人的笔名）
+
+因此历史提交记录中会同时出现以上两个名字，**二者为同一人**：迁移前后的代码与提交历史同源，
+不存在对他人代码的复制、转用或再发布。
+
+### 其他说明
+
 - 迁移保留了完整提交历史，包括 `master` / `0.0.2` / `0.0.3` 分支与 `0.0.1` 标签
 - 仓库内第三方内容版权归其原作者，遵循各自许可证（如 vendored 的 `ui/xterm.js`、`ui/xterm.css` 为 MIT）
 - 如对来源或署名有异议，请提 issue 联系更正
