@@ -1996,7 +1996,7 @@ async function showContextMenu(menu, x, y, isDir) {
   menu.style.display = "";
 }
 
-/** 右键"运行"：已有目标→执行，无目标→创建 */
+/** 右键"运行"：已有目标→执行，无目标→按清单内容创建运行目标 */
 async function handleContextRun(fullPath) {
   const invoke = getTauriInvoke();
   if (!invoke) return;
@@ -2005,27 +2005,44 @@ async function handleContextRun(fullPath) {
       path: fullPath,
       projectRoot: state.currentProject?.path
     });
+
+    // 情况1: 已有目标绑定该文件 → 执行（多脚本时取先命中的一个，通常按 dev/start 排序）
     if (status.has_target && status.target_name) {
-      // 情况1: 已有目标 → 执行
       const targets = await invoke("get_run_targets", { projectRoot: state.currentProject?.path });
       const target = targets.find(t => (t.name || t.key) === status.target_name);
       if (target && target.cmd) {
-        await runTargetCmd(status.target_name, target.cmd);
+        await runTargetCmd(status.target_name, target.cmd, target.bind);
       }
-    } else {
-      // 情况2: 无目标 → IDE 自动创建（key = target<N>）
-      const name = fullPath.split(/[/\\]/).pop() || fullPath;
-      const dot = name.lastIndexOf(".");
-      const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
-      // 命令模板：优先用后端建议，其次文件名匹配，最后扩展名匹配
-      const cmdMap = {
-        py: "python {file}", rs: "cargo run", js: "node {file}",
-        "Cargo.toml": "cargo run", "package.json": "npm start", "Makefile": "make"
-      };
-      let cmd = status.suggested_cmd || cmdMap[name] || cmdMap[ext] || "python {file}";
-      cmd = cmd.replace(/\{file\}/gi, fullPath);
-      await autoCreateRunTarget(name, cmd, fullPath);
+      return;
     }
+
+    // 情况2: 清单文件 → 按文件内容生成（package.json 的每个 scripts 各一个运行目标）
+    const specs = status.suggested_targets || [];
+    if (specs.length > 0) {
+      const created = await createRunTargets(fullPath, specs);
+      setStatus(I18N.t("run.auto.created", { count: created.length, names: created.join("、") }));
+      return;
+    }
+
+    // 情况3: 是清单文件但没有可运行脚本（如 package.json 里没有 scripts）
+    if (status.known === true) {
+      const fileName = fullPath.split(/[/\\]/).pop() || fullPath;
+      setStatus(I18N.t("run.auto.no_script", { file: fileName }), "error");
+      return;
+    }
+
+    // 情况4: 未知 → 按模板创建单个运行目标（兜底）
+    const name = fullPath.split(/[/\\]/).pop() || fullPath;
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+    // 命令模板：优先用后端建议，其次文件名匹配，最后扩展名匹配
+    const cmdMap = {
+      py: "python {file}", rs: "cargo run", js: "node {file}",
+      "Cargo.toml": "cargo run", Makefile: "make"
+    };
+    let cmd = status.suggested_cmd || cmdMap[name] || cmdMap[ext] || "python {file}";
+    cmd = cmd.replace(/\{file\}/gi, fullPath);
+    await autoCreateRunTarget(name, cmd, fullPath);
   } catch (err) {
     setStatus("运行失败: " + err, "error");
   }
@@ -2074,49 +2091,70 @@ async function handleContextTryRun(fullPath) {
 }
 
 /**
- * IDE 自动创建运行目标。
- * key 使用 target<N> 格式（遍历已有 target* 取 max+1）。
- * 同时设置 bind 字段（相对路径）。
+ * IDE 自动创建运行目标（单个）。
+ * key 使用 target<N> 格式，同时设置 bind 字段（相对路径）。
  */
 async function autoCreateRunTarget(name, cmd, fullPath) {
-  const invoke = getTauriInvoke();
-  if (!invoke || !state.currentProject) return;
+  const created = await createRunTargets(fullPath, [{ name, cmd }]);
+  return created[0] || null;
+}
 
-  // 遍历已有 target<N> 取最大索引 + 1
+/**
+ * 按后端建议批量创建运行目标（每个 spec 一个）。
+ * - key 使用 target<N>（遍历已有 target* 取 max+1，逐个递增）
+ * - bind 统一写绑定文件的相对路径
+ * - 名称冲突时加父目录前缀（如 admin-web:dev），再冲突则加 #N
+ * @param {string} fullPath 绑定的清单文件绝对路径
+ * @param {Array<{name: string, cmd: string}>} specs 后端给出的建议目标
+ * @returns {Promise<string[]>} 实际创建的目标名称
+ */
+async function createRunTargets(fullPath, specs) {
+  const invoke = getTauriInvoke();
+  if (!invoke || !state.currentProject || !specs || specs.length === 0) return [];
+
+  const relPath = toRelativePath(fullPath);
+  const dirName = relPath.split(/[/\\]/).slice(-2, -1)[0] || "";
+
+  // 既有目标名与最大索引
   let index = 0;
+  const used = new Set();
   try {
-    const targets = await invoke("get_run_targets", { projectRoot: state.currentProject.path });
-    if (targets && targets.length > 0) {
-      let maxIdx = -1;
-      for (const t of targets) {
-        const m = (t.key || "").match(/^target(\d+)$/);
-        if (m) {
-          const n = parseInt(m[1], 10);
-          if (n > maxIdx) maxIdx = n;
-        }
-      }
-      index = maxIdx + 1;
+    const targets = (await invoke("get_run_targets", { projectRoot: state.currentProject.path })) || [];
+    let maxIdx = -1;
+    for (const t of targets) {
+      used.add(t.name || t.key);
+      const m = (t.key || "").match(/^target(\d+)$/);
+      if (m) maxIdx = Math.max(maxIdx, parseInt(m[1], 10));
     }
+    index = maxIdx + 1;
   } catch {
     index = 0;
   }
 
-  const targetKey = `target${index}`;
-  const cmdKey = `darkhorse.code.run.${targetKey}.cmd`;
-  const nameKey = `darkhorse.code.run.${targetKey}.name`;
-  const bindKey = `darkhorse.code.run.${targetKey}.bind`;
-
-  // 绑定相对路径
-  const relPath = toRelativePath(fullPath);
-
+  const created = [];
   try {
-    await executeConfigAction("add", "p", cmdKey, cmd);
-    await executeConfigAction("add", "p", nameKey, name);
-    await executeConfigAction("add", "p", bindKey, relPath);
+    for (const spec of specs) {
+      let name = spec.name;
+      if (used.has(name)) name = dirName ? `${dirName}:${spec.name}` : name;
+      if (used.has(name)) {
+        let n = 2;
+        while (used.has(`${name}#${n}`)) n++;
+        name = `${name}#${n}`;
+      }
+      used.add(name);
+
+      const targetKey = `target${index}`;
+      await executeConfigAction("add", "p", `darkhorse.code.run.${targetKey}.cmd`, spec.cmd);
+      await executeConfigAction("add", "p", `darkhorse.code.run.${targetKey}.name`, name);
+      await executeConfigAction("add", "p", `darkhorse.code.run.${targetKey}.bind`, relPath);
+      created.push(name);
+      index += 1;
+    }
     loadRunTargets();
   } catch (err) {
     setStatus("自动创建运行目标失败: " + err, "error");
   }
+  return created;
 }
 
 /** 全路径 → 相对于项目根的路径 */
@@ -2449,7 +2487,7 @@ async function loadRunTargets() {
     list.innerHTML = targets
       .map(
         (t) => `
-      <div class="run-target-item" data-cmd="${escapeHtml(t.cmd || "")}" data-name="${escapeHtml(t.name || t.key)}">
+      <div class="run-target-item" data-cmd="${escapeHtml(t.cmd || "")}" data-name="${escapeHtml(t.name || t.key)}" data-bind="${escapeHtml(t.bind || "")}">
         <div class="run-target-info">
           <div class="run-target-name">
             <span class="run-icon">&#9654;</span>
@@ -2469,7 +2507,8 @@ async function loadRunTargets() {
       el.addEventListener("click", () => {
         const cmd = el.dataset.cmd;
         const name = el.dataset.name;
-        if (cmd) runTargetCmd(name, cmd);
+        const bind = el.dataset.bind;
+        if (cmd) runTargetCmd(name, cmd, bind);
       });
     });
 
@@ -2499,16 +2538,22 @@ async function loadRunTargets() {
 
 /**
  * 运行目标：在编辑区打开终端标签页执行命令
+ * @param {string} name 目标名（标签页标题）
+ * @param {string} cmd 要执行的命令
+ * @param {string} [bind] 绑定的清单文件（项目相对路径），决定工作目录
  */
-async function runTargetCmd(name, cmd) {
+async function runTargetCmd(name, cmd, bind) {
   const invoke = getTauriInvoke();
   if (!invoke) {
     setStatus(I18N.t("status.tauri_unavail"));
     return;
   }
 
-  // 检查是否已打开同名标签
-  const existing = state.tabs.find((t) => t._runTarget === cmd);
+  // 检查是否已打开同名标签（命令 + 绑定文件都相同才算同一个运行）
+  const bindKey = bind || "";
+  const existing = state.tabs.find(
+    (t) => t._runTarget === cmd && (t._runTargetBind || "") === bindKey
+  );
   if (existing) {
     switchTab(existing.id);
     return;
@@ -2521,6 +2566,7 @@ async function runTargetCmd(name, cmd) {
     path: "",
     content: cmd,
     _runTarget: cmd,
+    _runTargetBind: bindKey,
   };
   state.tabs.push(tab);
   renderTabs();
@@ -2531,7 +2577,11 @@ async function runTargetCmd(name, cmd) {
 
   try {
     setStatus(I18N.t("run.executing", { name }));
-    const result = await invoke("run_target", { cmd, projectRoot: state.currentProject?.path });
+    const result = await invoke("run_target", {
+      cmd,
+      projectRoot: state.currentProject?.path,
+      bind: bind || undefined,
+    });
 
     let output = `> ${cmd}\n`;
 

@@ -216,6 +216,8 @@
   "run.executing": "Running: {name}",
   "run.done": "{name} finished (exit: {code})",
   "run.fail": "Run failed: {err}",
+  "run.auto.created": "Created {count} run target(s): {names}",
+  "run.auto.no_script": "No runnable scripts in {file}",
   "terminal.spawned": "{name} launched in new window",
   "terminal.spawn_fail": "Launch failed: {err}",
   "terminal.starting": "Starting {name}...",

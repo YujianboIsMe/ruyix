@@ -1,5 +1,6 @@
 use crate::config::{ConfigManager, Scope};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::Mutex;
 
 /// 系统提示词：编译期嵌入 command.md，零运行时开销
@@ -233,20 +234,21 @@ pub async fn check_executable(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    let prompt = format!(
-        "文件路径: {}\n文件名: {}\n扩展名: .{}\n\n这个文件可以运行/执行吗？请只回复一个选项:\n- FILE_YES|<运行命令模板，用 {{file}} 指代文件> — 仅因文件名而可运行的清单/构建文件（如 Cargo.toml、package.json、Makefile）\n- YES|<运行命令模板> — 因其后缀类型而可运行的脚本（如 .py）\n- CONDITIONAL|<条件说明> — 可运行但需要特定条件\n- NO — 不可运行",
-        path, file_name, ext
-    );
+    // 提示词里带上文件内容与同目录线索：只有路径时 LLM 只能按名字猜
+    // （例如 package.json 一律猜成 npm start，看不见里面写的是 dev）
+    let content_head = read_head(path, MAX_PROMPT_CONTENT_CHARS);
+    let hints = dir_hints(p);
+    let prompt = execute_check_prompt(path, file_name, ext, &content_head, &hints);
 
     let client = reqwest::Client::new();
     let req_body = ChatRequest {
         model,
         messages: vec![
-            ChatMessage { role: "system".to_string(), content: "你是一个文件执行分析器。判断文件是否可以运行。".to_string() },
+            ChatMessage { role: "system".to_string(), content: "你是一个文件执行分析器。根据文件内容与同目录线索判断文件是否可以运行，并给出可直接执行的命令。".to_string() },
             ChatMessage { role: "user".to_string(), content: prompt },
         ],
         temperature: 0.0,
-        max_tokens: 150,
+        max_tokens: 200,
     };
 
     let resp = client.post(&api_url)
@@ -266,4 +268,175 @@ pub async fn check_executable(
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_default();
     Ok(content)
+}
+
+// ============================================
+// 文件可运行性：提示词构造
+// ============================================
+
+/// 放进提示词的文件内容上限（字符数，非字节）
+const MAX_PROMPT_CONTENT_CHARS: usize = 4000;
+
+/// 读取文件头部内容（按字符截断，避免切断 UTF-8）。
+/// 读不出来或疑似二进制（含 NUL 字节）时返回空串。
+fn read_head(path: &str, max_chars: usize) -> String {
+    let Ok(bytes) = std::fs::read(path) else {
+        return String::new();
+    };
+    if bytes.contains(&0) {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let head: String = text.chars().take(max_chars).collect();
+    if head.len() < text.len() {
+        format!("{}\n...(内容已截断)", head)
+    } else {
+        head
+    }
+}
+
+/// 同目录线索：包管理器锁文件、工程清单等。
+/// 这些信息不进提示词的话，LLM 只能凭文件名猜命令（例如猜 npm，实际工程用 pnpm）。
+fn dir_hints(p: &Path) -> Vec<String> {
+    let Some(dir) = p.parent() else {
+        return Vec::new();
+    };
+    let mut hints = Vec::new();
+    for (file, desc) in [
+        ("pnpm-lock.yaml", "pnpm 工程，命令请用 pnpm run <script>"),
+        ("yarn.lock", "yarn 工程，命令请用 yarn run <script>"),
+        ("bun.lockb", "bun 工程，命令请用 bun run <script>"),
+        ("package-lock.json", "npm 工程，命令请用 npm run <script>"),
+        ("Cargo.toml", "Rust 工程，命令用 cargo run"),
+        ("pyproject.toml", "Python 工程"),
+        ("requirements.txt", "Python 依赖清单"),
+        ("go.mod", "Go 工程，命令用 go run ."),
+        ("docker-compose.yml", "Docker Compose 工程"),
+    ] {
+        if dir.join(file).exists() {
+            hints.push(format!("- 同目录存在 {} → {}", file, desc));
+        }
+    }
+    hints
+}
+
+/// 构造"文件是否可以运行"的提示词（纯函数，便于测试）
+fn execute_check_prompt(
+    path: &str,
+    file_name: &str,
+    ext: &str,
+    content_head: &str,
+    dir_hints: &[String],
+) -> String {
+    let content_block = if content_head.trim().is_empty() {
+        "（无法读取或内容为空）".to_string()
+    } else {
+        format!("```\n{}\n```", content_head)
+    };
+    let hint_block = if dir_hints.is_empty() {
+        String::new()
+    } else {
+        format!("\n同目录线索:\n{}\n", dir_hints.join("\n"))
+    };
+
+    format!(
+        "文件路径: {path}\n文件名: {file_name}\n扩展名: .{ext}\n{hint_block}\n\
+         文件内容（可能截断）:\n{content_block}\n\n\
+         这个文件可以运行/执行吗？请只回复一个选项:\n\
+         - FILE_YES|<运行命令模板，用 {{file}} 指代文件> — 仅因文件名而可运行的清单/构建文件（如 Cargo.toml、package.json、Makefile）。\
+         若是 package.json，必须依据内容里 scripts 的脚本名给出命令（如 npm run dev），优先 dev/start，\
+         且不要用 {{file}}（npm 不需要文件路径）\n\
+         - YES|<运行命令模板> — 因其后缀类型而可运行的脚本（如 .py）\n\
+         - CONDITIONAL|<条件说明> — 可运行但需要特定条件\n\
+         - NO — 不可运行"
+    )
+}
+
+// ============================================
+// 测试
+// ============================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_file(tag: &str, content: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间异常")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("dh-code-ai-test-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        let p = dir.join("probe.txt");
+        std::fs::write(&p, content).expect("写文件失败");
+        p
+    }
+
+    /// 提示词必须包含文件内容 —— 这是"看不见 scripts 就猜命令"这一根因的修复点
+    #[test]
+    fn prompt_includes_file_content() {
+        let prompt = execute_check_prompt(
+            r"D:\proj\admin-web\package.json",
+            "package.json",
+            "json",
+            r#"{"scripts":{"dev":"vite","build":"vite build"}}"#,
+            &["- 同目录存在 pnpm-lock.yaml → pnpm 工程，命令请用 pnpm run <script>".to_string()],
+        );
+
+        assert!(prompt.contains(r#""dev":"vite""#), "提示词应包含 package.json 内容（scripts）");
+        assert!(prompt.contains("pnpm-lock.yaml"), "提示词应包含同目录锁文件线索");
+        assert!(prompt.contains("scripts"), "提示词应提示按 scripts 选命令");
+        assert!(prompt.contains(r"D:\proj\admin-web\package.json"), "仍应包含路径");
+    }
+
+    /// 读不出内容时给出占位说明，而不是空块
+    #[test]
+    fn prompt_marks_unreadable_content() {
+        let prompt = execute_check_prompt("x.py", "x.py", "py", "", &[]);
+        assert!(prompt.contains("无法读取或内容为空"));
+        assert!(!prompt.contains("同目录线索"), "无线索时不应出现空的线索段");
+    }
+
+    /// 内容按字符截断（不会把多字节字符切坏），并带截断标记
+    #[test]
+    fn read_head_truncates_safely() {
+        let content = "中文内容".repeat(100); // 400 字符
+        let p = tmp_file("trunc", &content);
+        let head = read_head(&p.to_string_lossy(), 50);
+
+        assert!(head.contains("...(内容已截断)"), "超长内容应有截断标记");
+        assert_eq!(head.lines().count(), 2, "截断后应为内容 + 标记两行");
+        let first_line = head.lines().next().unwrap();
+        assert_eq!(first_line.chars().count(), 50, "应按字符数截断");
+    }
+
+    /// 二进制文件（含 NUL）不进提示词
+    #[test]
+    fn read_head_skips_binary() {
+        let p = tmp_file("bin", "");
+        std::fs::write(&p, [0x50, 0x4b, 0x00, 0x01, 0x02]).expect("写文件失败");
+        assert_eq!(read_head(&p.to_string_lossy(), 100), "");
+    }
+
+    /// 同目录线索能识别包管理器
+    #[test]
+    fn dir_hints_detect_lockfiles() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间异常")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("dh-code-ai-test-hints-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        std::fs::write(dir.join("package.json"), "{}").expect("写文件失败");
+        std::fs::write(dir.join("pnpm-lock.yaml"), "").expect("写文件失败");
+
+        let hints = dir_hints(&dir.join("package.json"));
+        assert!(
+            hints.iter().any(|h| h.contains("pnpm-lock.yaml")),
+            "应识别 pnpm 锁文件，实际: {:?}",
+            hints
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

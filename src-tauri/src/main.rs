@@ -6,6 +6,7 @@ mod git;
 mod instance;
 mod pty;
 mod rag;
+mod runner;
 
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -261,6 +262,8 @@ struct ExecuteStatus {
     target_name: Option<String>,
     /// 建议的运行命令（若来自预置清单）
     suggested_cmd: Option<String>,
+    /// 建议的运行目标列表：package.json 的每个 scripts 各一条
+    suggested_targets: Vec<runner::RunSpec>,
 }
 
 #[tauri::command]
@@ -287,11 +290,24 @@ fn get_execute_status(
     // 三层查找：预置清单 → 文件名匹配 → 扩展名匹配
     let mut known: Option<bool> = None;
     let mut suggested_cmd: Option<String> = None;
+    let mut suggested_targets: Vec<runner::RunSpec> = Vec::new();
 
     // 1) 预置清单（优先级最高，保证知名文件不被扩展名级条目覆盖）
-    if let Some(manifest) = config::manifest_for_path(p) {
-        known = Some(true);
-        suggested_cmd = Some(manifest.cmd.to_string());
+    //    命令来自文件内容：package.json 按 scripts 逐条生成运行目标，
+    //    而不是写死的 npm start
+    match runner::manifest_run_specs(p) {
+        Some(specs) => {
+            known = Some(true);
+            suggested_cmd = specs.first().map(|s| s.cmd.clone());
+            suggested_targets = specs;
+        }
+        None => {
+            // 不是清单文件或内容解析失败 → 回退到静态命令表
+            if let Some(manifest) = config::manifest_for_path(p) {
+                known = Some(true);
+                suggested_cmd = Some(manifest.cmd.to_string());
+            }
+        }
     }
 
     // 2) execute.toml 文件名精确匹配
@@ -339,7 +355,13 @@ fn get_execute_status(
             }
         }
     }
-    Ok(ExecuteStatus { known, has_target, target_name, suggested_cmd })
+    Ok(ExecuteStatus {
+        known,
+        has_target,
+        target_name,
+        suggested_cmd,
+        suggested_targets,
+    })
 }
 
 #[tauri::command]
@@ -559,8 +581,51 @@ struct RunOutput {
     killed: bool,
 }
 
+/// 运行目标的工作目录解析。
+///
+/// - 未绑定文件 → 项目根目录
+/// - 绑定了文件 → 该文件**所在目录**（如 `admin-web\package.json` → `<项目根>\admin-web`），
+///   `npm start` 这类必须在清单文件所在目录执行的命令才能正确运行
+/// - 绑定了目录 → 该目录本身
+/// - 目录不存在、或解析后越出项目根（bind 写成 `../..`）→ 回退到项目根
+fn resolve_run_dir(project_root: Option<&str>, bind: Option<&str>) -> Option<String> {
+    let root = project_root?;
+    let root_path = Path::new(root);
+
+    let Some(bind) = bind.map(str::trim).filter(|b| !b.is_empty()) else {
+        return Some(root.to_string());
+    };
+
+    let bind_path = root_path.join(bind);
+    let dir = if bind_path.is_dir() {
+        bind_path
+    } else {
+        match bind_path.parent() {
+            // parent 为空串表示 bind 就在项目根下（如 "package.json"）
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => root_path.to_path_buf(),
+        }
+    };
+
+    // 越界防护：解析后的真实路径必须落在项目根内
+    match (root_path.canonicalize(), dir.canonicalize()) {
+        (Ok(root_canon), Ok(dir_canon)) if dir_canon.starts_with(&root_canon) => {
+            Some(clean_path(&dir_canon))
+        }
+        _ => Some(root.to_string()),
+    }
+}
+
+/// 运行目标：执行一次性命令并回传输出。
+///
+/// `bind` 为运行目标绑定的清单文件（项目相对路径），用于决定工作目录：
+/// 绑定 `admin-web\package.json` 时命令在 `<项目根>\admin-web` 下执行。
 #[tauri::command]
-async fn run_target(cmd: String, project_root: Option<String>) -> Result<RunOutput, String> {
+async fn run_target(
+    cmd: String,
+    project_root: Option<String>,
+    bind: Option<String>,
+) -> Result<RunOutput, String> {
     let parts = split_cmd(&cmd);
     if parts.is_empty() {
         return Err("空命令".to_string());
@@ -568,6 +633,9 @@ async fn run_target(cmd: String, project_root: Option<String>) -> Result<RunOutp
 
     let program = resolve_windows_cmd(&parts[0]);
     let args = parts[1..].to_vec();
+
+    // 工作目录必须在进闭包前算好（project_root 会被 move）
+    let run_dir = resolve_run_dir(project_root.as_deref(), bind.as_deref());
 
     // 后台线程执行，避免阻塞 UI
     tauri::async_runtime::spawn_blocking(move || {
@@ -580,7 +648,7 @@ async fn run_target(cmd: String, project_root: Option<String>) -> Result<RunOutp
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
-        if let Some(ref dir) = project_root {
+        if let Some(ref dir) = run_dir {
             cmd.current_dir(dir);
         }
 
@@ -1150,6 +1218,145 @@ mod tests {
         assert!(
             lines.iter().any(|l| !l.spans.is_empty()),
             "至少一行应包含高亮 span"
+        );
+    }
+
+    // ============================================
+    // 运行目录解析（0.0.4 修复：绑定清单文件后应在该文件所在目录运行）
+    // ============================================
+
+    /// 临时项目目录，Drop 时自动清理
+    struct TempProj(std::path::PathBuf);
+
+    impl TempProj {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("系统时间异常")
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "dh-code-run-test-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+            TempProj(dir)
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+
+        /// 写文件（自动创建父目录）
+        fn write(&self, rel: &str, content: &str) {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).expect("创建父目录失败");
+            }
+            std::fs::write(&p, content).expect("写文件失败");
+        }
+    }
+
+    impl Drop for TempProj {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 路径比较用规范化：统一分隔符、去尾部斜杠、忽略大小写
+    fn norm(p: &str) -> String {
+        p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    }
+
+    #[test]
+    fn run_dir_defaults_to_project_root() {
+        let proj = TempProj::new("root");
+        assert_eq!(
+            resolve_run_dir(Some(&proj.path()), None).map(|d| norm(&d)),
+            Some(norm(&proj.path())),
+            "未绑定文件时应使用项目根目录"
+        );
+        assert_eq!(
+            resolve_run_dir(Some(&proj.path()), Some("  ")).map(|d| norm(&d)),
+            Some(norm(&proj.path())),
+            "空白 bind 应等价于未绑定"
+        );
+    }
+
+    /// 复现用例：bind = admin-web\package.json、cmd = npm start
+    /// 期望工作目录是 <项目根>\admin-web（修复前是项目根 → 报错）
+    #[test]
+    fn run_dir_uses_bind_file_parent_dir() {
+        let proj = TempProj::new("bind");
+        proj.write("admin-web/package.json", "{\"name\":\"admin-web\"}");
+
+        for bind in [r"admin-web\package.json", "admin-web/package.json"] {
+            let dir = resolve_run_dir(Some(&proj.path()), Some(bind)).expect("应解析出工作目录");
+            assert_eq!(
+                norm(&dir),
+                norm(&format!("{}\\admin-web", proj.path())),
+                "bind={} 时应在该文件所在目录运行",
+                bind
+            );
+        }
+    }
+
+    #[test]
+    fn run_dir_bind_at_project_root_stays_at_root() {
+        let proj = TempProj::new("rootbind");
+        proj.write("package.json", "{}");
+        let dir = resolve_run_dir(Some(&proj.path()), Some("package.json")).expect("应有工作目录");
+        assert_eq!(norm(&dir), norm(&proj.path()), "根目录下的清单文件 → 项目根");
+    }
+
+    #[test]
+    fn run_dir_bind_dir_uses_dir_itself() {
+        let proj = TempProj::new("dirbind");
+        std::fs::create_dir_all(proj.0.join("admin-web")).expect("创建目录失败");
+        let dir = resolve_run_dir(Some(&proj.path()), Some("admin-web")).expect("应有工作目录");
+        assert_eq!(norm(&dir), norm(&format!("{}\\admin-web", proj.path())));
+    }
+
+    #[test]
+    fn run_dir_missing_dir_falls_back_to_root() {
+        let proj = TempProj::new("missing");
+        let dir =
+            resolve_run_dir(Some(&proj.path()), Some("not-exist/package.json")).expect("应有工作目录");
+        assert_eq!(norm(&dir), norm(&proj.path()), "目录不存在应回退项目根");
+    }
+
+    #[test]
+    fn run_dir_blocks_path_escape() {
+        let proj = TempProj::new("escape");
+        let outside_name = format!("dh-code-run-test-escape-outside-{}", std::process::id());
+        let outside = proj.0.parent().expect("临时目录应有父目录").join(&outside_name);
+        std::fs::create_dir_all(&outside).expect("创建目录失败");
+
+        let dir = resolve_run_dir(Some(&proj.path()), Some(&format!("../{outside_name}/package.json")))
+            .expect("应有工作目录");
+        assert_eq!(norm(&dir), norm(&proj.path()), "越出项目根的 bind 应回退项目根");
+
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 端到端：走真实 run_target（Windows 命令解析 + 工作目录设置），
+    /// 用 `cmd /c cd` 回显实际工作目录
+    #[test]
+    fn run_target_executes_in_bind_dir() {
+        let proj = TempProj::new("e2e");
+        proj.write("admin-web/package.json", "{}");
+
+        let out = tauri::async_runtime::block_on(run_target(
+            "cmd /c cd".to_string(),
+            Some(proj.path()),
+            Some(r"admin-web\package.json".to_string()),
+        ))
+        .expect("run_target 执行失败");
+
+        assert_eq!(out.exit_code, Some(0), "命令应执行成功: {}", out.stderr);
+        assert!(
+            out.stdout.to_lowercase().contains("admin-web"),
+            "实际工作目录应包含 admin-web，实际输出: {:?}",
+            out.stdout
         );
     }
 }

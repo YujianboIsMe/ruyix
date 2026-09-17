@@ -101,6 +101,21 @@ darkhorse.code.run.target0.bind=src\P05-es\pdf2es.py
 target0 是用户随意取的名字，不是系统递增的（IDE不维护计数器）。
 只有IDE自动创建运行目标时，才遍历target开头的code/key，然后取最大的数字+1。
 
+**bind 与运行目录**：`bind` 是绑定的清单文件（项目相对路径），决定命令在哪个目录执行：
+
+| bind | 运行目录 |
+|---|---|
+| 无 | 项目根 |
+| `admin-web\package.json` | `<项目根>\admin-web` |
+| `admin-web`（目录） | `<项目根>\admin-web` |
+| 目录不存在 / 越出项目根 | 回退项目根 |
+
+`npm start`、`cargo run` 这类必须在清单文件所在目录执行的命令依赖此规则
+（缺陷记录：[bug-运行目录错误](./bug-运行目录错误-v0.0.4.md)）。
+
+**命令来源**：`package.json` 的运行目标由 `scripts` 逐条生成（每个脚本一个目标），
+命令形如 `npm run dev`，不再写死 `npm start`；详见 [运行机制](./execute.md)。
+
 ### AI
 AI配置同样遵循配置四级配置机制。
 

@@ -216,6 +216,8 @@
   "run.executing": "正在运行: {name}",
   "run.done": "{name} 执行完毕 (exit: {code})",
   "run.fail": "运行失败: {err}",
+  "run.auto.created": "已创建 {count} 个运行目标：{names}",
+  "run.auto.no_script": "{file} 里没有可运行的 scripts",
   "terminal.spawned": "{name} 已在新窗口中启动",
   "terminal.spawn_fail": "启动失败: {err}",
   "terminal.starting": "正在启动 {name}...",
