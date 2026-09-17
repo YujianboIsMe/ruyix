@@ -1,5 +1,19 @@
 # darkhorse-code
 
+## 来源说明
+
+本项目原托管于 GitCode，现已迁移至 GitHub 继续维护：
+
+| | 地址 |
+|---|---|
+| 源仓库（GitCode） | <https://gitcode.com/m0_66201040/darkhorse-code> |
+| 当前仓库（GitHub） | <https://github.com/YujianboIsMe/newest-ai-code> |
+
+- 源仓库与当前仓库**由同一作者开发与维护**，作者：俞建波 `<yujianboisme@outlook.com>`
+- 迁移保留了完整提交历史，包括 `master` / `0.0.2` / `0.0.3` 分支与 `0.0.1` 标签
+- 仓库内第三方内容版权归其原作者，遵循各自许可证（如 vendored 的 `ui/xterm.js`、`ui/xterm.css` 为 MIT）
+- 如对来源或署名有异议，请提 issue 联系更正
+
 ## 架构
 Tauri 2 + Monaco Editor + Rust后端
 这个方案已经被SideX等开源IDE验证，是目前Rust+WebView路线做IDE的最优解。
