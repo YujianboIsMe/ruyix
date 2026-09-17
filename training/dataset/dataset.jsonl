@@ -1,0 +1,96 @@
+{"project_path": null, "input": "打开项目 D:\\projects\\my-app", "output": "---COMMAND---\nopen project D:\\projects\\my-app\n---LUA---\nif input:match(\"打开项目%s+(.+)\") then\n  return \"open project \" .. input:match(\"打开项目%s+(.+)\")\nend"}
+{"project_path": null, "input": "帮我打开项目 /Users/mac/PycharmProjects/newest-ai-code", "output": "---COMMAND---\nopen project /Users/mac/PycharmProjects/newest-ai-code\n---LUA---\nif input:match(\"打开项目%s+(.+)\") then\n  return \"open project \" .. input:match(\"打开项目%s+(.+)\")\nend"}
+{"project_path": null, "input": "切换到项目 D:\\work\\ruyix", "output": "---COMMAND---\nopen project D:\\work\\ruyix\n---LUA---\nif input:match(\"切换到项目%s+(.+)\") then\n  return \"open project \" .. input:match(\"切换到项目%s+(.+)\")\nend"}
+{"project_path": null, "input": "open project /home/dev/webapp", "output": "---COMMAND---\nopen project /home/dev/webapp\n---LUA---\nif input:match(\"[Oo][Pp][Ee][Nn]%s+project%s+(.+)\") then\n  return \"open project \" .. input:match(\"[Oo][Pp][Ee][Nn]%s+project%s+(.+)\")\nend"}
+{"project_path": null, "input": "换个项目：D:\\games\\demo", "output": "---COMMAND---\nopen project D:\\games\\demo\n---LUA---\nif input:match(\"项目[：:]%s*(%S.*)\") and input:match(\"换\") then\n  return \"open project \" .. input:match(\"项目[：:]%s*(%S.*)\")\nend"}
+{"project_path": null, "input": "打开文件 src/main.rs", "output": "---COMMAND---\nopen file src/main.rs\n---LUA---\nif input:match(\"打开文件%s+(.+)\") then\n  return \"open file \" .. input:match(\"打开文件%s+(.+)\")\nend"}
+{"project_path": "D:\\projects\\ruyix", "input": "打开文件 ui/index.html", "output": "---COMMAND---\nopen file ui/index.html\n---LUA---\nif input:match(\"打开文件%s+(.+)\") then\n  return \"open file \" .. input:match(\"打开文件%s+(.+)\")\nend"}
+{"project_path": null, "input": "帮我看看 ui/command.js", "output": "---COMMAND---\nopen file ui/command.js\n---LUA---\nif input:match(\"看看%s+([%w%.%-%_/\\]+)\") then\n  return \"open file \" .. input:match(\"看看%s+([%w%.%-%_/\\]+)\")\nend"}
+{"project_path": null, "input": "打开 README.md", "output": "---COMMAND---\nopen file README.md\n---LUA---\nif input:match(\"打开%s-([%w_%.%-%/\\]+%.[%w]+)%s*$\") then\n  return \"open file \" .. input:match(\"打开%s-([%w_%.%-%/\\]+%.[%w]+)%s*$\")\nend"}
+{"project_path": null, "input": "查看 package.json", "output": "---COMMAND---\nopen file package.json\n---LUA---\nif input:match(\"查看%s+([%w%.%-%_/\\]+%.[%w]+)\") then\n  return \"open file \" .. input:match(\"查看%s+([%w%.%-%_/\\]+%.[%w]+)\")\nend"}
+{"project_path": null, "input": "open file src/lib/utils.py", "output": "---COMMAND---\nopen file src/lib/utils.py\n---LUA---\nif input:match(\"[Oo][Pp][Ee][Nn]%s+file%s+(.+)\") then\n  return \"open file \" .. input:match(\"[Oo][Pp][Ee][Nn]%s+file%s+(.+)\")\nend"}
+{"project_path": null, "input": "关闭项目", "output": "---COMMAND---\nclose project\n---LUA---\nif input:match(\"关闭?项目\") or input:match(\"关掉.*项目\") then\n  return \"close project\"\nend"}
+{"project_path": null, "input": "关掉当前项目", "output": "---COMMAND---\nclose project\n---LUA---\nif input:match(\"关掉.*项目\") or input:match(\"关闭?项目\") then\n  return \"close project\"\nend"}
+{"project_path": null, "input": "关闭所有标签页", "output": "---COMMAND---\nclose all\n---LUA---\nif input:match(\"关闭.*所有\") or input:match(\"标签.*全关\") then\n  return \"close all\"\nend"}
+{"project_path": null, "input": "把标签全关了", "output": "---COMMAND---\nclose all\n---LUA---\nif input:match(\"标签.*全关\") or input:match(\"关闭.*所有\") then\n  return \"close all\"\nend"}
+{"project_path": null, "input": "关闭第0个标签", "output": "---COMMAND---\nclose 0\n---LUA---\nif input:match(\"关闭?第(%d+)个\") then\n  return \"close \" .. input:match(\"关闭?第(%d+)个\")\nend"}
+{"project_path": null, "input": "关闭第2个标签页", "output": "---COMMAND---\nclose 2\n---LUA---\nif input:match(\"关闭?第(%d+)个\") then\n  return \"close \" .. input:match(\"关闭?第(%d+)个\")\nend"}
+{"project_path": null, "input": "关掉最后一个标签", "output": "---COMMAND---\nclose -1\n---LUA---\nif input:match(\"最后\") then\n  return \"close -1\"\nend"}
+{"project_path": null, "input": "关闭倒数第二个标签", "output": "---COMMAND---\nclose -2\n---LUA---\nif input:match(\"倒数第二\") then\n  return \"close -2\"\nend"}
+{"project_path": null, "input": "关闭其他标签页", "output": "---COMMAND---\nclose other\n---LUA---\nif input:match(\"关闭?其他\") then\n  return \"close other\"\nend"}
+{"project_path": null, "input": "关闭左边的标签", "output": "---COMMAND---\nclose left\n---LUA---\nif input:match(\"关闭?左边\") then\n  return \"close left\"\nend"}
+{"project_path": null, "input": "把右边的标签都关了", "output": "---COMMAND---\nclose right\n---LUA---\nif input:match(\"右边.*关\") then\n  return \"close right\"\nend"}
+{"project_path": null, "input": "帮我创建python文件叫hello", "output": "---COMMAND---\nnew py hello\n---LUA---\nif input:match(\"创建.*[Pp]ython.*文件\") or input:match(\"新建.*[Pp]ython\") then\n  local name = input:match(\"叫(%S+)\") or input:match(\"名为(%S+)\") or input:match(\"文件%s+(%S+)\")\n  return \"new py \" .. (name or \"untitled\")\nend"}
+{"project_path": null, "input": "新建一个rust文件，名字是server", "output": "---COMMAND---\nnew rs server\n---LUA---\nif input:match(\"新建.*rust\") or input:match(\"创建.*[Rr]ust\") then\n  local name = input:match(\"名字是(%S+)\") or input:match(\"叫(%S+)\") or input:match(\"名为(%S+)\")\n  return \"new rs \" .. (name or \"untitled\")\nend"}
+{"project_path": null, "input": "帮我建个markdown文件叫notes", "output": "---COMMAND---\nnew md notes\n---LUA---\nif input:match(\"建.*markdown\") or input:match(\"新建.*md\") then\n  local name = input:match(\"叫(%S+)\") or input:match(\"名为(%S+)\")\n  return \"new md \" .. (name or \"untitled\")\nend"}
+{"project_path": null, "input": "创建c文件叫main", "output": "---COMMAND---\nnew c main\n---LUA---\nif input:match(\"创建.*c文件\") or input:match(\"新建.*c文件\") then\n  local name = input:match(\"叫(%S+)\") or input:match(\"名为(%S+)\")\n  return \"new c \" .. (name or \"untitled\")\nend"}
+{"project_path": null, "input": "新建Python文件 utils", "output": "---COMMAND---\nnew py utils\n---LUA---\nif input:match(\"新建.*[Pp]ython\") then\n  local name = input:match(\"[Pp]ython文件%s+(%S+)\") or input:match(\"叫(%S+)\")\n  return \"new py \" .. (name or \"untitled\")\nend"}
+{"project_path": null, "input": "create a rust file called demo", "output": "---COMMAND---\nnew rs demo\n---LUA---\nif input:match(\"[Cc]reate.*rust.*file\") or input:match(\"new rust file\") then\n  local name = input:match(\"called%s+(%S+)\") or input:match(\"named%s+(%S+)\")\n  return \"new rs \" .. (name or \"untitled\")\nend"}
+{"project_path": null, "input": "新文档 meeting", "output": "---COMMAND---\nnew md meeting\n---LUA---\nif input:match(\"新文档%s+(%S+)\") then\n  return \"new md \" .. input:match(\"新文档%s+(%S+)\")\nend"}
+{"project_path": null, "input": "创建文件 src/lib/helper.py", "output": "---COMMAND---\nnew file src/lib/helper.py\n---LUA---\nif input:match(\"创建文件%s+(.+)\") then\n  return \"new file \" .. input:match(\"创建文件%s+(.+)\")\nend"}
+{"project_path": null, "input": "新建文件 docs/api.md", "output": "---COMMAND---\nnew file docs/api.md\n---LUA---\nif input:match(\"新建文件%s+(.+)\") then\n  return \"new file \" .. input:match(\"新建文件%s+(.+)\")\nend"}
+{"project_path": null, "input": "新建文件夹 docs/api", "output": "---COMMAND---\nnew folder docs/api\n---LUA---\nif input:match(\"新建?(文件夹|目录)%s+(.+)\") then\n  return \"new folder \" .. input:match(\"新建?(文件夹|目录)%s+(.+)\")\nend"}
+{"project_path": null, "input": "创建目录 logs", "output": "---COMMAND---\nnew dir logs\n---LUA---\nif input:match(\"创建目录%s+(.+)\") then\n  return \"new dir \" .. input:match(\"创建目录%s+(.+)\")\nend"}
+{"project_path": null, "input": "new folder test/fixtures", "output": "---COMMAND---\nnew folder test/fixtures\n---LUA---\nif input:match(\"new%s+folder%s+(.+)\") then\n  return \"new folder \" .. input:match(\"new%s+folder%s+(.+)\")\nend"}
+{"project_path": null, "input": "把a.txt重命名为b.txt", "output": "---COMMAND---\nrename a.txt b.txt\n---LUA---\nif input:match(\"重命名\") then\n  local old = input:match(\"把%s*(%S+)\")\n  local new = input:match(\"为%s*(%S+)\")\n  if old and new then return \"rename \" .. old .. \" \" .. new end\nend"}
+{"project_path": null, "input": "重命名 utils.rs 为 tools.rs", "output": "---COMMAND---\nrename utils.rs tools.rs\n---LUA---\nif input:match(\"重命名%s+(%S+)%s+为%s+(%S+)\") then\n  local old, new = input:match(\"重命名%s+(%S+)%s+为%s+(%S+)\")\n  return \"rename \" .. old .. \" \" .. new\nend"}
+{"project_path": null, "input": "mv old.json new.json", "output": "---COMMAND---\nmv old.json new.json\n---LUA---\nif input:match(\"^mv%s+(%S+)%s+(%S+)\") then\n  local old, new = input:match(\"^mv%s+(%S+)%s+(%S+)\")\n  return \"mv \" .. old .. \" \" .. new\nend"}
+{"project_path": null, "input": "删除测试目录", "output": "---COMMAND---\ndel 测试\n---LUA---\nif input:match(\"删除\") then\n  local path = input:match(\"删除%s*(%S+)\")\n  if path then return \"del \" .. path end\nend"}
+{"project_path": null, "input": "删除 temp.log", "output": "---COMMAND---\ndel temp.log\n---LUA---\nif input:match(\"删除%s+(%S+)\") then\n  return \"del \" .. input:match(\"删除%s+(%S+)\")\nend"}
+{"project_path": null, "input": "删掉build文件夹", "output": "---COMMAND---\ndel build\n---LUA---\nif input:match(\"删掉%s*([%w%-%_%.]+)\") then\n  return \"del \" .. input:match(\"删掉%s*([%w%-%_%.]+)\")\nend"}
+{"project_path": null, "input": "移除 src/old.rs", "output": "---COMMAND---\nrm src/old.rs\n---LUA---\nif input:match(\"移除%s+(%S+)\") then\n  return \"rm \" .. input:match(\"移除%s+(%S+)\")\nend"}
+{"project_path": "/Users/mac/PycharmProjects/newest-ai-code", "input": "去掉node_modules目录", "output": "---COMMAND---\ndel node_modules\n---LUA---\nif input:match(\"去掉%s+([%w%-%_%.]+)\") then\n  return \"del \" .. input:match(\"去掉%s+([%w%-%_%.]+)\")\nend"}
+{"project_path": null, "input": "刷新文件树", "output": "---COMMAND---\nrefresh\n---LUA---\nif input:match(\"刷新\") and not input:match(\"刷新%s+%S\") then\n  return \"refresh\"\nend"}
+{"project_path": null, "input": "更新文件列表", "output": "---COMMAND---\nrefresh\n---LUA---\nif input:match(\"更新文件列表\") then\n  return \"refresh\"\nend"}
+{"project_path": null, "input": "刷新一下docs目录", "output": "---COMMAND---\nrefresh docs\n---LUA---\nif input:match(\"刷新.-([%w%-%_%.]+)目录\") then\n  return \"refresh \" .. input:match(\"刷新.-([%w%-%_%.]+)目录\")\nend"}
+{"project_path": "D:\\projects\\ruyix", "input": "外部工具改了文件，刷新", "output": "---COMMAND---\nrefresh\n---LUA---\nif input:match(\"刷新\") then\n  return \"refresh\"\nend"}
+{"project_path": null, "input": "配置API密钥 sk-abc123", "output": "---COMMAND---\nconfig add -g ruyix.code.ai.api_key sk-abc123\n---LUA---\nif input:match(\"[Aa][Pp][Ii].*密钥\") then\n  local key = input:match(\"(sk-%S+)\")\n  if key then return \"config add -g ruyix.code.ai.api_key \" .. key end\nend"}
+{"project_path": null, "input": "config add -g ruyix.code.ai.model qwen2.5-1.5b-instruct", "output": "---COMMAND---\nconfig add -g ruyix.code.ai.model qwen2.5-1.5b-instruct\n---LUA---\nif input:match(\"^config%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "查看当前模型配置", "output": "---COMMAND---\nconfig get ruyix.code.ai.model\n---LUA---\nif input:match(\"查看.*模型\") or input:match(\"当前模型\") then\n  return \"config get ruyix.code.ai.model\"\nend"}
+{"project_path": null, "input": "读取全局API地址", "output": "---COMMAND---\nconfig get -g ruyix.code.ai.api_url\n---LUA---\nif input:match(\"[Aa][Pp][Ii]地址\") then\n  return \"config get -g ruyix.code.ai.api_url\"\nend"}
+{"project_path": null, "input": "更新模型为 deepseek-chat", "output": "---COMMAND---\nconfig update -g ruyix.code.ai.model deepseek-chat\n---LUA---\nif input:match(\"更新?模型为%s+(%S+)\") then\n  return \"config update -g ruyix.code.ai.model \" .. input:match(\"更新?模型为%s+(%S+)\")\nend"}
+{"project_path": null, "input": "删除项目级AI配置 ruyix.code.ai.alias", "output": "---COMMAND---\nconfig remove -p ruyix.code.ai.alias\n---LUA---\nif input:match(\"删除.*配置%s+(ruyix%.code%.%S+)\") then\n  return \"config remove -p \" .. input:match(\"删除.*配置%s+(ruyix%.code%.%S+)\")\nend"}
+{"project_path": null, "input": "config get ruyix.code.run.target", "output": "---COMMAND---\nconfig get ruyix.code.run.target\n---LUA---\nif input:match(\"^config%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "添加运行目标 构建=cargo build", "output": "---COMMAND---\nrun 构建=cargo build\n---LUA---\nif input:match(\"运行目标%s*(.+)=(.+)\") or input:match(\"添加运行目标%s+(.+)\") then\n  local pair = input:match(\"运行目标%s*(%S+=%S+.*)\")\n  if pair then return \"run \" .. pair end\nend"}
+{"project_path": null, "input": "run dev=npm run dev", "output": "---COMMAND---\nrun dev=npm run dev\n---LUA---\nif input:match(\"^run%s+(%S+=.+)\") then\n  return input\nend"}
+{"project_path": null, "input": "设置启动命令 dev=pnpm run dev", "output": "---COMMAND---\nrun dev=pnpm run dev\n---LUA---\nif input:match(\"命令%s+(%S+=%S+.*)\") then\n  return \"run \" .. input:match(\"命令%s+(%S+=%S+.*)\")\nend"}
+{"project_path": null, "input": "删除运行目标 构建", "output": "---COMMAND---\nrun del 构建\n---LUA---\nif input:match(\"删除运行目标%s+(%S+)\") then\n  return \"run del \" .. input:match(\"删除运行目标%s+(%S+)\")\nend"}
+{"project_path": null, "input": "怎么用这个IDE", "output": "---COMMAND---\nhelp\n---LUA---\nif input:match(\"怎么用\") or input:match(\"如何使用\") then\n  return \"help\"\nend"}
+{"project_path": null, "input": "打开帮助页", "output": "---COMMAND---\nhelp\n---LUA---\nif input:match(\"帮助\") then\n  return \"help\"\nend"}
+{"project_path": null, "input": "help", "output": "---COMMAND---\nhelp\n---LUA---\nif input:match(\"^help$\") then\n  return \"help\"\nend"}
+{"project_path": null, "input": "git status", "output": "---COMMAND---\ngit status\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "查看git状态", "output": "---COMMAND---\ngit status\n---LUA---\nif input:match(\"查看.*[Gg]it.*状态\") or input:match(\"[Gg]it状态\") then\n  return \"git status\"\nend"}
+{"project_path": "D:\\projects\\ruyix", "input": "看看状态", "output": "---COMMAND---\ngit status\n---LUA---\nif input:match(\"看看?状态\") then\n  return \"git status\"\nend"}
+{"project_path": null, "input": "git add -A", "output": "---COMMAND---\ngit add -A\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "暂存所有改动", "output": "---COMMAND---\ngit add -A\n---LUA---\nif input:match(\"暂存.*所有\") or input:match(\"暂存.*全部\") then\n  return \"git add -A\"\nend"}
+{"project_path": null, "input": "git add src/main.rs", "output": "---COMMAND---\ngit add src/main.rs\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "暂存main.rs", "output": "---COMMAND---\ngit add main.rs\n---LUA---\nif input:match(\"暂存%s+([%w%-%_%.%/]+)\") then\n  return \"git add \" .. input:match(\"暂存%s+([%w%-%_%.%/]+)\")\nend"}
+{"project_path": null, "input": "提交代码，信息是\"修复登录bug\"", "output": "---COMMAND---\ngit commit -m \"修复登录bug\"\n---LUA---\nif input:match(\"提交\") then\n  local msg = input:match(\"[\\\"”]([^\\\"”]+)[\\\"”]\")\n  if msg then return 'git commit -m \"' .. msg .. '\"' end\nend"}
+{"project_path": null, "input": "git commit -m \"docs: update readme\"", "output": "---COMMAND---\ngit commit -m \"docs: update readme\"\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "推送", "output": "---COMMAND---\ngit push\n---LUA---\nif input:match(\"^推\") then\n  return \"git push\"\nend"}
+{"project_path": null, "input": "git push", "output": "---COMMAND---\ngit push\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "push my code", "output": "---COMMAND---\ngit push\n---LUA---\nif input:match(\"[Pp]ush\") then\n  return \"git push\"\nend"}
+{"project_path": null, "input": "拉取最新代码", "output": "---COMMAND---\ngit pull\n---LUA---\nif input:match(\"拉取\") then\n  return \"git pull\"\nend"}
+{"project_path": null, "input": "看看提交历史", "output": "---COMMAND---\ngit log\n---LUA---\nif input:match(\"提交历史\") or input:match(\"提交记录\") then\n  return \"git log\"\nend"}
+{"project_path": null, "input": "git diff", "output": "---COMMAND---\ngit diff\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "有什么改动", "output": "---COMMAND---\ngit diff\n---LUA---\nif input:match(\"有什么改动\") or input:match(\"哪些改动\") then\n  return \"git diff\"\nend"}
+{"project_path": null, "input": "show me the diff", "output": "---COMMAND---\ngit diff\n---LUA---\nif input:match(\"[Dd]iff\") then\n  return \"git diff\"\nend"}
+{"project_path": null, "input": "新建分支 feature/login", "output": "---COMMAND---\ngit branch feature/login\n---LUA---\nif input:match(\"新建分支%s+(%S+)\") then\n  return \"git branch \" .. input:match(\"新建分支%s+(%S+)\")\nend"}
+{"project_path": null, "input": "切换分支 dev", "output": "---COMMAND---\ngit checkout dev\n---LUA---\nif input:match(\"切换分支%s+(%S+)\") then\n  return \"git checkout \" .. input:match(\"切换分支%s+(%S+)\")\nend"}
+{"project_path": null, "input": "git stash", "output": "---COMMAND---\ngit stash\n---LUA---\nif input:match(\"^git%s+\") then\n  return input\nend"}
+{"project_path": null, "input": "暂存当前工作区", "output": "---COMMAND---\ngit stash\n---LUA---\nif input:match(\"暂存当前工作区\") or input:match(\"先存起来\") then\n  return \"git stash\"\nend"}
+{"project_path": null, "input": "创建rust文件demo然后打开它", "output": "---COMMAND---\nnew rs demo\nopen file demo.rs\n---LUA---\nif input:match(\"创建.*rust.*然后.*打开\") then\n  local name = input:match(\"叫(%S+)\") or input:match(\"文件(%S+)\")\n  name = name or \"demo\"\n  return \"new rs \" .. name .. \"\\nopen file \" .. name .. \".rs\"\nend"}
+{"project_path": null, "input": "新建文件src/a.py并打开", "output": "---COMMAND---\nnew file src/a.py\nopen file src/a.py\n---LUA---\nif input:match(\"新建文件(%S+)并打开\") then\n  local p = input:match(\"新建文件(%S+)并打开\")\n  return \"new file \" .. p .. \"\\nopen file \" .. p\nend"}
+{"project_path": null, "input": "关掉所有标签再打开README.md", "output": "---COMMAND---\nclose all\nopen file README.md\n---LUA---\nif input:match(\"关.*所有.*打开\") then\n  local f = input:match(\"打开%s-([%w_%.%-%/\\]+%.[%w]+)\")\n  if f then return \"close all\\nopen file \" .. f end\nend"}
+{"project_path": null, "input": "帮我写一个红黑树实现", "output": "不支持的操作：代码生成不在命令翻译范围内"}
+{"project_path": null, "input": "重启电脑", "output": "不支持的操作：无法控制系统"}
+{"project_path": null, "input": "订一杯奶茶", "output": "不支持的操作：臣妾做不到"}
+{"project_path": null, "input": "帮我发邮件给老板", "output": "不支持的操作：无法访问邮箱"}
+{"project_path": null, "input": "格式化整个磁盘", "output": "不支持的操作：危险操作被拒绝"}
+{"project_path": null, "input": "你好", "output": "你好"}
+{"project_path": null, "input": "你是谁", "output": "我是ruyix命令助手"}
+{"project_path": null, "input": "你能干什么", "output": "把自然语言翻译成IDE命令"}
+{"project_path": null, "input": "下班了吗", "output": "还没，你先忙"}
+{"project_path": null, "input": "今晚有空吗", "output": "你还是好好工作，房贷还清了吗？车贷还清了吗？"}
+{"project_path": null, "input": "今天天气怎么样", "output": "你还是好好工作，房贷还清了吗？车贷还清了吗？"}
+{"project_path": "D:\\projects\\ruyix", "input": "你好呀", "output": "你好"}
