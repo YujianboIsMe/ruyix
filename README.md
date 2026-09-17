@@ -2,29 +2,28 @@
 
 ## 来源说明
 
-本项目原托管于 GitCode，现已迁移至 GitHub 继续维护：
+### 原项目
 
-| | 地址 |
-|---|---|
-| 源仓库（GitCode） | <https://gitcode.com/m0_66201040/darkhorse-code> |
-| 当前仓库（GitHub） | <https://github.com/YujianboIsMe/newest-ai-code> |
+本项目的早期版本由**一位女性程序员**开发并维护，她以笔名「醒过来摸鱼」在 GitCode 上发布
+（CSDN 同名账号），后因**工作繁忙**停止了该项目的维护。
 
-### 关于作者身份
+- 原项目地址（GitCode）：<https://gitcode.com/m0_66201040/darkhorse-code>
 
-本项目的全部代码**均由同一位作者编写**。作者最初以**女性程序员**的身份
-（笔名「醒过来摸鱼」，CSDN 同名账号）在 GitCode 上发布并维护本项目；
-现迁移至 GitHub，改以本名署名。
+### 迁移说明
 
-- 现用署名：俞建波 `<yujianboisme@outlook.com>`
-- 早期署名：醒过来摸鱼 `<you@example.com>`（作者本人的笔名）
+经**原作者同意**，本项目已迁移至 GitHub 继续开发与维护：
 
-因此历史提交记录中会同时出现以上两个名字，**二者为同一人**：迁移前后的代码与提交历史同源，
-不存在对他人代码的复制、转用或再发布。
+- 当前仓库（GitHub）：<https://github.com/YujianboIsMe/newest-ai-code>
+- 现维护者：俞建波 `<yujianboisme@outlook.com>`
+- 迁移保留了完整提交历史，包括 `master` / `0.0.2` / `0.0.3` 分支与 `0.0.1` 标签
+- 历史提交中署名为「醒过来摸鱼」的提交均出自原作者；迁移至 GitHub 后的提交由现维护者提交
+
+原项目地址已在上方注明，用于标明项目来源与原作者的署名。
 
 ### 其他说明
 
-- 迁移保留了完整提交历史，包括 `master` / `0.0.2` / `0.0.3` 分支与 `0.0.1` 标签
 - 仓库内第三方内容版权归其原作者，遵循各自许可证（如 vendored 的 `ui/xterm.js`、`ui/xterm.css` 为 MIT）
+- 感谢原作者的开源贡献
 - 如对来源或署名有异议，请提 issue 联系更正
 
 ## 架构
