@@ -18,7 +18,7 @@ pub fn is_other_instance() -> bool {
 fn detect() -> bool {
     use std::ptr;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError,
     };
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
@@ -60,7 +60,7 @@ fn detect() -> bool {
 #[cfg(all(test, windows))]
 mod tests {
     use std::ptr;
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
     /// 验证检测所依赖的内核契约：同一进程内第二次创建同名互斥体
@@ -75,11 +75,19 @@ mod tests {
 
         let h1 = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
         assert!(!h1.is_null(), "首次创建应成功");
-        assert_ne!(unsafe { GetLastError() }, ERROR_ALREADY_EXISTS, "首次创建不应冲突");
+        assert_ne!(
+            unsafe { GetLastError() },
+            ERROR_ALREADY_EXISTS,
+            "首次创建不应冲突"
+        );
 
         let h2 = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
         assert!(!h2.is_null(), "已存在时仍应返回句柄");
-        assert_eq!(unsafe { GetLastError() }, ERROR_ALREADY_EXISTS, "重复创建应返回 ERROR_ALREADY_EXISTS");
+        assert_eq!(
+            unsafe { GetLastError() },
+            ERROR_ALREADY_EXISTS,
+            "重复创建应返回 ERROR_ALREADY_EXISTS"
+        );
 
         unsafe {
             CloseHandle(h2);

@@ -11,9 +11,9 @@ mod runner;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::sync::Mutex;
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::Emitter;
 use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
 
 /// CREATE_NEW_CONSOLE — 为新进程创建独立控制台窗口
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
@@ -177,7 +177,12 @@ fn read_file(path: String) -> Result<FileContent, String> {
 
 /// 根据文件扩展名返回 MIME 类型
 fn mime_from_ext(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -226,8 +231,7 @@ fn create_file(path: String) -> Result<(), String> {
         return Err(format!("文件已存在: {}", p.display()));
     }
     if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建父目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {}", e))?;
     }
     std::fs::write(p, "").map_err(|e| format!("创建文件失败: {}", e))
 }
@@ -421,26 +425,26 @@ fn lua_translate(
         eprintln!("[RUST-LUA] learn.lua 为空，跳过");
         return Ok(None);
     }
-    eprintln!("[RUST-LUA] learn.lua 内容 ({} 字节):\n{}", lua_content.len(), lua_content);
-
-    let full_script = format!(
-        "local input = ...\n{}\nreturn nil",
+    eprintln!(
+        "[RUST-LUA] learn.lua 内容 ({} 字节):\n{}",
+        lua_content.len(),
         lua_content
     );
+
+    let full_script = format!("local input = ...\n{}\nreturn nil", lua_content);
 
     let lua = mlua::Lua::new();
     // 沙箱：移除危险全局函数
     for name in ["os", "io", "require", "loadfile", "dofile", "load"] {
-        lua.globals().set(name, mlua::Value::Nil)
+        lua.globals()
+            .set(name, mlua::Value::Nil)
             .map_err(|e| format!("Lua 沙箱失败: {}", e))?;
     }
 
-    let result: mlua::Value = lua.load(&full_script)
-        .call(input)
-        .map_err(|e| {
-            eprintln!("[RUST-LUA] 执行失败: {}", e);
-            format!("Lua 执行失败: {}", e)
-        })?;
+    let result: mlua::Value = lua.load(&full_script).call(input).map_err(|e| {
+        eprintln!("[RUST-LUA] 执行失败: {}", e);
+        format!("Lua 执行失败: {}", e)
+    })?;
 
     eprintln!("[RUST-LUA] Lua 返回值类型: {:?}", result.type_name());
     // 返回值：nil → None，字符串 → Some
@@ -468,8 +472,7 @@ fn rename_path(from: String, to: String) -> Result<(), String> {
     if !src.exists() {
         return Err(format!("路径不存在: {}", src.display()));
     }
-    std::fs::rename(src, Path::new(&to))
-        .map_err(|e| format!("重命名失败: {}", e))
+    std::fs::rename(src, Path::new(&to)).map_err(|e| format!("重命名失败: {}", e))
 }
 
 #[tauri::command]
@@ -652,8 +655,7 @@ async fn run_target(
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output()
-            .map_err(|e| format!("执行失败: {}", e))?;
+        let output = cmd.output().map_err(|e| format!("执行失败: {}", e))?;
 
         Ok(RunOutput {
             exit_code: output.status.code(),
@@ -811,7 +813,11 @@ fn build_line_highlights(
 
             if e > line_start && s < line_end {
                 let rel_start = s.saturating_sub(line_start);
-                let rel_end = if e < line_end { e - line_start } else { line_text.len() };
+                let rel_end = if e < line_end {
+                    e - line_start
+                } else {
+                    line_text.len()
+                };
                 if rel_start < rel_end {
                     line_spans.push(LineSpan {
                         start_col: rel_start,
@@ -885,8 +891,12 @@ fn config_get(
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<Option<String>, String> {
-    let s = config::Scope::from_str(&scope)
-        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", scope))?;
+    let s = config::Scope::from_str(&scope).ok_or_else(|| {
+        format!(
+            "无效的作用域: {}。可用: g/global, p/project, r/runtime",
+            scope
+        )
+    })?;
     let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
     mgr.config_read(&s, &key, project_root.as_deref())
 }
@@ -899,8 +909,12 @@ fn config_set(
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<(), String> {
-    let s = config::Scope::from_str(&scope)
-        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", scope))?;
+    let s = config::Scope::from_str(&scope).ok_or_else(|| {
+        format!(
+            "无效的作用域: {}。可用: g/global, p/project, r/runtime",
+            scope
+        )
+    })?;
     let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
     mgr.config_write(&s, &key, &value, project_root.as_deref())
 }
@@ -912,8 +926,12 @@ fn config_delete(
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
 ) -> Result<(), String> {
-    let s = config::Scope::from_str(&scope)
-        .ok_or_else(|| format!("无效的作用域: {}。可用: g/global, p/project, r/runtime", scope))?;
+    let s = config::Scope::from_str(&scope).ok_or_else(|| {
+        format!(
+            "无效的作用域: {}。可用: g/global, p/project, r/runtime",
+            scope
+        )
+    })?;
     let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
     mgr.config_delete(&s, &key, project_root.as_deref())
 }
@@ -944,20 +962,24 @@ fn rag_reindex(
     let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
     let handle = app_handle.clone();
     let result = mgr.full_index_with_progress(&root, &move |current, total| {
-        let _ = handle.emit("rag-index-progress", serde_json::json!({
-            "current": current,
-            "total": total,
-            "phase": "indexing"
-        }));
+        let _ = handle.emit(
+            "rag-index-progress",
+            serde_json::json!({
+                "current": current,
+                "total": total,
+                "phase": "indexing"
+            }),
+        );
     });
     // 发送完成事件
-    let _ = app_handle.emit("rag-index-progress", serde_json::json!({
-        "current": 0, "total": 0, "phase": "done"
-    }));
+    let _ = app_handle.emit(
+        "rag-index-progress",
+        serde_json::json!({
+            "current": 0, "total": 0, "phase": "done"
+        }),
+    );
     let indexed = result?;
-    let rebuild_note = mgr
-        .rebuild_note
-        .clone();
+    let rebuild_note = mgr.rebuild_note.clone();
     Ok(rag::ReindexResult {
         indexed,
         rebuild_note,
@@ -985,9 +1007,7 @@ fn rag_remove_file(
 }
 
 #[tauri::command]
-fn rag_idle_check(
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-) -> Result<(), String> {
+fn rag_idle_check(rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>) -> Result<(), String> {
     let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
     mgr.idle_check();
     Ok(())
@@ -1002,9 +1022,7 @@ fn rag_status(
 }
 
 #[tauri::command]
-fn rag_shutdown(
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-) -> Result<(), String> {
+fn rag_shutdown(rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>) -> Result<(), String> {
     let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
     mgr.shutdown();
     Ok(())
@@ -1034,17 +1052,25 @@ fn rag_set_embedding_config(
 ) -> Result<(), String> {
     let mut cfg = rag::load_global_rag_config();
     cfg.api_url = Some(api_url.trim().to_string());
-    cfg.api_key = match api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    cfg.api_key = match api_key
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         Some(k) => Some(k),
         None => {
             // 缺省时复用 AI 配置的 api_key（runtime → project → global）
             let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
             let mut key = None;
-            for scope in [config::Scope::Runtime, config::Scope::Project, config::Scope::Global] {
+            for scope in [
+                config::Scope::Runtime,
+                config::Scope::Project,
+                config::Scope::Global,
+            ] {
                 if scope == config::Scope::Project && project_root.is_none() {
                     continue;
                 }
-                if let Ok(Some(v)) = mgr.config_read(&scope, "darkhorse.code.ai.api_key", project_root.as_deref())
+                if let Ok(Some(v)) =
+                    mgr.config_read(&scope, "darkhorse.code.ai.api_key", project_root.as_deref())
                     && !v.is_empty()
                 {
                     key = Some(v);
@@ -1054,7 +1080,9 @@ fn rag_set_embedding_config(
             key
         }
     };
-    cfg.model = model.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    cfg.model = model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     cfg.dim = Some(dim.unwrap_or(rag::DEFAULT_DIM));
     cfg.enabled = true;
     rag::save_global_rag_config(&cfg)
@@ -1078,9 +1106,7 @@ fn main() {
             let save = MenuItemBuilder::with_id("save", "保存")
                 .accelerator("CmdOrCtrl+S")
                 .build(app)?;
-            let menu = MenuBuilder::new(app)
-                .item(&save)
-                .build()?;
+            let menu = MenuBuilder::new(app).item(&save).build()?;
             app.set_menu(menu)?;
             Ok(())
         })
@@ -1305,7 +1331,11 @@ mod tests {
         let proj = TempProj::new("rootbind");
         proj.write("package.json", "{}");
         let dir = resolve_run_dir(Some(&proj.path()), Some("package.json")).expect("应有工作目录");
-        assert_eq!(norm(&dir), norm(&proj.path()), "根目录下的清单文件 → 项目根");
+        assert_eq!(
+            norm(&dir),
+            norm(&proj.path()),
+            "根目录下的清单文件 → 项目根"
+        );
     }
 
     #[test]
@@ -1319,8 +1349,8 @@ mod tests {
     #[test]
     fn run_dir_missing_dir_falls_back_to_root() {
         let proj = TempProj::new("missing");
-        let dir =
-            resolve_run_dir(Some(&proj.path()), Some("not-exist/package.json")).expect("应有工作目录");
+        let dir = resolve_run_dir(Some(&proj.path()), Some("not-exist/package.json"))
+            .expect("应有工作目录");
         assert_eq!(norm(&dir), norm(&proj.path()), "目录不存在应回退项目根");
     }
 
@@ -1328,12 +1358,23 @@ mod tests {
     fn run_dir_blocks_path_escape() {
         let proj = TempProj::new("escape");
         let outside_name = format!("dh-code-run-test-escape-outside-{}", std::process::id());
-        let outside = proj.0.parent().expect("临时目录应有父目录").join(&outside_name);
+        let outside = proj
+            .0
+            .parent()
+            .expect("临时目录应有父目录")
+            .join(&outside_name);
         std::fs::create_dir_all(&outside).expect("创建目录失败");
 
-        let dir = resolve_run_dir(Some(&proj.path()), Some(&format!("../{outside_name}/package.json")))
-            .expect("应有工作目录");
-        assert_eq!(norm(&dir), norm(&proj.path()), "越出项目根的 bind 应回退项目根");
+        let dir = resolve_run_dir(
+            Some(&proj.path()),
+            Some(&format!("../{outside_name}/package.json")),
+        )
+        .expect("应有工作目录");
+        assert_eq!(
+            norm(&dir),
+            norm(&proj.path()),
+            "越出项目根的 bind 应回退项目根"
+        );
 
         let _ = std::fs::remove_dir_all(&outside);
     }

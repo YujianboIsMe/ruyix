@@ -36,11 +36,7 @@ struct ChatChoiceMessage {
 }
 
 /// 从配置中读取 AI 设置，依次尝试 runtime → project → global
-fn read_ai_config(
-    mgr: &ConfigManager,
-    key: &str,
-    project_root: Option<&str>,
-) -> Option<String> {
+fn read_ai_config(mgr: &ConfigManager, key: &str, project_root: Option<&str>) -> Option<String> {
     for scope in [Scope::Runtime, Scope::Project, Scope::Global] {
         if scope == Scope::Project && project_root.is_none() {
             continue;
@@ -67,11 +63,12 @@ fn load_ai_config(
         format!("{}/chat/completions", api_url.trim_end_matches('/'))
     };
 
-    let api_key = read_ai_config(mgr, "darkhorse.code.ai.api_key", project_root).ok_or_else(|| {
-        "请先配置 API Key:\n\
+    let api_key =
+        read_ai_config(mgr, "darkhorse.code.ai.api_key", project_root).ok_or_else(|| {
+            "请先配置 API Key:\n\
          config add -g darkhorse.code.ai.api_key <你的密钥>"
-            .to_string()
-    })?;
+                .to_string()
+        })?;
 
     let model = read_ai_config(mgr, "darkhorse.code.ai.model", project_root)
         .unwrap_or_else(|| "deepseek-chat".to_string());
@@ -86,7 +83,9 @@ pub async fn translate(
     input: &str,
 ) -> Result<String, String> {
     let (api_url, api_key, model, lang) = {
-        let mgr = config_mgr.lock().map_err(|e| format!("配置锁失败: {}", e))?;
+        let mgr = config_mgr
+            .lock()
+            .map_err(|e| format!("配置锁失败: {}", e))?;
         let (api_url, api_key, model) = load_ai_config(&mgr, project_root)?;
         let lang = read_ai_config(&mgr, "darkhorse.code.ui.lang", project_root)
             .unwrap_or_else(|| "zh-CN".to_string());
@@ -94,7 +93,11 @@ pub async fn translate(
     };
 
     // 打开项目时，将项目根路径作为上下文注入到用户消息中
-    let context_prefix = if lang == "en" { "Current project path: " } else { "当前项目路径: " };
+    let context_prefix = if lang == "en" {
+        "Current project path: "
+    } else {
+        "当前项目路径: "
+    };
     let user_message = match project_root {
         Some(root) => format!("{}{}\n\n{}", context_prefix, root, input),
         None => input.to_string(),
@@ -104,17 +107,26 @@ pub async fn translate(
     let req_body = ChatRequest {
         model,
         messages: vec![
-            ChatMessage { role: "system".to_string(), content: SYSTEM_PROMPT.to_string() },
-            ChatMessage { role: "user".to_string(), content: user_message },
+            ChatMessage {
+                role: "system".to_string(),
+                content: SYSTEM_PROMPT.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_message,
+            },
         ],
         temperature: 0.1,
         max_tokens: 300,
     };
 
-    let resp = client.post(&api_url)
+    let resp = client
+        .post(&api_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .json(&req_body).send().await
+        .json(&req_body)
+        .send()
+        .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
 
     if !resp.status().is_success() {
@@ -123,25 +135,38 @@ pub async fn translate(
         return Err(format!("API 返回错误 ({}): {}", status.as_u16(), body));
     }
 
-    let chat_resp: ChatResponse = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
-    let content = chat_resp.choices.first()
+    let chat_resp: ChatResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+    let content = chat_resp
+        .choices
+        .first()
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_else(|| "不支持的操作：AI 未返回有效响应".to_string());
 
-    eprintln!("[RUST-AI] LLM 原始返回 ({} 字节): {}", content.len(), content);
+    eprintln!(
+        "[RUST-AI] LLM 原始返回 ({} 字节): {}",
+        content.len(),
+        content
+    );
 
     // 解析 ---COMMAND--- / ---LUA--- 两部分格式
     let (commands, lua_code) = parse_command_lua_response(&content);
-    eprintln!("[RUST-AI] 解析 → commands: {:?}, lua_code: {} 字节",
+    eprintln!(
+        "[RUST-AI] 解析 → commands: {:?}, lua_code: {} 字节",
         commands.as_deref(),
-        lua_code.as_ref().map_or(0, |s| s.len()));
+        lua_code.as_ref().map_or(0, |s| s.len())
+    );
 
     let final_commands = commands.unwrap_or(content);
     eprintln!("[RUST-AI] 最终命令: {}", final_commands);
 
     // 保存 Lua 代码到 learn.lua
     if let Some(root) = project_root {
-        let mgr = config_mgr.lock().map_err(|e| format!("配置锁失败: {}", e))?;
+        let mgr = config_mgr
+            .lock()
+            .map_err(|e| format!("配置锁失败: {}", e))?;
         if let Some(lua) = lua_code {
             eprintln!("[RUST-AI] LLM 生成了 Lua，保存到 learn.lua");
             // LLM 生成了 Lua → 直接保存
@@ -168,8 +193,10 @@ pub async fn translate(
 
 /// 判断字符串是否为有效的标准命令（非闲聊、非不支持）
 fn is_valid_command(s: &str) -> bool {
-    let verbs = ["open", "close", "config", "new", "run", "help", "git",
-                 "del", "delete", "remove", "rm", "rename", "mv"];
+    let verbs = [
+        "open", "close", "config", "new", "run", "help", "git", "del", "delete", "remove", "rm",
+        "rename", "mv",
+    ];
     let first = s.split_whitespace().next().unwrap_or("").to_lowercase();
     verbs.contains(&first.as_str())
 }
@@ -207,10 +234,12 @@ fn parse_command_lua_response(content: &str) -> (Option<String>, Option<String>)
         slice[..end].trim().to_string()
     });
 
-    let lua_code = lua_start.map(|start| {
-        let begin = start + lua_marker.len();
-        content[begin..].trim().to_string()
-    }).filter(|s| !s.is_empty());
+    let lua_code = lua_start
+        .map(|start| {
+            let begin = start + lua_marker.len();
+            content[begin..].trim().to_string()
+        })
+        .filter(|s| !s.is_empty());
 
     (commands, lua_code)
 }
@@ -221,19 +250,15 @@ pub async fn check_executable(
     path: &str,
 ) -> Result<String, String> {
     let (api_url, api_key, model) = {
-        let mgr = config_mgr.lock().map_err(|e| format!("配置锁失败: {}", e))?;
+        let mgr = config_mgr
+            .lock()
+            .map_err(|e| format!("配置锁失败: {}", e))?;
         load_ai_config(&mgr, None)?
     };
 
     let p = std::path::Path::new(path);
-    let file_name = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     // 提示词里带上文件内容与同目录线索：只有路径时 LLM 只能按名字猜
     // （例如 package.json 一律猜成 npm start，看不见里面写的是 dev）
     let content_head = read_head(path, MAX_PROMPT_CONTENT_CHARS);
@@ -251,10 +276,13 @@ pub async fn check_executable(
         max_tokens: 200,
     };
 
-    let resp = client.post(&api_url)
+    let resp = client
+        .post(&api_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .json(&req_body).send().await
+        .json(&req_body)
+        .send()
+        .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
 
     if !resp.status().is_success() {
@@ -263,8 +291,13 @@ pub async fn check_executable(
         return Err(format!("API 返回错误 ({}): {}", status.as_u16(), body));
     }
 
-    let chat_resp: ChatResponse = resp.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
-    let content = chat_resp.choices.first()
+    let chat_resp: ChatResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+    let content = chat_resp
+        .choices
+        .first()
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_default();
     Ok(content)
@@ -383,10 +416,19 @@ mod tests {
             &["- 同目录存在 pnpm-lock.yaml → pnpm 工程，命令请用 pnpm run <script>".to_string()],
         );
 
-        assert!(prompt.contains(r#""dev":"vite""#), "提示词应包含 package.json 内容（scripts）");
-        assert!(prompt.contains("pnpm-lock.yaml"), "提示词应包含同目录锁文件线索");
+        assert!(
+            prompt.contains(r#""dev":"vite""#),
+            "提示词应包含 package.json 内容（scripts）"
+        );
+        assert!(
+            prompt.contains("pnpm-lock.yaml"),
+            "提示词应包含同目录锁文件线索"
+        );
         assert!(prompt.contains("scripts"), "提示词应提示按 scripts 选命令");
-        assert!(prompt.contains(r"D:\proj\admin-web\package.json"), "仍应包含路径");
+        assert!(
+            prompt.contains(r"D:\proj\admin-web\package.json"),
+            "仍应包含路径"
+        );
     }
 
     /// 读不出内容时给出占位说明，而不是空块

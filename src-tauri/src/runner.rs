@@ -149,8 +149,7 @@ mod tests {
         );
 
         let specs = manifest_run_specs(&pkg).expect("应识别为清单文件");
-        let pairs: Vec<(String, String)> =
-            specs.into_iter().map(|s| (s.name, s.cmd)).collect();
+        let pairs: Vec<(String, String)> = specs.into_iter().map(|s| (s.name, s.cmd)).collect();
 
         assert_eq!(
             pairs,
@@ -173,10 +172,7 @@ mod tests {
             ("package-lock.json", "npm run dev"),
         ] {
             let dir = TempDir::new("pm");
-            dir.write(
-                "package.json",
-                r#"{"name":"x","scripts":{"dev":"vite"}}"#,
-            );
+            dir.write("package.json", r#"{"name":"x","scripts":{"dev":"vite"}}"#);
             dir.write(lock, "");
             let pkg = dir.0.join("package.json");
 

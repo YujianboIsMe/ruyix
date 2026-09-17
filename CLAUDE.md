@@ -163,7 +163,7 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 - Dark theme, matches IDE. Replaces browser-native `window.confirm`/`window.prompt`.
 
 ### File Icons
-- 🐍 Python, 🦀 Rust, 🌏 HTML, 🎨 CSS, Ⓙ JS, Ⓜ️ Markdown, 🛢️ SQL, 🖼️ Images
+- 🐍 Python, 🦀 Rust, 🌏 HTML, 🎨 CSS, Ⓙ JS, ☕ Java, Ⓜ️ Markdown, 🛢️ SQL, 🖼️ Images
 - 🚫 .gitignore, ⚙️ .toml, 🧩 .json, 📄 unknown
 - Folder icons: ➡️ collapsed, ⬇️ expanded with children, 🈳 empty
 

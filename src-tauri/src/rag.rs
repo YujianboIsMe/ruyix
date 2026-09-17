@@ -37,7 +37,7 @@ pub struct SearchResult {
 /// 索引进度
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexProgress {
-    pub phase: String,     // "idle" | "scanning" | "indexing" | "done"
+    pub phase: String, // "idle" | "scanning" | "indexing" | "done"
     pub current: usize,
     pub total: usize,
 }
@@ -87,22 +87,31 @@ pub struct GlobalRagConfig {
 // ============================================
 
 const DEFAULT_EXTENSIONS: &[&str] = &[
-    "java", "js", "ts", "jsx", "tsx", "py", "rs", "go", "c", "cpp", "h", "hpp",
-    "cs", "rb", "php", "swift", "kt", "scala", "vue", "svelte", "html", "css",
-    "scss", "less", "md", "rst", "txt", "toml", "yaml", "yml", "json", "xml",
-    "sql", "sh", "bat", "ps1", "proto", "graphql",
+    "java", "js", "ts", "jsx", "tsx", "py", "rs", "go", "c", "cpp", "h", "hpp", "cs", "rb", "php",
+    "swift", "kt", "scala", "vue", "svelte", "html", "css", "scss", "less", "md", "rst", "txt",
+    "toml", "yaml", "yml", "json", "xml", "sql", "sh", "bat", "ps1", "proto", "graphql",
 ];
 
 const EXCLUDED_DIRS: &[&str] = &[
-    "node_modules", ".git", "target", ".venv", "venv", "__pycache__",
-    "dist", "build", ".next", "out", "coverage", ".idea", ".vscode",
+    "node_modules",
+    ".git",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
+    "out",
+    "coverage",
+    ".idea",
+    ".vscode",
     ".darkhorse",
 ];
 
 const EXCLUDED_EXTENSIONS: &[&str] = &[
-    "lock", "min.js", "min.css", "map", "pyc", "class", "o", "so",
-    "dll", "exe", "bin", "png", "jpg", "jpeg", "gif", "bmp", "ico",
-    "svg", "webp", "woff", "woff2", "ttf", "eot", "pdf", "zip",
+    "lock", "min.js", "min.css", "map", "pyc", "class", "o", "so", "dll", "exe", "bin", "png",
+    "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "woff", "woff2", "ttf", "eot", "pdf", "zip",
     "tar", "gz", "bz2", "xz", "7z", "rar",
 ];
 
@@ -213,7 +222,7 @@ impl QdrantManager {
                 EdgeVectorParams {
                     size: self.dim,
                     distance: Distance::Cosine,
-                    on_disk: Some(true),   // mmap 存储，省内存
+                    on_disk: Some(true), // mmap 存储，省内存
                     multivector_config: None,
                     datatype: None,
                     quantization_config: None,
@@ -306,10 +315,7 @@ impl QdrantManager {
     }
 
     /// 批量插入/更新向量
-    pub fn upsert_points(
-        &self,
-        points: Vec<QdrantPoint>,
-    ) -> Result<(), String> {
+    pub fn upsert_points(&self, points: Vec<QdrantPoint>) -> Result<(), String> {
         let shard = self.shard.as_ref().ok_or("qdrant 未启动")?;
 
         let persisted: Vec<PointStructPersisted> = points
@@ -332,31 +338,23 @@ impl QdrantManager {
 
         shard
             .update(UpdateOperation::PointOperation(
-                PointOperations::UpsertPoints(PointInsertOperations::PointsList(
-                    persisted,
-                )),
+                PointOperations::UpsertPoints(PointInsertOperations::PointsList(persisted)),
             ))
             .map_err(|e| format!("插入向量失败: {}", e))
     }
 
     /// 搜索相似向量
-    pub fn search(
-        &self,
-        vector: Vec<f32>,
-        limit: usize,
-    ) -> Result<Vec<QdrantSearchHit>, String> {
+    pub fn search(&self, vector: Vec<f32>, limit: usize) -> Result<Vec<QdrantSearchHit>, String> {
         let shard = self.shard.as_ref().ok_or("qdrant 未启动")?;
 
-        let query = QueryEnum::Nearest(NamedQuery::new(
-            VectorInternal::Dense(vector),
-            VECTOR_NAME,
-        ));
+        let query = QueryEnum::Nearest(NamedQuery::new(VectorInternal::Dense(vector), VECTOR_NAME));
 
         let mut request = QueryRequest::new(limit);
         request.query = Some(ScoringQuery::Vector(query));
         request.with_payload = WithPayloadInterface::Bool(true);
 
-        let scored = shard.query(request)
+        let scored = shard
+            .query(request)
             .map_err(|e| format!("搜索失败: {}", e))?;
 
         let hits: Vec<QdrantSearchHit> = scored
@@ -374,12 +372,10 @@ impl QdrantManager {
     pub fn delete_points(&self, file_path: &str) -> Result<(), String> {
         let shard = self.shard.as_ref().ok_or("qdrant 未启动")?;
 
-        let filter = Filter::new_must(Condition::Field(
-            FieldCondition::new_match(
-                "path".parse::<JsonPath>().unwrap(),
-                Match::new_value(ValueVariants::String(file_path.to_string())),
-            ),
-        ));
+        let filter = Filter::new_must(Condition::Field(FieldCondition::new_match(
+            "path".parse::<JsonPath>().unwrap(),
+            Match::new_value(ValueVariants::String(file_path.to_string())),
+        )));
 
         shard
             .update(UpdateOperation::PointOperation(
@@ -458,7 +454,13 @@ impl EmbeddingClient {
             .build()
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { client, api_url, api_key, model, dim })
+        Ok(Self {
+            client,
+            api_url,
+            api_key,
+            model,
+            dim,
+        })
     }
 
     pub fn api_url(&self) -> &str {
@@ -495,8 +497,8 @@ impl EmbeddingClient {
             return Err(msg);
         }
 
-        let parsed: EmbeddingResponse = serde_json::from_str(&text)
-            .map_err(|e| format!("解析嵌入响应失败: {}", e))?;
+        let parsed: EmbeddingResponse =
+            serde_json::from_str(&text).map_err(|e| format!("解析嵌入响应失败: {}", e))?;
 
         let mut out = Vec::with_capacity(parsed.data.len());
         for d in parsed.data {
@@ -549,7 +551,11 @@ impl RagManager {
             qdrant: QdrantManager::new(DEFAULT_DIM),
             embed: None,
             config: ProjectRagConfig::default(),
-            progress: IndexProgress { phase: "idle".to_string(), current: 0, total: 0 },
+            progress: IndexProgress {
+                phase: "idle".to_string(),
+                current: 0,
+                total: 0,
+            },
             rebuild_note: None,
             config_project: None,
         }
@@ -580,9 +586,7 @@ impl RagManager {
 
     /// 保存项目 rag.toml
     pub fn save_config(&self, project_root: &str) -> Result<(), String> {
-        let dir = PathBuf::from(project_root)
-            .join(".darkhorse")
-            .join("code");
+        let dir = PathBuf::from(project_root).join(".darkhorse").join("code");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join("rag.toml");
         let toml_str = toml::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
@@ -660,7 +664,8 @@ impl RagManager {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file() && has_valid_extension(e.path()))
         {
-            let rel_path = entry.path()
+            let rel_path = entry
+                .path()
                 .strip_prefix(&root)
                 .unwrap_or(entry.path())
                 .to_string_lossy()
@@ -680,28 +685,42 @@ impl RagManager {
         for (path, rel_path) in &all_files {
             let content = match std::fs::read_to_string(path) {
                 Ok(s) => s,
-                Err(_) => { done += 1; on_progress(done, total); continue; },
+                Err(_) => {
+                    done += 1;
+                    on_progress(done, total);
+                    continue;
+                }
             };
 
             if content.trim().is_empty() || content.len() > MAX_FILE_CHARS {
-                done += 1; on_progress(done, total); continue;
+                done += 1;
+                on_progress(done, total);
+                continue;
             }
 
             // hash 相同 → 无需重新编码
             let hash = compute_hash(&content);
             if self.config.files.get(rel_path) == Some(&hash) {
                 new_files.insert(rel_path.clone(), hash);
-                done += 1; on_progress(done, total); continue;
+                done += 1;
+                on_progress(done, total);
+                continue;
             }
 
             pending.push((rel_path.clone(), hash, content));
 
             // 攒满一批，批量调用嵌入 API
             if pending.len() >= EMBED_BATCH {
-                self.flush_pending_batch(&mut pending, &mut points, &mut new_files, &mut id_counter)?;
+                self.flush_pending_batch(
+                    &mut pending,
+                    &mut points,
+                    &mut new_files,
+                    &mut id_counter,
+                )?;
             }
 
-            done += 1; on_progress(done, total);
+            done += 1;
+            on_progress(done, total);
         }
         self.flush_pending_batch(&mut pending, &mut points, &mut new_files, &mut id_counter)?;
 
@@ -787,7 +806,11 @@ impl RagManager {
         let p = PathBuf::from(abs_path);
         let content = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
         let root = PathBuf::from(project_root);
-        let rel_path = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+        let rel_path = p
+            .strip_prefix(&root)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .replace('\\', "/");
 
         // 删除旧向量
         let _ = self.qdrant.delete_points(&rel_path);
@@ -800,7 +823,11 @@ impl RagManager {
         let hash = compute_hash(&content);
         let embedding = self.embed.as_ref().unwrap().embed(&content)?;
         let snippet = content.lines().take(3).collect::<Vec<_>>().join("\n");
-        let snippet = if snippet.len() > 200 { format!("{}...", &snippet[..200]) } else { snippet };
+        let snippet = if snippet.len() > 200 {
+            format!("{}...", &snippet[..200])
+        } else {
+            snippet
+        };
         let line_count = content.lines().count().max(1);
 
         self.qdrant.upsert_points(vec![QdrantPoint {
@@ -845,7 +872,12 @@ impl RagManager {
     pub fn idle_check(&mut self) {}
 
     /// 搜索
-    pub fn search(&mut self, project_root: &str, query: &str, top_k: usize) -> Result<Vec<SearchResult>, String> {
+    pub fn search(
+        &mut self,
+        project_root: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, String> {
         self.ensure_project(project_root)?;
         if !self.qdrant.is_running() || self.embed.is_none() {
             self.init(project_root)?;

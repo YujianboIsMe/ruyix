@@ -130,7 +130,13 @@ fn status_impl(project_root: &str) -> Result<GitStatus, String> {
     // core.quotepath=false: 路径原样输出（UTF-8，不转义中文）
     let out = run_git(
         project_root,
-        &["-c", "core.quotepath=false", "status", "--porcelain", "-uall"],
+        &[
+            "-c",
+            "core.quotepath=false",
+            "status",
+            "--porcelain",
+            "-uall",
+        ],
     )?;
     if out.exit_code != Some(0) {
         return Err(first_line(&out.stderr).unwrap_or_else(|| "git status 失败".to_string()));
@@ -271,7 +277,10 @@ mod tests {
         let status = status_impl(&dir.path()).expect("仓库状态读取失败");
         assert!(status.is_repo, "git init 后应判定为仓库");
         assert!(status.remote.is_none(), "新仓库不应有 origin");
-        assert_eq!(status.branch, "(no commits)", "新仓库无提交时分支应降级显示");
+        assert_eq!(
+            status.branch, "(no commits)",
+            "新仓库无提交时分支应降级显示"
+        );
         assert!(
             status.unstaged.iter().any(|f| f.path == "main.rs"),
             "未跟踪文件应出现在 unstaged，实际: {:?}",

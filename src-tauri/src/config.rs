@@ -23,9 +23,18 @@ pub struct ManifestDef {
 }
 
 pub const MANIFEST_FILES: &[ManifestDef] = &[
-    ManifestDef { name: "cargo.toml", cmd: "cargo run" },
-    ManifestDef { name: "package.json", cmd: "npm start" },
-    ManifestDef { name: "makefile", cmd: "make" },
+    ManifestDef {
+        name: "cargo.toml",
+        cmd: "cargo run",
+    },
+    ManifestDef {
+        name: "package.json",
+        cmd: "npm start",
+    },
+    ManifestDef {
+        name: "makefile",
+        cmd: "make",
+    },
 ];
 
 /// 根据路径返回匹配的清单定义
@@ -279,7 +288,9 @@ impl ConfigManager {
         match fs::read_to_string(&path) {
             Ok(s) => {
                 #[derive(Deserialize)]
-                struct File { projects: ProjectsConfig }
+                struct File {
+                    projects: ProjectsConfig,
+                }
                 toml::from_str::<File>(&s)
                     .map(|f| f.projects)
                     .unwrap_or_default()
@@ -290,8 +301,12 @@ impl ConfigManager {
 
     pub fn save_projects(&self, cfg: &ProjectsConfig) -> Result<(), String> {
         #[derive(Serialize)]
-        struct File { projects: ProjectsConfig }
-        let file = File { projects: cfg.clone() };
+        struct File {
+            projects: ProjectsConfig,
+        }
+        let file = File {
+            projects: cfg.clone(),
+        };
         let toml_str = toml::to_string_pretty(&file).map_err(|e| e.to_string())?;
         fs::write(self.projects_path(), toml_str).map_err(|e| format!("写入配置失败: {}", e))
     }
@@ -398,10 +413,7 @@ impl ConfigManager {
 
     /// 加载项目运行目标，按 target key 分组。
     /// 从 `run.toml` 中读取所有 `target<N>.cmd` 和 `target<N>.name` 键值对。
-    pub fn load_run_targets(
-        &self,
-        project_root: Option<&str>,
-    ) -> Result<Vec<RunTarget>, String> {
+    pub fn load_run_targets(&self, project_root: Option<&str>) -> Result<Vec<RunTarget>, String> {
         let dir = self.resolve_project_dir(project_root)?;
         let path = dir.join("run.toml");
         let map = self.read_toml_file(&path, "run")?;
@@ -528,7 +540,10 @@ impl ConfigManager {
             .unwrap_or(key);
 
         let dot_pos = rest.find('.').ok_or_else(|| {
-            format!("配置键格式错误 (需为 {0}.<section>.<key>): {1}", PREFIX, key)
+            format!(
+                "配置键格式错误 (需为 {0}.<section>.<key>): {1}",
+                PREFIX, key
+            )
         })?;
 
         let section = rest[..dot_pos].to_string();
@@ -562,13 +577,18 @@ impl ConfigManager {
 
     /// 读取 TOML 文件，从 `[section]` 中提取 key-value。
     /// 兼容旧格式：如果没有 `[section]`，则读取根级别的 key。
-    fn read_toml_file(&self, path: &PathBuf, section: &str) -> Result<HashMap<String, String>, String> {
+    fn read_toml_file(
+        &self,
+        path: &PathBuf,
+        section: &str,
+    ) -> Result<HashMap<String, String>, String> {
         let content = match fs::read_to_string(path) {
             Ok(s) => s,
             Err(_) => return Ok(HashMap::new()),
         };
 
-        let value: toml::Value = toml::from_str(&content).map_err(|e| format!("TOML 解析错误: {}", e))?;
+        let value: toml::Value =
+            toml::from_str(&content).map_err(|e| format!("TOML 解析错误: {}", e))?;
 
         let mut map = HashMap::new();
         if let toml::Value::Table(root) = value {
@@ -596,7 +616,12 @@ impl ConfigManager {
     }
 
     /// 写入 TOML 文件，key-value 放入 `[section]` 表
-    fn write_toml_file(&self, path: &PathBuf, section: &str, map: &HashMap<String, String>) -> Result<(), String> {
+    fn write_toml_file(
+        &self,
+        path: &PathBuf,
+        section: &str,
+        map: &HashMap<String, String>,
+    ) -> Result<(), String> {
         // 构建 [section] 内的表
         let mut section_table = toml::map::Map::new();
         for (k, v) in map {
@@ -756,7 +781,8 @@ lang = 'unknown'
         let mgr = ConfigManager::new_with_dir(dir.clone());
 
         // 修改名称与语言
-        mgr.update_project(r"C:\foo\bar", " 我的项目 ", "rust").unwrap();
+        mgr.update_project(r"C:\foo\bar", " 我的项目 ", "rust")
+            .unwrap();
         let cfg = mgr.load_projects();
         assert_eq!(cfg.list[0].name, "我的项目"); // trim 生效
         assert_eq!(cfg.list[0].lang, "rust");
