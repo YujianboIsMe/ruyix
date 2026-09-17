@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Development Workflow & Code Style
+
+**Workflow**: develop **directly on `master`** — do not open feature branches. Branches are version
+**snapshots/backups** only (`0.0.2` / `0.0.3` / `0.0.4` are frozen snapshots; never commit new work to them).
+
+**Code style**: Google style guides. Rust follows Google/Fuchsia Rust style (= rustfmt), everything else
+follows Google JS / HTML / CSS / JSON style guides. Full rules: `doc/编码规范.md`.
+
+```bash
+cargo fmt --check                  # Rust 格式（rustfmt.toml: max_width 100 等）
+node scripts/check-style.js        # JS/HTML/CSS/JSON 风格（零依赖，0 error 才算过）
+cargo clippy --all-targets         # 静态检查，必须 0 warning
+cargo test -p darkhorse-code       # 单元测试
+```
+
+Notes: `ui/xterm.js` / `ui/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
+no npm/bundler, so never add npm tooling — `scripts/check-style.js` is the style gate.
+
 ## Project Vision
 
 darkhorse-code is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Monaco Editor. Currently the editor is a custom implementation using a transparent `<textarea>` overlaid on a syntax-highlighted backdrop via CSS Grid.
@@ -11,7 +29,7 @@ darkhorse-code is an IDE built on **Tauri 2 + Rust backend**, aiming to eventual
 ## Architecture
 
 - **Frontend**: Vanilla HTML/CSS/JS (no bundler, no npm). Served from `ui/` via Tauri's custom protocol. All Tauri APIs accessed via `window.__TAURI__` global.
-- **Backend**: Tauri 2 Rust backend with five modules: `main.rs` (Tauri commands + app entry), `config.rs` (3-scope config system), `pty.rs` (PTY terminal management), `ai.rs` (LLM integration).
+- **Backend**: Tauri 2 Rust backend, modules: `main.rs` (Tauri commands + app entry), `config.rs` (3-scope config, projects, run targets), `pty.rs` (PTY terminal management), `ai.rs` (LLM integration), `git.rs` (git status/commands), `runner.rs` (run-command inference from manifest contents), `rag.rs` (semantic search index/retrieval), `instance.rs` (single-instance detection).
 - **Communication**: Tauri native IPC. Synchronous calls use `invoke()`. Async push for PTY output uses Tauri's event system `emit()`/`listen()`.
 - **Syntax highlighting**: `tree-sitter` + `arborium` crate. Highlighting runs in a `spawn_blocking` thread to avoid blocking the async runtime.
 - **Terminal**: `xterm.js` (vendored from `ui/xterm.js`) + Rust PTY via `portable-pty` crate.
@@ -206,7 +224,7 @@ Known config keys:
 | `config_delete` | `(scope, key, project_root?)` → `()` | |
 | `ai_translate` | `(input, project_root?)` → `String` | Calls LLM |
 | `highlight_code` | `(language, code)` → `Vec<LineHighlight>` | tree-sitter |
-| `run_target` | `(cmd, project_root?)` → `RunOutput` | One-shot, not interactive |
+| `run_target` | `(cmd, project_root?, bind?)` → `RunOutput` | One-shot, not interactive. cwd = directory of the `bind` manifest file (`resolve_run_dir()`), else project root |
 | `spawn_terminal` | `(cmd, project_root?)` → `()` | New OS console window |
 | `pty_spawn` | `(cmd, tabId, project_root?)` → `()` | PTY for inline xterm.js |
 | `pty_write` | `(tabId, data)` → `()` | |
