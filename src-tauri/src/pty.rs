@@ -68,7 +68,7 @@ impl PtyManager {
         let mut cmd_builder = CommandBuilder::new(&program);
         cmd_builder.args(&parts[1..]);
         cmd_builder.cwd(
-            cwd.map(|p| std::path::PathBuf::from(p))
+            cwd.map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
         );
         cmd_builder.env("PYTHONIOENCODING", "utf-8");

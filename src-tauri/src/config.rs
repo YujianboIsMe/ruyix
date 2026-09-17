@@ -423,7 +423,7 @@ impl ConfigManager {
 
         // 合并
         let mut targets: Vec<RunTarget> = Vec::new();
-        for (key, _) in &groups {
+        for key in groups.keys() {
             let cmd = map.get(&format!("{}.cmd", key)).cloned();
             let name = names.get(key).cloned().flatten();
             let bind = binds.get(key).cloned().flatten();
@@ -457,10 +457,10 @@ impl ConfigManager {
         let mut map = HashMap::new();
         if let toml::Value::Table(t) = root {
             for (ext, v) in t {
-                if let toml::Value::Table(inner) = v {
-                    if let Some(toml::Value::Boolean(can_run)) = inner.get("can_run") {
-                        map.insert(ext, *can_run);
-                    }
+                if let toml::Value::Table(inner) = v
+                    && let Some(toml::Value::Boolean(can_run)) = inner.get("can_run")
+                {
+                    map.insert(ext, *can_run);
                 }
             }
         }

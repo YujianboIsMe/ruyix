@@ -133,10 +133,11 @@ pub struct QdrantPoint {
     pub payload: serde_json::Value,
 }
 
-/// 搜索结果命中（与旧 API 兼容）
+/// 搜索结果命中
+/// 注：不保留 qdrant 的点 id —— 结果只按 payload 的 path/行号/片段消费，
+/// 删除/更新向量走的是 path 过滤（delete_points），id 无用。保留会触发 dead_code。
 #[derive(Debug, Clone)]
 pub struct QdrantSearchHit {
-    pub id: u64,
     pub score: f32,
     pub payload: Option<serde_json::Value>,
 }
@@ -197,11 +198,11 @@ impl QdrantManager {
         let existing_dim = std::fs::read_to_string(&marker)
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok());
-        if let Some(old) = existing_dim {
-            if old != self.dim {
-                std::fs::remove_dir_all(&self.data_dir)
-                    .map_err(|e| format!("清理旧向量数据失败: {}", e))?;
-            }
+        if let Some(old) = existing_dim
+            && old != self.dim
+        {
+            std::fs::remove_dir_all(&self.data_dir)
+                .map_err(|e| format!("清理旧向量数据失败: {}", e))?;
         }
 
         let _ = std::fs::create_dir_all(&self.data_dir);
@@ -361,10 +362,6 @@ impl QdrantManager {
         let hits: Vec<QdrantSearchHit> = scored
             .into_iter()
             .map(|s| QdrantSearchHit {
-                id: match s.id {
-                    PointId::NumId(n) => n,
-                    _ => 0,
-                },
                 score: s.score,
                 payload: s.payload.map(|p| serde_json::Value::Object(p.0)),
             })
@@ -773,11 +770,6 @@ impl RagManager {
         Ok(())
     }
 
-    /// 全量索引（无回调）
-    pub fn full_index(&mut self, project_root: &str) -> Result<usize, String> {
-        self.full_index_with_progress(project_root, &|_, _| {})
-    }
-
     /// 增量索引单文件
     pub fn index_file(&mut self, project_root: &str, abs_path: &str) -> Result<(), String> {
         self.ensure_project(project_root)?;
@@ -923,10 +915,10 @@ pub fn load_global_rag_config() -> GlobalRagConfig {
         .join(".darkhorse")
         .join("code")
         .join("rag.toml");
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            return toml::from_str(&content).unwrap_or_default();
-        }
+    if path.exists()
+        && let Ok(content) = std::fs::read_to_string(&path)
+    {
+        return toml::from_str(&content).unwrap_or_default();
     }
     GlobalRagConfig::default()
 }

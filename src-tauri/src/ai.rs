@@ -44,10 +44,10 @@ fn read_ai_config(
         if scope == Scope::Project && project_root.is_none() {
             continue;
         }
-        if let Ok(Some(val)) = mgr.config_read(&scope, key, project_root) {
-            if !val.is_empty() {
-                return Some(val);
-            }
+        if let Ok(Some(val)) = mgr.config_read(&scope, key, project_root)
+            && !val.is_empty()
+        {
+            return Some(val);
         }
     }
     None
@@ -132,7 +132,7 @@ pub async fn translate(
     // 解析 ---COMMAND--- / ---LUA--- 两部分格式
     let (commands, lua_code) = parse_command_lua_response(&content);
     eprintln!("[RUST-AI] 解析 → commands: {:?}, lua_code: {} 字节",
-        commands.as_ref().map(|s| s.as_str()),
+        commands.as_deref(),
         lua_code.as_ref().map_or(0, |s| s.len()));
 
     let final_commands = commands.unwrap_or(content);

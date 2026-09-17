@@ -311,32 +311,31 @@ fn get_execute_status(
 
     let mut has_target = false;
     let mut target_name = None;
-    if known == Some(true) {
-        if let Some(root) = project_root {
-            if let Ok(targets) = mgr.load_run_targets(Some(&root)) {
-                for t in &targets {
-                    // 匹配 bind 字段：显式绑定的文件路径
-                    if let Some(ref bind) = t.bind {
-                        let full_bind = std::path::Path::new(&root).join(bind);
-                        if let Ok(full) = full_bind.canonicalize() {
-                            let bind_path = clean_path(&full);
-                            let input_path = clean_path(std::path::Path::new(&path));
-                            if input_path == bind_path {
-                                has_target = true;
-                                target_name = t.name.clone().or_else(|| Some(t.key.clone()));
-                                break;
-                            }
-                        }
-                    }
-                    // 匹配 cmd 字段：命令中包含文件路径或文件名
-                    if let Some(ref cmd) = t.cmd {
-                        if cmd.contains(&path) || cmd.contains(&file_name) {
-                            has_target = true;
-                            target_name = t.name.clone().or_else(|| Some(t.key.clone()));
-                            break;
-                        }
+    if known == Some(true)
+        && let Some(root) = project_root
+        && let Ok(targets) = mgr.load_run_targets(Some(&root))
+    {
+        for t in &targets {
+            // 匹配 bind 字段：显式绑定的文件路径
+            if let Some(ref bind) = t.bind {
+                let full_bind = std::path::Path::new(&root).join(bind);
+                if let Ok(full) = full_bind.canonicalize() {
+                    let bind_path = clean_path(&full);
+                    let input_path = clean_path(std::path::Path::new(&path));
+                    if input_path == bind_path {
+                        has_target = true;
+                        target_name = t.name.clone().or_else(|| Some(t.key.clone()));
+                        break;
                     }
                 }
+            }
+            // 匹配 cmd 字段：命令中包含文件路径或文件名
+            if let Some(ref cmd) = t.cmd
+                && (cmd.contains(&path) || cmd.contains(&file_name))
+            {
+                has_target = true;
+                target_name = t.name.clone().or_else(|| Some(t.key.clone()));
+                break;
             }
         }
     }
@@ -712,13 +711,13 @@ pub fn split_cmd(cmd: &str) -> Vec<String> {
 pub(crate) fn resolve_windows_cmd(program: &str) -> String {
     if cfg!(windows) {
         let p = std::path::Path::new(program);
-        if p.extension().is_none() {
-            if let Ok(path_var) = std::env::var("PATH") {
-                for dir in path_var.split(';') {
-                    let candidate = std::path::Path::new(dir).join(format!("{}.cmd", program));
-                    if candidate.exists() {
-                        return format!("{}.cmd", program);
-                    }
+        if p.extension().is_none()
+            && let Ok(path_var) = std::env::var("PATH")
+        {
+            for dir in path_var.split(';') {
+                let candidate = std::path::Path::new(dir).join(format!("{}.cmd", program));
+                if candidate.exists() {
+                    return format!("{}.cmd", program);
                 }
             }
         }
@@ -743,7 +742,7 @@ fn build_line_highlights(
             let e = end as usize;
 
             if e > line_start && s < line_end {
-                let rel_start = if s > line_start { s - line_start } else { 0 };
+                let rel_start = s.saturating_sub(line_start);
                 let rel_end = if e < line_end { e - line_start } else { line_text.len() };
                 if rel_start < rel_end {
                     line_spans.push(LineSpan {
@@ -756,7 +755,7 @@ fn build_line_highlights(
         }
 
         // 排序并去重：tree-sitter 会对同一段文本产生多个重叠 capture
-        line_spans.sort_by(|a, b| a.start_col.cmp(&b.start_col));
+        line_spans.sort_by_key(|a| a.start_col);
         let mut deduped: Vec<LineSpan> = Vec::new();
         let mut covered = 0usize;
         for span in line_spans {
@@ -977,11 +976,11 @@ fn rag_set_embedding_config(
                 if scope == config::Scope::Project && project_root.is_none() {
                     continue;
                 }
-                if let Ok(Some(v)) = mgr.config_read(&scope, "darkhorse.code.ai.api_key", project_root.as_deref()) {
-                    if !v.is_empty() {
-                        key = Some(v);
-                        break;
-                    }
+                if let Ok(Some(v)) = mgr.config_read(&scope, "darkhorse.code.ai.api_key", project_root.as_deref())
+                    && !v.is_empty()
+                {
+                    key = Some(v);
+                    break;
                 }
             }
             key
