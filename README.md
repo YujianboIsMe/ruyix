@@ -13,7 +13,7 @@
 
 经**原作者同意**，本项目已迁移至 GitHub 继续开发与维护：
 
-- 当前仓库（GitHub）：<https://github.com/YujianboIsMe/newest-ai-code>
+- 当前仓库（GitHub）：<https://github.com/YujianboIsMe/ruyix>
 - 现维护者：俞建波 `<yujianboisme@outlook.com>`
 - 迁移保留了完整提交历史，包括 `master` / `0.0.2` / `0.0.3` 分支与 `0.0.1` 标签
 - 历史提交中署名为「醒过来摸鱼」的提交均出自原作者；迁移至 GitHub 后的提交由现维护者提交
