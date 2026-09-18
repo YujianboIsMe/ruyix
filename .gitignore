@@ -15,3 +15,7 @@ Cargo.lock
 /target
 /.idea
 /.ruyix
+
+# 本地微调环境（WSL 脚本、日志与产物）
+training/.wsl/
+training/outputs/
