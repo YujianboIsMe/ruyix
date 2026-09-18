@@ -61,7 +61,7 @@
   "agent.steps": "Steps",
   "agent.reports": "Reports",
   "agent.log": "Logs",
-  "agent.engine_demo": "Engine not wired yet · demo mode (auto-switches once P1 lands)",
+  "agent.engine_demo": "Demo mode · event-replay self-test without backend",
   "agent.idle_title": "Agent Engine",
   "agent.idle_sub": "Plan → Generate → Lint → Verify → Self-repair, one closed loop per task",
   "agent.idle_hint": "Type a task in the left panel, or run agent <task> in the command bar",

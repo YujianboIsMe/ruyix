@@ -61,7 +61,7 @@
   "agent.steps": "步骤",
   "agent.reports": "报告",
   "agent.log": "日志",
-  "agent.engine_demo": "引擎未接入 · 演示模式（P1 落位后自动切换真实引擎）",
+  "agent.engine_demo": "演示模式 · 无后端时的事件回放自测",
   "agent.idle_title": "Agent 引擎",
   "agent.idle_sub": "规划 → 生成 → 规约 → 验证 → 自修复，一次任务全链路闭环",
   "agent.idle_hint": "在左侧面板输入任务，或在命令栏输入 agent <任务>",

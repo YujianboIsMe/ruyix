@@ -255,9 +255,10 @@
     // 修复轮次卡
     for (const r of vm.repairs) {
       const running = r.status === "running";
+      const applied = Array.isArray(r.applied) ? r.applied.length > 0 : !!r.applied;
       const badge = running
         ? `<span class="agent-badge agent-badge--run">${L("进行中", "running")}</span>`
-        : (r.applied
+        : (applied
             ? `<span class="agent-badge agent-badge--ok">${L("已修复", "fixed")}</span>`
             : `<span class="agent-badge agent-badge--off">${L("未应用", "not applied")}</span>`);
       cards.push('<div class="agent-card agent-card--repair">' +
@@ -296,19 +297,37 @@
     el.scrollTop = el.scrollHeight;
   }
 
-  function renderEnvChips() {
+  function renderEnvChips(env) {
     const el = $("agent-env-chips");
     if (!el) return;
-    // P2 接入 agent_env_probe 后替换为真实探针
-    const env = [
-      { name: "docker", ok: false, note: L("未隔离 · 宿主执行", "unisolated · host") },
-      { name: "python", ok: true, note: "3.12.4" },
-      { name: "git", ok: true, note: "2.45.2" },
-      { name: "node", ok: true, note: "22.9.0" },
-    ];
-    el.innerHTML = env.map((e) =>
-      `<span class="agent-chip agent-chip--${e.ok ? "ok" : "warn"}">` +
-      `${e.ok ? "✓" : "✗"} ${esc(e.name)} ${esc(e.note)}</span>`).join("");
+    if (!env) {
+      // 无后端：保持最小占位（attach 时有 Tauri 会被 agent_env_probe 覆盖）
+      el.innerHTML = `<span class="agent-chip agent-chip--warn">✗ ${L("后端不可用", "backend unavailable")}</span>`;
+      return;
+    }
+    const chips = [];
+    const dockerOk = !!env.docker?.usable;
+    chips.push(`<span class="agent-chip agent-chip--${dockerOk ? "ok" : "warn"}">` +
+      `${dockerOk ? "✓" : "✗"} docker ${dockerOk
+        ? L("已隔离", "isolated")
+        : esc(env.docker?.summary || L("未隔离 · 宿主执行", "unisolated · host"))}</span>`);
+    for (const p of [env.python, env.node, env.git]) {
+      const short = String(p?.version || "").trim().split(/\s+/).pop() || "";
+      chips.push(`<span class="agent-chip agent-chip--${p?.available ? "ok" : "warn"}">` +
+        `${p?.available ? "✓" : "✗"} ${esc(p?.name ?? "?")} ${esc(short)}</span>`);
+    }
+    chips.push(`<span class="agent-chip agent-chip--${env.llm_key_configured ? "ok" : "warn"}">` +
+      `${env.llm_key_configured ? "✓" : "✗"} key ${env.llm_key_configured ? L("已配置", "set") : L("未配置", "missing")}</span>`);
+    el.innerHTML = chips.join("");
+  }
+
+  /** 真实环境探针（阻塞探针在 Rust 侧已入 blocking 线程池） */
+  function probeEnv() {
+    const invoke = getInvoke();
+    if (!invoke) return;
+    invoke("agent_env_probe", { projectRoot: null })
+      .then((env) => renderEnvChips(env))
+      .catch(() => {});
   }
 
   function renderHistory() {
@@ -318,14 +337,124 @@
       el.innerHTML = `<div class="agent-history-empty">${L("暂无运行记录", "No runs yet")}</div>`;
       return;
     }
-    el.innerHTML = history.slice().reverse().map((h, i) =>
-      `<div class="agent-history-item" data-hist="${history.length - 1 - i}">` +
-      `<span class="agent-dot agent-dot--${h.status}"></span>` +
-      `<span class="agent-history-task">${esc(truncate(h.task, 26))}</span>` +
-      `<span class="agent-history-time">${esc(h.elapsed)}s</span></div>`).join("");
-    el.querySelectorAll("[data-hist]").forEach((item) => {
-      item.addEventListener("click", () => restoreRun(history[Number(item.dataset.hist)]));
+    el.innerHTML = history.slice().reverse().map((h) => {
+      const data = h.vmJson ? `data-vm="${esc(h.id)}"` : `data-run="${esc(h.id)}"`;
+      return `<div class="agent-history-item" ${data}>` +
+        `<span class="agent-dot agent-dot--${h.status}"></span>` +
+        `<span class="agent-history-task">${esc(truncate(h.task, 26))}</span>` +
+        `<span class="agent-history-time">${esc(h.time)}</span></div>`;
+    }).join("");
+    el.querySelectorAll("[data-vm]").forEach((item) => {
+      item.addEventListener("click", () => {
+        const entry = history.find((h) => h.id === item.dataset.vm);
+        if (entry) restoreRun(entry);
+      });
     });
+    el.querySelectorAll("[data-run]").forEach((item) => {
+      item.addEventListener("click", () => loadRunRecord(item.dataset.run));
+    });
+  }
+
+  /**
+   * 真实模式：从后端 run 目录取历史（agent_runs，newest-first）。
+   * 浏览器/无后端时静默跳过，保留演示历史。
+   */
+  function loadHistory() {
+    const invoke = getInvoke();
+    if (!invoke) return;
+    invoke("agent_runs", { limit: 20, projectRoot: null })
+      .then((runs) => {
+        history.length = 0;
+        for (const r of runs ?? []) {
+          history.push({
+            id: r.run_id,
+            task: r.task || r.run_id,
+            status: r.status === "verified" || r.status === "planned" || r.status === "generated"
+              ? "done" : r.status === "failed" ? "error" : "canceled",
+            time: String(r.created_at || "").slice(11, 16) || "—",
+          });
+        }
+        renderHistory();
+      })
+      .catch(() => {});
+  }
+
+  /** 点历史项 → 加载完整 RunRecord 并还原视图 */
+  function loadRunRecord(runId) {
+    if (vm.status === "running") return;
+    const invoke = getInvoke();
+    if (!invoke) return;
+    invoke("agent_run_load", { runId, projectRoot: null })
+      .then((rec) => {
+        Object.assign(vm, newRunVm(), {
+          runId: rec.run_id,
+          task: rec.task,
+          mode: "full",
+          status: rec.status === "failed" ? "error" : "done",
+          demo: false,
+        });
+        // 阶段状态从记录推导（历史回看，不再有事件流）
+        if (rec.plan) vm.stages.plan = { status: "done", detail: `${rec.plan.steps?.length ?? 0} 步` };
+        if (rec.generation) {
+          const failed = (rec.generation.steps ?? []).filter((s) => s.status === "error").length;
+          vm.stages.generate = {
+            status: failed > 0 ? "error" : "done",
+            detail: `${rec.generation.files?.length ?? 0} 文件`,
+          };
+        }
+        if (rec.lint) {
+          const counts = rec.lint.counts ?? {};
+          vm.stages.lint = { status: "done", detail: "" };
+          vm.lint = {
+            ran: true,
+            ok: rec.lint.ok,
+            errors: counts.error ?? 0,
+            warnings: counts.warning ?? 0,
+            summary: "",
+            cmd: "",
+            parse_error: null,
+            diagnostics: (rec.lint.diagnostics ?? []).slice(0, 6).map((d) => ({
+              file: d.spans?.[0]?.file_name ?? "",
+              line: d.spans?.[0]?.line_start ?? 0,
+              rule: d.rule,
+              msg: d.message,
+            })),
+          };
+        }
+        if (rec.verify) {
+          vm.stages.verify = {
+            status: rec.verify.failed > 0 ? "error" : "done",
+            detail: rec.verify.verdict,
+          };
+        }
+        if (rec.error && rec.status === "failed") {
+          vm.stages.repair = { status: "error", detail: rec.error };
+        } else if ((rec.repair ?? []).length) {
+          vm.stages.repair = { status: "done", detail: `${rec.repair.length} 轮` };
+        }
+        vm.steps = (rec.generation?.steps ?? []).map((s) => ({
+          index: s.step_id,
+          total: (rec.generation?.steps ?? []).length,
+          title: s.title,
+          status: s.status === "done" ? "done" : s.status === "skipped" ? "skip" : "error",
+          notes: s.notes,
+          files: s.files,
+          error: s.error,
+        }));
+        vm.repairs = (rec.repair ?? []).map((r) => ({ ...r }));
+        vm.logs = [{
+          time: String(rec.created_at || "").slice(11, 19) || "--:--:--",
+          level: "info",
+          msg: `${rec.model} · ${rec.status}${rec.dir ? " · " + rec.dir : ""}`,
+        }];
+        renderShell();
+        showConsole();
+      })
+      .catch((err) => {
+        if (typeof setStatus === "function") {
+          setStatus(String(err ?? "load failed"), "error");
+        }
+      });
   }
 
   // ============================================
@@ -337,6 +466,11 @@
     return radio ? radio.value : "full";
   }
 
+  function getInvoke() {
+    if (typeof getTauriInvoke === "function") return getTauriInvoke();
+    return window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core) ?? null;
+  }
+
   function startTask(task, mode) {
     if (vm.status === "running") return;
     Object.assign(vm, newRunVm(), { task, mode, status: "running", startedAt: Date.now() });
@@ -344,18 +478,33 @@
     renderShell();
     showConsole();
 
-    const invoke = window.__TAURI__?.core?.invoke;
+    const invoke = getInvoke();
     if (invoke) {
-      invoke("agent_run", { task, projectRoot: null })
-        .then(() => finish("done"))
-        .catch(() => {
-          onLog({ level: "warn", msg: L("引擎未接入（P1 落位后可用），以下为演示回放",
-            "Engine not wired yet (lands in P1); replaying demo below") });
-          startDemo(task, mode, true);
+      // 真实引擎：阶段/步骤/报告全部由 agent://* 事件驱动（AgentSink 推送）
+      const cmd = mode === "plan" ? "agent_plan" : "agent_run";
+      invoke(cmd, { task, projectRoot: null })
+        .then(() => {
+          finish("done");
+          loadHistory();
+        })
+        .catch((err) => {
+          onLog({ level: "error", msg: String(err ?? L("运行失败", "run failed")) });
+          finish("error");
         });
       return;
     }
     startDemo(task, mode, true);
+  }
+
+  function cancelRun() {
+    if (vm.status !== "running") return;
+    const invoke = getInvoke();
+    if (invoke && !vm.demo) {
+      invoke("agent_cancel").catch(() => {});
+    }
+    stopDemo();
+    finish("canceled");
+    onLog({ level: "warn", msg: L("已取消（取消位贯通 <1s）", "canceled (cancel flag <1s)") });
   }
 
   function startDemo(task, mode, keepVm) {
@@ -386,13 +535,6 @@
     demoTimers.push(setTimeout(() => finish("done"), acc + 300));
   }
 
-  function cancelRun() {
-    if (vm.status !== "running") return;
-    stopDemo();
-    finish("canceled");
-    onLog({ level: "warn", msg: L("已取消（取消位贯通 <1s）", "canceled (cancel flag <1s)") });
-  }
-
   function finish(status) {
     stopClock();
     stopDemo();
@@ -402,12 +544,13 @@
       vm.status = "error";
     }
     renderHeader();
-    if (vm.runId) {
+    // 演示运行才进内存历史；真实运行以 agent_runs（后端 run 目录）为唯一来源
+    if (vm.demo && vm.runId) {
       history.push({
         id: vm.runId,
         task: vm.task,
         status: vm.status,
-        elapsed: vm.elapsed,
+        time: `${vm.elapsed}s`,
         vmJson: JSON.stringify({ ...vm, logs: vm.logs.slice(-50) }),
       });
       if (history.length > 20) history.shift();
@@ -616,7 +759,16 @@
         if (vm.status !== "running") showConsole();
       });
 
-    renderEnvChips();
+    // 真实引擎已接入：隐藏"演示模式"徽章，历史与环境探针走后端
+    const live = !!getInvoke();
+    const chip = document.querySelector(".agent-engine-chip");
+    if (chip) chip.style.display = live ? "none" : "";
+    if (live) {
+      loadHistory();
+      probeEnv();
+    }
+
+    renderEnvChips(null);
     renderHistory();
     renderShell();
 
