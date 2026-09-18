@@ -26,6 +26,7 @@ async function initApp() {
 
   // 设置语言菜单
   setupMenuBar();
+  setupConfigMenu();
 
   // 设置右键菜单
   setupContextMenu();
@@ -128,6 +129,80 @@ function setupMenuBar() {
   }
 
   updateProjectMenu();
+}
+
+/**
+ * 配置菜单：全局 / 项目 / 运行 → 中央编辑区打开配置标签
+ */
+function setupConfigMenu() {
+  const dropdown = document.getElementById("menu-config-dropdown");
+  if (!dropdown) return;
+  dropdown.querySelectorAll("[data-config-scope]").forEach((item) => {
+    item.addEventListener("click", async () => {
+      dropdown.style.display = "none";
+      await openConfigTab(item.dataset.configScope);
+    });
+  });
+}
+
+/**
+ * 打开（或复用）一个配置编辑标签。内容为整个 scope 的合并 TOML 视图，
+ * Ctrl+S 走 saveConfigTab 保存。
+ */
+async function openConfigTab(scope) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"), "error");
+    return;
+  }
+  try {
+    const dump = await invoke("config_scope_load", {
+      scope,
+      projectRoot: state.currentProject?.path ?? null,
+    });
+    let tab = state.tabs.find((t) => t._isConfig && t.configScope === scope);
+    if (tab) {
+      tab.content = dump.content;
+      tab._modified = false;
+    } else {
+      tab = {
+        id: "config-" + scope,
+        name: I18N.t("config.tab_" + scope),
+        path: "",
+        content: dump.content,
+        _isConfig: true,
+        configScope: scope,
+        configDir: dump.dir,
+      };
+      state.tabs.push(tab);
+    }
+    renderTabs();
+    switchTab(tab.id);
+    setStatus(I18N.t("config.loaded", { dir: dump.dir }));
+  } catch (err) {
+    setStatus(String(err), "error");
+  }
+}
+
+/** 保存配置标签：整个 scope 的内容存回后端 */
+async function saveConfigTab(tab) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"), "error");
+    return;
+  }
+  try {
+    const n = await invoke("config_scope_save", {
+      scope: tab.configScope,
+      content: tab.content,
+      projectRoot: state.currentProject?.path ?? null,
+    });
+    tab._modified = false;
+    renderTabs();
+    setStatus(I18N.t("config.saved", { n }));
+  } catch (err) {
+    setStatus(String(err), "error");
+  }
 }
 
 /**
@@ -1213,6 +1288,7 @@ function setupKeyboardShortcuts() {
 async function saveCurrentFile() {
   const tab = state.tabs.find((t) => t.id === state.activeTabId);
   if (!tab || tab._isTerminal || tab._isImage) return;
+  if (tab._isConfig) return saveConfigTab(tab);
   if (!tab.path) {
     setStatus(I18N.t("save.no_path"), "error");
     return;

@@ -945,6 +945,41 @@ fn config_delete(
     mgr.config_delete(&s, &key, project_root.as_deref())
 }
 
+/// 配置菜单：读整个 scope 的合并视图（配置标签编辑用）
+#[tauri::command]
+fn config_scope_load(
+    scope: String,
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<config::ScopeConfigDump, String> {
+    let s = config::Scope::from_str(&scope).ok_or_else(|| {
+        format!(
+            "无效的作用域: {}。可用: g/global, p/project, r/runtime",
+            scope
+        )
+    })?;
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.dump_scope_toml(&s, project_root.as_deref())
+}
+
+/// 配置菜单：保存配置标签的内容（Ctrl+S）
+#[tauri::command]
+fn config_scope_save(
+    scope: String,
+    content: String,
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<usize, String> {
+    let s = config::Scope::from_str(&scope).ok_or_else(|| {
+        format!(
+            "无效的作用域: {}。可用: g/global, p/project, r/runtime",
+            scope
+        )
+    })?;
+    let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.save_scope_toml(&s, &content, project_root.as_deref())
+}
+
 // ============================================
 // RAG（智搜）命令
 // ============================================
@@ -1161,6 +1196,8 @@ fn main() {
             config_get,
             config_set,
             config_delete,
+            config_scope_load,
+            config_scope_save,
             ai_translate,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,

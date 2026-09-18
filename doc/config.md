@@ -150,3 +150,21 @@ files_count = 312
 
 修改 api_url / dim 的入口：菜单栏【智搜】→ 确认弹窗 → 接受。
 修改 dim 后旧向量库自动清空，需要全量重建索引。
+## 配置菜单（编辑器）
+
+顶栏「配置」菜单提供三个入口，点击后在中央编辑区打开一个**配置标签**：
+
+| 子菜单 | 作用域 | 内容来源 |
+|---|---|---|
+| 全局 | global | `~/.ruyix/code/*.toml` 合并视图 |
+| 项目 | project | `<项目>/.ruyix/code/*.toml` 合并视图（需先打开项目） |
+| 运行 | runtime | 内存中的运行时键（不落盘） |
+
+- 合并视图是**合法 TOML**：每个 section 渲染为 `[section]` 表，直接编辑，`Ctrl+S` 保存。
+- 全局/项目为**合并语义**：保存只写文本中出现的 `[section]`，未出现的既有 section 文件不受影响。
+- 运行为**整体替换语义**：保存会清掉未列出的运行时键。
+- `projects.toml` / `execute.toml` / `rag.toml` 是结构化文件，由专门功能管理：
+  编辑器读时排除，保存时若出现同名 `[section]` 会直接报错拒绝。
+- 配置值只有平铺的「键 = 字符串」；数字/布尔保存时转为字符串，嵌套表/数组报错。
+
+对应后端命令：`config_scope_load(scope, project_root?)` / `config_scope_save(scope, content, project_root?)`。

@@ -225,6 +225,8 @@ Known config keys:
 | `config_get` | `(scope, key, project_root?)` → `Option<String>` | |
 | `config_set` | `(scope, key, value, project_root?)` → `()` | Rejects run targets with global scope |
 | `config_delete` | `(scope, key, project_root?)` → `()` | |
+| `config_scope_load` | `(scope, project_root?)` → `ScopeConfigDump` | Merged TOML view of a whole scope for the Config menu editor tab; excludes structured files (projects/execute/rag) |
+| `config_scope_save` | `(scope, content, project_root?)` → `usize` | Writes `[section]` tables back (merge semantics); runtime scope replaces all in-memory keys; returns key count |
 | `ai_translate` | `(input, project_root?)` → `String` | Calls LLM |
 | `highlight_code` | `(language, code)` → `Vec<LineHighlight>` | tree-sitter |
 | `run_target` | `(cmd, project_root?, bind?)` → `RunOutput` | One-shot, not interactive. cwd = directory of the `bind` manifest file (`resolve_run_dir()`), else project root |
