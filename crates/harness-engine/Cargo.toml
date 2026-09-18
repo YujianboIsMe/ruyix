@@ -1,0 +1,20 @@
+[package]
+name = "harness-engine"
+version = "0.1.0"
+description = "darkhorse harness 引擎层 —— 规划→生成→规约→验证→自修复（零 tauri 依赖，自 ruyix 融合计划 D1/D2 迁入）"
+authors = ["醒过来摸鱼"]
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "6"
+chrono = "0.4"
+# spawn_blocking（原 tauri::async_runtime 同款语义）+ 重试间隔
+tokio = { version = "1", features = ["rt", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+# v0.7 评估：判据要用真正则（"每条 return 都是三元组""错误码形如 E_XXX_YYY"这类形态判据
+# 用字符串包含判是假判据）。纯 Rust、无 C 依赖。
+regex = "1"

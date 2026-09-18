@@ -1,0 +1,10 @@
+# 这个样例项目是**故意违规**的：它是给 harness-lint 的自检与演示语料。
+# 阈值调小是为了让小文件也能触发 HX101 / HX102。
+
+[lint]
+max_file_lines = 30
+max_function_lines = 15
+
+[architecture]
+layers = ["types", "config", "repo", "service", "runtime", "ui"]
+strict = false

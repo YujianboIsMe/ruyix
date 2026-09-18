@@ -1,0 +1,17 @@
+# harness-lint 自己的配置 —— 狗粮：linter 也要被自己的规则检查。
+# 唯一放宽的地方是 tests/fixtures：那些文件是**故意违规**的正反例样本，
+# 它们必须违规，否则测试就失去意义了。
+
+[lint]
+max_file_lines = 260
+max_function_lines = 60
+# examples/ 与 fixtures/ 都是**故意违规**的语料（正反例样本），不参与自身检查——
+# 它们必须违规，否则那些测试就失去了意义。
+ignore_paths = ["examples/*", "*/examples/*", "tests/fixtures/*", "*/tests/fixtures/*"]
+
+[noqa]
+require_reason = true
+
+[architecture]
+layers = ["types", "config", "repo", "service", "runtime", "ui"]
+strict = false
