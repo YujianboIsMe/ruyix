@@ -5,10 +5,10 @@
 //! 所以必须能强制结束，并且要连子进程树一起杀（cargo test 会再 fork 测试二进制）。
 
 use std::io::Read;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};

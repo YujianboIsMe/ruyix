@@ -42,6 +42,9 @@ use std::path::{Path, PathBuf};
 
 pub use crate::exec::CancelFlag;
 
+/// 遍历结果：(候选文件, 被跳过且有理由说明的文件)
+pub type WalkStats = (Vec<local::FileStat>, Vec<(String, String)>);
+
 /// 一份被索引的文档（Provider 无关）。
 ///
 /// 比需求文档 §9.3 的字段多了 `mtime_ms` / `size`：增量索引与"陈旧检测"都需要它们，
@@ -82,10 +85,7 @@ pub trait KbSource {
     /// 拉取/扫描出文档列表（含被跳过项与理由）。`cancel` 置位后应尽快返回已拿到的部分。
     fn fetch(&self, cancel: &CancelFlag) -> Result<KbScan, String>;
     /// 只做遍历与过滤（不读内容）：陈旧检测与规模统计用它。
-    fn walk_stats(
-        &self,
-        cancel: &CancelFlag,
-    ) -> Result<(Vec<local::FileStat>, Vec<(String, String)>), String>;
+    fn walk_stats(&self, cancel: &CancelFlag) -> Result<WalkStats, String>;
 }
 
 /// 按 `kind` 造来源。**这里就是"Provider 路线图"的接口**：
@@ -273,7 +273,9 @@ impl Registry {
     /// 按路径去重（Windows 路径大小写不敏感，统一小写比较）。
     pub fn find_by_path(&self, path: &Path) -> Option<&KbEntry> {
         let key = norm_path_key(path);
-        self.entries.iter().find(|e| norm_path_key(Path::new(&e.path)) == key)
+        self.entries
+            .iter()
+            .find(|e| norm_path_key(Path::new(&e.path)) == key)
     }
 
     /// 加入（同路径覆盖）并落盘。

@@ -225,10 +225,10 @@ fn d_prompt_budget() -> usize {
 /// 这个默认值兜底引擎单独构建/测试的场景；换机器/换目录时用
 /// `HARNESS_LINT_DIR` 环境变量或配置项覆盖。
 fn d_lint_dir() -> String {
-    if let Ok(v) = std::env::var("HARNESS_LINT_DIR") {
-        if !v.trim().is_empty() {
-            return v.trim().to_string();
-        }
+    if let Ok(v) = std::env::var("HARNESS_LINT_DIR")
+        && !v.trim().is_empty()
+    {
+        return v.trim().to_string();
     }
     let manifest = env!("CARGO_MANIFEST_DIR");
     std::path::Path::new(manifest)
@@ -499,10 +499,10 @@ pub fn config_path() -> PathBuf {
 /// 与 `HARNESS_LINT_DIR` 同一套做法：允许环境变量覆盖（**测试靠它隔离**，
 /// 不然单测会往用户真实的 `%APPDATA%` 里写东西）。
 pub fn kb_dir(cfg: &KbConfig) -> PathBuf {
-    if let Ok(v) = std::env::var("HARNESS_KB_DIR") {
-        if !v.trim().is_empty() {
-            return PathBuf::from(v.trim());
-        }
+    if let Ok(v) = std::env::var("HARNESS_KB_DIR")
+        && !v.trim().is_empty()
+    {
+        return PathBuf::from(v.trim());
     }
     let raw = cfg.dir.trim();
     if !raw.is_empty() {
@@ -551,20 +551,20 @@ pub fn load() -> Result<AppConfig, String> {
 
 /// 环境变量优先于文件：方便脚本化调用 / 不把 key 落盘。
 pub fn apply_env_overrides(cfg: &mut AppConfig) {
-    if let Ok(v) = std::env::var("DEEPSEEK_API_KEY") {
-        if !v.trim().is_empty() {
-            cfg.llm.api_key = v.trim().to_string();
-        }
+    if let Ok(v) = std::env::var("DEEPSEEK_API_KEY")
+        && !v.trim().is_empty()
+    {
+        cfg.llm.api_key = v.trim().to_string();
     }
-    if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
-        if !v.trim().is_empty() {
-            cfg.llm.base_url = v.trim().trim_end_matches('/').to_string();
-        }
+    if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL")
+        && !v.trim().is_empty()
+    {
+        cfg.llm.base_url = v.trim().trim_end_matches('/').to_string();
     }
-    if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
-        if !v.trim().is_empty() {
-            cfg.llm.model = v.trim().to_string();
-        }
+    if let Ok(v) = std::env::var("DEEPSEEK_MODEL")
+        && !v.trim().is_empty()
+    {
+        cfg.llm.model = v.trim().to_string();
     }
 }
 
@@ -576,75 +576,6 @@ pub fn save(cfg: &AppConfig) -> Result<(), String> {
     let text = toml::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("写入配置失败 {}: {e}", path.display()))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_are_usable_without_a_config_file() {
-        let cfg = AppConfig::default();
-        assert_eq!(cfg.llm.base_url, "https://api.deepseek.com");
-        assert!(cfg.llm.model.starts_with("deepseek"));
-        assert!(cfg.verify.test_timeout_secs > cfg.verify.cmd_timeout_secs);
-        assert!(!cfg.workspace_root.is_empty());
-    }
-
-    #[test]
-    fn partial_toml_fills_missing_fields() {
-        // 用户只写了 api_key，其它字段必须落回默认值而不是报错
-        let cfg: AppConfig = toml::from_str("[llm]\napi_key = \"sk-x\"\n").unwrap();
-        assert_eq!(cfg.llm.api_key, "sk-x");
-        assert_eq!(cfg.llm.model, "deepseek-v4-pro");
-        // python 默认名按平台走：Windows 是 python，Unix 是 python3
-        #[cfg(target_os = "windows")]
-        assert_eq!(cfg.verify.python_bin, "python");
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(cfg.verify.python_bin, "python3");
-        assert_eq!(cfg.max_context_chars, 24_000);
-    }
-
-    #[test]
-    fn tilde_workspace_root_expands_to_home() {
-        let mut cfg = AppConfig::default();
-        cfg.workspace_root = "~/.darkhorse/harness/runs".into();
-        let p = runs_root(&cfg);
-        assert!(p.is_absolute(), "{p:?}");
-        assert!(p.ends_with("runs"), "{p:?}");
-    }
-
-    #[test]
-    fn kb_is_off_by_default_and_has_a_budget() {
-        // 默认关 = 不改变现有行为；但预算/阈值必须有可用默认值，
-        // 否则用户一开开关就拿到"没有上限的注入"。
-        let cfg = AppConfig::default();
-        assert!(!cfg.kb.enabled);
-        assert!(cfg.kb.token_budget > 0);
-        assert!(cfg.kb.top_k >= 1);
-        assert!(cfg.kb.min_score > 0.0 && cfg.kb.min_score < 1.0);
-        assert!(cfg.kb.per_source_limit >= 1);
-    }
-
-    #[test]
-    fn partial_kb_toml_only_touches_what_it_says() {
-        let cfg: AppConfig = toml::from_str("[kb]\nenabled = true\nroots = [\"D:/Notes/ai-notes\"]\n").unwrap();
-        assert!(cfg.kb.enabled);
-        assert_eq!(cfg.kb.roots, vec!["D:/Notes/ai-notes".to_string()]);
-        // 没写的字段落默认值（而不是 0 —— 0 预算等于静默关闭注入）
-        assert_eq!(cfg.kb.top_k, 4);
-        assert_eq!(cfg.kb.token_budget, 1200);
-    }
-
-    #[test]
-    fn kb_dir_prefers_explicit_config_over_default() {
-        // 环境变量优先级更高，这里只验配置项本身能生效
-        let mut kb = KbConfig::default();
-        kb.dir = "D:/tmp/kb-test".into();
-        assert_eq!(kb_dir(&kb), PathBuf::from("D:/tmp/kb-test"));
-        kb.dir = String::new();
-        assert!(kb_dir(&kb).ends_with("kb"), "{:?}", kb_dir(&kb));
-    }
 }
 
 /// 读配置文件里某个段下的原始文本值（评估实验要用：临时改 `[kb]` 参数再还原）。
@@ -687,7 +618,9 @@ pub fn set_raw_value(section: &str, key: &str, value: &str) -> bool {
             out.push(line.to_string());
             continue;
         }
-        if cur == format!("[{section}]") && (t.starts_with(&format!("{key} = ")) || t.starts_with(&format!("{key}="))) {
+        if cur == format!("[{section}]")
+            && (t.starts_with(&format!("{key} = ")) || t.starts_with(&format!("{key}=")))
+        {
             out.push(format!("{key} = {value}"));
             hit = true;
             continue;
@@ -700,4 +633,78 @@ pub fn set_raw_value(section: &str, key: &str, value: &str) -> bool {
     let mut body = out.join("\n");
     body.push('\n');
     std::fs::write(&path, body).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_usable_without_a_config_file() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.llm.base_url, "https://api.deepseek.com");
+        assert!(cfg.llm.model.starts_with("deepseek"));
+        assert!(cfg.verify.test_timeout_secs > cfg.verify.cmd_timeout_secs);
+        assert!(!cfg.workspace_root.is_empty());
+    }
+
+    #[test]
+    fn partial_toml_fills_missing_fields() {
+        // 用户只写了 api_key，其它字段必须落回默认值而不是报错
+        let cfg: AppConfig = toml::from_str("[llm]\napi_key = \"sk-x\"\n").unwrap();
+        assert_eq!(cfg.llm.api_key, "sk-x");
+        assert_eq!(cfg.llm.model, "deepseek-v4-pro");
+        // python 默认名按平台走：Windows 是 python，Unix 是 python3
+        #[cfg(target_os = "windows")]
+        assert_eq!(cfg.verify.python_bin, "python");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(cfg.verify.python_bin, "python3");
+        assert_eq!(cfg.max_context_chars, 24_000);
+    }
+
+    #[test]
+    fn tilde_workspace_root_expands_to_home() {
+        let cfg = AppConfig {
+            workspace_root: "~/.darkhorse/harness/runs".into(),
+            ..AppConfig::default()
+        };
+        let p = runs_root(&cfg);
+        assert!(p.is_absolute(), "{p:?}");
+        assert!(p.ends_with("runs"), "{p:?}");
+    }
+
+    #[test]
+    fn kb_is_off_by_default_and_has_a_budget() {
+        // 默认关 = 不改变现有行为；但预算/阈值必须有可用默认值，
+        // 否则用户一开开关就拿到"没有上限的注入"。
+        let cfg = AppConfig::default();
+        assert!(!cfg.kb.enabled);
+        assert!(cfg.kb.token_budget > 0);
+        assert!(cfg.kb.top_k >= 1);
+        assert!(cfg.kb.min_score > 0.0 && cfg.kb.min_score < 1.0);
+        assert!(cfg.kb.per_source_limit >= 1);
+    }
+
+    #[test]
+    fn partial_kb_toml_only_touches_what_it_says() {
+        let cfg: AppConfig =
+            toml::from_str("[kb]\nenabled = true\nroots = [\"D:/Notes/ai-notes\"]\n").unwrap();
+        assert!(cfg.kb.enabled);
+        assert_eq!(cfg.kb.roots, vec!["D:/Notes/ai-notes".to_string()]);
+        // 没写的字段落默认值（而不是 0 —— 0 预算等于静默关闭注入）
+        assert_eq!(cfg.kb.top_k, 4);
+        assert_eq!(cfg.kb.token_budget, 1200);
+    }
+
+    #[test]
+    fn kb_dir_prefers_explicit_config_over_default() {
+        // 环境变量优先级更高，这里只验配置项本身能生效
+        let mut kb = KbConfig {
+            dir: "D:/tmp/kb-test".into(),
+            ..KbConfig::default()
+        };
+        assert_eq!(kb_dir(&kb), PathBuf::from("D:/tmp/kb-test"));
+        kb.dir = String::new();
+        assert!(kb_dir(&kb).ends_with("kb"), "{:?}", kb_dir(&kb));
+    }
 }

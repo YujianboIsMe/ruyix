@@ -155,19 +155,19 @@ pub fn evaluate(
 
     // 与窗口内最好水平对比：防止「永久退化被滚动基线吸收成新常态」。
     // 滚动中位数只能发现**突然**的退化，发现不了**持续**的退化。
-    if let Some(b) = reference_best {
-        if b.score - cur.score >= cfg.score_drop {
-            signals.push(Signal {
-                kind: "score_vs_best".into(),
-                detail: format!(
-                    "质量分 {:.2}，低于窗口内最好水平 {:.2}（差 {:.2}）",
-                    cur.score,
-                    b.score,
-                    b.score - cur.score
-                ),
-                delta: round2(b.score - cur.score),
-            });
-        }
+    if let Some(b) = reference_best
+        && b.score - cur.score >= cfg.score_drop
+    {
+        signals.push(Signal {
+            kind: "score_vs_best".into(),
+            detail: format!(
+                "质量分 {:.2}，低于窗口内最好水平 {:.2}（差 {:.2}）",
+                cur.score,
+                b.score,
+                b.score - cur.score
+            ),
+            delta: round2(b.score - cur.score),
+        });
     }
     if r.score - cur.score >= cfg.score_drop {
         signals.push(Signal {
@@ -735,16 +735,16 @@ pub fn run_once(repo: &Path, cfg: &AppConfig, flag: CancelFlag) -> Result<Entrop
         Some(n) => (Some(n), "gh pr list"),
         None => (remote_entropy_branches(repo, &cfg.entropy), "git ls-remote"),
     };
-    if let Some(n) = pending {
-        if n as usize >= cfg.entropy.max_open_prs {
-            return Ok(EntropyOutcome::Skipped {
-                reason: format!(
-                    "已有 {n} 个未处理的 {}* 分支/PR（上限 {}，来源 {source}）——先处理完再开新的",
-                    cfg.entropy.branch_prefix, cfg.entropy.max_open_prs
-                ),
-                metrics: before,
-            });
-        }
+    if let Some(n) = pending
+        && n >= cfg.entropy.max_open_prs
+    {
+        return Ok(EntropyOutcome::Skipped {
+            reason: format!(
+                "已有 {n} 个未处理的 {}* 分支/PR（上限 {}，来源 {source}）——先处理完再开新的",
+                cfg.entropy.branch_prefix, cfg.entropy.max_open_prs
+            ),
+            metrics: before,
+        });
     }
 
     // 3) 隔离：所有改动在独立 worktree 里做，用户的工作区一字节不碰
@@ -1167,12 +1167,14 @@ mod tests {
 
     #[test]
     fn selects_errors_first_then_fixable() {
-        let mut report = LintReport::default();
-        report.diagnostics = vec![
-            diag("HX101", "warning", "a.py", false),
-            diag("HX204", "warning", "b.py", true),
-            diag("HX201", "error", "c.py", false),
-        ];
+        let report = LintReport {
+            diagnostics: vec![
+                diag("HX101", "warning", "a.py", false),
+                diag("HX204", "warning", "b.py", true),
+                diag("HX201", "error", "c.py", false),
+            ],
+            ..Default::default()
+        };
         let sel = select_targets(&report, &cfg());
         assert_eq!(sel[0].rule, "HX201", "error 优先");
         assert_eq!(sel[1].rule, "HX204", "同为 warning 时有建议的优先");
@@ -1183,14 +1185,16 @@ mod tests {
         let mut c = cfg();
         c.max_fix_targets = 3;
         c.max_changed_files = 2;
-        let mut report = LintReport::default();
-        report.diagnostics = vec![
-            diag("HX101", "warning", "a.py", false),
-            diag("HX102", "warning", "a.py", false),
-            diag("HX103", "warning", "b.py", false),
-            diag("HX104", "warning", "c.py", false),
-            diag("HX105", "warning", "d.py", false),
-        ];
+        let report = LintReport {
+            diagnostics: vec![
+                diag("HX101", "warning", "a.py", false),
+                diag("HX102", "warning", "a.py", false),
+                diag("HX103", "warning", "b.py", false),
+                diag("HX104", "warning", "c.py", false),
+                diag("HX105", "warning", "d.py", false),
+            ],
+            ..Default::default()
+        };
         let sel = select_targets(&report, &c);
         assert!(sel.len() <= 3, "条数必须有上限：{}", sel.len());
         let mut files: Vec<String> = sel.iter().map(|d| d.file()).collect();
@@ -1201,11 +1205,13 @@ mod tests {
 
     #[test]
     fn infrastructure_errors_are_not_targets() {
-        let mut report = LintReport::default();
-        report.diagnostics = vec![
-            diag("HX000", "error", "broken.py", false),
-            diag("HX998", "error", "a.py", false),
-        ];
+        let report = LintReport {
+            diagnostics: vec![
+                diag("HX000", "error", "broken.py", false),
+                diag("HX998", "error", "a.py", false),
+            ],
+            ..Default::default()
+        };
         assert!(
             select_targets(&report, &cfg()).is_empty(),
             "HX000/HX998 是检查没跑成，不是代码熵，不该让模型去改"

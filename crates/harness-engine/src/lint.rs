@@ -139,10 +139,10 @@ impl LintDiagnostic {
                 None => out.push_str(&format!("  参考：{doc}\n")),
             }
         }
-        if !self.fixable {
-            if let Some(reason) = &self.fix_blocked_reason {
-                out.push_str(&format!("  不能自动修的原因：{reason}\n"));
-            }
+        if !self.fixable
+            && let Some(reason) = &self.fix_blocked_reason
+        {
+            out.push_str(&format!("  不能自动修的原因：{reason}\n"));
         }
         out
     }

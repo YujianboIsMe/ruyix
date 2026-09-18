@@ -228,6 +228,8 @@ fn run_check(
     )
 }
 
+// 沙箱计划 + 定位 + 命令 + 输出上限，缺一不可；拆结构体反而掩盖调用形状
+#[allow(clippy::too_many_arguments)]
 fn run_check_capped(
     plan: &sandbox::Plan,
     seq: &AtomicUsize,
@@ -278,6 +280,7 @@ fn run_check_capped(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_check_inner(
     plan: &sandbox::Plan,
     seq: &AtomicUsize,
@@ -465,8 +468,8 @@ fn syntax_checks(
             for f in py {
                 // py_compile 比 `python -c "import x"` 安全：不执行模块顶层代码
                 let o = run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.python_bin,
                     &["-m", "py_compile", &f],
@@ -479,8 +482,8 @@ fn syntax_checks(
         Lang::Rust => {
             if root.join("Cargo.toml").exists() {
                 let o = run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.cargo_bin,
                     &["check", "--message-format=short", "--color", "never"],
@@ -510,8 +513,8 @@ fn syntax_checks(
                 for f in rs {
                     // 没有 Cargo.toml 就用 rustc 单文件语法+类型检查（不链接）
                     let o = run_check(
-                        &plan,
-                        &seq,
+                        plan,
+                        seq,
                         root,
                         "rustc",
                         &[
@@ -546,8 +549,8 @@ fn syntax_checks(
             }
             for f in js {
                 let o = run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.node_bin,
                     &["--check", &f],
@@ -565,8 +568,8 @@ fn syntax_checks(
             }
             for f in go {
                 let o = run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.go_bin,
                     &["fmt", "-e", &f],
@@ -586,6 +589,8 @@ fn syntax_ok(checks: &[CheckResult], lang: Lang) -> bool {
         .any(|c| c.kind == "syntax" && c.language == lang.name() && c.status == "failed")
 }
 
+// 与 run_check_* 同形：检查上下文 8 项都是调用方已就绪的事实
+#[allow(clippy::too_many_arguments)]
 fn test_checks(
     plan: &sandbox::Plan,
     seq: &AtomicUsize,
@@ -630,8 +635,8 @@ fn test_checks(
             }
             // pytest 不在就退到 unittest（标准库，一定有）
             let has_pytest = run_check(
-                &plan,
-                &seq,
+                plan,
+                seq,
                 root,
                 &v.python_bin,
                 &["-c", "import pytest"],
@@ -642,8 +647,8 @@ fn test_checks(
             let _ = app_cfg;
             let o = if has_pytest {
                 run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.python_bin,
                     &[
@@ -662,8 +667,8 @@ fn test_checks(
                 )
             } else {
                 run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.python_bin,
                     &["-m", "unittest", "discover", "-v"],
@@ -700,8 +705,8 @@ fn test_checks(
                 return out;
             }
             let o = run_check(
-                &plan,
-                &seq,
+                plan,
+                seq,
                 root,
                 &v.cargo_bin,
                 &["test", "--color", "never"],
@@ -727,8 +732,8 @@ fn test_checks(
                 .collect();
             if has_test_script {
                 let o = run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     "npm",
                     &["test", "--silent"],
@@ -743,8 +748,8 @@ fn test_checks(
                 ));
             } else if !test_files.is_empty() {
                 let o = run_check(
-                    &plan,
-                    &seq,
+                    plan,
+                    seq,
                     root,
                     &v.node_bin,
                     &["--test"],
@@ -777,8 +782,8 @@ fn test_checks(
                 return out;
             }
             let o = run_check(
-                &plan,
-                &seq,
+                plan,
+                seq,
                 root,
                 &v.go_bin,
                 &["test", "./..."],

@@ -122,33 +122,33 @@ pub fn save(root: &Path, rec: &RunRecord) -> Result<(), String> {
     }
 
     // 有观测却不告诉用户观测物在哪，等于没有观测。
-    if matches!(rec.status.as_str(), "verified" | "failed") {
-        if let Some(dir) = crate::observe::current_dir() {
-            crate::observe::log(
-                "info",
-                "run",
-                format!(
-                    "日志与 trace 已落盘：{}（读法：harness trace {}）",
-                    dir.display(),
-                    rec.run_id
-                ),
-            );
-        }
+    if matches!(rec.status.as_str(), "verified" | "failed")
+        && let Some(dir) = crate::observe::current_dir()
+    {
+        crate::observe::log(
+            "info",
+            "run",
+            format!(
+                "日志与 trace 已落盘：{}（读法：harness trace {}）",
+                dir.display(),
+                rec.run_id
+            ),
+        );
     }
 
     crate::observe::log("debug", "run", "save: 落 run.json 完成，准备记 git 快照");
     // **git 记内容版本**（run.json 记元数据）。放在这里是因为它是所有阶段的
     // 唯一落盘口 —— 一处接线，漏不掉某个阶段。
     // `commit_stage` 自己会判断"没变化就不提交"，所以高频调用也不会堆出空提交。
-    if let Ok(dir) = project_dir(root, &rec.run_id) {
-        if dir.exists() {
-            let subject = format!("{} | {}", rec.status, clip(&rec.task, 48));
-            let _ = if crate::gitops::is_repo(&dir) {
-                crate::gitops::commit_stage(&dir, &subject)
-            } else {
-                crate::gitops::snapshot_init(&dir, &subject)
-            };
-        }
+    if let Ok(dir) = project_dir(root, &rec.run_id)
+        && dir.exists()
+    {
+        let subject = format!("{} | {}", rec.status, clip(&rec.task, 48));
+        let _ = if crate::gitops::is_repo(&dir) {
+            crate::gitops::commit_stage(&dir, &subject)
+        } else {
+            crate::gitops::snapshot_init(&dir, &subject)
+        };
     }
     crate::observe::log("debug", "run", "save: 完成");
     Ok(())
@@ -237,10 +237,7 @@ pub fn delete(root: &Path, run_id: &str) -> Result<(), String> {
             }
         }
     }
-    Err(format!(
-        "删除运行目录失败 {}: {last}",
-        dir.display()
-    ))
+    Err(format!("删除运行目录失败 {}: {last}", dir.display()))
 }
 
 /// 读取运行目录内的某个文件（UI 里点文件树用）。限制在运行目录内 + 512KB。

@@ -525,20 +525,20 @@ pub fn context_pack(run_dir: &Path, rec: &crate::workspace::RunRecord) -> Result
         rec.model
     ));
     // 隔离状态：回答"这一次到底隔离了没有"
-    if let Some(v) = &rec.verify {
-        if let Some(iso) = &v.isolation {
-            o.push_str(&format!("- 运行时隔离：{}\n", iso.label()));
-        }
+    if let Some(v) = &rec.verify
+        && let Some(iso) = &v.isolation
+    {
+        o.push_str(&format!("- 运行时隔离：{}\n", iso.label()));
     }
     o.push_str(&format!("\n## 任务原文\n\n{}\n", rec.task.trim()));
 
     // ---- 结论与失败点
     o.push_str("\n## 结论与失败点\n\n");
     let mut failures: Vec<String> = Vec::new();
-    if let Some(e) = &rec.error {
-        if !e.is_empty() {
-            failures.push(format!("- 运行级错误：{e}"));
-        }
+    if let Some(e) = &rec.error
+        && !e.is_empty()
+    {
+        failures.push(format!("- 运行级错误：{e}"));
     }
     if let Some(v) = &rec.verify {
         o.push_str(&format!("- 验证结论：{}\n", v.verdict));
@@ -633,11 +633,11 @@ pub fn context_pack(run_dir: &Path, rec: &crate::workspace::RunRecord) -> Result
             }
         }
     }
-    if targets.is_empty() {
-        if let Some(g) = &rec.generation {
-            for f in g.files.iter().take(10) {
-                targets.push(f.path.clone());
-            }
+    if targets.is_empty()
+        && let Some(g) = &rec.generation
+    {
+        for f in g.files.iter().take(10) {
+            targets.push(f.path.clone());
         }
     }
     if targets.is_empty() {
@@ -721,9 +721,12 @@ pub fn context_pack(run_dir: &Path, rec: &crate::workspace::RunRecord) -> Result
             .kb
             .iter()
             .flat_map(|i| {
-                i.dropped
-                    .iter()
-                    .map(move |d| format!("- `{}` 被裁：{} — {}（{}）", i.stage, d.path, d.reason, d.detail))
+                i.dropped.iter().map(move |d| {
+                    format!(
+                        "- `{}` 被裁：{} — {}（{}）",
+                        i.stage, d.path, d.reason, d.detail
+                    )
+                })
             })
             .take(30)
             .collect();
@@ -792,7 +795,7 @@ mod tests {
     fn redact_masks_the_actual_configured_key_by_exact_match() {
         // 形态匹配只认已知形态；自己那把钥匙靠精确替换兜底 —— 两条路都要走
         let key = "my-very-odd-format-key-1234567890".to_string();
-        let out = redact(&format!("使用 {key} 访问"), &[key.clone()]);
+        let out = redact(&format!("使用 {key} 访问"), std::slice::from_ref(&key));
         assert!(!out.contains(&key), "{out}");
         assert!(out.contains("[REDACTED]"), "{out}");
     }

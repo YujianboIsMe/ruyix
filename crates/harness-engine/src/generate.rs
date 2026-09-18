@@ -190,7 +190,7 @@ fn build_gen_user_prompt(
             already.push_str(&format!("\n- {} （内容因上下文预算省略）", f.path));
             continue;
         }
-        let head = crate::exec::clip(&f.content, (budget - used).min(4000).max(600));
+        let head = crate::exec::clip(&f.content, (budget - used).clamp(600, 4000));
         used += head.len();
         already.push_str(&format!("\n--- {} ---\n{}\n", f.path, head));
     }
@@ -495,12 +495,17 @@ mod tests {
             files: vec!["mathx.py".into()],
             kind: "code".into(),
         };
-        let block = "【参考资料 · 本地知识库】\n--- [项目文档] math/既有实现.py#0 ---\n已有 safe_div";
+        let block =
+            "【参考资料 · 本地知识库】\n--- [项目文档] math/既有实现.py#0 ---\n已有 safe_div";
         let u = build_gen_user_prompt("写模块", "{}", &step, &[], 1000, Some(block));
         assert!(u.contains("已有 safe_div"), "{u}");
         assert!(u.contains("核心模块"), "{u}");
         assert!(!plan::GEN_SYSTEM.contains("已有 safe_div"));
-        assert!(!plan::GEN_SYSTEM.contains("本地知识库"), "{:?}", plan::GEN_SYSTEM);
+        assert!(
+            !plan::GEN_SYSTEM.contains("本地知识库"),
+            "{:?}",
+            plan::GEN_SYSTEM
+        );
 
         let plain = build_gen_user_prompt("写模块", "{}", &step, &[], 1000, None);
         assert!(!plain.contains("本地知识库"), "{plain}");

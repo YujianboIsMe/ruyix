@@ -470,7 +470,7 @@ mod tests {
         // 这一条是"我声称的隔离"与"我实际下发的参数"之间的对照表。
         // 任何一条限制被删掉，这里都会红。
         let a = argv(&["python", "-m", "unittest"]);
-        assert!(has(&a, ["--read-only", ""]) == false); // --read-only 无值，见下
+        assert!(!has(&a, ["--read-only", ""])); // --read-only 无值，见下
         assert!(a.iter().any(|x| x == "--read-only"), "{a:?}");
         assert!(has(&a, ["--cap-drop", "ALL"]), "{a:?}");
         assert!(has(&a, ["--security-opt", "no-new-privileges"]), "{a:?}");
@@ -575,10 +575,12 @@ mod tests {
 
     #[test]
     fn usable_sandbox_runs_in_container_for_all_modes() {
-        let mut probe = Probe::default();
-        probe.daemon_ok = true;
-        probe.image_present = true;
-        probe.usable = true;
+        let probe = Probe {
+            daemon_ok: true,
+            image_present: true,
+            usable: true,
+            ..Default::default()
+        };
         for mode in ["require", "prefer", "off"] {
             let mut cfg = AppConfig::default();
             cfg.sandbox.mode = mode.into();

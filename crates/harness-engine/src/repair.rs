@@ -93,10 +93,10 @@ pub fn build_prompt(
             out.push_str("上一轮没有让违规数下降，这一轮请换思路：优先处理 error 级、优先用诊断给的“怎么改”。\n");
         }
     }
-    if let Some(b) = kb_block {
-        if !b.trim().is_empty() {
-            out.push_str(&format!("\n{b}\n"));
-        }
+    if let Some(b) = kb_block
+        && !b.trim().is_empty()
+    {
+        out.push_str(&format!("\n{b}\n"));
     }
     out.push_str("\n只输出 JSON：{\"edits\": [...], \"notes\": \"...\"}");
     out
@@ -122,10 +122,10 @@ pub fn rule_ids(rec: &crate::workspace::RunRecord) -> Vec<String> {
 /// 解析模型的修复建议（容错，兼容 files 形态）。
 pub fn parse_attempt(raw: &str) -> Result<RepairAttempt, String> {
     let json = llm::extract_json_object(raw);
-    if let Ok(a) = serde_json::from_str::<RepairAttempt>(&json) {
-        if !a.edits.is_empty() {
-            return Ok(a);
-        }
+    if let Ok(a) = serde_json::from_str::<RepairAttempt>(&json)
+        && !a.edits.is_empty()
+    {
+        return Ok(a);
     }
     // 兼容：模型可能只回 files（整文件重写），把它转成"整文件替换"的编辑
     let v: serde_json::Value = serde_json::from_str(&json)

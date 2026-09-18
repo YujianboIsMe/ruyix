@@ -11,8 +11,8 @@
 //! 输出的差别只在 Sink，**阶段顺序、停止条件、错误处理完全共用**。
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::config::{self, AppConfig};
@@ -89,9 +89,14 @@ pub struct RunOpts {
 /// 为什么要有它：评估任务里的"复用仓库里已有的模块"必须让模型**真的看到**那些文件，
 /// 否则生成代码 `import store_util` 直接 ModuleNotFoundError，测的就不是"会不会复用"。
 /// 管道与评估的 raw 臂共用这一份实现（别各写一遍）。
-pub fn seed_files(root: &std::path::Path, run_id: &str, seeds: &[(String, String)]) -> Result<PathBuf, String> {
+pub fn seed_files(
+    root: &std::path::Path,
+    run_id: &str,
+    seeds: &[(String, String)],
+) -> Result<PathBuf, String> {
     let dir = workspace::run_dir(root, run_id)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建运行目录失败 {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("创建运行目录失败 {}: {e}", dir.display()))?;
     let proj = workspace::project_dir(root, run_id)?;
     for (rel, src) in seeds {
         let to = proj.join(rel);
@@ -182,12 +187,7 @@ pub async fn plan_stage(
     // 目录结构、既有模块（避免规划出重复的东西）。
     let engine = kb::Engine::from_config(cfg);
     let plan_inj = if engine.enabled {
-        kb::retrieve::retrieve(
-            &engine,
-            "plan",
-            task,
-            &kb::retrieve::Workspace::default(),
-        )
+        kb::retrieve::retrieve(&engine, "plan", task, &kb::retrieve::Workspace::default())
     } else {
         // 关着的时候也要留一条"没注入"的记录：否则事后根本分不清
         // "知识库没开"与"知识库开了但没命中"
@@ -201,16 +201,16 @@ pub async fn plan_stage(
         }
     };
     sink.log(
-        if plan_inj.hits.is_empty() { "info" } else { "ok" },
+        if plan_inj.hits.is_empty() {
+            "info"
+        } else {
+            "ok"
+        },
         format!("[plan] 知识库：{}", plan_inj.summary()),
     );
     let plan_block = kb::retrieve::render_block(&plan_inj);
 
-    sink.stage(
-        "plan",
-        "start",
-        format!("调用 {} 拆解任务…", cfg.llm.model),
-    );
+    sink.stage("plan", "start", format!("调用 {} 拆解任务…", cfg.llm.model));
     let t0 = Instant::now();
     let (plan, usage, model, ms) = plan::generate(&cfg.llm, task, plan_block.as_deref()).await?;
 
@@ -285,7 +285,7 @@ pub async fn plan_stage(
     Ok(rec)
 }
 
-pub(crate) async fn generate_stage(
+pub async fn generate_stage(
     sink: &dyn Sink,
     cfg: &AppConfig,
     flag: Arc<AtomicBool>,
@@ -303,7 +303,7 @@ pub(crate) async fn generate_stage(
         "start",
         format!("{} 个步骤 → {}", plan.steps.len(), proj.display()),
     );
-    sink.log( "info", format!("输出目录: {}", proj.display()));
+    sink.log("info", format!("输出目录: {}", proj.display()));
 
     let t0 = Instant::now();
     // 知识库：查询用"当前步骤标题 + 详情"，工作区 = 已生成的文件（见 generate::run_all）
@@ -315,7 +315,7 @@ pub(crate) async fn generate_stage(
         &plan,
         &rec.run_id,
         &proj,
-        move |st, i, total| sink.step( i, total, st),
+        move |st, i, total| sink.step(i, total, st),
         &flag,
         if engine.enabled { Some(&engine) } else { None },
     )
@@ -377,7 +377,7 @@ pub(crate) async fn generate_stage(
         }
     }
     for r in &outcome.rejected {
-        sink.log( "warn", format!("拒绝写入（路径越界/非法）: {r}"));
+        sink.log("warn", format!("拒绝写入（路径越界/非法）: {r}"));
     }
 
     let failed = outcome.steps.iter().filter(|s| s.status == "error").count();
@@ -385,11 +385,7 @@ pub(crate) async fn generate_stage(
 
     rec.usage.add(&outcome.usage);
     rec.generation = Some(outcome);
-    rec.status = if failed > 0 {
-        "generated".into()
-    } else {
-        "generated".into()
-    };
+    rec.status = "generated".to_string();
     if failed > 0 {
         sink.log(
             "warn",
@@ -413,7 +409,7 @@ pub(crate) async fn generate_stage(
     Ok(())
 }
 
-pub(crate) async fn verify_stage(
+pub async fn verify_stage(
     sink: &dyn Sink,
     cfg: &AppConfig,
     flag: Arc<AtomicBool>,
@@ -440,10 +436,9 @@ pub(crate) async fn verify_stage(
     let t0 = Instant::now();
 
     // 验证是纯阻塞的（等子进程），丢到 blocking 线程池，别占着 tokio worker
-    let report =
-        tokio::task::spawn_blocking(move || verify::run(&cfg2, &rid, &proj2, &flag2))
-            .await
-            .map_err(|e| format!("验证线程异常: {e}"))?;
+    let report = tokio::task::spawn_blocking(move || verify::run(&cfg2, &rid, &proj2, &flag2))
+        .await
+        .map_err(|e| format!("验证线程异常: {e}"))?;
 
     for c in &report.checks {
         let icon = match c.status.as_str() {
@@ -480,7 +475,7 @@ pub(crate) async fn verify_stage(
                 &c.stderr
             };
             for line in detail.lines().filter(|l| !l.trim().is_empty()).take(6) {
-                sink.log( "error", format!("    ├ {line}"));
+                sink.log("error", format!("    ├ {line}"));
             }
         }
     }
@@ -511,7 +506,7 @@ pub(crate) async fn verify_stage(
     Ok(report)
 }
 
-pub(crate) async fn run_lint(cfg: &AppConfig, proj: PathBuf) -> lint::LintOutcome {
+pub async fn run_lint(cfg: &AppConfig, proj: PathBuf) -> lint::LintOutcome {
     let cfg2 = cfg.clone();
     match tokio::task::spawn_blocking(move || lint::run_lint(&proj, &cfg2)).await {
         Ok(out) => out,
@@ -559,7 +554,7 @@ pub(crate) fn verify_failures_text(report: &VerifyReport) -> String {
     out
 }
 
-pub(crate) async fn repair_stage(
+pub async fn repair_stage(
     sink: &dyn Sink,
     cfg: &AppConfig,
     flag: &exec::CancelFlag,
@@ -578,13 +573,13 @@ pub(crate) async fn repair_stage(
     let mut prev: Option<RepairRound> = None;
     for round in 1..=max_rounds {
         if exec::is_cancelled(flag) {
-            sink.log( "warn", "用户取消，自我纠正循环提前结束".to_string());
+            sink.log("warn", "用户取消，自我纠正循环提前结束".to_string());
             break;
         }
         let before = issue_count(rec);
         if before == 0 {
             if zero_means_clean(cfg.lint.enabled, rec.lint.is_some()) {
-                sink.log( "ok", "没有需要修复的问题，循环结束".to_string());
+                sink.log("ok", "没有需要修复的问题，循环结束".to_string());
             } else {
                 sink.log(
                     "warn",
@@ -627,7 +622,12 @@ pub(crate) async fn repair_stage(
                 std::slice::from_ref(proj),
                 &rec.generation
                     .as_ref()
-                    .map(|g| g.files.iter().map(|f| f.path.clone()).collect::<Vec<String>>())
+                    .map(|g| {
+                        g.files
+                            .iter()
+                            .map(|f| f.path.clone())
+                            .collect::<Vec<String>>()
+                    })
                     .unwrap_or_default(),
             );
             kb::retrieve::retrieve(&engine, &format!("repair:{round}"), &query, &ws)
@@ -669,12 +669,9 @@ pub(crate) async fn repair_stage(
                     detail: e.clone(),
                     ..Default::default()
                 };
-                sink.repair( &r);
+                sink.repair(&r);
                 rec.repair.push(r);
-                sink.log(
-                    "error",
-                    format!("第 {round} 轮模型没给出可用改动：{e}"),
-                );
+                sink.log("error", format!("第 {round} 轮模型没给出可用改动：{e}"));
                 break;
             }
         };
@@ -693,15 +690,15 @@ pub(crate) async fn repair_stage(
         match repair::apply_edits(proj, &attempt.edits) {
             Ok(applied) => {
                 for a in &applied {
-                    sink.log( "ok", format!("  已应用：{a}"));
+                    sink.log("ok", format!("  已应用：{a}"));
                 }
                 // 重跑验证 + 规约检查
                 match verify_stage(sink, cfg, flag.clone(), rec).await {
                     Ok(_) => {}
-                    Err(e) => sink.log( "warn", format!("重跑验证失败：{e}")),
+                    Err(e) => sink.log("warn", format!("重跑验证失败：{e}")),
                 }
                 let lint_out = run_lint(cfg, proj.clone()).await;
-                sink.lint( &lint_out);
+                sink.lint(&lint_out);
                 if !lint_out.ran {
                     sink.log(
                         "error",
@@ -730,7 +727,7 @@ pub(crate) async fn repair_stage(
                         format!("{before} → {after}（没下降，停止循环）")
                     },
                 };
-                sink.repair( &r);
+                sink.repair(&r);
                 sink.log(
                     if status == "ok" { "ok" } else { "warn" },
                     format!("第 {round} 轮：{}", r.detail),
@@ -741,7 +738,7 @@ pub(crate) async fn repair_stage(
                 let root = config::runs_root(cfg);
                 workspace::save(&root, rec)?;
                 if after == 0 {
-                    sink.log( "ok", "全部问题已修复".to_string());
+                    sink.log("ok", "全部问题已修复".to_string());
                     break;
                 }
                 if status == "no_progress" {
@@ -760,7 +757,7 @@ pub(crate) async fn repair_stage(
                     elapsed_ms: elapsed,
                     ..Default::default()
                 };
-                sink.repair( &r);
+                sink.repair(&r);
                 sink.log(
                     "error",
                     format!("第 {round} 轮改动被拒绝（已回滚，未改盘）：{e}"),
@@ -787,7 +784,7 @@ pub(crate) async fn repair_stage(
             rec.repair.len()
         )
     };
-    sink.stage( "repair", if clean { "done" } else { "skip" }, detail);
+    sink.stage("repair", if clean { "done" } else { "skip" }, detail);
     Ok(())
 }
 
@@ -807,7 +804,7 @@ pub(crate) async fn lint_and_repair_stage(
             format!("自定义规则检查 @ {}", proj.display()),
         );
         let out = run_lint(cfg, proj.clone()).await;
-        sink.lint( &out);
+        sink.lint(&out);
         match &out.report {
             Some(r) => {
                 sink.log(
@@ -815,7 +812,7 @@ pub(crate) async fn lint_and_repair_stage(
                     format!("规约检查：{} · {}", r.summary_line(), out.cmd),
                 );
                 for (rule, n) in &r.by_rule {
-                    sink.log( "info", format!("  {rule} × {n}"));
+                    sink.log("info", format!("  {rule} × {n}"));
                 }
                 for d in r.diagnostics.iter().take(8) {
                     sink.log(

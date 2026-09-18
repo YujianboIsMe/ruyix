@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod ai;
 mod config;
 mod git;
@@ -1108,6 +1109,7 @@ fn main() {
         .manage(config_mgr)
         .manage(pty_mgr)
         .manage(Mutex::new(rag::RagManager::new()))
+        .manage(agent::AgentState::new())
         .setup(|app| {
             // 注册原生 Ctrl+S 快捷键 — 即使 WebView2 拦截了 JS 的 Ctrl+S，
             // 原生菜单 accelerator 仍能在 OS 层面捕获该组合键
@@ -1160,6 +1162,19 @@ fn main() {
             config_set,
             config_delete,
             ai_translate,
+            // Agent 命令桥（融合计划 Z3，append-only 注册块）
+            agent::agent_run,
+            agent::agent_plan,
+            agent::agent_generate,
+            agent::agent_verify,
+            agent::agent_lint,
+            agent::agent_repair,
+            agent::agent_cancel,
+            agent::agent_runs,
+            agent::agent_run_load,
+            agent::agent_run_delete,
+            agent::agent_read_artifact,
+            agent::agent_env_probe,
             git::git_status,
             git::git_run,
             rag_search,

@@ -94,8 +94,8 @@ impl TaskSpec {
     fn load(path: &Path) -> Result<TaskSpec, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("读任务失败 {}: {e}", path.display()))?;
-        let spec: TaskSpec = toml::from_str(&text)
-            .map_err(|e| format!("解析任务失败 {}: {e}", path.display()))?;
+        let spec: TaskSpec =
+            toml::from_str(&text).map_err(|e| format!("解析任务失败 {}: {e}", path.display()))?;
         Ok(spec)
     }
 
@@ -251,7 +251,10 @@ fn read_text_files(root: &Path) -> Vec<(String, String)> {
                 continue;
             }
             let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if !matches!(ext, "py" | "md" | "txt" | "toml" | "json" | "js" | "rs" | "go" | "cfg" | "ini") {
+            if !matches!(
+                ext,
+                "py" | "md" | "txt" | "toml" | "json" | "js" | "rs" | "go" | "cfg" | "ini"
+            ) {
                 continue;
             }
             if let Ok(text) = std::fs::read_to_string(&p) {
@@ -293,7 +296,11 @@ pub fn evaluate(
             name: format!("文件存在：{f}"),
             kind: "files".into(),
             pass: exists,
-            detail: if exists { String::new() } else { "缺失".into() },
+            detail: if exists {
+                String::new()
+            } else {
+                "缺失".into()
+            },
         });
     }
 
@@ -359,12 +366,18 @@ pub fn evaluate(
     // 语义：**层里得有文件**才算 —— 空目录不算（空目录里没有任何代码，等于没这一层）
 
     for layer in &spec.require_layers {
-        let present = files.iter().any(|(rel, _)| rel.starts_with(&format!("{layer}/")));
+        let present = files
+            .iter()
+            .any(|(rel, _)| rel.starts_with(&format!("{layer}/")));
         checks.push(CheckOutcome {
             name: format!("目录存在：{layer}/"),
             kind: "require_layers".into(),
             pass: present,
-            detail: if present { String::new() } else { "没有这个层".into() },
+            detail: if present {
+                String::new()
+            } else {
+                "没有这个层".into()
+            },
         });
     }
 
@@ -430,7 +443,11 @@ fn parse_raw_files(raw: &str) -> Result<Vec<(String, String)>, String> {
         .ok_or("输出里没有 files 数组")?;
     let mut out = Vec::new();
     for item in arr {
-        let path = item.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+        let path = item
+            .get("path")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
         let content = item
             .get("content")
             .and_then(|c| c.as_str())
@@ -478,7 +495,19 @@ pub async fn run_once(
     };
     r.run_id = run_id.clone();
 
-    if let Err(e) = run_arm_inner(cfg, spec, arm, round, suite_dir, kb_dir_override, &root, &proj, &mut r).await {
+    if let Err(e) = run_arm_inner(
+        cfg,
+        spec,
+        arm,
+        round,
+        suite_dir,
+        kb_dir_override,
+        &root,
+        &proj,
+        &mut r,
+    )
+    .await
+    {
         r.error = e;
         r.ok = false;
         r.elapsed_ms = t0.elapsed().as_millis();
@@ -594,6 +623,8 @@ async fn run_raw_arm(
 }
 
 /// 跑一个臂的一轮：raw 走自己的极简路径，其余三个臂**全部走同一份管道实现**。
+// 评估臂的完整上下文（套件/任务/轮次/目录/覆盖/记录），拆了更难对齐论文口径
+#[allow(clippy::too_many_arguments)]
 async fn run_arm_inner(
     cfg: &AppConfig,
     spec: &TaskSpec,
@@ -630,6 +661,7 @@ async fn run_arm_inner(
 }
 
 /// 真正跑管道并把指标搬进 `EvalRun`。
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline_arm(
     cfg: &AppConfig,
     spec: &TaskSpec,
@@ -691,7 +723,6 @@ async fn run_pipeline_arm(
     let _ = (proj, root);
     Ok(())
 }
-
 
 /// 评估专用的**空**知识库目录（没有夹具的任务用它）：确定"没有来源"，而不是"用了用户的"。
 fn empty_kb_dir() -> PathBuf {
@@ -828,7 +859,11 @@ pub struct EvalReport {
     pub notes: Vec<String>,
 }
 
-pub fn summarize(runs: &[EvalRun], arms: &[String], tasks: &[String]) -> BTreeMap<String, ArmSummary> {
+pub fn summarize(
+    runs: &[EvalRun],
+    arms: &[String],
+    tasks: &[String],
+) -> BTreeMap<String, ArmSummary> {
     let mut out = BTreeMap::new();
     for arm in arms {
         let mine: Vec<&EvalRun> = runs.iter().filter(|r| &r.arm == arm).collect();
@@ -851,7 +886,11 @@ pub fn summarize(runs: &[EvalRun], arms: &[String], tasks: &[String]) -> BTreeMa
             valid: n,
             invalid: mine.len() - n,
             accepted,
-            pass_at_1: if n == 0 { 0.0 } else { accepted as f64 / n as f64 },
+            pass_at_1: if n == 0 {
+                0.0
+            } else {
+                accepted as f64 / n as f64
+            },
             ci_low: lo,
             ci_high: hi,
             checks,
@@ -954,7 +993,9 @@ fn md_table(report: &EvalReport) -> String {
         }
         s.push('\n');
     }
-    s.push_str("\n## 两两比较（Fisher 精确检验，双侧）\n\n| A | B | p | 说明 |\n|---|---|---|---|\n");
+    s.push_str(
+        "\n## 两两比较（Fisher 精确检验，双侧）\n\n| A | B | p | 说明 |\n|---|---|---|---|\n",
+    );
     for f in &report.fisher {
         s.push_str(&format!(
             "| `{}` | `{}` | {:.4} | {} |\n",
@@ -1020,9 +1061,9 @@ pub async fn cli(args: &[String]) -> i32 {
     let out_path = arg_value(args, "--out").unwrap_or_else(|| "eval-report.json".into());
     let md_path = arg_value(args, "--md").unwrap_or_else(|| "eval-report.md".into());
     // 评估**默认单独一个知识库目录**：不污染用户自己的 kb.json
-    let kb_root = arg_value(args, "--kb-root").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::temp_dir().join("darkhorse-eval-kb")
-    });
+    let kb_root = arg_value(args, "--kb-root")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("darkhorse-eval-kb"));
     // --recheck：判据改了之后，用**既有产物**重算一遍（不重跑模型）
     if args.iter().any(|a| a == "--recheck") {
         return recheck(&suite, &arms, &out_path, &md_path);
@@ -1070,7 +1111,10 @@ pub async fn cli(args: &[String]) -> i32 {
         }
     };
     if !only.is_empty() {
-        specs.retain(|s| only.iter().any(|o| &s.id == o || s.id.starts_with(o.as_str())));
+        specs.retain(|s| {
+            only.iter()
+                .any(|o| &s.id == o || s.id.starts_with(o.as_str()))
+        });
     }
     if specs.is_empty() {
         eprintln!("筛选后没有任务（--only {only:?}）");
@@ -1170,9 +1214,7 @@ pub async fn cli(args: &[String]) -> i32 {
             "有 {no_tests} 轮没跑到单元测试（沙箱/环境跳过）—— 这些轮在这条判据上必然失败，属于**环境**而不是模型能力"
         ));
     }
-    notes.push(
-        "所有臂共用同一份任务描述与判据；`raw` 臂只调一次模型、不重试、不给诊断".into(),
-    );
+    notes.push("所有臂共用同一份任务描述与判据；`raw` 臂只调一次模型、不重试、不给诊断".into());
     notes.push(format!(
         "每臂每任务 {} 轮：只够看大效应；置信区间按 Wilson 给（小样本）",
         rounds
@@ -1191,7 +1233,13 @@ pub async fn cli(args: &[String]) -> i32 {
     println!("\n报告已写入 {out_path}");
     println!("              {md_path}");
 
-    if report.summary.get("harness").map(|a| a.accepted).unwrap_or(0) > 0 {
+    if report
+        .summary
+        .get("harness")
+        .map(|a| a.accepted)
+        .unwrap_or(0)
+        > 0
+    {
         0
     } else {
         1
@@ -1214,10 +1262,10 @@ fn apply_kb_settings(spec: &str) -> std::collections::BTreeMap<String, Option<St
     for k in KB_KEYS {
         saved.insert(k.to_string(), crate::config::raw_value("kb", k));
     }
-    if let Some(path) = kb_backup_path() {
-        if let Ok(text) = serde_json::to_string_pretty(&saved) {
-            let _ = std::fs::write(path, text);
-        }
+    if let Some(path) = kb_backup_path()
+        && let Ok(text) = serde_json::to_string_pretty(&saved)
+    {
+        let _ = std::fs::write(path, text);
     }
     for pair in spec.split(',').filter(|p| p.contains('=')) {
         let (k, v) = pair.split_once('=').unwrap();
@@ -1256,7 +1304,8 @@ fn recover_kb_settings() {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
-    let Ok(saved) = serde_json::from_str::<std::collections::BTreeMap<String, Option<String>>>(&text)
+    let Ok(saved) =
+        serde_json::from_str::<std::collections::BTreeMap<String, Option<String>>>(&text)
     else {
         let _ = std::fs::remove_file(&path);
         return;
@@ -1373,17 +1422,19 @@ fn save_report(report: &EvalReport, out_path: &str, md_path: &str) {
     // （踩过：输出目录 D:/tmp 不存在，`let _ = fs::write(...)` 把整份报告吞了，
     //   命令行还照样打印"报告已写入 …"。）
     for (path, body) in [
-        (out_path, serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".into())),
+        (
+            out_path,
+            serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".into()),
+        ),
         (md_path, md_table(report)),
     ] {
         let p = Path::new(path);
-        if let Some(dir) = p.parent() {
-            if !dir.as_os_str().is_empty() {
-                if let Err(e) = std::fs::create_dir_all(dir) {
-                    eprintln!("✗ 建报告目录失败 {}: {e}", dir.display());
-                    continue;
-                }
-            }
+        if let Some(dir) = p.parent()
+            && !dir.as_os_str().is_empty()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            eprintln!("✗ 建报告目录失败 {}: {e}", dir.display());
+            continue;
         }
         if let Err(e) = std::fs::write(p, body) {
             eprintln!("✗ 写报告失败 {}: {e}", p.display());
@@ -1497,7 +1548,10 @@ mod tests {
         assert!(failed.iter().any(|f| f.contains("禁止")), "{failed:?}");
         assert!(failed.iter().any(|f| f.contains("HX201")), "{failed:?}");
         assert!(failed.iter().any(|f| f.contains("形态")), "{failed:?}");
-        assert!(failed.iter().any(|f| f.contains("规约 error")), "{failed:?}");
+        assert!(
+            failed.iter().any(|f| f.contains("规约 error")),
+            "{failed:?}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

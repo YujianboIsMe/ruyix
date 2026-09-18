@@ -253,10 +253,10 @@ pub fn rollback_branch(
     // 若这个分支正在某个 worktree 里被检出，先摘掉 worktree
     let wts = must(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
     for block in wts.split("\n\n") {
-        if block.contains(&format!("branch refs/heads/{branch}")) {
-            if let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) {
-                let _ = git(repo, &["worktree", "remove", "--force", path.trim()]);
-            }
+        if block.contains(&format!("branch refs/heads/{branch}"))
+            && let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree "))
+        {
+            let _ = git(repo, &["worktree", "remove", "--force", path.trim()]);
         }
     }
 

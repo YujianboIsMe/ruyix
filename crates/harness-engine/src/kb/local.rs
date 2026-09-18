@@ -15,7 +15,7 @@
 //! 两处实现同一套规则，是 bug 的经典产地（v0.2 的 `# noqa` 口径就是这么出事的）。
 
 use super::{KbDoc, KbScan, KbSource};
-use crate::exec::{is_cancelled, CancelFlag};
+use crate::exec::{CancelFlag, is_cancelled};
 use std::path::{Path, PathBuf};
 
 /// 目录级黑名单（名字精确匹配）
@@ -54,11 +54,58 @@ const SECRET_HINTS: &[&str] = &[
 
 /// 可索引的文本扩展名
 const TEXT_EXTS: &[&str] = &[
-    "md", "markdown", "rst", "txt", "org", "tex", "adoc", "rs", "py", "js", "mjs", "cjs", "ts",
-    "tsx", "jsx", "java", "kt", "go", "c", "h", "cc", "cpp", "hpp", "cs", "rb", "php", "lua",
-    "sh", "bash", "zsh", "ps1", "bat", "cmd", "sql", "toml", "yaml", "yml", "json", "jsonl",
-    "ini", "cfg", "conf", "properties", "gradle", "tf", "proto", "vue", "svelte", "html", "css",
-    "scss", "less",
+    "md",
+    "markdown",
+    "rst",
+    "txt",
+    "org",
+    "tex",
+    "adoc",
+    "rs",
+    "py",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "tsx",
+    "jsx",
+    "java",
+    "kt",
+    "go",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "rb",
+    "php",
+    "lua",
+    "sh",
+    "bash",
+    "zsh",
+    "ps1",
+    "bat",
+    "cmd",
+    "sql",
+    "toml",
+    "yaml",
+    "yml",
+    "json",
+    "jsonl",
+    "ini",
+    "cfg",
+    "conf",
+    "properties",
+    "gradle",
+    "tf",
+    "proto",
+    "vue",
+    "svelte",
+    "html",
+    "css",
+    "scss",
+    "less",
 ];
 
 /// 没有扩展名但确实是文本的文件
@@ -81,7 +128,6 @@ pub struct FileStat {
     pub size: u64,
 }
 
-
 pub struct LocalSource {
     pub root: PathBuf,
     pub label: String,
@@ -98,7 +144,7 @@ impl LocalSource {
     }
 
     /// 遍历 + 过滤（不读内容）。返回 (候选文件, 被跳过且有理由说明的文件)。
-    pub fn walk(&self, cancel: &CancelFlag) -> Result<(Vec<FileStat>, Vec<(String, String)>), String> {
+    pub fn walk(&self, cancel: &CancelFlag) -> Result<super::WalkStats, String> {
         if !self.root.is_dir() {
             return Err(format!(
                 "知识库来源不是一个目录（或不存在）：{}",
@@ -250,10 +296,7 @@ impl KbSource for LocalSource {
         self.scan(cancel)
     }
 
-    fn walk_stats(
-        &self,
-        cancel: &CancelFlag,
-    ) -> Result<(Vec<FileStat>, Vec<(String, String)>), String> {
+    fn walk_stats(&self, cancel: &CancelFlag) -> Result<super::WalkStats, String> {
         self.walk(cancel)
     }
 }
@@ -274,10 +317,10 @@ fn rel(root: &Path, p: &Path) -> String {
 }
 
 fn is_text_like(lower_name: &str) -> bool {
-    if let Some(ext) = lower_name.rsplit_once('.').map(|(_, e)| e) {
-        if TEXT_EXTS.contains(&ext) {
-            return true;
-        }
+    if let Some(ext) = lower_name.rsplit_once('.').map(|(_, e)| e)
+        && TEXT_EXTS.contains(&ext)
+    {
+        return true;
     }
     TEXT_NAMES.contains(&lower_name)
 }
@@ -349,7 +392,10 @@ mod tests {
         let paths: Vec<String> = s.docs.iter().map(|x| x.path.clone()).collect();
         assert!(paths.contains(&"README.md".to_string()), "{paths:?}");
         assert!(paths.contains(&"src/a.py".to_string()), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.contains("node_modules")), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules")),
+            "{paths:?}"
+        );
         assert!(!paths.iter().any(|p| p.contains("target/")), "{paths:?}");
         assert!(!paths.contains(&"blob.bin".to_string()), "{paths:?}");
     }
@@ -427,7 +473,9 @@ mod tests {
             );
         }
         assert!(
-            s.skipped.iter().any(|(p, w)| p == "bad.md" && w.contains("UTF-8")),
+            s.skipped
+                .iter()
+                .any(|(p, w)| p == "bad.md" && w.contains("UTF-8")),
             "非 UTF-8 文件必须有理由：{:?}",
             s.skipped
         );

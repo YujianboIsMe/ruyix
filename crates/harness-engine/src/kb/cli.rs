@@ -5,7 +5,7 @@
 //! 命令行里 `kb search "预算裁剪"` 一行就能看。调试检索和调试代码一样，
 //! 反馈环越短越好。
 
-use super::{index, retrieve, Engine, KbEntry, Registry};
+use super::{Engine, KbEntry, Registry, index, retrieve};
 use std::path::{Path, PathBuf};
 
 pub fn kb_cli(args: &[String]) -> i32 {
@@ -90,14 +90,12 @@ fn cmd_index(engine: &mut Engine, args: &[String]) -> i32 {
             kind: "local".into(),
             path: canon.to_string_lossy().to_string(),
             label: if label.is_empty() {
-                prev.as_ref()
-                    .map(|e| e.label.clone())
-                    .unwrap_or_else(|| {
-                        canon
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_else(|| canon.to_string_lossy().to_string())
-                    })
+                prev.as_ref().map(|e| e.label.clone()).unwrap_or_else(|| {
+                    canon
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| canon.to_string_lossy().to_string())
+                })
             } else {
                 label.clone()
             },
@@ -111,7 +109,7 @@ fn cmd_index(engine: &mut Engine, args: &[String]) -> i32 {
                 println!("  扫描：{}", p.msg);
             } else if p.phase == "done" {
                 last = p.msg;
-            } else if p.done % 25 == 0 || p.done == p.total {
+            } else if p.done.is_multiple_of(25) || p.done == p.total {
                 println!("  [{}/{}] {}", p.done, p.total, p.msg);
             }
         };
@@ -179,7 +177,11 @@ fn cmd_stats(engine: &Engine, json: bool) -> i32 {
     println!(
         "知识库目录：{}（{}）",
         status.dir,
-        if status.enabled { "已启用" } else { "未启用" }
+        if status.enabled {
+            "已启用"
+        } else {
+            "未启用"
+        }
     );
     if !status.reason.is_empty() {
         println!("状态：{}", status.reason);
@@ -251,7 +253,9 @@ fn cmd_search(engine: &mut Engine, args: &[String]) -> i32 {
     }
     // 调试模式：开关关着也照查（否则"检索效果怎么样"没法在不改配置的情况下验）
     if !engine.enabled {
-        eprintln!("（注意：config 里 [kb] enabled = false —— 本次按调试模式检索，真实运行不会注入）");
+        eprintln!(
+            "（注意：config 里 [kb] enabled = false —— 本次按调试模式检索，真实运行不会注入）"
+        );
         engine.enabled = true;
         // 调试模式下把"未启用"这条原因清掉，否则命中列表与说明自相矛盾
         engine.reason.clear();
@@ -292,7 +296,11 @@ fn cmd_search(engine: &mut Engine, args: &[String]) -> i32 {
             score = h.score,
             cov = h.coverage,
             label = h.source_label,
-            at = if h.indexed_at.is_empty() { "未知" } else { &h.indexed_at }
+            at = if h.indexed_at.is_empty() {
+                "未知"
+            } else {
+                &h.indexed_at
+            }
         );
         println!("   {}", h.title);
     }
@@ -306,7 +314,10 @@ fn cmd_search(engine: &mut Engine, args: &[String]) -> i32 {
         println!("  ! {n}");
     }
     if block {
-        println!("\n===== 注入块原文 =====\n{}", retrieve::render_block(&inj).unwrap_or_default());
+        println!(
+            "\n===== 注入块原文 =====\n{}",
+            retrieve::render_block(&inj).unwrap_or_default()
+        );
     }
     0
 }
@@ -326,11 +337,11 @@ fn cmd_remove(engine: &Engine, args: &[String]) -> i32 {
     match reg.remove(id, &engine.dir) {
         Ok(Some(_)) => {
             let db: PathBuf = index::db_path(&engine.dir, id);
-            if db.exists() {
-                if let Err(e) = std::fs::remove_file(&db) {
-                    eprintln!("已从列表移除，但索引文件删除失败：{e}（{}）", db.display());
-                    return 1;
-                }
+            if db.exists()
+                && let Err(e) = std::fs::remove_file(&db)
+            {
+                eprintln!("已从列表移除，但索引文件删除失败：{e}（{}）", db.display());
+                return 1;
             }
             println!("已移除 {id}");
             0

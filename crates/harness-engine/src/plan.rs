@@ -154,10 +154,10 @@ pub fn parse_plan(raw: &str) -> Result<Plan, String> {
     let json = llm::extract_json_object(raw);
     // 注意：Plan 的字段全是 #[serde(default)]，所以 {"plan": {...}} 这种多包一层的
     // 输出也能"解析成功"但 steps 为空。必须要求 steps 非空才认这次强类型解析。
-    if let Ok(p) = serde_json::from_str::<Plan>(&json) {
-        if !p.steps.is_empty() {
-            return normalize(p);
-        }
+    if let Ok(p) = serde_json::from_str::<Plan>(&json)
+        && !p.steps.is_empty()
+    {
+        return normalize(p);
     }
 
     let v: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
@@ -249,10 +249,10 @@ fn normalize(mut p: Plan) -> Result<Plan, String> {
 
 fn get_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
     for k in keys {
-        if let Some(s) = v.get(*k).and_then(|x| x.as_str()) {
-            if !s.trim().is_empty() {
-                return Some(s.trim().to_string());
-            }
+        if let Some(s) = v.get(*k).and_then(|x| x.as_str())
+            && !s.trim().is_empty()
+        {
+            return Some(s.trim().to_string());
         }
     }
     None
@@ -286,11 +286,11 @@ fn get_str_list(v: &serde_json::Value, keys: &[&str]) -> Vec<String> {
 /// 获得指令级权限（需求 §2.5 的硬要求，被单测钉着）。
 pub fn build_user_prompt(task: &str, kb_block: Option<&str>) -> String {
     let mut out = String::new();
-    if let Some(b) = kb_block {
-        if !b.trim().is_empty() {
-            out.push_str(b);
-            out.push_str("\n\n（以上为参考资料，可能过期；请优先遵守任务本身的要求。）\n\n");
-        }
+    if let Some(b) = kb_block
+        && !b.trim().is_empty()
+    {
+        out.push_str(b);
+        out.push_str("\n\n（以上为参考资料，可能过期；请优先遵守任务本身的要求。）\n\n");
     }
     out.push_str(&format!(
         "任务描述：\n{}\n\n请输出计划 JSON。注意：所有步骤、文件路径、测试命令都要在后续真的能落地执行。",
@@ -336,7 +336,8 @@ mod tests {
             let slug = slugify(s);
             assert!(!slug.is_empty(), "空 slug：{s:?}");
             assert!(
-                slug.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+                slug.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
                 "slug 里出现了非 ASCII 字符：{s:?} → {slug:?}"
             );
             assert!(slug.len() <= 40, "slug 太长：{slug:?}");
@@ -347,8 +348,6 @@ mod tests {
         // 英文照旧
         assert_eq!(slugify("strutil 模块 v2"), "strutil-v2");
     }
-
-
 
     #[test]
     fn parses_well_formed_plan() {

@@ -132,10 +132,10 @@ pub fn extract_json_object(raw: &str) -> String {
             }
             '}' => {
                 depth -= 1;
-                if depth == 0 {
-                    if let Some(st) = start {
-                        return s[st..=i].to_string();
-                    }
+                if depth == 0
+                    && let Some(st) = start
+                {
+                    return s[st..=i].to_string();
                 }
             }
             _ => {}
@@ -257,8 +257,6 @@ fn api_error_message(text: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// 连通性 + 鉴权自检：拿模型列表，比"跑一个真实任务才发现 key 错"友好得多。
-
 /// 记一次成功的 LLM 调用。
 ///
 /// prompt / response 只记**头部**（脱敏 + 截断后）：完整落盘会把任务原文和代码
@@ -327,6 +325,7 @@ fn observe_llm_fail(
     );
 }
 
+/// 连通性 + 鉴权自检：拿模型列表，比"跑一个真实任务才发现 key 错"友好得多。
 pub async fn probe(cfg: &LlmConfig) -> Result<Vec<String>, String> {
     if cfg.api_key.trim().is_empty() {
         return Err("尚未配置 DeepSeek API Key".into());

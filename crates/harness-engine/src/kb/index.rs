@@ -19,9 +19,9 @@
 //! `DELETE FROM chunks_fts WHERE rowid = ?` —— **不用 FTS5 的 `'delete'` 特殊命令**
 //! （本机在 Code-Rag 上验证过它在内置 sqlite3 上不可靠）。
 
-use super::{KbDoc, KbEntry, KbConfig, StaleView};
-use crate::exec::{is_cancelled, CancelFlag};
-use rusqlite::{params, Connection};
+use super::{KbConfig, KbDoc, KbEntry, StaleView};
+use crate::exec::{CancelFlag, is_cancelled};
+use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -156,13 +156,28 @@ pub struct Chunk {
 
 /// 代码/文档的"可切分点"标记（顶层定义开头）。
 const ITEM_KEYS: &[&str] = &[
-    "def ", "class ", "fn ", "pub fn ", "pub struct ", "pub enum ", "impl ", "func ", "async fn ",
-    "export ", "function ", "void ", "struct ", "interface ", "const ", "async def ", "test ",
+    "def ",
+    "class ",
+    "fn ",
+    "pub fn ",
+    "pub struct ",
+    "pub enum ",
+    "impl ",
+    "func ",
+    "async fn ",
+    "export ",
+    "function ",
+    "void ",
+    "struct ",
+    "interface ",
+    "const ",
+    "async def ",
+    "test ",
 ];
 
 fn looks_like_heading(t: &str) -> bool {
     let hs = t.chars().take_while(|c| *c == '#').count();
-    hs >= 1 && hs <= 6 && t.chars().nth(hs).map(|c| c == ' ').unwrap_or(false)
+    (1..=6).contains(&hs) && t.chars().nth(hs).map(|c| c == ' ').unwrap_or(false)
 }
 
 fn looks_like_item(t: &str) -> bool {
@@ -263,12 +278,10 @@ pub struct StoreStats {
 pub fn open(dir: &Path, id: &str) -> Result<Connection, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("创建知识库目录失败: {e}"))?;
     let path = dir.join(format!("{id}.db"));
-    let conn = Connection::open(&path)
-        .map_err(|e| format!("打开索引库失败 {}: {e}", path.display()))?;
+    let conn =
+        Connection::open(&path).map_err(|e| format!("打开索引库失败 {}: {e}", path.display()))?;
     conn.execute_batch(SCHEMA).map_err(|e| {
-        format!(
-            "初始化索引库失败（若报 no such module: fts5，说明这个 SQLite 没有 FTS5）：{e}"
-        )
+        format!("初始化索引库失败（若报 no such module: fts5，说明这个 SQLite 没有 FTS5）：{e}")
     })?;
     Ok(conn)
 }
@@ -293,11 +306,9 @@ pub fn stats(dir: &Path, id: &str) -> Result<StoreStats, String> {
         .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
         .unwrap_or(0);
     let indexed_at: String = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'indexed_at'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT value FROM meta WHERE key = 'indexed_at'", [], |r| {
+            r.get(0)
+        })
         .unwrap_or_default();
     Ok(StoreStats {
         doc_count: docs.max(0) as usize,
@@ -746,10 +757,7 @@ pub fn indexed_files(dir: &Path, id: &str) -> Result<HashMap<String, (String, u6
             ))
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows
-        .flatten()
-        .map(|(p, h, m, s)| (p, (h, m, s)))
-        .collect())
+    Ok(rows.flatten().map(|(p, h, m, s)| (p, (h, m, s))).collect())
 }
 
 /// 索引库的物理路径（GUI 里"打开目录"用）
@@ -829,7 +837,8 @@ mod tests {
     fn tokenizer_drops_punctuation_and_markdown_noise() {
         let t = unique_tokens("### 标题：**加粗**、括号（x）");
         assert!(
-            !t.iter().any(|x| x.contains('*') || x.contains('#') || x.contains('：')),
+            !t.iter()
+                .any(|x| x.contains('*') || x.contains('#') || x.contains('：')),
             "{t:?}"
         );
         assert!(t.contains(&"标题".to_string()), "{t:?}");
@@ -850,7 +859,10 @@ mod tests {
 
         // 真库上验一遍召回：同主题的文档必须排在无关文档之前
         let d = TempDir::new("recall");
-        d.write("doc/预算.md", "# 预算\n\n按预算而不是条数截断，超预算必被裁掉。\n");
+        d.write(
+            "doc/预算.md",
+            "# 预算\n\n按预算而不是条数截断，超预算必被裁掉。\n",
+        );
         d.write("doc/无关.md", "# 无关\n\n今天天气不错，出去走走。\n");
         let cfg = KbConfig::default();
         index(&d, &cfg);
@@ -882,7 +894,11 @@ mod tests {
             "# 标题\n\n{body}\n\n```python\ndef f():\n    # ## 这不是标题\n    return 1\n```\n\n{body}\n"
         );
         let chunks = chunk_text(&text, 200);
-        assert!(chunks.len() >= 2, "这份文本必须被切成多块：{}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "这份文本必须被切成多块：{}",
+            chunks.len()
+        );
         for c in &chunks {
             assert!(fences_balanced(&c.text), "块里出现了半截围栏：\n{}", c.text);
         }
@@ -1073,22 +1089,22 @@ mod tests {
         assert_eq!(st.removed, 0);
     }
 
-#[test]
-fn empty_files_are_registered_so_staleness_does_not_cry_wolf() {
-    // 空文件如果被"跳过"，陈旧检测每次都会把它算成"新增" —— 一个永远亮着的
-    // 假警报，比没有警报更糟。所以空文件照样登记（只是 0 个 chunk）。
-    let d = TempDir::new("empty");
-    d.write("a.md", "# A\n\n有内容\n");
-    d.write("b.md", "");
-    let cfg = KbConfig::default();
-    let st = index(&d, &cfg);
-    assert_eq!(st.added, 2, "{st:?}");
-    let e = entry_for(&d.0);
-    let v = quick_stale(&d.store(), &e, &cfg);
-    assert_eq!(v.added, 0, "空文件不该被反复报成新增：{v:?}");
-    assert!(!v.is_stale(), "{v:?}");
-    // 但它搜不到任何东西（没有 chunk 可命中）
-    let out = search(&d.store(), &e.id, "内容", 10).unwrap();
-    assert!(out.hits.iter().all(|h| h.path != "b.md"), "{:?}", out.hits);
-}
+    #[test]
+    fn empty_files_are_registered_so_staleness_does_not_cry_wolf() {
+        // 空文件如果被"跳过"，陈旧检测每次都会把它算成"新增" —— 一个永远亮着的
+        // 假警报，比没有警报更糟。所以空文件照样登记（只是 0 个 chunk）。
+        let d = TempDir::new("empty");
+        d.write("a.md", "# A\n\n有内容\n");
+        d.write("b.md", "");
+        let cfg = KbConfig::default();
+        let st = index(&d, &cfg);
+        assert_eq!(st.added, 2, "{st:?}");
+        let e = entry_for(&d.0);
+        let v = quick_stale(&d.store(), &e, &cfg);
+        assert_eq!(v.added, 0, "空文件不该被反复报成新增：{v:?}");
+        assert!(!v.is_stale(), "{v:?}");
+        // 但它搜不到任何东西（没有 chunk 可命中）
+        let out = search(&d.store(), &e.id, "内容", 10).unwrap();
+        assert!(out.hits.iter().all(|h| h.path != "b.md"), "{:?}", out.hits);
+    }
 }
