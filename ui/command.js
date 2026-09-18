@@ -76,6 +76,9 @@ async function handleCommand(raw, _fromAi = false) {
     case "help":
       openHelp();
       break;
+    case "agent":
+      window.AgentUI?.handleCommand(parts.slice(1).join(" "));
+      break;
     case "search":
       await handleSearchCommand(parts.slice(1));
       break;
@@ -512,7 +515,7 @@ async function handleAiCommand(raw) {
 
     // 闲聊回复（不是标准命令动词开头）→ 直接显示
     const firstWord = result.split(/\s+/)[0]?.toLowerCase();
-    if (!["open", "close", "config", "new", "run", "help", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
+    if (!["open", "close", "config", "new", "run", "help", "agent", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
       console.log("[AI] → 闲聊:", result);
       setStatus(result);
       return;

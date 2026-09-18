@@ -38,6 +38,14 @@ async function initApp() {
   setupResponsiveTitlebar();
   setupProjectSwitcher();
   setupNavigatorTabs();
+
+  // Agent 控制台（融合计划 Z4）：注入视图切换钩子，页面逻辑自持在 agent.js
+  window.AgentHost = {
+    isProjectOpen: () => !!state.currentProject,
+    showProjectWorkspace,
+    showWelcomePage,
+  };
+  window.AgentUI?.attach(window.AgentHost);
   setupOutlineTabs();
   setupTextareaSync();
   setupTerminalList();
@@ -1466,9 +1474,11 @@ function showHelpPage() {
   const welcome = document.getElementById("welcome-content");
   const help = document.getElementById("help-page");
   const editorBody = document.getElementById("editor-body");
+  const agent = document.getElementById("agent-page");
   if (welcome) welcome.style.display = "none";
   if (help) help.style.display = "";
   if (editorBody) editorBody.style.display = "none";
+  if (agent) agent.style.display = "none";
 }
 
 function hideHelpPage() {
@@ -1492,7 +1502,7 @@ function openHelpTab() {
 
   const tab = {
     id: "help-" + Date.now().toString(),
-    name: "帮助",
+    name: I18N.t("help.title"),
     path: "",
     content: getHelpText(),
     _isHelp: true,

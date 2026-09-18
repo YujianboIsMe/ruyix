@@ -78,6 +78,7 @@
             <button class="nav-tab" data-tab="files">项目文件</button>
             <button class="nav-tab" data-tab="terminal">终端资源</button>
             <button class="nav-tab" data-tab="target">运行目标</button>
+            <button class="nav-tab" data-tab="agent" data-i18n="nav.tab_agent">智能体</button>
           </div>
           <div class="nav-content">
             <div id="nav-panel-projects" class="nav-panel active">
@@ -122,6 +123,36 @@
             <div id="nav-panel-target" class="nav-panel">
               <div id="run-targets-list" class="run-targets-list"></div>
             </div>
+            <div id="nav-panel-agent" class="nav-panel">
+              <textarea id="agent-task-input" class="agent-task-input" rows="3"
+                placeholder="描述任务，例如：给 utils/string.rs 实现 truncate_words 并补测试"
+                data-i18n-placeholder="agent.task_placeholder"></textarea>
+              <div class="agent-mode-row">
+                <label class="agent-mode">
+                  <input type="radio" name="agent-mode" value="full" checked>
+                  <span data-i18n="agent.mode_full">全流程</span>
+                </label>
+                <label class="agent-mode">
+                  <input type="radio" name="agent-mode" value="plan">
+                  <span data-i18n="agent.mode_plan">仅规划</span>
+                </label>
+              </div>
+              <div class="agent-btn-row">
+                <button id="agent-run-btn" class="agent-btn agent-btn--run" data-i18n="agent.run">▶ 运行</button>
+                <button id="agent-cancel-btn" class="agent-btn agent-btn--cancel" data-i18n="agent.cancel" disabled>✕ 取消</button>
+              </div>
+              <button id="agent-demo-btn" class="agent-btn agent-btn--demo" data-i18n="agent.demo">▶ 演示回放</button>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="agent.env">环境探针</div>
+                <div id="agent-env-chips" class="agent-env-chips"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="agent.history">历史运行</div>
+                <div id="agent-history-list" class="agent-history-list">
+                  <div class="agent-history-empty" data-i18n="agent.history_empty">暂无运行记录</div>
+                </div>
+              </div>
+            </div>
           </div>
         </aside>
 
@@ -135,40 +166,105 @@
           <!-- 帮助页 -->
           <div id="help-page" class="help-page" style="display:none">
             <div class="help-content">
-              <h1>帮助</h1>
-              <h2>命令系统</h2>
+              <h1 data-i18n="help.title">帮助</h1>
+              <h2 data-i18n="help.section_commands">命令系统</h2>
               <table class="help-table">
-                <tr><th>命令</th><th>说明</th></tr>
-                <tr><td><code>open project &lt;路径&gt;</code></td><td>打开 / 切换项目文件夹</td></tr>
-                <tr><td><code>open file &lt;路径&gt;</code></td><td>打开文件</td></tr>
-                <tr><td><code>close project</code></td><td>关闭当前项目</td></tr>
-                <tr><td><code>close all</code></td><td>关闭所有标签页</td></tr>
-                <tr><td><code>close &lt;序号&gt;</code></td><td>按序号关闭标签页（负数从右数）</td></tr>
-                <tr><td><code>close other</code></td><td>关闭除当前外的标签页</td></tr>
-                <tr><td><code>close left</code></td><td>关闭当前标签页左侧所有</td></tr>
-                <tr><td><code>close right</code></td><td>关闭当前标签页右侧所有</td></tr>
-                <tr><td><code>new py|rs|md|c &lt;名称&gt;</code></td><td>创建文件（自动加后缀）</td></tr>
-                <tr><td><code>new file &lt;相对路径&gt;</code></td><td>创建文件</td></tr>
-                <tr><td><code>new folder|dir &lt;相对路径&gt;</code></td><td>创建目录</td></tr>
-                <tr><td><code>del|delete|remove|rm &lt;相对路径&gt;</code></td><td>删除文件/目录（弹窗确认）</td></tr>
-                <tr><td><code>config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td>配置管理</td></tr>
+                <tr><th data-i18n="help.table_cmd">命令</th><th data-i18n="help.table_desc">说明</th></tr>
+                <tr><td><code data-i18n="help.cmd_open_project">open project &lt;路径&gt;</code></td><td data-i18n="help.desc_open_project">打开 / 切换项目文件夹</td></tr>
+                <tr><td><code data-i18n="help.cmd_open_file">open file &lt;路径&gt;</code></td><td data-i18n="help.desc_open_file">打开文件</td></tr>
+                <tr><td><code data-i18n="help.cmd_close_project">close project</code></td><td data-i18n="help.desc_close_project">关闭当前项目</td></tr>
+                <tr><td><code data-i18n="help.cmd_close_all">close all</code></td><td data-i18n="help.desc_close_all">关闭所有标签页</td></tr>
+                <tr><td><code data-i18n="help.cmd_close_index">close &lt;序号&gt;</code></td><td data-i18n="help.desc_close_index">按序号关闭标签页（负数从右数）</td></tr>
+                <tr><td><code data-i18n="help.cmd_close_other">close other</code></td><td data-i18n="help.desc_close_other">关闭除当前外的标签页</td></tr>
+                <tr><td><code data-i18n="help.cmd_close_left">close left</code></td><td data-i18n="help.desc_close_left">关闭当前标签页左侧所有</td></tr>
+                <tr><td><code data-i18n="help.cmd_close_right">close right</code></td><td data-i18n="help.desc_close_right">关闭当前标签页右侧所有</td></tr>
+                <tr><td><code data-i18n="help.cmd_new_type">new py|rs|md|c &lt;名称&gt;</code></td><td data-i18n="help.desc_new_type">创建文件（自动加后缀）</td></tr>
+                <tr><td><code data-i18n="help.cmd_new_file">new file &lt;相对路径&gt;</code></td><td data-i18n="help.desc_new_file">创建文件</td></tr>
+                <tr><td><code data-i18n="help.cmd_new_folder">new folder|dir &lt;相对路径&gt;</code></td><td data-i18n="help.desc_new_folder">创建目录</td></tr>
+                <tr><td><code data-i18n="help.cmd_del">del|delete|remove|rm &lt;相对路径&gt;</code></td><td data-i18n="help.desc_del">删除文件/目录（弹窗确认）</td></tr>
+                <tr><td><code data-i18n="help.cmd_config">config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td data-i18n="help.desc_config">配置管理</td></tr>
               </table>
-              <p class="help-note">快捷键：<kbd>Ctrl+S</kbd> 保存当前文件</p>
-              <h2>语法高亮支持</h2>
+              <p class="help-note"><span data-i18n="help.shortcut_label">快捷键：</span><kbd>Ctrl+S</kbd> <span data-i18n="help.shortcut_save_action">保存当前文件</span></p>
+              <h2 data-i18n="help.section_highlight">语法高亮支持</h2>
               <table class="help-table">
-                <tr><th>语言</th><th>扩展名</th></tr>
+                <tr><th data-i18n="help.table_lang">语言</th><th data-i18n="help.table_ext">扩展名</th></tr>
                 <tr><td>Python</td><td>.py</td></tr>
                 <tr><td>Rust</td><td>.rs</td></tr>
-                <tr><td>HTML（含嵌入 CSS/JS）</td><td>.html, .htm</td></tr>
+                <tr><td data-i18n="help.lang_html">HTML（含嵌入 CSS/JS）</td><td>.html, .htm</td></tr>
                 <tr><td>CSS</td><td>.css</td></tr>
                 <tr><td>JavaScript</td><td>.js, .mjs, .cjs</td></tr>
                 <tr><td>Markdown</td><td>.md, .markdown</td></tr>
                 <tr><td>SQL</td><td>.sql</td></tr>
                 <tr><td>Java</td><td>.java</td></tr>
               </table>
-              <h2>联系方式</h2>
-              <p>CSDN 关注 <strong>醒过来摸鱼</strong>，私信即可。</p>
-              <button id="btn-help-back" class="help-back-btn">← 返回</button>
+              <h2 data-i18n="help.section_contact">联系方式</h2>
+              <p><span data-i18n="help.contact_follow">关注 </span><a href="https://newest-ai.com" target="_blank"><strong>https://newest-ai.com</strong></a><span data-i18n="help.contact_mid">，邮箱 </span><strong>yujianboisme@outlook.com</strong><span data-i18n="help.contact_end">。</span></p>
+              <button id="btn-help-back" class="help-back-btn" data-i18n="help.back">← 返回</button>
+            </div>
+          </div>
+
+          <!-- Agent 控制台（融合计划 Z4）：引擎落位前含演示回放 -->
+          <div id="agent-page" class="agent-page" style="display:none">
+            <!-- 空闲视图 -->
+            <div id="agent-console-idle" class="agent-idle">
+              <div class="agent-idle-inner">
+                <div class="agent-engine-chip" data-i18n="agent.engine_demo">引擎未接入 · 演示模式（P1 落位后自动切换真实引擎）</div>
+                <h1 class="agent-idle-title" data-i18n="agent.idle_title">Agent 引擎</h1>
+                <p class="agent-idle-sub" data-i18n="agent.idle_sub">规划 → 生成 → 规约 → 验证 → 自修复，一次任务全链路闭环</p>
+                <div class="agent-cap-grid">
+                  <div class="agent-cap">
+                    <div class="agent-cap-icon">⛭</div>
+                    <div class="agent-cap-title" data-i18n="agent.cap_plan_title">规划</div>
+                    <div class="agent-cap-desc" data-i18n="agent.cap_plan_desc">任务拆解为可验证的步骤与产物清单</div>
+                  </div>
+                  <div class="agent-cap">
+                    <div class="agent-cap-icon">⚒</div>
+                    <div class="agent-cap-title" data-i18n="agent.cap_gen_title">生成</div>
+                    <div class="agent-cap-desc" data-i18n="agent.cap_gen_desc">在隔离运行目录产出代码，未隔离必标注</div>
+                  </div>
+                  <div class="agent-cap">
+                    <div class="agent-cap-icon">✓</div>
+                    <div class="agent-cap-title" data-i18n="agent.cap_verify_title">验证</div>
+                    <div class="agent-cap-desc" data-i18n="agent.cap_verify_desc">编译、测试、规约多道闸门，报告可回看</div>
+                  </div>
+                  <div class="agent-cap">
+                    <div class="agent-cap-icon">⟳</div>
+                    <div class="agent-cap-title" data-i18n="agent.cap_repair_title">自修复</div>
+                    <div class="agent-cap-desc" data-i18n="agent.cap_repair_desc">失败定位 → 定点修复 → 自动复验，轮次上限可配</div>
+                  </div>
+                </div>
+                <div class="agent-idle-actions">
+                  <button id="agent-hero-demo" class="agent-btn agent-btn--run" data-i18n="agent.demo">▶ 演示回放</button>
+                </div>
+                <p class="agent-idle-hint" data-i18n="agent.idle_hint">在左侧面板输入任务，或在命令栏输入 agent &lt;任务&gt;</p>
+              </div>
+            </div>
+            <!-- 运行视图 -->
+            <div id="agent-console-run" class="agent-console" style="display:none">
+              <div class="agent-header">
+                <div class="agent-header-left">
+                  <span class="agent-header-title" data-i18n="agent.console">Agent 控制台</span>
+                  <span id="agent-run-meta" class="agent-run-meta"></span>
+                </div>
+                <div class="agent-header-right">
+                  <span id="agent-status-pill" class="agent-pill"></span>
+                  <button id="agent-console-cancel" class="agent-btn agent-btn--cancel" data-i18n="agent.cancel">✕ 取消</button>
+                  <button id="agent-console-close" class="agent-icon-btn" title="关闭" data-i18n-title="agent.close">✕</button>
+                </div>
+              </div>
+              <div id="agent-pipeline" class="agent-pipeline"></div>
+              <div class="agent-main">
+                <div class="agent-col agent-col--steps">
+                  <div class="agent-col-title" data-i18n="agent.steps">步骤</div>
+                  <div id="agent-steps" class="agent-steps"></div>
+                </div>
+                <div class="agent-col agent-col--reports">
+                  <div class="agent-col-title" data-i18n="agent.reports">报告</div>
+                  <div id="agent-reports" class="agent-reports"></div>
+                </div>
+              </div>
+              <div class="agent-log-title" data-i18n="agent.log">日志</div>
+              <div id="agent-log" class="agent-log"></div>
             </div>
           </div>
 
@@ -353,6 +449,7 @@
 
   <script src="i18n.js"></script>
   <script src="command.js"></script>
+  <script src="agent.js"></script>
   <script src="main.js"></script>
 </body>
 </html>
