@@ -29,7 +29,8 @@ ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Mo
 ## Architecture
 
 - **Frontend**: Vanilla HTML/CSS/JS (no bundler, no npm). Served from `ui/` via Tauri's custom protocol. All Tauri APIs accessed via `window.__TAURI__` global.
-- **Backend**: Tauri 2 Rust backend, modules: `main.rs` (Tauri commands + app entry), `config.rs` (3-scope config, projects, run targets), `pty.rs` (PTY terminal management), `ai.rs` (LLM integration), `git.rs` (git status/commands), `runner.rs` (run-command inference from manifest contents), `rag.rs` (semantic search index/retrieval), `instance.rs` (single-instance detection).
+- **Backend**: Tauri 2 Rust backend, modules: `main.rs` (Tauri commands + app entry), `config.rs` (3-scope config, projects, run targets), `pty.rs` (PTY terminal management), `ai.rs` (LLM integration), `git.rs` (git status/commands), `runner.rs` (run-command inference from manifest contents), `rag.rs` (semantic search index/retrieval), `instance.rs` (single-instance detection), `agent/` (Agent bridge: `agent_*` commands + `agent://*` events + config_bridge, see `doc/融合计划-Agent集成-v0.2.md`).
+- **Agent engine**: `crates/harness-engine` — zero-tauri lib crate imported from darkhorse-harness (plan → generate → lint → verify → self-repair; 175 unit tests via `cargo test -p harness-engine`). The ruyix `agent/` module wraps it; engine code lives in the workspace, don't re-vendor.
 - **Communication**: Tauri native IPC. Synchronous calls use `invoke()`. Async push for PTY output uses Tauri's event system `emit()`/`listen()`.
 - **Syntax highlighting**: `tree-sitter` + `arborium` crate. Highlighting runs in a `spawn_blocking` thread to avoid blocking the async runtime.
 - **Terminal**: `xterm.js` (vendored from `ui/xterm.js`) + Rust PTY via `portable-pty` crate.
@@ -61,8 +62,10 @@ ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Mo
 │   └── lang/             # Language files
 │       ├── zh-CN.json    # 🇨🇳 Chinese (default)
 │       └── en.json       # 🇬🇧 English
+├── crates/harness-engine/  # Agent engine lib (zero tauri; plan/generate/lint/verify/repair/kb/exec/sandbox/gitops)
+├── tools/lint/             # harness_lint python package (engine lint stage; HARNESS_LINT_DIR can override)
 ├── doc/                  # Design docs (Chinese)
-└── Cargo.toml            # Workspace manifest
+└── Cargo.toml            # Workspace manifest (members: src-tauri, crates/harness-engine)
 ```
 
 ## Build & Run

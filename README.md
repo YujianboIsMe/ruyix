@@ -33,6 +33,12 @@ Tauri 2 + Monaco Editor + Rust后端
 语法高亮架构：tree-sitter+ arborium
 终端架构：xterm.js + Rust PTY
 
+## AI Agent 引擎（harness-engine）
+`crates/harness-engine`：从 darkhorse-harness 一次性迁入的 Agent 引擎（零 tauri 依赖的 lib crate），
+实现「规划 → 生成 → 规约 → 验证 → 自修复」闭环，含 175 个单测。
+后端桥 `src-tauri/src/agent/`（12 个 agent_* 命令 + `agent://*` 事件流），
+前端面板见导航区「智能体」标签（无后端时自带演示回放）。详见[融合计划](doc/融合计划-Agent集成-v0.2.md)。
+
 ## 界面
 [界面](doc/ui.md)
 

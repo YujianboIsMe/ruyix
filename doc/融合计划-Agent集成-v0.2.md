@@ -9,6 +9,23 @@
 > harness 归档**」；同步更新已过时的事实盘点（harness v0.7 已全部提交、已有远端、
 > 单测 177 个、ruyix 命令 43 定义 / 42 注册）。
 
+> **✅ 执行进度（2026-09-18 夜间，单人按 CLAUDE.md master 直开发，未启用 §6 分支窗口）**
+>
+> - **P0–P3 已完成**：引擎落位（`7e11a07`，含 tools/lint）→ 命令桥 12 个 `agent_*`
+>   注册 + config_bridge 单测（`859e46c`）→ 面板接真实命令 + 无后端演示回退（`8bc8d54`）。
+>   harness 仓已打本地标签 `archive/pre-fusion`（对应 8388e1c；**推送远端与仓库描述
+>   改名待用户执行**）。
+> - **门禁实测**：`cargo fmt --check` ✓；`cargo clippy --all-targets` 0 warning
+>   （引擎 79 条新工具链 lint 已清零）；`cargo test` 引擎 175 收集（159 通过 + 8 忽略：
+>   1 真调 DeepSeek / 7 要 Docker）+ ruyix 35 通过（含 4 个 config_bridge 单测）；
+>   `check-style.js` 0 error。8 个 ignored 即 harness 原有 live 测试，语义未变。
+> - **与 D1 清单的偏差**：`eval.rs` 随引擎一并迁入（tauri-free，保住全部单测，
+>   R1 的「eval 是否迁入」就此了结）；`kb/cli.rs` 同迁。`plan_stage`/`generate_stage`/
+>   `verify_stage`/`repair_stage`/`run_lint` 由 `pub(crate)` 放开为 `pub`（命令桥需要，
+>   引擎语义未改）。
+> - **P4 剩余**：配好 Key 后在真机 GUI 跑一次 plan-only 端到端验收；ui-smoke 增加
+>   agent 场景；归档标签推送远端。
+
 ---
 
 ## 0. 摘要（TL;DR）
