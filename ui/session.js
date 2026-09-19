@@ -308,6 +308,18 @@
     return "reviewed";
   }
 
+  // Agent 输出是 markdown：markdown-it 渲染（vendor 自 ui/markdown-it.min.js，
+  // html:false —— 产物里的原生 HTML 一律转义，与 esc 同一安全底线）
+  const md = window.markdownit
+    ? window.markdownit({ html: false, breaks: true, linkify: true })
+    : null;
+
+  /** markdown → HTML；无渲染器时退化为转义文本（保留换行） */
+  function mdHtml(text) {
+    if (md) return md.render(text ?? "");
+    return "<p>" + esc(text ?? "").replace(/\n/g, "<br>") + "</p>";
+  }
+
   function msgHtml(m) {
     if (m.role === "system") {
       return `<div class="session-msg session-msg--system">${esc(m.text)}</div>`;
@@ -320,8 +332,11 @@
       const ok = okSet.includes(m.status);
       meta.push(`<span class="session-status ${ok ? "session-status--ok" : "session-status--err"}">${esc(statusLabel(m.status))}</span>`);
     }
+    const bubble = mine
+      ? `<div class="session-bubble">${esc(m.text)}</div>`
+      : `<div class="session-bubble session-bubble--md">${mdHtml(m.text)}</div>`;
     return `<div class="session-msg ${mine ? "session-msg--user" : "session-msg--agent"}">` +
-      `<div class="session-bubble">${esc(m.text)}</div>` +
+      bubble +
       (mine ? "" : gateHtml(m)) +
       (meta.length ? `<div class="session-meta">${meta.join(" ")}</div>` : "") +
       `</div>`;
