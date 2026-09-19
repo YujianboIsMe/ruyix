@@ -13,6 +13,10 @@ const state = {
   activeTabId: null,
 };
 
+// 面板模块（session / mcp / a2a / capability / config）读的是 window.state；
+// 顶层 const 只进全局词法环境、不会挂到 window 上，这里显式导出，别删。
+window.state = state;
+
 // ============================================
 // 初始化
 // ============================================
@@ -40,20 +44,19 @@ async function initApp() {
   setupProjectSwitcher();
   setupNavigatorTabs();
 
-  // Agent 控制台（融合计划 Z4）：注入视图切换钩子，页面逻辑自持在 agent.js
-  window.AgentHost = {
-    isProjectOpen: () => !!state.currentProject,
-    showProjectWorkspace,
-    showWelcomePage,
-  };
-  window.AgentUI?.attach(window.AgentHost);
+  // 会话（多会话对话模型）：nav 会话列表 + 中央聊天 tab，逻辑自持在 session.js
+  window.SessionUI?.attach();
+  window.McpUI?.attach();
+  window.A2aUI?.attach();
+  window.ToolsUI?.attach();
+  window.SkillsUI?.attach();
+  window.ConfigUI?.attach();
+  setupCapabilityMenu();
   setupOutlineTabs();
   setupTextareaSync();
   setupTerminalList();
   setupKeyboardShortcuts();
   setupHelpMenu();
-  setupRagMenu();
-  setupRagHooks();
   try {
     await autoOpenLastProject();
   } catch (err) {
@@ -132,7 +135,8 @@ function setupMenuBar() {
 }
 
 /**
- * 配置菜单：全局 / 项目 / 运行 → 中央编辑区打开配置标签
+ * 配置菜单：全局 / 项目 / 运行 → 中央编辑区打开配置表单标签
+ * （表单本体在 config.js：扫描配置项 → 表单 + 保存/应用/取消）
  */
 function setupConfigMenu() {
   const dropdown = document.getElementById("menu-config-dropdown");
@@ -140,69 +144,19 @@ function setupConfigMenu() {
   dropdown.querySelectorAll("[data-config-scope]").forEach((item) => {
     item.addEventListener("click", async () => {
       dropdown.style.display = "none";
-      await openConfigTab(item.dataset.configScope);
+      await handleCommand("config form " + item.dataset.configScope);
     });
   });
 }
 
-/**
- * 打开（或复用）一个配置编辑标签。内容为整个 scope 的合并 TOML 视图，
- * Ctrl+S 走 saveConfigTab 保存。
- */
+/** 打开（或复用）配置表单标签 */
 async function openConfigTab(scope) {
-  const invoke = getTauriInvoke();
-  if (!invoke) {
-    setStatus(I18N.t("status.tauri_unavail"), "error");
-    return;
-  }
-  try {
-    const dump = await invoke("config_scope_load", {
-      scope,
-      projectRoot: state.currentProject?.path ?? null,
-    });
-    let tab = state.tabs.find((t) => t._isConfig && t.configScope === scope);
-    if (tab) {
-      tab.content = dump.content;
-      tab._modified = false;
-    } else {
-      tab = {
-        id: "config-" + scope,
-        name: I18N.t("config.tab_" + scope),
-        path: "",
-        content: dump.content,
-        _isConfig: true,
-        configScope: scope,
-        configDir: dump.dir,
-      };
-      state.tabs.push(tab);
-    }
-    renderTabs();
-    switchTab(tab.id);
-    setStatus(I18N.t("config.loaded", { dir: dump.dir }));
-  } catch (err) {
-    setStatus(String(err), "error");
-  }
+  return window.ConfigUI?.open(scope);
 }
 
-/** 保存配置标签：整个 scope 的内容存回后端 */
-async function saveConfigTab(tab) {
-  const invoke = getTauriInvoke();
-  if (!invoke) {
-    setStatus(I18N.t("status.tauri_unavail"), "error");
-    return;
-  }
-  try {
-    const n = await invoke("config_scope_save", {
-      scope: tab.configScope,
-      content: tab.content,
-      projectRoot: state.currentProject?.path ?? null,
-    });
-    tab._modified = false;
-    renderTabs();
-    setStatus(I18N.t("config.saved", { n }));
-  } catch (err) {
-    setStatus(String(err), "error");
-  }
+/** 保存配置表单（Ctrl+S）；应用/取消走各自按钮 */
+async function saveConfigTab() {
+  return window.ConfigUI?.save();
 }
 
 /**
@@ -455,13 +409,22 @@ async function updateMaximizeIcon() {
 // 标签页管理
 // ============================================
 
+/** 标签页图标：专用视图优先，其余按文件名 */
+function tabIcon(t) {
+  if (t._isConfig) return "⚙️";
+  if (t._isHelp) return "🔒";
+  if (t._isSession) return "🤖";
+  if (t._isTerminal) return "🖥️";
+  return fileIcon(t.name);
+}
+
 function renderTabs() {
   const bar = document.getElementById("tab-bar");
   if (!bar) return;
 
   bar.innerHTML = state.tabs
     .map((t) => {
-      const icon = t._isHelp ? "🔒" : t._isTerminal ? "🖥️" : fileIcon(t.name);
+      const icon = tabIcon(t);
       return `
     <div class="tab-item${t.id === state.activeTabId ? " active" : ""}"
          data-tab-id="${t.id}" title="${t.path}">
@@ -490,8 +453,10 @@ function renderTabs() {
 }
 
 function switchTab(tabId) {
-  // 边界层：切换标签页前保存当前 tab
+  // 边界层：切换标签页前保存当前 tab；
+  // 配置表单没有落盘路径，改为把编辑值暂存进标签（切回来不丢）
   if (window._saveBeforeSwitch) window._saveBeforeSwitch();
+  window.ConfigUI?.stash();
 
   state.activeTabId = tabId;
   renderTabs();
@@ -502,6 +467,35 @@ function switchTab(tabId) {
   showEditor();
   hideTerminalView();
   hideImageView();
+  hideConfigView();
+  if (tab._isConfig) {
+    // 配置标签页 — 表单视图（扫描配置项 → 表单 + 保存/应用/取消）
+    hideEditorView();
+    hideSessionView();
+    showConfigView();
+    window.ConfigUI?.render(tab);
+    return;
+  }
+  if (tab._isSession) {
+    // 会话标签页 — 聊天 DOM 懒构建并移入容器
+    hideEditorView();
+    hideTerminalView();
+    hideImageView();
+    showSessionView();
+    const container = document.getElementById("session-container");
+    const chatEl = window.SessionUI?.ensureChatEl(tab);
+    if (container && chatEl) {
+      container.innerHTML = "";
+      container.appendChild(chatEl);
+      chatEl.querySelector(".session-msgs")?.scrollTo(0, 1e9);
+    }
+    // 进入会话即聚焦输入框（否则按键会落到底部命令栏）
+    chatEl?.querySelector(".session-input")?.focus();
+    // 大纲区显示该会话的任务计划（模型返回计划后：✅完成 ⌛等待 ⛏️进行中）
+    window.SessionUI?.renderOutline(tab._session);
+    return;
+  }
+  hideSessionView();
   if (tab._isTerminal) {
     // xterm.js 终端标签页 — 重新挂载到容器中
     hideEditorView();
@@ -587,6 +581,7 @@ function hideEditor() {
   document.getElementById("editor-view").style.display = "none";
   document.getElementById("terminal-view").style.display = "none";
   document.getElementById("image-view").style.display = "none";
+  document.getElementById("session-view").style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
   document.getElementById("editor-code-backdrop").innerHTML = "";
   document.getElementById("editor-textarea").value = "";
@@ -1287,7 +1282,7 @@ function setupKeyboardShortcuts() {
 
 async function saveCurrentFile() {
   const tab = state.tabs.find((t) => t.id === state.activeTabId);
-  if (!tab || tab._isTerminal || tab._isImage) return;
+  if (!tab || tab._isTerminal || tab._isImage || tab._isSession) return;
   if (tab._isConfig) return saveConfigTab(tab);
   if (!tab.path) {
     setStatus(I18N.t("save.no_path"), "error");
@@ -1312,9 +1307,6 @@ async function saveCurrentFile() {
       await highlightAndRender(tab, tab._language);
     }
 
-    // 增量索引：更新智搜向量
-    if (window._ragIndexAfterSave) window._ragIndexAfterSave(tab);
-
     setStatus(I18N.t("save.ok", { name: tab.name }));
   } catch (err) {
     setStatus(I18N.t("save.fail", { err }), "error");
@@ -1333,208 +1325,6 @@ function setupHelpMenu() {
 
   // 帮助页返回按钮
   document.getElementById("btn-help-back")?.addEventListener("click", () => hideHelpPage());
-}
-
-// ============================================
-// 智搜菜单
-// ============================================
-
-function setupRagMenu() {
-  const btn = document.getElementById("menu-rag");
-  if (!btn) return;
-  btn.style.cursor = "pointer";
-
-  btn.addEventListener("click", async () => {
-    // 先检查是否已永久禁用
-    try {
-      const invoke = getTauriInvoke();
-      if (invoke) {
-        const cfg = await invoke("rag_get_global_config");
-        if (cfg && cfg.permanently_disabled) {
-          btn.style.display = "none";
-          return;
-        }
-      }
-    } catch {}
-
-    // 显示确认弹窗
-    showRagModal();
-  });
-
-  // 初始检查永久禁用状态
-  checkRagDisabled();
-}
-
-async function checkRagDisabled() {
-  try {
-    const invoke = getTauriInvoke();
-    if (invoke) {
-      const cfg = await invoke("rag_get_global_config");
-      if (cfg && cfg.permanently_disabled) {
-        const btn = document.getElementById("menu-rag");
-        if (btn) btn.style.display = "none";
-      }
-    }
-  } catch {}
-}
-
-function showRagModal() {
-  const overlay = document.getElementById("rag-modal-overlay");
-  if (!overlay) return;
-
-  overlay.style.display = "";
-
-  const cleanup = () => { overlay.style.display = "none"; };
-
-  document.getElementById("rag-btn-accept").onclick = async () => {
-    // 收集嵌入 API 配置（用户可修改，缺省为 DeepSeek 嵌入 API、1024 维）
-    const apiUrl = (document.getElementById("rag-api-url")?.value || "").trim();
-    if (!apiUrl) {
-      setStatus(I18N.t("rag.err_url_required"), "error");
-      return;
-    }
-    const dim = parseInt((document.getElementById("rag-dim")?.value || "").trim(), 10) || 1024;
-
-    cleanup();
-    setStatus(I18N.t("rag.starting"));
-    try {
-      const invoke = getTauriInvoke();
-      if (invoke) {
-        await invoke("rag_set_embedding_config", {
-          apiUrl,
-          dim,
-          projectRoot: state.currentProject?.path
-        });
-        const res = await invoke("rag_reindex", { projectRoot: state.currentProject?.path });
-        if (res && res.rebuild_note) {
-          // 旧向量库无法加载，已自动备份重建
-          setStatus(I18N.t("rag.ready") + "（" + res.rebuild_note + "）");
-        } else {
-          setStatus(I18N.t("rag.ready"));
-        }
-      }
-    } catch (err) {
-      setStatus(I18N.t("rag.start_fail", { err }), "error");
-    }
-  };
-
-  document.getElementById("rag-btn-later").onclick = () => {
-    cleanup();
-  };
-
-  document.getElementById("rag-btn-disable").onclick = async () => {
-    cleanup();
-    try {
-      const invoke = getTauriInvoke();
-      if (invoke) {
-        await invoke("rag_disable_permanently");
-        const btn = document.getElementById("menu-rag");
-        if (btn) btn.style.display = "none";
-        setStatus("智搜已永久禁用");
-      }
-    } catch (err) {
-      setStatus("操作失败: " + err, "error");
-    }
-  };
-
-  overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
-}
-
-/** 设置智搜相关钩子：增量索引、空闲卸载、进度监听 */
-function setupRagHooks() {
-  // 文件保存后增量更新索引
-  window._ragIndexAfterSave = async function (tab) {
-    if (!tab || !tab.path) return;
-    try {
-      const invoke = getTauriInvoke();
-      if (invoke) await invoke("rag_index_file", {
-        path: tab.path,
-        projectRoot: state.currentProject?.path
-      });
-    } catch { /* 静默失败 */ }
-  };
-
-  // 空闲检查定时器（每 60 秒）
-  setInterval(async () => {
-    try {
-      const invoke = getTauriInvoke();
-      if (invoke) await invoke("rag_idle_check");
-    } catch { /* 静默 */ }
-  }, 60_000);
-
-  // 监听索引进度事件
-  try {
-    const tauriEvent = window.__TAURI__?.event;
-    if (tauriEvent && typeof tauriEvent.listen === "function") {
-      tauriEvent.listen("rag-index-progress", (event) => {
-        const p = event.payload;
-        if (p.phase === "done") {
-          setStatus("索引完成");
-        } else {
-          setStatus(`索引中 ${p.current}/${p.total}...`);
-        }
-      });
-    }
-  } catch { /* 在浏览器开发模式中忽略 */ }
-}
-
-/** 在编辑区显示搜索结果 */
-function showSearchResults(results) {
-  const backdrop = document.getElementById("editor-code-backdrop");
-  const textarea = document.getElementById("editor-textarea");
-  const gutter = document.getElementById("editor-gutter");
-
-  if (results.length === 0) {
-    gutter.innerHTML = "";
-    backdrop.innerHTML = '<div class="search-empty">无结果</div>';
-    textarea.value = "";
-    textarea.readOnly = true;
-    return;
-  }
-
-  let gutterHtml = "";
-  let codeHtml = "";
-  let rawText = "";
-
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    const lineNum = i + 1;
-    gutterHtml += `<div class="gutter-line">${lineNum}</div>`;
-
-    const pct = r.score ? Math.round(r.score * 100) : 0;
-    const pathDisplay = r.path === "—" ? "" : `<span class="search-result-path">${escapeHtml(r.path)}</span>`;
-    const scoreDisplay = r.score ? `<span class="search-result-score">${pct}%</span>` : "";
-
-    codeHtml += `<div class="code-line search-result-line" data-path="${escapeHtml(r.path || "")}">
-      ${scoreDisplay}${pathDisplay}
-      <span class="search-result-snippet">${escapeHtml(r.snippet || "")}</span>
-    </div>`;
-    rawText += (r.path || "") + "\n" + (r.snippet || "") + "\n\n";
-  }
-
-  gutter.innerHTML = gutterHtml;
-  backdrop.innerHTML = codeHtml;
-  textarea.value = rawText;
-  textarea.readOnly = true;
-
-  // 点击搜索结果跳转到文件（如果路径有效）
-  backdrop.querySelectorAll(".search-result-line[data-path]").forEach((el) => {
-    const p = el.dataset.path;
-    if (p && p !== "—" && p.includes(".")) {
-      el.style.cursor = "pointer";
-      el.addEventListener("click", () => {
-        // 打开文件
-        const relPath = toRelativePath ? toRelativePath(p) : p;
-        handleCommand("open file " + p.replace(/\\/g, "/"));
-      });
-      el.addEventListener("mouseenter", () => {
-        el.style.background = "rgba(86, 156, 214, 0.15)";
-      });
-      el.addEventListener("mouseleave", () => {
-        el.style.background = "";
-      });
-    }
-  });
 }
 
 function openHelp() {
@@ -1677,7 +1467,6 @@ async function doAutoSave(tab) {
       await highlightAndRender(tab, tab._language);
     }
     // 增量索引
-    if (window._ragIndexAfterSave) window._ragIndexAfterSave(tab);
   } catch {
     // 静默失败，定时器下次会重试
   }
@@ -1894,6 +1683,8 @@ function setNavigatorMode(mode) {
   const tabFiles = document.querySelector('.nav-tab[data-tab="files"]');
   const tabTerminal = document.querySelector('.nav-tab[data-tab="terminal"]');
   const tabTarget = document.querySelector('.nav-tab[data-tab="target"]');
+  // 智能体只在打开项目后可用（引擎任务依赖项目上下文）
+  const tabAgent = document.querySelector('.nav-tab[data-tab="sessions"]');
 
   const panelProjects = document.getElementById("nav-panel-projects");
   const panelFiles = document.getElementById("nav-panel-files");
@@ -1906,6 +1697,8 @@ function setNavigatorMode(mode) {
     if (tabFiles) tabFiles.style.display = "none";
     if (tabTerminal) tabTerminal.style.display = "none";
     if (tabTarget) tabTarget.style.display = "none";
+    if (tabAgent) tabAgent.style.display = "none";
+    window.SessionUI?.projectClosed?.();
 
     // 停用所有 tab/panel，激活项目列表
     document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
@@ -1918,6 +1711,7 @@ function setNavigatorMode(mode) {
     if (tabFiles) tabFiles.style.display = "";
     if (tabTerminal) tabTerminal.style.display = "";
     if (tabTarget) tabTarget.style.display = "";
+    if (tabAgent) tabAgent.style.display = "";
 
     // 停用所有 tab/panel，激活文件 tab
     document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
@@ -1930,6 +1724,27 @@ function setNavigatorMode(mode) {
 // ============================================
 // 导航区标签页切换
 // ============================================
+
+function setupCapabilityMenu() {
+  // 面板内子标签（MCP / A2A / 工具 / 技能）
+  document.querySelectorAll(".cap-sub-tab").forEach((sub) => {
+    sub.addEventListener("click", () => switchCapabilitySub(sub.dataset.capTab));
+  });
+  // 顶部「能力」菜单：激活能力面板并切到对应子页
+  document.querySelectorAll("#menu-capability-dropdown [data-cap]").forEach((item) => {
+    item.addEventListener("click", () => {
+      document.querySelector('.nav-tab[data-tab="capability"]')?.click();
+      switchCapabilitySub(item.dataset.cap);
+    });
+  });
+}
+
+function switchCapabilitySub(sub) {
+  document.querySelectorAll(".cap-sub-tab").forEach((s) =>
+    s.classList.toggle("active", s.dataset.capTab === sub));
+  document.querySelectorAll(".cap-sub-panel").forEach((p) =>
+    p.classList.toggle("active", p.id === `cap-sub-${sub}`));
+}
 
 function setupNavigatorTabs() {
   const tabs = document.querySelectorAll(".nav-tab");
@@ -2875,12 +2690,34 @@ function hideTerminalView() {
   document.getElementById("terminal-view").style.display = "none";
 }
 
+function showSessionView() {
+  document.getElementById("editor-empty").style.display = "none";
+  document.getElementById("editor-view").style.display = "none";
+  document.getElementById("session-view").style.display = "";
+}
+
+function hideSessionView() {
+  const el = document.getElementById("session-view");
+  if (el) el.style.display = "none";
+}
+
 function showImageView() {
   document.getElementById("image-view").style.display = "";
 }
 
 function hideImageView() {
   document.getElementById("image-view").style.display = "none";
+}
+
+function showConfigView() {
+  document.getElementById("editor-empty").style.display = "none";
+  document.getElementById("editor-view").style.display = "none";
+  document.getElementById("config-view").style.display = "";
+}
+
+function hideConfigView() {
+  const el = document.getElementById("config-view");
+  if (el) el.style.display = "none";
 }
 
 /** 支持的图片扩展名集合 */

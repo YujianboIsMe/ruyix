@@ -19,6 +19,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 dirs = "6"
+# MCP 客户端的请求/响应匹配与超时（tauri 自带的 tokio 不直接暴露给业务代码）
+tokio = { version = "1", features = ["rt", "time", "sync"] }
 portable-pty = "0.8"
 arborium = { version = "2", default-features = false, features = ["lang-python", "lang-rust", "lang-html", "lang-css", "lang-javascript", "lang-markdown", "lang-sql", "lang-java"] }
 arborium-theme = "2"
@@ -27,7 +29,6 @@ mlua = { version = "0.10", features = ["lua54", "vendored"] }
 base64 = "0.22"
 walkdir = "2"
 sha2 = "0.10"
-qdrant-edge = "0.8"
 
 [features]
 default = ["custom-protocol"]

@@ -32,6 +32,16 @@
               <div class="menu-dropdown-item" data-config-scope="runtime" data-i18n="menu.config.runtime">运行</div>
             </div>
           </span>
+          <!-- 能力：MCP / A2A / 工具 / SKILL -->
+          <span class="menu-item" id="menu-capability" style="position:relative">
+            <span data-i18n="menu.capability">能力 ▾</span>
+            <div class="menu-dropdown" id="menu-capability-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-cap="mcp" data-i18n="menu.cap.mcp">MCP 服务器</div>
+              <div class="menu-dropdown-item" data-cap="a2a" data-i18n="menu.cap.a2a">A2A 远端</div>
+              <div class="menu-dropdown-item" data-cap="tools" data-i18n="menu.cap.tools">工具（命令行白名单）</div>
+              <div class="menu-dropdown-item" data-cap="skills" data-i18n="menu.cap.skills">SKILL（技能）</div>
+            </div>
+          </span>
           <!-- 语言 -->
           <span class="menu-item" id="menu-lang" style="position:relative">
             <span data-i18n="menu.lang">语言 ▾</span>
@@ -43,10 +53,6 @@
                 <span data-i18n="menu.lang.en">English</span><span class="lang-check">✔️</span>
               </div>
             </div>
-          </span>
-          <!-- 智搜 -->
-          <span class="menu-item" id="menu-rag" style="position:relative">
-            <span data-i18n="menu.rag">智搜</span>
           </span>
           <!-- 帮助 -->
           <span class="menu-item" id="menu-help" style="position:relative">
@@ -87,7 +93,8 @@
             <button class="nav-tab" data-tab="files">项目文件</button>
             <button class="nav-tab" data-tab="terminal">终端资源</button>
             <button class="nav-tab" data-tab="target">运行目标</button>
-            <button class="nav-tab" data-tab="agent" data-i18n="nav.tab_agent">智能体</button>
+            <button class="nav-tab" data-tab="sessions" data-i18n="nav.tab_sessions">会话</button>
+            <button class="nav-tab" data-tab="capability" data-i18n="nav.tab_capability">能力</button>
           </div>
           <div class="nav-content">
             <div id="nav-panel-projects" class="nav-panel active">
@@ -132,36 +139,113 @@
             <div id="nav-panel-target" class="nav-panel">
               <div id="run-targets-list" class="run-targets-list"></div>
             </div>
-            <div id="nav-panel-agent" class="nav-panel">
-              <textarea id="agent-task-input" class="agent-task-input" rows="3"
-                placeholder="描述任务，例如：给 utils/string.rs 实现 truncate_words 并补测试"
-                data-i18n-placeholder="agent.task_placeholder"></textarea>
-              <div class="agent-mode-row">
-                <label class="agent-mode">
-                  <input type="radio" name="agent-mode" value="full" checked>
-                  <span data-i18n="agent.mode_full">全流程</span>
-                </label>
-                <label class="agent-mode">
-                  <input type="radio" name="agent-mode" value="plan">
-                  <span data-i18n="agent.mode_plan">仅规划</span>
-                </label>
+            <div id="nav-panel-sessions" class="nav-panel">
+              <button id="session-new-btn" class="agent-btn agent-btn--run" data-i18n="session.new">＋ 新建会话</button>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="session.list">会话列表</div>
+                <div id="session-list" class="agent-history-list"></div>
               </div>
-              <div class="agent-btn-row">
-                <button id="agent-run-btn" class="agent-btn agent-btn--run" data-i18n="agent.run">▶ 运行</button>
-                <button id="agent-cancel-btn" class="agent-btn agent-btn--cancel" data-i18n="agent.cancel" disabled>✕ 取消</button>
-              </div>
-              <button id="agent-demo-btn" class="agent-btn agent-btn--demo" data-i18n="agent.demo">▶ 演示回放</button>
               <div class="agent-side-section">
                 <div class="agent-side-title" data-i18n="agent.env">环境探针</div>
                 <div id="agent-env-chips" class="agent-env-chips"></div>
               </div>
+            </div>
+          <div id="nav-panel-capability" class="nav-panel">
+          <div class="cap-sub-tabs">
+            <button class="cap-sub-tab active" data-cap-tab="mcp" data-i18n="cap.tab_mcp">MCP</button>
+            <button class="cap-sub-tab" data-cap-tab="a2a" data-i18n="cap.tab_a2a">A2A</button>
+            <button class="cap-sub-tab" data-cap-tab="tools" data-i18n="cap.tab_tools">工具</button>
+            <button class="cap-sub-tab" data-cap-tab="skills" data-i18n="cap.tab_skills">技能</button>
+          </div>
+          <div id="cap-sub-mcp" class="cap-sub-panel active">
               <div class="agent-side-section">
-                <div class="agent-side-title" data-i18n="agent.history">历史运行</div>
-                <div id="agent-history-list" class="agent-history-list">
-                  <div class="agent-history-empty" data-i18n="agent.history_empty">暂无运行记录</div>
+                <div class="agent-side-title" data-i18n="mcp.servers">MCP 服务器</div>
+                <div id="mcp-server-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.add">添加服务器</div>
+                <input type="text" id="mcp-add-name" class="a2a-input"
+                       placeholder="名称，例如 fs" data-i18n-placeholder="mcp.name_ph">
+                <input type="text" id="mcp-add-command" class="a2a-input"
+                       placeholder="命令，例如 npx -y @modelcontextprotocol/server-filesystem /tmp"
+                       data-i18n-placeholder="mcp.cmd_ph">
+                <button id="mcp-add-btn" class="agent-btn agent-btn--run" data-i18n="mcp.add_btn">＋ 添加</button>
+              </div>
+              <div id="mcp-tool-section" class="agent-side-section" style="display:none">
+                <div class="agent-side-title"><span id="mcp-selected-name"></span>
+                  <button id="mcp-start-btn" class="agent-btn agent-btn--run mcp-mini-btn" data-i18n="mcp.connect">连接</button>
+                  <button id="mcp-stop-btn" class="agent-btn agent-btn--cancel mcp-mini-btn" data-i18n="mcp.disconnect" style="display:none">断开</button>
                 </div>
+                <div id="mcp-tool-list" class="mcp-tool-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.call">调用工具</div>
+                <select id="mcp-call-tool" class="a2a-input"><option value="">—</option></select>
+                <textarea id="mcp-call-args" class="agent-task-input" rows="3"
+                          placeholder='参数 JSON，例如 {"path": "src/main.rs"}'
+                          data-i18n-placeholder="mcp.args_ph"></textarea>
+                <button id="mcp-call-btn" class="agent-btn agent-btn--run" data-i18n="mcp.call_btn">▶ 调用</button>
+                <pre id="mcp-call-result" class="mcp-call-result"></pre>
               </div>
             </div>
+            <div id="cap-sub-a2a" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="a2a.agents">远端 Agent</div>
+                <div id="a2a-agent-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="a2a.discover">发现 Agent</div>
+                <input type="text" id="a2a-discover-url" class="a2a-input"
+                       placeholder="基址 URL，例如 http://127.0.0.1:9000"
+                       data-i18n-placeholder="a2a.url_ph">
+                <button id="a2a-discover-btn" class="agent-btn agent-btn--run" data-i18n="a2a.discover_btn">🔍 发现</button>
+              </div>
+              <div id="a2a-task-section" class="agent-side-section" style="display:none">
+                <div class="agent-side-title" data-i18n="a2a.task">委托任务 → <span id="a2a-selected-name"></span></div>
+                <textarea id="a2a-task-input" class="agent-task-input" rows="3"
+                          placeholder="任务描述" data-i18n-placeholder="a2a.task_ph"></textarea>
+                <button id="a2a-send-btn" class="agent-btn agent-btn--run" data-i18n="a2a.send_btn">▶ 发送</button>
+                <div id="a2a-state-line" class="a2a-state-line"></div>
+                <pre id="a2a-result" class="mcp-call-result"></pre>
+              </div>
+            </div>
+            <div id="cap-sub-tools" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="tools.list">工具白名单</div>
+                <div id="tools-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="tools.add">添加工具</div>
+                <input type="text" id="tools-add-name" class="a2a-input"
+                       placeholder="名称，例如 graphviz" data-i18n-placeholder="tools.name_ph">
+                <input type="text" id="tools-add-command" class="a2a-input"
+                       placeholder="命令（缺省同名称），例如 dot" data-i18n-placeholder="tools.cmd_ph">
+                <input type="text" id="tools-add-desc" class="a2a-input"
+                       placeholder="描述（给 agent 看的用途说明）" data-i18n-placeholder="tools.desc_ph">
+                <button id="tools-add-btn" class="agent-btn agent-btn--run" data-i18n="tools.add_btn">＋ 添加</button>
+              </div>
+            </div>
+            <div id="cap-sub-skills" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="skill.list">SKILL 技能</div>
+                <div id="skills-list" class="mcp-server-list"></div>
+                <div class="agent-btn-row" style="margin-top:6px">
+                  <button id="skill-new-btn" class="agent-btn agent-btn--run" data-i18n="skill.new">＋ 新建</button>
+                  <button id="skill-del-btn" class="agent-btn agent-btn--cancel" data-i18n="skill.delete">✕ 删除</button>
+                </div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="skill.editor">编辑</div>
+                <input type="text" id="skill-edit-name" class="a2a-input"
+                       placeholder="技能名（保存时的唯一标识）" data-i18n-placeholder="skill.name_ph">
+                <input type="text" id="skill-edit-desc" class="a2a-input"
+                       placeholder="一句话描述" data-i18n-placeholder="skill.desc_ph">
+                <textarea id="skill-edit-content" class="agent-task-input" rows="8"
+                          placeholder="Markdown 正文：步骤、规约、注意事项…" data-i18n-placeholder="skill.content_ph"></textarea>
+                <button id="skill-save-btn" class="agent-btn agent-btn--run" data-i18n="skill.save">💾 保存</button>
+              </div>
+            </div>
+          </div>
           </div>
         </aside>
 
@@ -213,71 +297,7 @@
           </div>
 
           <!-- Agent 控制台（融合计划 Z4）：引擎落位前含演示回放 -->
-          <div id="agent-page" class="agent-page" style="display:none">
-            <!-- 空闲视图 -->
-            <div id="agent-console-idle" class="agent-idle">
-              <div class="agent-idle-inner">
-                <div class="agent-engine-chip" data-i18n="agent.engine_demo">引擎未接入 · 演示模式（P1 落位后自动切换真实引擎）</div>
-                <h1 class="agent-idle-title" data-i18n="agent.idle_title">Agent 引擎</h1>
-                <p class="agent-idle-sub" data-i18n="agent.idle_sub">规划 → 生成 → 规约 → 验证 → 自修复，一次任务全链路闭环</p>
-                <div class="agent-cap-grid">
-                  <div class="agent-cap">
-                    <div class="agent-cap-icon">⛭</div>
-                    <div class="agent-cap-title" data-i18n="agent.cap_plan_title">规划</div>
-                    <div class="agent-cap-desc" data-i18n="agent.cap_plan_desc">任务拆解为可验证的步骤与产物清单</div>
-                  </div>
-                  <div class="agent-cap">
-                    <div class="agent-cap-icon">⚒</div>
-                    <div class="agent-cap-title" data-i18n="agent.cap_gen_title">生成</div>
-                    <div class="agent-cap-desc" data-i18n="agent.cap_gen_desc">在隔离运行目录产出代码，未隔离必标注</div>
-                  </div>
-                  <div class="agent-cap">
-                    <div class="agent-cap-icon">✓</div>
-                    <div class="agent-cap-title" data-i18n="agent.cap_verify_title">验证</div>
-                    <div class="agent-cap-desc" data-i18n="agent.cap_verify_desc">编译、测试、规约多道闸门，报告可回看</div>
-                  </div>
-                  <div class="agent-cap">
-                    <div class="agent-cap-icon">⟳</div>
-                    <div class="agent-cap-title" data-i18n="agent.cap_repair_title">自修复</div>
-                    <div class="agent-cap-desc" data-i18n="agent.cap_repair_desc">失败定位 → 定点修复 → 自动复验，轮次上限可配</div>
-                  </div>
-                </div>
-                <div class="agent-idle-actions">
-                  <button id="agent-hero-demo" class="agent-btn agent-btn--run" data-i18n="agent.demo">▶ 演示回放</button>
-                </div>
-                <p class="agent-idle-hint" data-i18n="agent.idle_hint">在左侧面板输入任务，或在命令栏输入 agent &lt;任务&gt;</p>
-              </div>
-            </div>
-            <!-- 运行视图 -->
-            <div id="agent-console-run" class="agent-console" style="display:none">
-              <div class="agent-header">
-                <div class="agent-header-left">
-                  <span class="agent-header-title" data-i18n="agent.console">Agent 控制台</span>
-                  <span id="agent-run-meta" class="agent-run-meta"></span>
-                </div>
-                <div class="agent-header-right">
-                  <span id="agent-status-pill" class="agent-pill"></span>
-                  <button id="agent-console-cancel" class="agent-btn agent-btn--cancel" data-i18n="agent.cancel">✕ 取消</button>
-                  <button id="agent-console-close" class="agent-icon-btn" title="关闭" data-i18n-title="agent.close">✕</button>
-                </div>
-              </div>
-              <div id="agent-pipeline" class="agent-pipeline"></div>
-              <div class="agent-main">
-                <div class="agent-col agent-col--steps">
-                  <div class="agent-col-title" data-i18n="agent.steps">步骤</div>
-                  <div id="agent-steps" class="agent-steps"></div>
-                </div>
-                <div class="agent-col agent-col--reports">
-                  <div class="agent-col-title" data-i18n="agent.reports">报告</div>
-                  <div id="agent-reports" class="agent-reports"></div>
-                </div>
-              </div>
-              <div class="agent-log-title" data-i18n="agent.log">日志</div>
-              <div id="agent-log" class="agent-log"></div>
-            </div>
-          </div>
-
-          <!-- 编辑器主体：gutter + 代码区 -->
+                    <!-- 编辑器主体：gutter + 代码区 -->
           <div id="editor-body" class="editor-body">
             <div id="editor-empty" class="editor-empty">
               <p>打开文件以开始编辑</p>
@@ -289,8 +309,30 @@
                 <textarea id="editor-textarea" class="editor-textarea" spellcheck="false"></textarea>
               </div>
             </div>
+            <div id="config-view" class="config-view" style="display:none">
+              <div class="config-head">
+                <div class="config-head-main">
+                  <span id="config-scope-title" class="config-scope-title">配置</span>
+                  <span id="config-dir" class="config-dir"></span>
+                </div>
+                <div class="config-head-actions">
+                  <span id="config-dirty" class="config-dirty" style="display:none"
+                        data-i18n="config.dirty">● 未保存</span>
+                  <button id="config-btn-save" class="config-btn" data-i18n="config.btn_save">保存</button>
+                  <button id="config-btn-apply" class="config-btn config-btn--primary"
+                          data-i18n="config.btn_apply">应用</button>
+                  <button id="config-btn-cancel" class="config-btn"
+                          data-i18n="config.btn_cancel">取消</button>
+                </div>
+              </div>
+              <div id="config-hint" class="config-hint" data-i18n="config.hint"></div>
+              <div id="config-body" class="config-body"></div>
+            </div>
             <div id="terminal-view" class="terminal-view" style="display:none">
               <div id="terminal-container" class="terminal-container"></div>
+            </div>
+            <div id="session-view" class="terminal-view" style="display:none">
+              <div id="session-container" class="session-container"></div>
             </div>
             <div id="image-view" class="image-view" style="display:none">
               <div id="image-container" class="image-container">
@@ -402,37 +444,6 @@
     </div>
   </div>
 
-  <!-- RAG 智搜确认弹窗 -->
-  <div id="rag-modal-overlay" class="modal-overlay" style="display:none">
-    <div class="modal-box" style="max-width:480px">
-      <div class="modal-title" data-i18n="rag.modal_title">启用智能搜索</div>
-      <div class="modal-body">
-        <p data-i18n="rag.modal_desc">使用该功能需要：</p>
-        <ol style="padding-left:18px;line-height:1.8;color:var(--text-secondary);font-size:13px">
-          <li data-i18n="rag.modal_item1">将项目代码发送到在线嵌入 API 进行向量编码</li>
-          <li data-i18n="rag.modal_item2">启动本地向量数据库（qdrant-edge 嵌入式，内存占用低）</li>
-          <li data-i18n="rag.modal_item3">对项目中的源代码和文档建立语义索引（首次约 1–5 分钟，取决于网络速度）</li>
-          <li data-i18n="rag.modal_item4">代码会发送到您填写的嵌入 API 进行编码，请确认该服务可信。</li>
-        </ol>
-      </div>
-      <div class="modal-input-row">
-        <label class="modal-input-label" data-i18n="rag.api_url_label">嵌入模型 API 地址</label>
-        <input type="text" id="rag-api-url" class="modal-input" placeholder="https://api.deepseek.com/v1/embeddings" value="https://api.deepseek.com/v1/embeddings" />
-      </div>
-      <div class="modal-input-row">
-        <label class="modal-input-label" data-i18n="rag.dim_label">向量维度</label>
-        <input type="number" id="rag-dim" class="modal-input" value="1024" />
-      </div>
-      <div class="modal-buttons" style="justify-content:space-between">
-        <button id="rag-btn-disable" class="modal-btn" style="background:transparent;color:#f48771" data-i18n="rag.btn_disable">永久禁用</button>
-        <div>
-          <button id="rag-btn-later" class="modal-btn modal-btn-cancel" data-i18n="rag.btn_later">暂不接受</button>
-          <button id="rag-btn-accept" class="modal-btn modal-btn-ok" data-i18n="rag.btn_accept">接受</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- 修改项目弹窗 -->
   <div id="project-edit-modal" class="modal-overlay" style="display:none">
     <div class="modal-box" style="max-width:420px">
@@ -458,7 +469,11 @@
 
   <script src="i18n.js"></script>
   <script src="command.js"></script>
-  <script src="agent.js"></script>
+  <script src="session.js"></script>
+  <script src="mcp.js"></script>
+  <script src="a2a.js"></script>
+  <script src="capability.js"></script>
+  <script src="config.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

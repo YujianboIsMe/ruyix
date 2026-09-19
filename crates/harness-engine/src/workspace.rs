@@ -81,6 +81,11 @@ pub fn now_iso() -> String {
     chrono::Local::now().to_rfc3339()
 }
 
+/// 紧凑时间戳（只有数字和 `-`）—— 目录名安全（`now_iso` 含 `:`，Windows 不允许做文件名）
+pub fn now_compact() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
 pub fn run_dir(root: &Path, run_id: &str) -> Result<PathBuf, String> {
     // run_id 来自我们自己生成（时间戳 + slug），这里再校验一次，避免从前端传进来的
     // 任意字符串被当成路径用
@@ -220,7 +225,7 @@ pub fn delete(root: &Path, run_id: &str) -> Result<(), String> {
         return Ok(());
     }
     // 删掉构建产物目录常见失败：target 里可能有正在被占用的文件，先尽力清 target
-    let _ = std::fs::remove_dir_all(dir.join("project").join(".harness-target"));
+    let _ = std::fs::remove_dir_all(dir.join("project").join(".ruyix"));
     // Windows 上"目录不是空的 (os error 145)"几乎总是**删除过程中还有人在写**：
     // 观测 tracer 是全局的（可能在往这个 run 目录追加日志）、杀毒/索引服务也可能摸文件。
     // 退一步重试，比把一次正常的删除报成失败更接近事实。
@@ -361,8 +366,9 @@ mod tests {
             .unwrap();
         }
         let ms = t0.elapsed().as_millis();
-        // 抓的是"卡死"（真机 600s 那次），不是做基准；并行跑测试时会慢一些
-        assert!(ms < 60_000, "save 太慢（{ms}ms），八成卡在 git 上了");
+        // 抓的是"卡死"（真机 600s 那次），不是做基准。并行跑测试时会慢一些；
+        // Windows 上 git 子进程 spawn 开销大，并行实测可超 60s（单跑 9s），留到 180s
+        assert!(ms < 180_000, "save 太慢（{ms}ms），八成卡在 git 上了");
         // 内容变过几次，就该有几个提交
         let n = crate::gitops::log(&proj, 20).map(|v| v.len()).unwrap_or(0);
         assert!(n >= 1, "至少要有一次提交");

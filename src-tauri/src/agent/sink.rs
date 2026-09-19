@@ -110,6 +110,21 @@ impl engine::pipeline::Sink for AgentSink {
         );
     }
 
+    /// 规划完成即推送完整计划 —— 前端大纲区据此渲染任务列表（agent://step 推进三态）
+    fn plan(&self, p: &engine::plan::Plan) {
+        let _ = self.app.emit("agent://plan", p);
+    }
+
+    /// 机械验证结论（v0.3）：会话里「验证」小节实时更新，不等 run 结束
+    fn verify(&self, v: &engine::agent::VerifyOutcome) {
+        let _ = self.app.emit("agent://verify", v);
+    }
+
+    /// 复核结论（v0.3）：干净上下文复核 agent 的判定，会话里「复核」小节
+    fn reflect(&self, r: &engine::reflect::Reflection) {
+        let _ = self.app.emit("agent://reflect", r);
+    }
+
     fn lint(&self, outcome: &engine::lint::LintOutcome) {
         let _ = self.app.emit("agent://lint", lint_payload(outcome));
     }

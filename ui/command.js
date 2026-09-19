@@ -77,10 +77,24 @@ async function handleCommand(raw, _fromAi = false) {
       openHelp();
       break;
     case "agent":
-      window.AgentUI?.handleCommand(parts.slice(1).join(" "));
+      if (!state.currentProject) {
+        setStatus(I18N.t("cmd.agent.no_project"), "error");
+        break;
+      }
+      window.SessionUI?.handleCommand(parts.slice(1).join(" "));
       break;
-    case "search":
-      await handleSearchCommand(parts.slice(1));
+    case "mcp":
+      window.McpUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "a2a":
+      window.A2aUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "tools":
+      window.ToolsUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "skill":
+    case "skills":
+      window.SkillsUI?.handleCommand(parts.slice(1).join(" "));
       break;
     case "git":
       await handleGitCommand(raw, _fromAi);
@@ -372,93 +386,6 @@ async function handleProjectCommand(raw) {
 }
 
 /**
- * 智搜命令
- *   search <关键词>      语义搜索
- *   search reindex       重建索引
- *   search status        索引状态
- *   search off           关闭智搜
- */
-async function handleSearchCommand(args) {
-  if (!state.currentProject) {
-    setStatus(I18N.t("cmd.search.no_project"), "error");
-    return;
-  }
-
-  const invoke = getTauriInvoke();
-  if (!invoke) {
-    setStatus(I18N.t("status.tauri_unavail"));
-    return;
-  }
-
-  const sub = args.join(" ").trim();
-
-  if (!sub || sub.toLowerCase() === "status") {
-    try {
-      const status = await invoke("rag_status");
-      const rows = [
-        { path: "—", snippet: "智搜状态: " + (status.enabled ? "已启用" : "未启用"), score: 0 },
-        { path: "—", snippet: "嵌入API: " + (status.api_configured ? (status.api_url || "已配置") : "未配置"), score: 0 },
-        { path: "—", snippet: "qdrant: " + (status.qdrant_running ? "运行中" : "未运行"), score: 0 },
-        { path: "—", snippet: "已索引文件: " + status.files_indexed, score: 0 },
-        { path: "—", snippet: "上次索引: " + (status.last_indexed || "从未"), score: 0 },
-      ];
-      // 向量库重建提示（旧数据无法加载时）
-      if (status.rebuild_note) {
-        rows.push({ path: "—", snippet: "注意: " + status.rebuild_note, score: 0 });
-      }
-      showSearchResults(rows);
-    } catch (err) {
-      setStatus(I18N.t("cmd.search.fail", { err }), "error");
-    }
-    return;
-  }
-
-  if (sub.toLowerCase() === "reindex") {
-    setStatus(I18N.t("cmd.search.reindexing"));
-    try {
-      const res = await invoke("rag_reindex", { projectRoot: state.currentProject.path });
-      let msg = "索引完成: " + res.indexed + " 个文件";
-      if (res.rebuild_note) msg += "（" + res.rebuild_note + "）";
-      setStatus(msg);
-    } catch (err) {
-      setStatus(I18N.t("cmd.search.fail", { err }), "error");
-    }
-    return;
-  }
-
-  if (sub.toLowerCase() === "off") {
-    try {
-      await invoke("rag_shutdown");
-      setStatus(I18N.t("cmd.search.off"));
-    } catch (err) {
-      setStatus(I18N.t("cmd.search.fail", { err }), "error");
-    }
-    return;
-  }
-
-  // 语义搜索
-  setStatus(I18N.t("cmd.search.searching"));
-  try {
-    const topK = 10;
-    const results = await invoke("rag_search", { query: sub, topK, projectRoot: state.currentProject.path });
-    if (results.length === 0) {
-      setStatus(I18N.t("cmd.search.no_results"));
-      showSearchResults([]);
-    } else {
-      showSearchResults(results);
-      setStatus(results.length + " 个结果");
-    }
-  } catch (err) {
-    // qdrant 未运行等错误
-    setStatus(I18N.t("cmd.search.unavailable", { err }), "error");
-    // 提示用户启用智搜
-    showSearchResults([
-      { path: "—", snippet: "智搜未启用。请点击菜单栏【智搜】启用该功能。", score: 0 }
-    ]);
-  }
-}
-
-/**
  * AI 命令：将自然语言翻译为标准命令后执行
  */
 async function handleAiCommand(raw) {
@@ -515,7 +442,7 @@ async function handleAiCommand(raw) {
 
     // 闲聊回复（不是标准命令动词开头）→ 直接显示
     const firstWord = result.split(/\s+/)[0]?.toLowerCase();
-    if (!["open", "close", "config", "new", "run", "help", "agent", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
+    if (!["open", "close", "config", "new", "run", "help", "agent", "mcp", "a2a", "tools", "skill", "skills", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
       console.log("[AI] → 闲聊:", result);
       setStatus(result);
       return;
@@ -757,8 +684,6 @@ async function handleDeleteCommand(raw, skipConfirm = false) {
     // 关闭已打开的标签页
     const tab = state.tabs.find((t) => t.path === fullPath);
     if (tab) closeTab(tab.id);
-    // 从智搜索引中移除
-    try { await invoke("rag_remove_file", { path: rawPath, projectRoot: state.currentProject?.path }); } catch {}
     loadFileTree(state.currentProject.path);
   } catch (err) {
     setStatus(I18N.t("cmd.delete.failed", { err }), "error");
@@ -924,9 +849,14 @@ async function handleConfigCommand(raw) {
   // 去掉 "config " 前缀
   const rest = raw.slice("config".length).trim();
   if (!rest) {
-    setStatus(
-      -p|-p|-p
-    );
+    setStatus(I18N.t("cmd.config.sub_usage"));
+    return;
+  }
+
+  // 配置表单子动词（扫描配置项 → 表单）在 config.js，路由过去
+  const first = rest.split(/\s+/)[0].toLowerCase();
+  if (["form", "save", "apply", "cancel"].includes(first)) {
+    await window.ConfigUI?.handleCommand(rest);
     return;
   }
 

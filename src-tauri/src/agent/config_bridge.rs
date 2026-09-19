@@ -44,6 +44,14 @@ pub struct BridgeValues {
     pub lint_max_repair_rounds: Option<String>,
     pub kb_enabled: Option<String>,
     pub kb_top_k: Option<String>,
+    // v0.3 质量门禁：机械验证 + 反思
+    pub gate_narrow: Option<String>,
+    pub gate_full: Option<String>,
+    pub gate_max_full_attempts: Option<String>,
+    pub gate_staged_timeout: Option<String>,
+    pub reflect_enabled: Option<String>,
+    pub reflect_max_rounds: Option<String>,
+    pub reflect_model: Option<String>,
 }
 
 impl BridgeValues {
@@ -66,6 +74,21 @@ impl BridgeValues {
             ),
             kb_enabled: read(mgr, "ruyix.code.harness.kb.enabled", project_root),
             kb_top_k: read(mgr, "ruyix.code.harness.kb.top_k", project_root),
+            gate_narrow: read(mgr, "ruyix.code.harness.gate.narrow", project_root),
+            gate_full: read(mgr, "ruyix.code.harness.gate.full", project_root),
+            gate_max_full_attempts: read(
+                mgr,
+                "ruyix.code.harness.gate.max_full_attempts",
+                project_root,
+            ),
+            gate_staged_timeout: read(
+                mgr,
+                "ruyix.code.harness.gate.staged_timeout_secs",
+                project_root,
+            ),
+            reflect_enabled: read(mgr, "ruyix.code.harness.reflect.enabled", project_root),
+            reflect_max_rounds: read(mgr, "ruyix.code.harness.reflect.max_rounds", project_root),
+            reflect_model: read(mgr, "ruyix.code.harness.reflect.model", project_root),
         }
     }
 }
@@ -153,6 +176,41 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         cfg.kb.top_k = k;
     }
 
+    // 质量门禁（v0.3）：机械验证 + 反思。非法值保持默认（配置桥不做硬失败）
+    if let Some(e) = v.gate_narrow.as_deref() {
+        cfg.gate.narrow = e == "true" || e == "1";
+    }
+    if let Some(e) = v.gate_full.as_deref() {
+        cfg.gate.full = e == "true" || e == "1";
+    }
+    if let Some(n) = v
+        .gate_max_full_attempts
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        cfg.gate.max_full_attempts = n;
+    }
+    if let Some(t) = v
+        .gate_staged_timeout
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        cfg.gate.staged_timeout_secs = t;
+    }
+    if let Some(e) = v.reflect_enabled.as_deref() {
+        cfg.reflect.enabled = e == "true" || e == "1";
+    }
+    if let Some(n) = v
+        .reflect_max_rounds
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        cfg.reflect.max_rounds = n;
+    }
+    if let Some(m) = &v.reflect_model {
+        cfg.reflect.model = m.clone();
+    }
+
     // 运行目录：ruyix 默认 ~/.ruyix/code/agent/runs（D5）
     cfg.workspace_root = v
         .workspace_root
@@ -160,13 +218,16 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         .unwrap_or_else(ruyix_workspace_root);
 }
 
-/// 命令层入口：读 ruyix 配置 → 引擎 AppConfig
+/// 命令层入口：读 ruyix 配置 → 引擎 AppConfig。
+/// 末尾沿用引擎的环境变量纪律（`DEEPSEEK_API_KEY` 等优先于文件，key 不落盘，
+/// 见 engine config.rs）——脚本/CI 与 GUI 读同一套来源。
 pub fn build_app_config(
     mgr: &ConfigManager,
     project_root: Option<&str>,
 ) -> Result<engine::config::AppConfig, String> {
     let mut cfg = engine::config::AppConfig::default();
     apply_overrides(&mut cfg, &BridgeValues::from_config(mgr, project_root));
+    engine::config::apply_env_overrides(&mut cfg);
     Ok(cfg)
 }
 
@@ -185,7 +246,9 @@ mod tests {
         // D3：IDE 要开箱即用 → prefer（引擎实验室默认是 require）
         assert_eq!(cfg.sandbox.mode, "prefer");
         // D5：运行目录落在 ruyix 名下，不与旧 harness 共享
-        assert!(cfg.workspace_root.contains(".ruyix/code/agent/runs"));
+        // （PathBuf::join 在 Windows 上是反斜杠，先归一再断言）
+        let normalized_root = cfg.workspace_root.replace('\\', "/");
+        assert!(normalized_root.contains(".ruyix/code/agent/runs"));
         // kb 默认关闭（附录 C）
         assert!(!cfg.kb.enabled);
         // 不配 key 时保持空串（命令层据此走"未配置"状态而非报错）
@@ -250,5 +313,57 @@ mod tests {
             },
         );
         assert_eq!(cfg.sandbox.mode, "prefer");
+    }
+
+    #[test]
+    fn gate_and_reflect_keys_bridge_with_defaults_on_garbage() {
+        let mut cfg = base();
+        // 默认：门禁与复核都开（v0.3 的默认行为就是"改了就验、交付前复核"）
+        assert!(cfg.gate.narrow && cfg.gate.full && cfg.reflect.enabled);
+        apply_overrides(
+            &mut cfg,
+            &BridgeValues {
+                gate_narrow: Some("false".into()),
+                gate_max_full_attempts: Some("1".into()),
+                reflect_max_rounds: Some("3".into()),
+                reflect_model: Some("deepseek-v4-pro".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!cfg.gate.narrow);
+        assert!(cfg.gate.full, "没传的键保持默认");
+        assert_eq!(cfg.gate.max_full_attempts, 1);
+        assert_eq!(cfg.reflect.max_rounds, 3);
+        assert_eq!(cfg.reflect.model, "deepseek-v4-pro");
+
+        apply_overrides(
+            &mut cfg,
+            &BridgeValues {
+                gate_max_full_attempts: Some("many".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.gate.max_full_attempts, 1, "非法值保持原值，不硬失败");
+    }
+
+    #[test]
+    fn build_app_config_honors_env_key_over_files() {
+        let dir = std::env::temp_dir().join(format!("ruyix-agent-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = crate::config::ConfigManager::new_with_dir(dir.clone());
+
+        // 无环境变量：未配置态（面板据此走引导视图而非报错）
+        // Safety：本测试是本进程内唯一读写该环境变量的测试
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        let cfg = build_app_config(&mgr, None).unwrap();
+        assert!(cfg.llm.api_key.is_empty());
+
+        // 环境变量优先于配置文件且不落盘（引擎纪律）
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-env-bridge") };
+        let cfg = build_app_config(&mgr, None).unwrap();
+        assert_eq!(cfg.llm.api_key, "sk-env-bridge");
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

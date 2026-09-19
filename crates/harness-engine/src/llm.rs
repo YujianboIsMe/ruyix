@@ -30,6 +30,12 @@ impl ChatMessage {
             content: c.into(),
         }
     }
+    pub fn assistant(c: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: c.into(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

@@ -150,21 +150,54 @@ files_count = 312
 
 修改 api_url / dim 的入口：菜单栏【智搜】→ 确认弹窗 → 接受。
 修改 dim 后旧向量库自动清空，需要全量重建索引。
-## 配置菜单（编辑器）
 
-顶栏「配置」菜单提供三个入口，点击后在中央编辑区打开一个**配置标签**：
+## 配置菜单（表单）
 
-| 子菜单 | 作用域 | 内容来源 |
+顶栏「配置」菜单提供三个入口，点击后在中央编辑区打开一个**配置表单标签**：
+
+| 子菜单 | 作用域 | 存放位置 |
 |---|---|---|
-| 全局 | global | `~/.ruyix/code/*.toml` 合并视图 |
-| 项目 | project | `<项目>/.ruyix/code/*.toml` 合并视图（需先打开项目） |
-| 运行 | runtime | 内存中的运行时键（不落盘） |
+| 全局 | global | `~/.ruyix/code/*.toml` |
+| 项目 | project | `<项目>/.ruyix/code/*.toml`（需先打开项目） |
+| 运行 | runtime | 内存，不落盘 |
 
-- 合并视图是**合法 TOML**：每个 section 渲染为 `[section]` 表，直接编辑，`Ctrl+S` 保存。
-- 全局/项目为**合并语义**：保存只写文本中出现的 `[section]`，未出现的既有 section 文件不受影响。
-- 运行为**整体替换语义**：保存会清掉未列出的运行时键。
-- `projects.toml` / `execute.toml` / `rag.toml` 是结构化文件，由专门功能管理：
-  编辑器读时排除，保存时若出现同名 `[section]` 会直接报错拒绝。
-- 配置值只有平铺的「键 = 字符串」；数字/布尔保存时转为字符串，嵌套表/数组报错。
+表单内容 = **本作用域 + 回退链**（runtime → project → global）上所有平铺配置项，
+按 section 分组渲染：
 
-对应后端命令：`config_scope_load(scope, project_root?)` / `config_scope_save(scope, content, project_root?)`。
+- **已知项**给出中文标签、说明与控件类型（文本框 / 密码框 / 下拉 / 开关 / 数字），
+  即使当前作用域没配过也会列出来，方便直接填。
+- **扫描到的未知键**也会渲染成一行（打「扫描」标记），类型按值的形状猜。
+- 本作用域没配、值来自回退链的项显示 `未设置 · 当前继承自 <作用域>: <值>`；
+  命中密钥类字段（含 `key/secret/token/password`）时值打码为 `••••••`。
+
+### 三个按钮
+
+| 按钮 | 命令 | 行为 |
+|---|---|---|
+| 保存 | `config save [scope]` | 只把**改动过的行**写回本作用域；清空某一项再保存 = 删除该键 |
+| 应用 | `config apply [scope]` | 保存 + 把非空值刷进 IDE **运行时内存**里的配置对象（查找优先级最高，重启失效） |
+| 取消 | `config cancel [scope]` | 丢弃未保存的改动并重新扫描（有改动时先弹确认） |
+
+三者都走命令系统，等价于在命令栏输入 `config save|apply|cancel [global|project|runtime]`；
+打开表单本身的命令是 `config form [scope]`（省略 scope = global）。
+
+保存是**增量语义**：只动提交上来的键，同一个文件里没提到的键原样保留；
+嵌套表 / 数组等非标量内容也不会被压平吃掉。
+
+`ui.lang` / `ui.emoji` 保存或应用后会立即热重载界面语言与 emoji 叠加样式。
+
+### 结构化文件
+
+`projects.toml` / `execute.toml` / `mcp.toml` / `a2a.toml` / `tools.toml` / `skills.toml`
+由各自的功能面板管理，平铺写回会破坏它们的格式：
+
+- 扫描时**排除**，表单里看不到；
+- 保存时若出现同名 `section`，直接**报错拒绝**。
+
+### 后端命令
+
+`config_form_load(scope, project_root?)` → `ScopeEntriesDump`
+`config_form_save(scope, entries, project_root?)` → `ScopeSaveReport`
+`config_form_apply(scope, entries, project_root?)` → `ScopeSaveReport`
+
+实现见 `src-tauri/src/config.rs`，前端见 `ui/config.js`。

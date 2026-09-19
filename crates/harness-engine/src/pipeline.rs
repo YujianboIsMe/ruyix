@@ -61,10 +61,16 @@ pub trait Sink: Send + Sync {
 
     /// 生成阶段的每一步（GUI 用来更新步骤列表）
     fn step(&self, _i: usize, _total: usize, _st: &StepOutcome) {}
+    /// 规划完成、计划就绪（GUI 在这一刻就能渲染任务列表，不必等整个 run 结束）
+    fn plan(&self, _plan: &plan::Plan) {}
     /// 规约检查结果（GUI 用来刷新诊断面板）
     fn lint(&self, _outcome: &lint::LintOutcome) {}
     /// 每一轮自我纠正（GUI 用来追加修复记录）
     fn repair(&self, _r: &RepairRound) {}
+    /// 机械验证结论（v0.3：工具循环的窄/全量两层，GUI 在会话里显示「验证」小节）
+    fn verify(&self, _v: &crate::agent::VerifyOutcome) {}
+    /// 反思结论（v0.3：干净上下文的复核 agent，GUI 显示「复核」小节）
+    fn reflect(&self, _r: &crate::reflect::Reflection) {}
 }
 
 // ============================================
@@ -272,6 +278,8 @@ pub async fn plan_stage(
             "规划里没有 kind=test 的步骤，验证阶段很可能只能做语法检查".to_string(),
         );
     }
+    // 计划一就绪就推给 UI —— 任务列表（含后续的步骤三态推进）从这一刻开始可见
+    sink.plan(&plan);
     sink.stage(
         "plan",
         "done",
@@ -554,6 +562,42 @@ pub(crate) fn verify_failures_text(report: &VerifyReport) -> String {
     out
 }
 
+/// 生成阶段失败/跳过的步骤 —— 它们的产物文件可能压根没落盘，只看测试 stderr
+/// 很难归因（典型：ModuleNotFoundError 其实是"那一步就没生成出来"）。
+/// 单独成段回灌，并明确告诉模型缺失的文件可以直接创建。
+pub(crate) fn generation_failures_text(rec: &RunRecord) -> String {
+    let mut out = String::new();
+    let Some(g) = &rec.generation else {
+        return out;
+    };
+    for st in &g.steps {
+        if st.status != "error" && st.status != "skipped" {
+            continue;
+        }
+        out.push_str(&format!(
+            "\n[生成步骤未落地] 步骤 {}「{}」（{}）— {}\n  计划产出：{}\n",
+            st.step_id,
+            st.title,
+            st.status,
+            st.error.clone().unwrap_or_else(|| "无错误详情".into()),
+            if st.files.is_empty() {
+                "（未记录）".to_string()
+            } else {
+                st.files.join(", ")
+            }
+        ));
+    }
+    if !out.is_empty() {
+        out.push_str(
+            "\n（以上步骤的产物文件可能缺失；如测试因缺文件失败，请直接给出完整文件创建它）\n",
+        );
+    }
+    out
+}
+
+/// 追问轮不占修复轮次，但也不能无限追问（防止模型靠反复要内容把循环拖成上下文泵）
+const MAX_NEED_ROUNDS: u32 = 3;
+
 pub async fn repair_stage(
     sink: &dyn Sink,
     cfg: &AppConfig,
@@ -571,7 +615,12 @@ pub async fn repair_stage(
     }
 
     let mut prev: Option<RepairRound> = None;
-    for round in 1..=max_rounds {
+    // 追问机制：模型回 {"need": [...]} 说"信息不足"，把文件/目录内容读出来
+    // 附给下一轮 —— 追问本身不消耗修复轮次（round 只在真正出补丁时 +1）
+    let mut context_block: Option<String> = None;
+    let mut needs_used = 0u32;
+    let mut round = 0u32;
+    while round < max_rounds {
         if exec::is_cancelled(flag) {
             sink.log("warn", "用户取消，自我纠正循环提前结束".to_string());
             break;
@@ -589,7 +638,7 @@ pub async fn repair_stage(
             break;
         }
 
-        // 诊断包：只含诊断（自带为什么/怎么改/参考）+ 被点到的文件内容
+        // 诊断包：lint 诊断 + 验证失败 stderr + 生成阶段没落盘的步骤
         let mut package = String::new();
         if let Some(l) = &rec.lint {
             package.push_str(&l.prompt_package(proj, cfg.lint.prompt_budget_chars));
@@ -597,12 +646,14 @@ pub async fn repair_stage(
         if let Some(v) = &rec.verify {
             package.push_str(&verify_failures_text(v));
         }
+        package.push_str(&generation_failures_text(rec));
 
+        let display_round = round + 1;
         sink.stage(
             "repair",
             "start",
             format!(
-                "第 {round}/{max_rounds} 轮：当前 {before} 个问题（规约 {} + 验证失败 {}）",
+                "第 {display_round}/{max_rounds} 轮：当前 {before} 个问题（规约 {} + 验证失败 {}）",
                 rec.lint.as_ref().map(|l| l.total()).unwrap_or(0),
                 rec.verify.as_ref().map(|v| v.failed).unwrap_or(0)
             ),
@@ -630,10 +681,10 @@ pub async fn repair_stage(
                     })
                     .unwrap_or_default(),
             );
-            kb::retrieve::retrieve(&engine, &format!("repair:{round}"), &query, &ws)
+            kb::retrieve::retrieve(&engine, &format!("repair:{display_round}"), &query, &ws)
         } else {
             kb::retrieve::KbInjection {
-                stage: format!("repair:{round}"),
+                stage: format!("repair:{display_round}"),
                 query: rule_ids.join(" "),
                 enabled: false,
                 reason: engine.reason.clone(),
@@ -643,7 +694,7 @@ pub async fn repair_stage(
         };
         sink.log(
             if kb_inj.hits.is_empty() { "info" } else { "ok" },
-            format!("[repair:{round}] 知识库：{}", kb_inj.summary()),
+            format!("[repair:{display_round}] 知识库：{}", kb_inj.summary()),
         );
         let kb_block = kb::retrieve::render_block(&kb_inj);
         rec.kb.push(kb_inj);
@@ -652,9 +703,10 @@ pub async fn repair_stage(
             &cfg.llm,
             &rec.task,
             &package,
-            round,
+            display_round,
             max_rounds,
             prev.as_ref(),
+            context_block.as_deref(),
             kb_block.as_deref(),
         )
         .await;
@@ -662,7 +714,7 @@ pub async fn repair_stage(
             Ok(v) => v,
             Err(e) => {
                 let r = RepairRound {
-                    round,
+                    round: display_round,
                     before,
                     after: before,
                     status: "rejected".into(),
@@ -671,11 +723,66 @@ pub async fn repair_stage(
                 };
                 sink.repair(&r);
                 rec.repair.push(r);
-                sink.log("error", format!("第 {round} 轮模型没给出可用改动：{e}"));
+                sink.log(
+                    "error",
+                    format!("第 {display_round} 轮模型没给出可用改动：{e}"),
+                );
                 break;
             }
         };
 
+        // 追问：读完内容直接进下一轮，不消耗修复轮次、不参与"违规数必须下降"判定
+        if !attempt.need.is_empty() {
+            if needs_used >= MAX_NEED_ROUNDS {
+                sink.log(
+                    "warn",
+                    format!("模型追问已达上限（{MAX_NEED_ROUNDS} 次），循环停止"),
+                );
+                let r = RepairRound {
+                    round: display_round,
+                    before,
+                    after: before,
+                    status: "rejected".into(),
+                    detail: "追问次数用完".into(),
+                    ..Default::default()
+                };
+                sink.repair(&r);
+                rec.repair.push(r);
+                break;
+            }
+            needs_used += 1;
+            context_block = Some(repair::gather_context(
+                proj,
+                &attempt.need,
+                cfg.lint.prompt_budget_chars,
+            ));
+            let r = RepairRound {
+                round: display_round,
+                before,
+                after: before,
+                status: "need".into(),
+                detail: format!(
+                    "追问上下文（{needs_used}/{MAX_NEED_ROUNDS}）：{}",
+                    attempt.need.join(", ")
+                ),
+                notes: attempt.notes.clone(),
+                usage_tokens: tokens,
+                elapsed_ms: elapsed,
+                ..Default::default()
+            };
+            sink.repair(&r);
+            rec.repair.push(r);
+            sink.log(
+                "info",
+                format!(
+                    "第 {display_round} 轮模型追问：{} —— 内容已附到下一轮",
+                    attempt.need.join(", ")
+                ),
+            );
+            continue;
+        }
+
+        round += 1; // 消耗修复轮次的是"出补丁并落盘"，不是追问
         for ed in &attempt.edits {
             sink.log(
                 "info",

@@ -173,6 +173,77 @@ pub struct VerifyConfig {
     pub test_timeout_secs: u64,
 }
 
+fn d_max_full_attempts() -> u32 {
+    3
+}
+fn d_max_reflect_rounds() -> u32 {
+    2
+}
+fn d_staged_timeout() -> u64 {
+    60
+}
+fn d_reflect_max_steps() -> usize {
+    8
+}
+
+/// Agent 循环的质量门禁（v0.3）：机械验证。
+///
+/// 触发是**事实驱动**的（这一轮有没有改动），不是任务分类 —— 分类是预测，
+/// 会误判；"有没有写文件"不会。见 `doc/需求-Agent-验证与反思-v0.3.md`。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GateConfig {
+    /// 改动后跑语法层（窄验证）
+    #[serde(default = "d_true")]
+    pub narrow: bool,
+    /// 交付（final）前跑全量验证：语法 + 单测 + 规约
+    #[serde(default = "d_true")]
+    pub full: bool,
+    /// 全量验证连续失败多少次后放弃拦截（防止"验证不过就无限修"）
+    #[serde(default = "d_max_full_attempts")]
+    pub max_full_attempts: u32,
+    /// 暂存内容语法检查的超时（确认模式；全量验证的超时在 `verify.*`）
+    #[serde(default = "d_staged_timeout")]
+    pub staged_timeout_secs: u64,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            narrow: true,
+            full: true,
+            max_full_attempts: d_max_full_attempts(),
+            staged_timeout_secs: d_staged_timeout(),
+        }
+    }
+}
+
+/// 反思（复核 agent）配置。复核必须用**干净上下文**，模型可单独指定。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReflectConfig {
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    /// 复核发现问题后最多回灌主循环几轮
+    #[serde(default = "d_max_reflect_rounds")]
+    pub max_rounds: u32,
+    /// 复核 agent 自己的工具轮次上限（只允许 read）
+    #[serde(default = "d_reflect_max_steps")]
+    pub max_steps: usize,
+    /// 复核用哪个模型（空 = 与主循环同模型）
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Default for ReflectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_rounds: d_max_reflect_rounds(),
+            max_steps: d_reflect_max_steps(),
+            model: String::new(),
+        }
+    }
+}
+
 fn d_python() -> String {
     // Windows 惯例是 `python`；macOS/Linux 系统自带且普遍在 PATH 上的是 `python3`
     if cfg!(target_os = "windows") {
@@ -210,8 +281,10 @@ fn d_true() -> bool {
 fn d_zero_i32() -> i32 {
     0
 }
-fn d_two() -> u32 {
-    2
+/// 自我纠正循环的默认轮数上限：验证失败 → stderr 回灌 → 补丁 → 重验。
+/// 5 是平衡点：太少救不回缺文件/依赖缺失的 run，太多在顽固问题上烧 token。
+fn d_max_repair_rounds() -> u32 {
+    5
 }
 fn d_prompt_budget() -> usize {
     12_000
@@ -256,7 +329,7 @@ pub struct LintConfig {
     #[serde(default)]
     pub extra_args: Vec<String>,
     /// 自我纠正循环的最大轮数
-    #[serde(default = "d_two")]
+    #[serde(default = "d_max_repair_rounds")]
     pub max_repair_rounds: u32,
     /// 诊断包（回灌给模型）的字符预算
     #[serde(default = "d_prompt_budget")]
@@ -271,7 +344,7 @@ impl Default for LintConfig {
             max_suppressions: d_zero_i32(),
             strict: false,
             extra_args: Vec::new(),
-            max_repair_rounds: d_two(),
+            max_repair_rounds: d_max_repair_rounds(),
             prompt_budget_chars: d_prompt_budget(),
         }
     }
@@ -458,6 +531,12 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub verify: VerifyConfig,
+    /// 工具循环的质量门禁：机械验证（v0.3）
+    #[serde(default)]
+    pub gate: GateConfig,
+    /// 工具循环的反思（复核 agent，v0.3）
+    #[serde(default)]
+    pub reflect: ReflectConfig,
     #[serde(default)]
     pub lint: LintConfig,
     #[serde(default)]
@@ -479,6 +558,8 @@ impl Default for AppConfig {
         Self {
             llm: LlmConfig::default(),
             verify: VerifyConfig::default(),
+            gate: GateConfig::default(),
+            reflect: ReflectConfig::default(),
             lint: LintConfig::default(),
             entropy: EntropyConfig::default(),
             sandbox: SandboxConfig::default(),

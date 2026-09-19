@@ -489,9 +489,10 @@ fn syntax_checks(
                     &["check", "--message-format=short", "--color", "never"],
                     duration(v, true),
                     // 把构建产物约束在运行目录内，别污染全局 target
+                    // （.ruyix 是 IDE 自己的命名空间：暂存/备份/验证产物都在这，仓库 .gitignore 里已排除）
                     &[
                         ("CARGO_TERM_COLOR", "never"),
-                        ("CARGO_TARGET_DIR", ".harness-target"),
+                        ("CARGO_TARGET_DIR", ".ruyix/target-verify"),
                     ],
                 );
                 out.push(CheckResult::from_output(
@@ -524,7 +525,7 @@ fn syntax_checks(
                             "lib",
                             "--emit=metadata",
                             "--out-dir",
-                            ".harness-out",
+                            ".ruyix/out-verify",
                             "-A",
                             "warnings",
                             &f,
@@ -581,6 +582,157 @@ fn syntax_checks(
         }
     }
     out
+}
+
+/// **暂存内容的"纯语法"检查**（v0.3 机械验证的窄层）。
+///
+/// 只做**单文件就能判定**的检查：内容写到系统临时目录再跑对应工具，**绝不碰项目磁盘**
+/// —— 确认模式"磁盘未动"的不变量靠它守住。
+///
+/// 判不了的语言显式跳过并写明原因（Rust 必须整包编译：单文件 `rustc` 会因为跨文件引用
+/// 和外部 crate 误报）。宁可"这次没验成"，也不要给模型一个假失败。
+pub fn staged_syntax_checks(
+    v: &VerifyConfig,
+    files: &[(String, String)],
+    timeout: Duration,
+) -> Vec<CheckResult> {
+    let mut out = Vec::new();
+    if files.is_empty() {
+        return out;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("ruyix-syntax-{}", crate::workspace::now_compact()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return vec![CheckResult::skipped(
+            "syntax",
+            "-",
+            "语法检查",
+            &format!("临时目录建不出来，本次未检查：{e}"),
+        )];
+    }
+    let mut rust = 0usize;
+    let mut other = 0usize;
+    for (i, (rel, content)) in files.iter().enumerate() {
+        let ext = Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        // 临时文件名带序号：不同目录下的同名文件不能互相覆盖
+        let name = format!("{i}-{}", file_name(rel));
+        match ext.as_str() {
+            "py" | "js" | "mjs" | "cjs" => {
+                let tmp = dir.join(&name);
+                if let Err(e) = std::fs::write(&tmp, content) {
+                    out.push(CheckResult::skipped(
+                        "syntax",
+                        lang_of(&ext),
+                        rel,
+                        &format!("临时文件写不进去：{e}"),
+                    ));
+                    continue;
+                }
+                let o = if ext == "py" {
+                    exec::run(
+                        &dir,
+                        &v.python_bin,
+                        &["-m", "py_compile", &name],
+                        timeout,
+                        &[("PYTHONIOENCODING", "utf-8")],
+                    )
+                } else {
+                    exec::run(&dir, &v.node_bin, &["--check", &name], timeout, &[])
+                };
+                out.push(CheckResult::from_output("syntax", lang_of(&ext), rel, &o));
+            }
+            // 纯数据文件：进程内解析就够，不用起子进程
+            "json" => out.push(parse_check(
+                "json",
+                rel,
+                serde_json::from_str::<serde_json::Value>(content)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            )),
+            "toml" => out.push(parse_check(
+                "toml",
+                rel,
+                toml::from_str::<toml::Value>(content)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            )),
+            "rs" => rust += 1,
+            _ => other += 1,
+        }
+    }
+    if rust > 0 {
+        out.push(CheckResult::skipped(
+            "syntax",
+            "rust",
+            "*.rs",
+            &format!(
+                "{rust} 个 Rust 文件未检查：Rust 必须整包编译（确认模式下不落盘）—— \
+                 写入/自主模式会跑全量验证"
+            ),
+        ));
+    }
+    if other > 0 {
+        out.push(CheckResult::skipped(
+            "syntax",
+            "-",
+            "其它文件",
+            &format!("{other} 个文件没有单文件语法检查器（只支持 py / js / json / toml）"),
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+fn file_name(rel: &str) -> String {
+    rel.rsplit(['/', '\\']).next().unwrap_or(rel).to_string()
+}
+
+fn lang_of(ext: &str) -> &'static str {
+    match ext {
+        "py" => "python",
+        "js" | "mjs" | "cjs" => "javascript",
+        "json" => "json",
+        "toml" => "toml",
+        _ => "-",
+    }
+}
+
+/// 进程内解析结果 → CheckResult（成功/失败都带真实原因，不含猜测）
+fn parse_check(kind: &str, target: &str, parsed: Result<(), String>) -> CheckResult {
+    match parsed {
+        Ok(()) => CheckResult::passed(
+            "syntax",
+            kind,
+            target,
+            &CmdOutput {
+                cmd: "（内置解析）".into(),
+                exit_code: Some(0),
+                timed_out: false,
+                duration_ms: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                spawn_error: None,
+            },
+        ),
+        Err(e) => CheckResult::from_output(
+            "syntax",
+            kind,
+            target,
+            &CmdOutput {
+                cmd: "（内置解析）".into(),
+                exit_code: Some(1),
+                timed_out: false,
+                duration_ms: 0,
+                stdout: String::new(),
+                stderr: e,
+                spawn_error: None,
+            },
+        ),
+    }
 }
 
 fn syntax_ok(checks: &[CheckResult], lang: Lang) -> bool {
@@ -713,7 +865,7 @@ fn test_checks(
                 duration(v, true),
                 &[
                     ("CARGO_TERM_COLOR", "never"),
-                    ("CARGO_TARGET_DIR", ".harness-target"),
+                    ("CARGO_TARGET_DIR", ".ruyix/target-verify"),
                 ],
             );
             out.push(CheckResult::from_output("test", "rust", "cargo test", &o));
@@ -1027,5 +1179,35 @@ mod tests {
         let t = r.checks.iter().find(|c| c.kind == "test").unwrap();
         assert_eq!(t.status, "failed");
         assert!(t.stdout.contains("FAILED") || t.stderr.contains("FAILED") || !t.stdout.is_empty());
+    }
+
+    /// 窄层（确认模式专用）：单文件语法检查作用在**内容**上，不碰项目磁盘。
+    /// 三条判据：好文件过、坏文件挂、判不了的语言显式跳过（绝不假失败）。
+    #[test]
+    fn staged_syntax_checks_flags_broken_code_without_touching_the_project() {
+        let v = VerifyConfig::default();
+        let files = vec![
+            ("ok.py".to_string(), "x = 1\n".to_string()),
+            ("bad.py".to_string(), "def f(:\n".to_string()),
+            ("a.rs".to_string(), "fn main() {}\n".to_string()),
+            ("b.json".to_string(), "{\"a\": 1}".to_string()),
+            ("c.json".to_string(), "{oops}".to_string()),
+        ];
+        let checks = staged_syntax_checks(&v, &files, Duration::from_secs(30));
+        let status = |t: &str| {
+            checks
+                .iter()
+                .find(|c| c.target == t)
+                .map(|c| c.status.clone())
+                .unwrap_or_else(|| format!("缺 {t}"))
+        };
+        assert_eq!(status("ok.py"), "passed");
+        assert_eq!(status("bad.py"), "failed");
+        assert_eq!(status("b.json"), "passed");
+        assert_eq!(status("c.json"), "failed");
+        // Rust 必须整包编译：单文件 rustc 会因为跨文件/外部 crate 误报 → 显式跳过并写原因
+        let rust = checks.iter().find(|c| c.language == "rust").unwrap();
+        assert_eq!(rust.status, "skipped");
+        assert!(rust.reason.contains("整包编译"), "{}", rust.reason);
     }
 }

@@ -22,3 +22,4 @@ training/outputs/
 
 # macOS
 .DS_Store
+.workbuddy/

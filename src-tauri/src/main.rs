@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod a2a;
 mod agent;
 mod ai;
+mod capability;
 mod config;
 mod git;
 mod instance;
+mod mcp;
 mod pty;
-mod rag;
 mod runner;
 
 #[cfg(windows)]
@@ -945,13 +947,13 @@ fn config_delete(
     mgr.config_delete(&s, &key, project_root.as_deref())
 }
 
-/// 配置菜单：读整个 scope 的合并视图（配置标签编辑用）
+/// 配置菜单：扫描一个作用域 → 配置表单的数据源（本作用域 ∪ 回退链）
 #[tauri::command]
-fn config_scope_load(
+fn config_form_load(
     scope: String,
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<config::ScopeConfigDump, String> {
+) -> Result<config::ScopeEntriesDump, String> {
     let s = config::Scope::from_str(&scope).ok_or_else(|| {
         format!(
             "无效的作用域: {}。可用: g/global, p/project, r/runtime",
@@ -959,17 +961,17 @@ fn config_scope_load(
         )
     })?;
     let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.dump_scope_toml(&s, project_root.as_deref())
+    mgr.scan_scope_entries(&s, project_root.as_deref())
 }
 
-/// 配置菜单：保存配置标签的内容（Ctrl+S）
+/// 配置菜单：保存表单（增量写；空值 = 删除该键）
 #[tauri::command]
-fn config_scope_save(
+fn config_form_save(
     scope: String,
-    content: String,
+    entries: Vec<config::ConfigEntryInput>,
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<usize, String> {
+) -> Result<config::ScopeSaveReport, String> {
     let s = config::Scope::from_str(&scope).ok_or_else(|| {
         format!(
             "无效的作用域: {}。可用: g/global, p/project, r/runtime",
@@ -977,159 +979,252 @@ fn config_scope_save(
         )
     })?;
     let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.save_scope_toml(&s, &content, project_root.as_deref())
+    mgr.save_scope_entries(&s, &entries, project_root.as_deref())
 }
 
-// ============================================
-// RAG（智搜）命令
-// ============================================
-
+/// 配置菜单：应用表单（= 保存 + 刷新 IDE 运行时内存里的配置对象）
 #[tauri::command]
-fn rag_search(
-    query: String,
-    top_k: Option<usize>,
-    project_root: Option<String>,
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-) -> Result<Vec<rag::SearchResult>, String> {
-    let root = project_root.ok_or("未打开项目")?;
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.search(&root, &query, top_k.unwrap_or(10))
-}
-
-#[tauri::command]
-fn rag_reindex(
-    project_root: Option<String>,
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-    app_handle: tauri::AppHandle,
-) -> Result<rag::ReindexResult, String> {
-    let root = project_root.ok_or("未打开项目")?;
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    let handle = app_handle.clone();
-    let result = mgr.full_index_with_progress(&root, &move |current, total| {
-        let _ = handle.emit(
-            "rag-index-progress",
-            serde_json::json!({
-                "current": current,
-                "total": total,
-                "phase": "indexing"
-            }),
-        );
-    });
-    // 发送完成事件
-    let _ = app_handle.emit(
-        "rag-index-progress",
-        serde_json::json!({
-            "current": 0, "total": 0, "phase": "done"
-        }),
-    );
-    let indexed = result?;
-    let rebuild_note = mgr.rebuild_note.clone();
-    Ok(rag::ReindexResult {
-        indexed,
-        rebuild_note,
-    })
-}
-
-#[tauri::command]
-fn rag_index_file(
-    path: String,
-    project_root: String,
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-) -> Result<(), String> {
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.index_file(&project_root, &path)
-}
-
-#[tauri::command]
-fn rag_remove_file(
-    path: String,
-    project_root: String,
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-) -> Result<(), String> {
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.remove_file(&project_root, &path)
-}
-
-#[tauri::command]
-fn rag_idle_check(rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>) -> Result<(), String> {
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.idle_check();
-    Ok(())
-}
-
-#[tauri::command]
-fn rag_status(
-    rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>,
-) -> Result<rag::IndexStatus, String> {
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    Ok(mgr.status())
-}
-
-#[tauri::command]
-fn rag_shutdown(rag_mgr: tauri::State<'_, Mutex<rag::RagManager>>) -> Result<(), String> {
-    let mut mgr = rag_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.shutdown();
-    Ok(())
-}
-
-#[tauri::command]
-fn rag_get_global_config() -> Result<rag::GlobalRagConfig, String> {
-    Ok(rag::load_global_rag_config())
-}
-
-#[tauri::command]
-fn rag_disable_permanently() -> Result<(), String> {
-    let mut cfg = rag::load_global_rag_config();
-    cfg.permanently_disabled = true;
-    cfg.enabled = false;
-    rag::save_global_rag_config(&cfg)
-}
-
-#[tauri::command]
-fn rag_set_embedding_config(
-    api_url: String,
-    api_key: Option<String>,
-    model: Option<String>,
-    dim: Option<usize>,
+fn config_form_apply(
+    scope: String,
+    entries: Vec<config::ConfigEntryInput>,
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<(), String> {
-    let mut cfg = rag::load_global_rag_config();
-    cfg.api_url = Some(api_url.trim().to_string());
-    cfg.api_key = match api_key
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(k) => Some(k),
-        None => {
-            // 缺省时复用 AI 配置的 api_key（runtime → project → global）
-            let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-            let mut key = None;
-            for scope in [
-                config::Scope::Runtime,
-                config::Scope::Project,
-                config::Scope::Global,
-            ] {
-                if scope == config::Scope::Project && project_root.is_none() {
-                    continue;
-                }
-                if let Ok(Some(v)) =
-                    mgr.config_read(&scope, "ruyix.code.ai.api_key", project_root.as_deref())
-                    && !v.is_empty()
-                {
-                    key = Some(v);
-                    break;
-                }
-            }
-            key
-        }
+) -> Result<config::ScopeSaveReport, String> {
+    let s = config::Scope::from_str(&scope).ok_or_else(|| {
+        format!(
+            "无效的作用域: {}。可用: g/global, p/project, r/runtime",
+            scope
+        )
+    })?;
+    let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.apply_scope_entries(&s, &entries, project_root.as_deref())
+}
+
+// ============================================
+// MCP 命令（stdio 客户端，配置在 mcp.toml）
+// ============================================
+
+#[tauri::command]
+async fn mcp_servers(
+    project_root: Option<String>,
+    mcp_mgr: tauri::State<'_, mcp::McpManager>,
+) -> Result<Vec<mcp::ServerStatus>, String> {
+    Ok(mcp_mgr.status(project_root.as_deref()).await)
+}
+
+#[tauri::command]
+fn mcp_add_server(
+    name: String,
+    command: String,
+    args: Option<Vec<String>>,
+    env: Option<std::collections::HashMap<String, String>>,
+    project_root: Option<String>,
+) -> Result<Vec<mcp::McpServerCfg>, String> {
+    let name = name.trim();
+    if name.is_empty() || command.trim().is_empty() {
+        return Err("名称与命令不能为空".into());
+    }
+    let cfg = mcp::McpServerCfg {
+        name: name.to_string(),
+        command: command.trim().to_string(),
+        args: args.unwrap_or_default(),
+        env: env.unwrap_or_default(),
+        enabled: true,
     };
-    cfg.model = model
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    cfg.dim = Some(dim.unwrap_or(rag::DEFAULT_DIM));
-    cfg.enabled = true;
-    rag::save_global_rag_config(&cfg)
+    mcp::save_server(&cfg, project_root.as_deref())?;
+    Ok(mcp::load_servers(project_root.as_deref()))
+}
+
+#[tauri::command]
+async fn mcp_remove_server(
+    name: String,
+    project_root: Option<String>,
+    mcp_mgr: tauri::State<'_, mcp::McpManager>,
+) -> Result<Vec<mcp::ServerStatus>, String> {
+    mcp_mgr.stop(&name).await;
+    mcp::remove_server(&name, project_root.as_deref())?;
+    Ok(mcp_mgr.status(project_root.as_deref()).await)
+}
+
+#[tauri::command]
+async fn mcp_start(
+    name: String,
+    project_root: Option<String>,
+    mcp_mgr: tauri::State<'_, mcp::McpManager>,
+) -> Result<mcp::ServerStatus, String> {
+    let cfg = mcp::load_servers(project_root.as_deref())
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("MCP 服务器不存在: {name}"))?;
+    if !cfg.enabled {
+        return Err(format!("MCP 服务器已停用: {name}"));
+    }
+    mcp_mgr.start(&cfg).await
+}
+
+#[tauri::command]
+async fn mcp_stop(
+    name: String,
+    project_root: Option<String>,
+    mcp_mgr: tauri::State<'_, mcp::McpManager>,
+) -> Result<Vec<mcp::ServerStatus>, String> {
+    mcp_mgr.stop(&name).await;
+    Ok(mcp_mgr.status(project_root.as_deref()).await)
+}
+
+#[tauri::command]
+async fn mcp_tools(
+    name: String,
+    mcp_mgr: tauri::State<'_, mcp::McpManager>,
+) -> Result<Vec<mcp::ToolInfo>, String> {
+    mcp_mgr.tools(&name).await
+}
+
+#[tauri::command]
+async fn mcp_call_tool(
+    name: String,
+    tool: String,
+    args_json: String,
+    mcp_mgr: tauri::State<'_, mcp::McpManager>,
+) -> Result<mcp::CallOutcome, String> {
+    mcp_mgr.call_tool(&name, &tool, &args_json).await
+}
+
+// ============================================
+// A2A 命令（远端 agent 发现与任务委托）
+// ============================================
+
+#[tauri::command]
+fn a2a_agents(project_root: Option<String>) -> Result<Vec<a2a::A2aAgentCfg>, String> {
+    Ok(a2a::load_agents(project_root.as_deref()))
+}
+
+/// 发现远端 agent card 并保存到全局配置
+#[tauri::command]
+async fn a2a_discover(url: String) -> Result<a2a::A2aAgentCfg, String> {
+    let cfg = a2a::discover_card(&url).await?;
+    a2a::save_agent(&cfg)?;
+    Ok(cfg)
+}
+
+#[tauri::command]
+fn a2a_remove(name: String, project_root: Option<String>) -> Result<Vec<a2a::A2aAgentCfg>, String> {
+    a2a::remove_agent(&name, project_root.as_deref())?;
+    Ok(a2a::load_agents(project_root.as_deref()))
+}
+
+/// 委托任务给远端 agent；轮询进度经 a2a://status 事件推送
+#[tauri::command]
+async fn a2a_send(
+    app: tauri::AppHandle,
+    name: String,
+    text: String,
+    project_root: Option<String>,
+) -> Result<a2a::A2aTaskResult, String> {
+    let cfg = a2a::load_agents(project_root.as_deref())
+        .into_iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| format!("A2A agent 不存在: {name}"))?;
+    let handle = app.clone();
+    let agent_name = cfg.name.clone();
+    let result = a2a::send_task(&cfg, &text, move |state, poll, max| {
+        let _ = handle.emit(
+            "a2a://status",
+            serde_json::json!({"name": agent_name, "state": state, "poll": poll, "max": max}),
+        );
+    })
+    .await?;
+    let _ = app.emit(
+        "a2a://status",
+        serde_json::json!({"name": result.agent, "state": result.state, "poll": 0, "max": 0}),
+    );
+    Ok(result)
+}
+
+// ============================================
+// 能力命令（工具白名单 + SKILL，tools.toml / skills.toml）
+// ============================================
+
+#[tauri::command]
+fn tools_list(project_root: Option<String>) -> Result<Vec<capability::ToolCfg>, String> {
+    Ok(capability::load_tools(project_root.as_deref()))
+}
+
+#[tauri::command]
+fn tools_add(
+    name: String,
+    command: Option<String>,
+    args_hint: Option<String>,
+    description: Option<String>,
+    project_root: Option<String>,
+) -> Result<Vec<capability::ToolCfg>, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("工具名不能为空".into());
+    }
+    let cfg = capability::ToolCfg {
+        name: name.to_string(),
+        command: command.unwrap_or_default().trim().to_string(),
+        args_hint: args_hint.unwrap_or_default().trim().to_string(),
+        description: description.unwrap_or_default().trim().to_string(),
+        enabled: true,
+    };
+    capability::save_tool(&cfg, project_root.as_deref())?;
+    Ok(capability::load_tools(project_root.as_deref()))
+}
+
+#[tauri::command]
+fn tools_remove(
+    name: String,
+    project_root: Option<String>,
+) -> Result<Vec<capability::ToolCfg>, String> {
+    capability::remove_tool(&name, project_root.as_deref())?;
+    Ok(capability::load_tools(project_root.as_deref()))
+}
+
+/// 探测本机是否装有该命令（`<command> --version`，短超时）
+#[tauri::command]
+async fn tools_probe(name: String) -> Result<capability::ToolProbe, String> {
+    let cfg = capability::load_tools(None)
+        .into_iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| format!("工具不存在: {name}"))?;
+    Ok(capability::probe_tool(&cfg).await)
+}
+
+#[tauri::command]
+fn skills_list(project_root: Option<String>) -> Result<Vec<capability::SkillCfg>, String> {
+    Ok(capability::load_skills(project_root.as_deref()))
+}
+
+#[tauri::command]
+fn skills_save(
+    name: String,
+    description: String,
+    content: String,
+    project_root: Option<String>,
+) -> Result<Vec<capability::SkillCfg>, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("技能名不能为空".into());
+    }
+    let cfg = capability::SkillCfg {
+        name: name.to_string(),
+        description: description.trim().to_string(),
+        enabled: true,
+        content,
+    };
+    capability::save_skill(&cfg, project_root.as_deref())?;
+    Ok(capability::load_skills(project_root.as_deref()))
+}
+
+#[tauri::command]
+fn skills_remove(
+    name: String,
+    project_root: Option<String>,
+) -> Result<Vec<capability::SkillCfg>, String> {
+    capability::remove_skill(&name, project_root.as_deref())?;
+    Ok(capability::load_skills(project_root.as_deref()))
 }
 
 // ============================================
@@ -1142,8 +1237,8 @@ fn main() {
 
     tauri::Builder::default()
         .manage(config_mgr)
+        .manage(mcp::McpManager::new())
         .manage(pty_mgr)
-        .manage(Mutex::new(rag::RagManager::new()))
         .manage(agent::AgentState::new())
         .setup(|app| {
             // 注册原生 Ctrl+S 快捷键 — 即使 WebView2 拦截了 JS 的 Ctrl+S，
@@ -1196,11 +1291,15 @@ fn main() {
             config_get,
             config_set,
             config_delete,
-            config_scope_load,
-            config_scope_save,
+            config_form_load,
+            config_form_save,
+            config_form_apply,
             ai_translate,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,
+            agent::agent_reply,
+            agent::agent_stage_preview,
+            agent::agent_stage_apply,
             agent::agent_plan,
             agent::agent_generate,
             agent::agent_verify,
@@ -1211,19 +1310,34 @@ fn main() {
             agent::agent_run_load,
             agent::agent_run_delete,
             agent::agent_read_artifact,
+            agent::agent_apply_preview,
+            agent::agent_apply_run,
             agent::agent_env_probe,
+            agent::agent_session_list,
+            agent::agent_session_load,
+            agent::agent_session_save,
+            agent::agent_session_new,
+            agent::agent_session_delete,
             git::git_status,
             git::git_run,
-            rag_search,
-            rag_reindex,
-            rag_index_file,
-            rag_remove_file,
-            rag_idle_check,
-            rag_status,
-            rag_shutdown,
-            rag_get_global_config,
-            rag_disable_permanently,
-            rag_set_embedding_config,
+            mcp_servers,
+            mcp_add_server,
+            mcp_remove_server,
+            mcp_start,
+            mcp_stop,
+            mcp_tools,
+            mcp_call_tool,
+            a2a_agents,
+            a2a_discover,
+            a2a_remove,
+            a2a_send,
+            tools_list,
+            tools_add,
+            tools_remove,
+            tools_probe,
+            skills_list,
+            skills_save,
+            skills_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,1 +1,1 @@
-An IDE for all program languages.
+An IDE with an Agent

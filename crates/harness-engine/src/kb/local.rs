@@ -34,7 +34,8 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 /// 目录名后缀黑名单（打包元数据/缓存目录：里面是生成物，不是知识）
-const SKIP_DIR_SUFFIXES: &[&str] = &[".egg-info", ".dist-info", "-packages", ".harness-target"];
+/// `.ruyix` = IDE 自己的命名空间（暂存/备份/验证构建产物），整块不进知识库
+const SKIP_DIR_SUFFIXES: &[&str] = &[".egg-info", ".dist-info", "-packages", ".ruyix"];
 
 /// 文件名级黑名单（小写后的包含匹配）—— **密钥优先**
 const SECRET_HINTS: &[&str] = &[

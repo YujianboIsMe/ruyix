@@ -26,6 +26,28 @@
 > - **P4 剩余**：配好 Key 后在真机 GUI 跑一次 plan-only 端到端验收；ui-smoke 增加
 >   agent 场景；归档标签推送远端。
 
+> **✅ 执行进度（2026-09-19，Windows 机 P4 收尾；旧 harness 仓归档/推送按用户决定取消，不再执行）**
+>
+> - **ui-smoke 落地**：新增 `scripts/ui-smoke.js`（零依赖 Node，与 check-style 同款
+>   自研路线）。U1–U5 契约静态断言（DOM 锚点 / `agent` 动词路由 / `agent://*` 事件
+>   前后端一致 / 附录 A 12 命令注册 / zh-en i18n 全量对齐）+ U6–U8 agent 场景
+>   （微型 DOM stub 驱动 `ui/agent.js` 内置演示回放：plan-only、全流程、运行中取消），
+>   22 项全绿。
+> - **plan-only 端到端验收（真调 LLM）**：新增 `crates/harness-engine/examples/plan_only.rs`
+>   （P5 引擎 CLI 的雏形），`DEEPSEEK_API_KEY` 环境变量供 Key（不落盘）真调
+>   DeepSeek：20s / 3266 tokens / 3 步（含测试步骤），run.json 落
+>   `~/.ruyix/code/agent/runs/` 且无 Key 明文（R6 断言通过）。前端面板另经真实
+>   浏览器（静态服务 `ui/`）跑演示回放验收，DOM 与截图均正常；Tauri 窗口本身
+>   无法外部驱动，GUI→invoke→引擎链路由命令桥单测 + 本 example 分段覆盖。
+> - **配套修正**：config_bridge 接通引擎环境变量纪律（`DEEPSEEK_API_KEY` 等优先于
+>   配置文件、不落盘，GUI 与脚本同一来源，含单测）；两处存量测试在 Windows 上的
+>   适配（`workspace_root` 断言归一路径分隔符；`save_is_fast…` 守卫阈值 60s→180s ——
+>   Windows 并行测试下 git 子进程 spawn 开销所致，"抓卡死"语义不变）。
+> - **门禁实测（Windows 11）**：fmt ✓ / clippy 0 warning / 引擎 159 通过 + 8 忽略 /
+>   ruyix 41 通过 / check-style 0 error / ui-smoke 22 项全绿。
+> - **P4 至此收口**（原"归档标签推送远端"一项取消）；§6 分支窗口未启用过，
+>   master 直开发规则全程有效。
+
 ---
 
 ## 0. 摘要（TL;DR）
@@ -375,6 +397,10 @@ agent_run_load(run_id: String) -> RunRecordJson
 agent_run_delete(run_id: String) -> ()
 agent_read_artifact(run_id: String, rel_path: String) -> FileContent
 agent_env_probe() -> EnvReport                                 // docker/python/git/node/…
+agent_apply_preview(run_id: String, project_root: Option<String>) -> Preview
+    // 【只读】沙箱产物 vs 真实项目：逐文件 add/modify/same + before/after + git dirty
+agent_apply_run(run_id: String, project_root: Option<String>, paths: Vec<String>, backup: Option<bool>) -> ApplyResult
+    // 写回勾选的文件；内容一致项跳过；覆盖前备份到 <项目>/.ruyix/backups/<run_id>-<ts>/
 ```
 
 约定：
@@ -382,8 +408,12 @@ agent_env_probe() -> EnvReport                                 // docker/python/
   返回 `Ok` + 状态字段；只有"答不了"才 `Err(String)`。
 - 返回 JSON 结构与 harness 对应结构体同形（RunRecord/VerifyReport/LintReport…），
   字段以 harness `workspace.rs`/`verify.rs`/`lint.rs` 现有定义为准。
-- 命令实现里 project_root 用于（且仅用于）任务上下文注入与 kb 工作区优先；
-  P4 之前不向 project_root 写任何东西。
+- 命令实现里 project_root 用于任务上下文注入（`agent/project_context.rs`）、kb 工作区优先，
+  以及**写回目标**（`agent/apply.rs`）。
+- **写回是显式两步**：`agent_apply_preview` 只读，`agent_apply_run` 必须带用户在 UI 上勾选出来的
+  `paths`。绝不在 `agent_run` 结束时自动落盘 —— 未确认的机器产出只留在沙箱
+  `<runs_root>/<run_id>/project/`。三条硬约束：路径封闭（拒 `..`/绝对路径/`.git`）、
+  拒绝写进沙箱自身、写前备份。UI 侧由 ui-smoke U14 守住"写入只能由确认按钮触发"。
 
 ## 附录 B：事件契约（payload 与 harness:// 逐字段同形）
 
@@ -411,5 +441,58 @@ harness.lint.package_dir        path   默认 <ruyix 仓>/tools/lint（HARNESS_L
 harness.lint.max_repair_rounds  u32    默认 2
 harness.kb.enabled              bool   默认 false（不改变现有行为）
 harness.kb.top_k / token_budget / per_source_limit / min_score  同 engine KbConfig 默认
+# v0.3 质量门禁（工具循环；见 doc/需求-Agent-验证与反思-v0.3.md）
+harness.gate.narrow             bool   默认 true（改动后跑语法层）
+harness.gate.full               bool   默认 true（交付前跑全量：语法 + 单测 + 规约）
+harness.gate.max_full_attempts  u32    默认 3（连续失败几次后按预算放行，答复写明"未通过"）
+harness.gate.staged_timeout_secs u64   默认 60（暂存内容语法检查的单条命令超时）
+harness.reflect.enabled         bool   默认 true（交付前用干净上下文的复核 agent 过一遍）
+harness.reflect.max_rounds      u32    默认 2（复核发现问题后最多回灌主循环几轮）
+harness.reflect.model           str    默认空 = 与主循环同模型
 # LLM 端点与密钥复用既有键：ruyix.code.ai.api_url / api_key / model（D3/D8）
 ```
+
+## 附录 D：Agent 四原语（Read / Write / Execute / Connect）
+
+会话里的 Agent **不是一堆专项工具**，只有四条能力原语 + 一条展示通道。模型每轮输出一个
+JSON 对象选一个能力，直到给出 `{"final": ...}`（上限 24 轮，`agent::MAX_STEPS`）。
+
+| 原语 | 参数 | 边界 |
+|------|------|------|
+| **Read** | `{"path":"src/ 或 src/main.rs"}` | 目录给结构树、文件给内容；路径封闭在项目内（`safe_rel_path`）；Git 历史用 Execute 跑 `git log` |
+| **Write** | `{"path","content"}` | 整文件写入（新增/覆盖）；内容为空拒绝静默清空；写入策略见下 |
+| **Execute** | `{"cmd","timeout_secs"}` | cwd 钉项目根，超时 5–120s（默认 30），stdout/stderr 各裁到 4KB，破坏性模式拒绝清单拦"不可逆的系统级破坏"（绊线不是沙箱，真隔离在 verify 的 docker 模式） |
+| **Connect** | `{"action":"list"\|"call"\|"send", ...}` | 见下 |
+
+**为什么删掉 `edit`（find/replace 结构化修改）**：四原语是能力集的上限，Write 已经覆盖
+"改文件"这件事的语义；多一个 edit 就多一种模型要选的形态、多一类"find 不唯一/不匹配"
+的失败模式。代价是改动也走整份内容（先 read 再整份 write），换来的是能力集简单、审查口径统一
+（任何变更都是一份完整新内容），差异面板与暂存/备份/三模式写入全部原样复用。
+提示词里明确写了"哪怕只改一行也交回整份内容，没把握的地方原样保留"。
+管道自修复（`repair.rs`）的 find/replace 是另一条独立通路，不受影响。
+
+**Connect 的契约与落地**：
+
+```text
+引擎侧（零 tauri）  trait Connector { list() -> Vec<ConnectTarget>; call(ConnectRequest) -> ConnectOutcome }
+                    NoConnector = 没接外部能力的空实现（单测 / 评估臂）
+宿主侧（ruyix）     agent/connect.rs::RuyixConnector
+                    call  action=call → mcp.toml 里找服务器，没连上先握手启动，再 tools/call
+                    call  action=send → a2a.toml 里找远端 Agent，message/send + 轮询到终态
+                                      进度走既有 a2a://status 事件（与 a2a_send 同一条）
+```
+
+- **清单进提示词**：run 开始取一次 `list()`，非空就拼进首条用户消息（`- mcp fs：已连接；工具：read_file(…)`）。
+  空清单不出现 —— 模型不会知道自己没有的能力，也就不会瞎猜名字。
+- **失败分两层**：目标不存在/起不来 = `Err`（那一轮记为失败，模型改路子）；外部系统自己报的
+  业务错误 = `ConnectOutcome::is_error`（信息，照样交回模型判断）。
+- **连什么是宿主的事**：子进程、HTTP、三 scope 配置都在 ruyix 侧；引擎搬到别的宿主换一个
+  `Connector` 实现即可，不必被 MCP 客户端与 a2a 表绑住。
+- **守门**：`scripts/ui-smoke.js` U16 断言四原语 + `execute_allowed` + `MAX_STEPS` + `trait Connector`，
+  并要求 mod.rs 真的建了 `connect::RuyixConnector` 且 connect.rs 同时有 MCP 与 A2A 通路（防 Connect 变空壳）。
+- **验收工具**：
+  - `cargo run -p harness-engine --example agent_loop_smoke` —— 七轮剧本（read → plan →
+    connect list → connect call → write → execute → final）跑真循环：假 LLM 顶在 HTTP 另一头
+    （无需 Key），HTTP 往返 / 循环 / 覆盖层 / 暂存目录 / 真实 shell 全真跑，13 项断言自检。
+  - `cargo test -p ruyix live_mcp_connect -- --ignored` —— Connect 的 MCP 通路真·往返
+    （python 起的 stdio JSON-RPC 回显服务器：未连接 → 自动握手 → tools/call → 清单转"已连接"）。

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -58,14 +58,55 @@ pub enum Scope {
     Runtime,
 }
 
-/// 配置编辑器的整个 scope 视图（配置菜单 → 编辑标签）
+/// 配置表单的一行（配置菜单 → 配置标签）
 #[derive(Debug, Clone, Serialize)]
-pub struct ScopeConfigDump {
+pub struct ConfigEntryDump {
+    /// section = `<section>.toml` 的文件名去后缀
+    pub section: String,
+    /// 相对 section 的键名，如 `api_key` / `llm.temperature`
+    pub key: String,
+    /// 完整配置键 `ruyix.code.<section>.<key>`
+    pub full_key: String,
+    /// 本作用域内的值（未设置 = 空串）
+    pub value: String,
+    /// 本作用域未设置时，回退链上取到的有效值
+    pub inherited: Option<InheritedValue>,
+}
+
+/// 回退链上的有效值及其来源作用域
+#[derive(Debug, Clone, Serialize)]
+pub struct InheritedValue {
+    /// 来源作用域：global / project
+    pub scope: String,
+    pub value: String,
+}
+
+/// 一个作用域 + 其回退链上的全部平铺配置项（配置表单的数据源）
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopeEntriesDump {
     pub scope: String,
     /// 配置目录（runtime 为内存占位说明）
     pub dir: String,
-    /// 合并渲染的 TOML 文本（可直接编辑、Ctrl+S 存回）
-    pub content: String,
+    pub entries: Vec<ConfigEntryDump>,
+}
+
+/// 表单提交的一行；`value` 为空串 = 删除该键（回落到回退链）
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigEntryInput {
+    pub section: String,
+    pub key: String,
+    pub value: String,
+}
+
+/// 保存 / 应用的结果计数
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ScopeSaveReport {
+    /// 写入（新增或更新）的键数
+    pub saved: usize,
+    /// 删除的键数
+    pub removed: usize,
+    /// 刷新进运行时内存对象的键数（保存路径为 0）
+    pub applied: usize,
 }
 
 impl Scope {
@@ -75,6 +116,27 @@ impl Scope {
             "project" | "p" => Some(Scope::Project),
             "runtime" | "r" => Some(Scope::Runtime),
             _ => None,
+        }
+    }
+
+    /// 作用域名（配置表单 / 状态栏展示）
+    pub fn name(&self) -> &'static str {
+        match self {
+            Scope::Global => "global",
+            Scope::Project => "project",
+            Scope::Runtime => "runtime",
+        }
+    }
+
+    /// 回退链上优先级更低的 scope（runtime → project → global）。
+    ///
+    /// 与 `ai.rs` / `agent::config_bridge` 的读法一致：runtime 覆盖 project，
+    /// project 覆盖 global。
+    fn fallbacks(&self) -> &'static [Scope] {
+        match self {
+            Scope::Global => &[],
+            Scope::Project => &[Scope::Global],
+            Scope::Runtime => &[Scope::Project, Scope::Global],
         }
     }
 }
@@ -294,83 +356,44 @@ impl ConfigManager {
     }
 
     // ============================================
-    // 配置编辑器（配置菜单）：整个 scope 的合并视图读写
+    // 配置表单（配置菜单）：扫描 / 保存 / 应用
     // ============================================
 
-    /// 结构化文件：由专门功能管理，平铺编辑器写回会破坏格式，读时排除、写时拒绝
-    const SCOPE_EXCLUDED_FILES: [&str; 3] = ["projects.toml", "execute.toml", "rag.toml"];
+    /// 结构化文件：由专门功能管理（各自的读写器维护数组/嵌套结构），
+    /// 平铺成表单会破坏格式 —— 扫描时排除，保存时拒绝。
+    const SCOPE_EXCLUDED_FILES: [&str; 6] = [
+        "projects.toml", // 项目菜单
+        "execute.toml",  // 运行目标面板
+        "mcp.toml",      // 能力 → MCP 面板
+        "a2a.toml",      // 能力 → A2A 面板
+        "tools.toml",    // 能力 → 工具面板
+        "skills.toml",   // 能力 → SKILL 面板
+    ];
 
-    /// 合并视图的渲染：各 section 按名字排序，`[section]` 表内平铺字符串键值。
-    /// 渲染结果本身是合法 TOML，编辑器里直接改、保存时原样解析回来。
-    fn render_sections_toml(
-        sections: &mut Vec<(String, HashMap<String, String>)>,
-        header: &str,
-    ) -> String {
-        sections.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut root = toml::map::Map::new();
-        for (section, map) in sections {
-            let mut table = toml::map::Map::new();
-            for (k, v) in map {
-                table.insert(k.clone(), toml::Value::String(v.clone()));
-            }
-            root.insert(section.clone(), toml::Value::Table(table));
-        }
-        let body =
-            toml::to_string_pretty(&toml::Value::Table(root)).unwrap_or_else(|_| String::new());
-        format!("{header}\n\n{body}")
-    }
-
-    /// 标量值 → 配置系统的字符串值。字符串原样；数字/布尔取字面量；
-    /// 嵌套表/数组拒绝（配置系统没有这类值）。
-    fn scalar_to_string(v: &toml::Value) -> Result<String, String> {
-        match v {
-            toml::Value::String(s) => Ok(s.clone()),
-            toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Boolean(_) => {
-                Ok(v.to_string())
-            }
-            other => Err(format!("不支持嵌套值（配置只有平铺的键=字符串）: {other}")),
-        }
-    }
-
-    /// 读整个 scope 的合并视图（配置菜单 → 编辑标签）。
-    /// - global/project：目录下各 `<section>.toml` 合并渲染；结构化文件排除；
-    ///   只收字符串键值（`read_toml_file` 同款规则），空 section 跳过
-    /// - runtime：内存键按 section 分组渲染；**保存时以文本为准整体替换**
-    pub fn dump_scope_toml(
+    /// 一个作用域里已有的平铺配置项：(section, key, value)。
+    /// - global/project：目录下各 `<section>.toml`（结构化文件排除），空 section 跳过
+    /// - runtime：内存键按首个点号切成 section + key
+    fn scope_pairs(
         &self,
         scope: &Scope,
         project_root: Option<&str>,
-    ) -> Result<ScopeConfigDump, String> {
+    ) -> Result<Vec<(String, String, String)>, String> {
+        let mut out: Vec<(String, String, String)> = Vec::new();
+
         if *scope == Scope::Runtime {
-            let mut sections: Vec<(String, HashMap<String, String>)> = Vec::new();
-            let mut keys: Vec<&String> = self.runtime.keys().collect();
-            keys.sort();
-            for key in keys {
-                let rest = key
+            for (full, value) in &self.runtime {
+                let rest = full
                     .strip_prefix(PREFIX)
                     .and_then(|s| s.strip_prefix('.'))
-                    .ok_or_else(|| format!("运行时键缺少前缀: {key}"))?;
-                let (section, sub) = rest
-                    .split_once('.')
-                    .ok_or_else(|| format!("运行时键缺少 section: {key}"))?;
-                let value = self.runtime.get(key).cloned().unwrap_or_default();
-                if let Some((_, m)) = sections.iter_mut().find(|(s, _)| s == section) {
-                    m.insert(sub.to_string(), value);
-                } else {
-                    let mut m = HashMap::new();
-                    m.insert(sub.to_string(), value);
-                    sections.push((section.to_string(), m));
+                    .unwrap_or(full);
+                if let Some((section, key)) = rest.split_once('.') {
+                    out.push((section.to_string(), key.to_string(), value.clone()));
                 }
             }
-            return Ok(ScopeConfigDump {
-                scope: "runtime".into(),
-                dir: "(内存 · 不落盘)".into(),
-                content: Self::render_sections_toml(
-                    &mut sections,
-                    "# ruyix 运行时配置（内存，不落盘）\n# 以本文件内容为准：保存会清掉未列出的运行时键",
-                ),
-            });
+            out.sort();
+            return Ok(out);
         }
+
         let dir = self.scope_dir_for(scope, project_root)?;
         let mut names: Vec<String> = Vec::new();
         if let Ok(entries) = fs::read_dir(&dir) {
@@ -382,87 +405,238 @@ impl ConfigManager {
             }
         }
         names.sort();
-        let mut sections: Vec<(String, HashMap<String, String>)> = Vec::new();
         for name in names {
             let section = name.trim_end_matches(".toml").to_string();
-            let map = self.read_toml_file(&dir.join(&name), &section)?;
-            if !map.is_empty() {
-                sections.push((section, map));
+            for (key, value) in self.read_toml_file(&dir.join(&name), &section)? {
+                out.push((section.clone(), key, value));
             }
         }
-        let title = match scope {
-            Scope::Global => "全局",
-            Scope::Project => "项目",
-            Scope::Runtime => "",
-        };
-        let header = format!(
-            "# ruyix {title}配置 — {}\n# Ctrl+S 保存；projects/execute/rag 由专门功能管理，不在此编辑",
-            dir.display()
-        );
-        Ok(ScopeConfigDump {
-            scope: match scope {
-                Scope::Global => "global".into(),
-                Scope::Project => "project".into(),
-                Scope::Runtime => "runtime".into(),
-            },
-            dir: dir.to_string_lossy().to_string(),
-            content: Self::render_sections_toml(&mut sections, &header),
+        out.sort();
+        Ok(out)
+    }
+
+    /// 扫描一个作用域 → 配置表单的数据源：
+    /// 本作用域的键 ∪ 回退链上的键（`runtime → project → global`），
+    /// 每个键带自己的值 + 未设置时的继承值（含来源作用域），供表单展示"当前生效值"。
+    pub fn scan_scope_entries(
+        &self,
+        scope: &Scope,
+        project_root: Option<&str>,
+    ) -> Result<ScopeEntriesDump, String> {
+        let own: HashMap<(String, String), String> = self
+            .scope_pairs(scope, project_root)?
+            .into_iter()
+            .map(|(s, k, v)| ((s, k), v))
+            .collect();
+
+        let mut inherited: HashMap<(String, String), InheritedValue> = HashMap::new();
+        for fb in scope.fallbacks() {
+            // 无项目时项目作用域不存在，跳过（同 ai.rs / config_bridge 的读法）
+            if *fb == Scope::Project && project_root.is_none() {
+                continue;
+            }
+            // 回退链按优先级从高到低遍历，先到先得
+            for (section, key, value) in self.scope_pairs(fb, project_root)? {
+                let id = (section, key);
+                if own.contains_key(&id) || inherited.contains_key(&id) {
+                    continue;
+                }
+                inherited.insert(
+                    id,
+                    InheritedValue {
+                        scope: fb.name().to_string(),
+                        value,
+                    },
+                );
+            }
+        }
+
+        let mut ids: Vec<(String, String)> = own.keys().cloned().collect();
+        ids.extend(inherited.keys().cloned());
+        ids.sort();
+        ids.dedup();
+
+        let entries = ids
+            .into_iter()
+            .map(|(section, key)| ConfigEntryDump {
+                full_key: format!("{}.{}.{}", PREFIX, section, key),
+                value: own
+                    .get(&(section.clone(), key.clone()))
+                    .cloned()
+                    .unwrap_or_default(),
+                inherited: inherited.get(&(section.clone(), key.clone())).cloned(),
+                section,
+                key,
+            })
+            .collect();
+
+        Ok(ScopeEntriesDump {
+            scope: scope.name().to_string(),
+            dir: self.scope_dir_label(scope, project_root)?,
+            entries,
         })
     }
 
-    /// 保存合并视图（配置标签 Ctrl+S）。
-    /// - global/project：按文本里的 `[section]` 逐个写 `<section>.toml`（合并语义：
-    ///   未在文本中出现的既有 section 文件不受影响）
-    /// - runtime：整体替换内存键
-    ///
-    /// 返回写入的键数量。
-    pub fn save_scope_toml(
+    /// 保存配置表单（增量语义）：
+    /// - 只写提交上来的行，未提交的键不动
+    /// - `value` 为空串 = 删除该键（回落到回退链）
+    /// - global/project 落盘 `<section>.toml`；runtime 改内存对象
+    pub fn save_scope_entries(
         &mut self,
         scope: &Scope,
-        content: &str,
+        entries: &[ConfigEntryInput],
         project_root: Option<&str>,
-    ) -> Result<usize, String> {
-        let root: toml::Value =
-            toml::from_str(content).map_err(|e| format!("TOML 解析错误: {e}"))?;
-        let table = root
-            .as_table()
-            .ok_or_else(|| "顶层必须是 [section] 表".to_string())?;
-
-        let mut count = 0usize;
-        for (section, value) in table {
-            let section_table = value
-                .as_table()
-                .ok_or_else(|| format!("[{section}] 必须是键值表"))?;
-            if Self::SCOPE_EXCLUDED_FILES.contains(&format!("{section}.toml").as_str()) {
-                return Err(format!(
-                    "[{section}] 由专门功能管理，不能通过配置编辑器写入"
-                ));
+    ) -> Result<ScopeSaveReport, String> {
+        let mut by_section: BTreeMap<String, Vec<&ConfigEntryInput>> = BTreeMap::new();
+        for e in entries {
+            let section = e.section.trim();
+            if section.is_empty()
+                || section.contains('.')
+                || section.contains('/')
+                || section.contains('\\')
+            {
+                return Err(format!("非法 section: {}", e.section));
             }
-            match scope {
-                Scope::Runtime => {
-                    // 运行时整体替换：首个 section 写入前清空内存键
-                    if count == 0 {
-                        self.runtime.clear();
-                    }
-                    for (k, v) in section_table {
-                        let key = format!("{}.{}.{}", PREFIX, section, k);
-                        self.runtime.insert(key, Self::scalar_to_string(v)?);
-                        count += 1;
+            if Self::SCOPE_EXCLUDED_FILES.contains(&format!("{section}.toml").as_str()) {
+                return Err(format!("[{section}] 由专门功能管理，不能通过配置表单写入"));
+            }
+            // 运行目标不能保存为全局（同 config_write 的规则）
+            if *scope == Scope::Global && section == "run" {
+                return Err(format!("运行目标不能保存为全局: {}", e.key));
+            }
+            by_section.entry(section.to_string()).or_default().push(e);
+        }
+
+        let mut report = ScopeSaveReport::default();
+        for (section, list) in by_section {
+            if *scope == Scope::Runtime {
+                for e in list {
+                    let full = format!("{}.{}.{}", PREFIX, section, e.key);
+                    if e.value.trim().is_empty() {
+                        if self.runtime.remove(&full).is_some() {
+                            report.removed += 1;
+                        }
+                    } else {
+                        self.runtime.insert(full, e.value.clone());
+                        report.saved += 1;
                     }
                 }
-                _ => {
-                    let dir = self.scope_dir_for(scope, project_root)?;
-                    fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-                    let mut map = HashMap::new();
-                    for (k, v) in section_table {
-                        map.insert(k.clone(), Self::scalar_to_string(v)?);
-                        count += 1;
-                    }
-                    self.write_toml_file(&dir.join(format!("{section}.toml")), section, &map)?;
+                continue;
+            }
+            let dir = self.scope_dir_for(scope, project_root)?;
+            fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+            let (saved, removed) = self.write_section_entries(&dir, &section, &list)?;
+            report.saved += saved;
+            report.removed += removed;
+        }
+        Ok(report)
+    }
+
+    /// 应用配置表单 = 保存 + 刷新 IDE 运行时内存里的配置对象。
+    ///
+    /// 运行时对象在查找链上优先级最高（runtime → project → global），所以应用之后
+    /// 这些值立刻对正在运行的 IDE 生效；它不落盘，重启即失效。
+    /// 只把非空值刷进运行时对象 —— 清空表单不做反向删除，避免误伤显式设过的运行时键
+    /// （要清运行时覆盖，到「运行」作用域的表单里清）。
+    pub fn apply_scope_entries(
+        &mut self,
+        scope: &Scope,
+        entries: &[ConfigEntryInput],
+        project_root: Option<&str>,
+    ) -> Result<ScopeSaveReport, String> {
+        let mut report = self.save_scope_entries(scope, entries, project_root)?;
+
+        if *scope == Scope::Runtime {
+            // 运行时作用域本身就是在内存对象上写，保存即生效
+            report.applied = report.saved;
+            return Ok(report);
+        }
+
+        let mut applied = 0usize;
+        for e in entries {
+            // 运行目标不进运行时对象（由运行目标面板 / run.toml 管理）
+            if e.section == "run" || e.value.trim().is_empty() {
+                continue;
+            }
+            let full = format!("{}.{}.{}", PREFIX, e.section, e.key);
+            self.runtime.insert(full, e.value.clone());
+            applied += 1;
+        }
+        report.applied = applied;
+        Ok(report)
+    }
+
+    /// 增量写一个 `<section>.toml`：只动提交的键，其余既有内容（含非标量）原样保留。
+    /// 表被清空则删掉文件，不留空 section。返回 (写入, 删除)。
+    fn write_section_entries(
+        &self,
+        dir: &std::path::Path,
+        section: &str,
+        entries: &[&ConfigEntryInput],
+    ) -> Result<(usize, usize), String> {
+        let path = dir.join(format!("{section}.toml"));
+        let mut root = match fs::read_to_string(&path) {
+            Ok(text) => match toml::from_str::<toml::Value>(&text) {
+                Ok(toml::Value::Table(t)) => t,
+                Ok(_) => return Err(format!("{} 顶层不是表", path.display())),
+                Err(e) => return Err(format!("TOML 解析错误 ({}): {e}", path.display())),
+            },
+            Err(_) => toml::map::Map::new(),
+        };
+
+        // 取 [section] 表；兼容旧格式（文件里是根级平铺键、且没有任何子表）
+        let section_table = match root.get(section) {
+            Some(toml::Value::Table(t)) => Some(t.clone()),
+            _ => None,
+        };
+        let legacy_flat =
+            section_table.is_none() && !root.is_empty() && root.values().all(|v| !v.is_table());
+        let mut table = section_table.unwrap_or_else(|| {
+            if legacy_flat {
+                root.clone()
+            } else {
+                toml::map::Map::new()
+            }
+        });
+
+        let mut saved = 0usize;
+        let mut removed = 0usize;
+        for e in entries {
+            if e.value.trim().is_empty() {
+                if table.remove(&e.key).is_some() {
+                    removed += 1;
                 }
+            } else {
+                table.insert(e.key.clone(), toml::Value::String(e.value.clone()));
+                saved += 1;
             }
         }
-        Ok(count)
+
+        if table.is_empty() {
+            if path.exists() {
+                fs::remove_file(&path).map_err(|e| format!("删除配置失败: {e}"))?;
+            }
+            return Ok((saved, removed));
+        }
+
+        if legacy_flat {
+            root.clear();
+        }
+        root.insert(section.to_string(), toml::Value::Table(table));
+        let text = toml::to_string_pretty(&toml::Value::Table(root)).map_err(|e| e.to_string())?;
+        fs::write(&path, text).map_err(|e| format!("写入配置失败: {e}"))?;
+        Ok((saved, removed))
+    }
+
+    /// 表单头部展示的存储位置（runtime 无目录）
+    fn scope_dir_label(&self, scope: &Scope, project_root: Option<&str>) -> Result<String, String> {
+        match scope {
+            Scope::Runtime => Ok("(内存 · 不落盘)".to_string()),
+            _ => Ok(self
+                .scope_dir_for(scope, project_root)?
+                .to_string_lossy()
+                .to_string()),
+        }
     }
 
     fn scope_dir_for(&self, scope: &Scope, project_root: Option<&str>) -> Result<PathBuf, String> {
@@ -859,81 +1033,202 @@ mod tests {
         projects: ProjectsConfig,
     }
 
-    // ===== 配置编辑器（配置菜单）=====
+    // ===== 配置表单（配置菜单）=====
 
+    /// 表单行的构造助手
+    fn entry(section: &str, key: &str, value: &str) -> ConfigEntryInput {
+        ConfigEntryInput {
+            section: section.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    /// 扫描：本作用域 ∪ 回退链；结构化文件必须被排除
     #[test]
-    fn dump_merges_sections_and_excludes_structured_files() {
-        let dir = temp_dir("dump");
+    fn scan_unions_fallback_chain_and_excludes_structured_files() {
+        let dir = temp_dir("scan");
         let mut mgr = ConfigManager::new_with_dir(dir.clone());
         mgr.config_write(&Scope::Global, "ruyix.code.ai.api_key", "sk-1", None)
             .unwrap();
         mgr.config_write(&Scope::Global, "ruyix.code.ui.lang", "zh-CN", None)
             .unwrap();
-        // 结构化文件必须被排除（平铺写回会破坏格式）
+        // 结构化文件：各自的读写器维护数组结构，平铺成表单会破坏格式
         fs::write(dir.join("projects.toml"), "[projects]\ncurrent = '/x'\n").unwrap();
-        fs::write(dir.join("rag.toml"), "enabled = true\n").unwrap();
+        fs::write(dir.join("execute.toml"), "[exec]\ncmd = 'ls'\n").unwrap();
+        fs::write(dir.join("mcp.toml"), "[[servers]]\nname = 'fs'\n").unwrap();
 
-        let dump = mgr.dump_scope_toml(&Scope::Global, None).unwrap();
-        assert!(dump.content.contains("[ai]"));
-        assert!(dump.content.contains("api_key"));
-        assert!(dump.content.contains("[ui]"));
-        // 头部注释会提到 projects/execute/rag，这里只断言没有它们的 section
-        assert!(!dump.content.contains("[projects]"));
-        assert!(!dump.content.contains("[rag]"));
+        let dump = mgr.scan_scope_entries(&Scope::Global, None).unwrap();
+        let keys: Vec<&str> = dump.entries.iter().map(|e| e.full_key.as_str()).collect();
+        assert_eq!(keys, vec!["ruyix.code.ai.api_key", "ruyix.code.ui.lang"]);
+        assert!(dump.entries.iter().all(|e| e.inherited.is_none()));
+        assert_eq!(dump.scope, "global");
+        assert_eq!(dump.dir, dir.to_string_lossy());
     }
 
+    /// 扫描 project 作用域：项目值优先，未设置的行带全局继承值
     #[test]
-    fn save_round_trips_and_rejects_reserved_sections() {
+    fn scan_project_marks_inherited_from_global() {
+        let dir = temp_dir("scan-proj");
+        let mut mgr = ConfigManager::new_with_dir(dir.clone());
+        mgr.config_write(&Scope::Global, "ruyix.code.ai.model", "global-model", None)
+            .unwrap();
+        mgr.config_write(&Scope::Global, "ruyix.code.ai.api_key", "sk-g", None)
+            .unwrap();
+
+        let proj = temp_dir("scan-proj-root");
+        let root = proj.to_string_lossy().to_string();
+        mgr.config_write(
+            &Scope::Project,
+            "ruyix.code.ai.model",
+            "proj-model",
+            Some(&root),
+        )
+        .unwrap();
+
+        let dump = mgr
+            .scan_scope_entries(&Scope::Project, Some(&root))
+            .unwrap();
+        let model = dump
+            .entries
+            .iter()
+            .find(|e| e.key == "model")
+            .expect("model 行缺失");
+        assert_eq!(model.value, "proj-model");
+        assert!(model.inherited.is_none(), "本作用域已设置就不该有继承值");
+
+        let api_key = dump
+            .entries
+            .iter()
+            .find(|e| e.key == "api_key")
+            .expect("api_key 行缺失");
+        assert_eq!(api_key.value, "");
+        let inh = api_key.inherited.as_ref().expect("应有全局继承值");
+        assert_eq!(inh.scope, "global");
+        assert_eq!(inh.value, "sk-g");
+    }
+
+    /// 保存：增量写 + 空值删除 + 拒绝保留 section
+    #[test]
+    fn save_is_incremental_and_removes_on_empty_value() {
         let dir = temp_dir("save");
         let mut mgr = ConfigManager::new_with_dir(dir.clone());
-        let text = "[ai]\napi_key = \"sk-2\"\nmax_tokens = 2000\n\n[ui]\nlang = \"en\"\n";
-        let n = mgr.save_scope_toml(&Scope::Global, text, None).unwrap();
-        assert_eq!(n, 3);
+        let report = mgr
+            .save_scope_entries(
+                &Scope::Global,
+                &[
+                    entry("ai", "api_key", "sk-2"),
+                    entry("ai", "model", "deepseek-chat"),
+                    entry("ui", "lang", "en"),
+                ],
+                None,
+            )
+            .unwrap();
+        assert_eq!((report.saved, report.removed, report.applied), (3, 0, 0));
 
-        // 读回：写盘格式与 config_read 兼容；数字标量转为字符串
+        // 读回：落盘格式与 config_read 兼容
         assert_eq!(
             mgr.config_read(&Scope::Global, "ruyix.code.ai.api_key", None)
                 .unwrap()
                 .as_deref(),
             Some("sk-2")
         );
+
+        // 增量：只提交 model 的更新，未提交的 api_key 不动
+        let report = mgr
+            .save_scope_entries(&Scope::Global, &[entry("ai", "model", "deepseek-v3")], None)
+            .unwrap();
+        assert_eq!((report.saved, report.removed), (1, 0));
         assert_eq!(
-            mgr.config_read(&Scope::Global, "ruyix.code.ai.max_tokens", None)
+            mgr.config_read(&Scope::Global, "ruyix.code.ai.api_key", None)
                 .unwrap()
                 .as_deref(),
-            Some("2000")
+            Some("sk-2")
         );
 
-        // 保留 section：写回会破坏结构化文件，必须拒绝
-        let bad = "[projects]\ncurrent = '/x'\n";
-        assert!(mgr.save_scope_toml(&Scope::Global, bad, None).is_err());
+        // 空值 = 删除该键；section 清空后不留空文件
+        let report = mgr
+            .save_scope_entries(
+                &Scope::Global,
+                &[entry("ai", "api_key", ""), entry("ai", "model", "")],
+                None,
+            )
+            .unwrap();
+        assert_eq!((report.saved, report.removed), (0, 2));
+        assert!(!dir.join("ai.toml").exists());
+        assert!(dir.join("ui.toml").exists());
 
-        // 再 dump：内容回到编辑器形状（round-trip）
-        let dump = mgr.dump_scope_toml(&Scope::Global, None).unwrap();
-        assert!(dump.content.contains("api_key"));
+        // 保留 section 直接拒绝
+        assert!(
+            mgr.save_scope_entries(&Scope::Global, &[entry("projects", "current", "/x")], None)
+                .is_err()
+        );
+        // 运行目标不能保存为全局
+        assert!(
+            mgr.save_scope_entries(&Scope::Global, &[entry("run", "target0.cmd", "ls")], None)
+                .is_err()
+        );
     }
 
+    /// 保存非标量既存内容时原样保留（不把数组/嵌套表拍平）
     #[test]
-    fn runtime_save_replaces_all_keys() {
+    fn save_preserves_non_scalar_sections() {
+        let dir = temp_dir("preserve");
+        let mut mgr = ConfigManager::new_with_dir(dir.clone());
+        fs::write(
+            dir.join("custom.toml"),
+            "[custom]\nanswer = 42\nnested = { a = 1 }\n[self]\nname = 'x'\n",
+        )
+        .unwrap();
+
+        mgr.save_scope_entries(&Scope::Global, &[entry("custom", "name", "y")], None)
+            .unwrap();
+        let text = fs::read_to_string(dir.join("custom.toml")).unwrap();
+        assert!(text.contains("answer = 42"), "数字标量应保留原类型: {text}");
+        assert!(text.contains("nested"), "嵌套表应保留: {text}");
+        assert!(
+            text.contains("name = \"y\"") || text.contains("name = 'y'"),
+            "{text}"
+        );
+        assert!(text.contains("[self]"), "其它 section 应保留: {text}");
+    }
+
+    /// 运行时作用域：写内存对象，自带的键在表单里显示为普通行（无继承）
+    #[test]
+    fn runtime_scope_reads_and_writes_memory_object() {
         let mut mgr = ConfigManager::new_with_dir(temp_dir("rt"));
         mgr.config_write(&Scope::Runtime, "ruyix.code.ai.api_key", "old", None)
             .unwrap();
         mgr.config_write(&Scope::Runtime, "ruyix.code.ui.emoji", "true", None)
             .unwrap();
 
-        let dump = mgr.dump_scope_toml(&Scope::Runtime, None).unwrap();
-        assert!(dump.content.contains("[ai]") && dump.content.contains("[ui]"));
+        let dump = mgr.scan_scope_entries(&Scope::Runtime, None).unwrap();
+        assert_eq!(dump.dir, "(内存 · 不落盘)");
+        assert_eq!(dump.entries.len(), 2);
 
-        let n = mgr
-            .save_scope_toml(&Scope::Runtime, "[ai]\nmodel = \"deepseek-chat\"\n", None)
+        let report = mgr
+            .save_scope_entries(
+                &Scope::Runtime,
+                &[
+                    entry("ai", "model", "deepseek-chat"),
+                    entry("ui", "emoji", ""),
+                ],
+                None,
+            )
             .unwrap();
-        assert_eq!(n, 1);
-        // 整体替换语义：未列出的 ui.emoji 被清掉
+        assert_eq!((report.saved, report.removed), (1, 1));
         assert_eq!(
             mgr.config_read(&Scope::Runtime, "ruyix.code.ai.model", None)
                 .unwrap(),
             Some("deepseek-chat".into())
         );
+        // 增量语义：未提交的 ai.api_key 还在
+        assert_eq!(
+            mgr.config_read(&Scope::Runtime, "ruyix.code.ai.api_key", None)
+                .unwrap(),
+            Some("old".into())
+        );
+        // 提交了空值 → 删掉
         assert_eq!(
             mgr.config_read(&Scope::Runtime, "ruyix.code.ui.emoji", None)
                 .unwrap(),
@@ -941,12 +1236,61 @@ mod tests {
         );
     }
 
+    /// 应用 = 保存 + 把非空值刷进运行时内存对象（全局/项目作用域才有这一步）
+    #[test]
+    fn apply_refreshes_runtime_object() {
+        let mut mgr = ConfigManager::new_with_dir(temp_dir("apply"));
+        let report = mgr
+            .apply_scope_entries(
+                &Scope::Global,
+                &[
+                    entry("ai", "model", "deepseek-chat"),
+                    entry("ui", "lang", "en"),
+                ],
+                None,
+            )
+            .unwrap();
+        assert_eq!((report.saved, report.applied), (2, 2));
+        // 运行时对象拿到值 → 读 runtime 命中（优先级最高）
+        assert_eq!(
+            mgr.config_read(&Scope::Runtime, "ruyix.code.ai.model", None)
+                .unwrap(),
+            Some("deepseek-chat".into())
+        );
+
+        // 空值不反向删除运行时键（避免误伤显式设过的运行时覆盖）
+        let report = mgr
+            .apply_scope_entries(&Scope::Global, &[entry("ai", "model", "")], None)
+            .unwrap();
+        assert_eq!(report.applied, 0);
+        assert_eq!(
+            mgr.config_read(&Scope::Runtime, "ruyix.code.ai.model", None)
+                .unwrap(),
+            Some("deepseek-chat".into())
+        );
+
+        // 项目作用域没有 project_root：连保存路径都拿不到，必须报错
+        assert!(
+            mgr.apply_scope_entries(
+                &Scope::Project,
+                &[entry("run", "t0.cmd", "cargo run")],
+                None
+            )
+            .is_err()
+        );
+    }
+
+    /// 项目作用域必须有 project_root
     #[test]
     fn project_scope_requires_project_root() {
         let mut mgr = ConfigManager::new_with_dir(temp_dir("proj"));
-        assert!(mgr.dump_scope_toml(&Scope::Project, None).is_err());
+        assert!(mgr.scan_scope_entries(&Scope::Project, None).is_err());
         assert!(
-            mgr.save_scope_toml(&Scope::Project, "[ai]\napi_key = 'x'\n", None)
+            mgr.save_scope_entries(&Scope::Project, &[entry("ai", "api_key", "x")], None)
+                .is_err()
+        );
+        assert!(
+            mgr.apply_scope_entries(&Scope::Project, &[entry("ai", "api_key", "x")], None)
                 .is_err()
         );
     }

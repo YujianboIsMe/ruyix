@@ -35,9 +35,12 @@ Tauri 2 + Monaco Editor + Rust后端
 
 ## AI Agent 引擎（harness-engine）
 `crates/harness-engine`：从 darkhorse-harness 一次性迁入的 Agent 引擎（零 tauri 依赖的 lib crate），
-实现「规划 → 生成 → 规约 → 验证 → 自修复」闭环，含 175 个单测。
-后端桥 `src-tauri/src/agent/`（12 个 agent_* 命令 + `agent://*` 事件流），
-前端面板见导航区「智能体」标签（无后端时自带演示回放）。详见[融合计划](doc/融合计划-Agent集成-v0.2.md)。
+实现「规划 → 生成 → 规约 → 验证 → 自修复」闭环，含 194 个单测。
+工具循环只有四种原子能力（读 / 写 / 执行 / 连接），交付前有**质量门禁**：机械验证（改动后跑语法层、
+交付前跑语法+单测+规约，未通过不放行）+ 干净上下文的复核 agent（只读、结构化结论、结论回灌主循环）。
+后端桥 `src-tauri/src/agent/`（`agent_*` 命令 + `agent://*` 事件流），
+前端面板见导航区「智能体」标签（无后端时自带演示回放）。详见[融合计划](doc/融合计划-Agent集成-v0.2.md)与
+[需求：验证与反思](doc/需求-Agent-验证与反思-v0.3.md)。
 
 ## 界面
 [界面](doc/ui.md)

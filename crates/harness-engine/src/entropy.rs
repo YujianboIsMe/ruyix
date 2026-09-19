@@ -852,6 +852,7 @@ fn repair_in_worktree(
         cfg.entropy.max_repair_attempts,
         None,
         None,
+        None,
     ))?;
     let applied = match repair::apply_edits(wt, &attempt.edits) {
         Ok(v) => v,
