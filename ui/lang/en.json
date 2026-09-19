@@ -291,7 +291,7 @@
   "terminal.xterm_missing": "xterm.js not loaded",
   "project.restoring": "Restoring project: {path}",
   "project.restore_fail": "Failed to restore project: {err}",
-  "project.welcome": "Welcome to Darkhorse Code",
+  "project.welcome": "Welcome to ruyix",
   "project.other_instance": "Another instance is running — last project not auto-opened",
   "project.ai_fail": "AI command failed: {err}",
   "project.ai_result": "Unsupported: AI returned no valid response",

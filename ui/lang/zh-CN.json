@@ -291,7 +291,7 @@
   "terminal.xterm_missing": "xterm.js 未加载",
   "project.restoring": "正在恢复项目: {path}",
   "project.restore_fail": "恢复项目失败: {err}",
-  "project.welcome": "欢迎使用 Darkhorse Code",
+  "project.welcome": "欢迎使用 ruyix",
   "project.other_instance": "检测到其他实例正在运行，未自动打开上次项目",
   "project.ai_fail": "AI 命令失败: {err}",
   "project.ai_result": "不支持的操作：AI 未返回有效响应",
