@@ -559,6 +559,8 @@ function closeTab(tabId) {
     state.activeTabId = null;
     renderTabs();
     hideEditor();
+    // 无项目时没有"编辑器空态"可回（欢迎页盖着编辑区），回到欢迎页
+    if (!state.currentProject) showWelcomePage();
   } else {
     const next = state.tabs[Math.min(idx, state.tabs.length - 1)];
     switchTab(next.id);
@@ -572,6 +574,16 @@ function hideEditorView() {
 // ============================================
 
 function showEditor() {
+  // 编辑区上层视图归位：显示标签页 = 欢迎页/帮助页/Agent 控制台都让位
+  // （标签栏在 editor-body 里，无项目状态下它整体隐藏，必须先放出来）
+  const welcome = document.getElementById("welcome-content");
+  const help = document.getElementById("help-page");
+  const agent = document.getElementById("agent-page");
+  const editorBody = document.getElementById("editor-body");
+  if (welcome) welcome.style.display = "none";
+  if (help) help.style.display = "none";
+  if (agent) agent.style.display = "none";
+  if (editorBody) editorBody.style.display = "";
   document.getElementById("editor-empty").style.display = "none";
   document.getElementById("editor-view").style.display = "";
 }
