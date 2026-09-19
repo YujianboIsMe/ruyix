@@ -122,7 +122,7 @@ function setupMenuBar() {
         if (action === "close-project") {
           await handleCommand("close project");
         } else if (action === "new-project") {
-          const path = await showPrompt("打开项目", "");
+          const path = await pickFolder(I18N.t("project.pick_folder"));
           if (path) await handleCommand("open project " + path);
         } else if (action === "migrate-config") {
           await handleCommand("project migrate");
@@ -319,6 +319,25 @@ function getTauriInvoke() {
     return core.invoke.bind(core);
   }
   return null;
+}
+
+/**
+ * 系统原生文件夹选择框（tauri-plugin-dialog）。
+ * 返回所选路径；取消 / 无 Tauri / 插件异常时返回 null，
+ * 命令栏 `open project <路径>` 仍是手动入口。
+ */
+async function pickFolder(title) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return null;
+  try {
+    const picked = await invoke("plugin:dialog|open", {
+      options: { directory: true, multiple: false, title },
+    });
+    if (Array.isArray(picked)) return picked[0] ?? null;
+    return picked ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ============================================

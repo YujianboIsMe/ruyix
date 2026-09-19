@@ -375,5 +375,6 @@
   "cmd.agent.no_project": "智能体需要先打开项目（agent 任务依赖项目上下文）",
   "nav.tab_sessions": "会话",
   "session.new": "＋ 新建会话",
-  "session.list": "会话列表"
+  "session.list": "会话列表",
+  "project.pick_folder": "选择项目文件夹"
 }

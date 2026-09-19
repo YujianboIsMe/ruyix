@@ -375,5 +375,6 @@
   "cmd.agent.no_project": "Open a project first (agent tasks need project context)",
   "nav.tab_sessions": "Sessions",
   "session.new": "+ New Session",
-  "session.list": "Sessions"
+  "session.list": "Sessions",
+  "project.pick_folder": "Select project folder"
 }

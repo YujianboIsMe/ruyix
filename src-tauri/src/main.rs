@@ -1236,6 +1236,7 @@ fn main() {
     let pty_mgr = Mutex::new(pty::PtyManager::new());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(config_mgr)
         .manage(mcp::McpManager::new())
         .manage(pty_mgr)
