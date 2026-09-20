@@ -665,6 +665,50 @@ impl Default for EnvConfig {
     }
 }
 
+fn d_proc_enabled() -> bool {
+    true
+}
+
+fn d_proc_max() -> usize {
+    4
+}
+
+fn d_proc_ready_timeout() -> u64 {
+    60
+}
+
+/// 托管进程（永不退出的服务）配置（v0.6）。
+///
+/// `execute` 原来是"跑完为止"，对 `mvn spring-boot:run` / `java -jar` 这类**永不退出**的服务
+/// 是错的：模型没有表达"常驻"的词汇，只能靠 `start` / `Start-Process` / 往 %TEMP% 写 bat 去绕，
+/// 绕出来的进程还脱离了引擎的进程树（输出拿不到、日志路径漂、杀都杀不到）。这一组开关给
+/// "常驻"一个正当出口，是 [`crate::proc`] 的配置面。
+///
+/// 默认**开**：关掉等于把模型推回歪招 —— 实测 cloud-shop-admin 因此空转了 17 轮，而服务其实
+/// 早就起来了（日志里写着 `Started AdminApplication`，进程还占着 8083 端口）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProcConfig {
+    /// 关掉后后台启动一律被拒（回一条说明，不执行）
+    #[serde(default = "d_proc_enabled")]
+    pub enabled: bool,
+    /// 同时托管的进程数上限（含 `keep_alive` 留下的），1~16
+    #[serde(default = "d_proc_max")]
+    pub max: usize,
+    /// 没显式给 `ready_timeout_secs` 时的默认就绪窗口（秒），1~600
+    #[serde(default = "d_proc_ready_timeout")]
+    pub ready_timeout_secs: u64,
+}
+
+impl Default for ProcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: d_proc_enabled(),
+            max: d_proc_max(),
+            ready_timeout_secs: d_proc_ready_timeout(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     #[serde(default)]
@@ -697,6 +741,9 @@ pub struct AppConfig {
     /// 环境准备（缺失工具的按需安装，走 Connect，v0.5）
     #[serde(default)]
     pub env: EnvConfig,
+    /// 托管进程（永不退出的服务：后台启动 + 就绪判据 + 句柄，v0.6）
+    #[serde(default)]
+    pub proc: ProcConfig,
     #[serde(default = "d_workspace")]
     pub workspace_root: String,
     #[serde(default = "d_max_context")]
@@ -720,6 +767,7 @@ impl Default for AppConfig {
             kb: KbConfig::default(),
             discover: DiscoverConfig::default(),
             env: EnvConfig::default(),
+            proc: ProcConfig::default(),
             workspace_root: d_workspace(),
             max_context_chars: d_max_context(),
         }

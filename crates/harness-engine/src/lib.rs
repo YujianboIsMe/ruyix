@@ -25,6 +25,7 @@ pub mod llm;
 pub mod observe;
 pub mod pipeline;
 pub mod plan;
+pub mod proc;
 pub mod reflect;
 pub mod repair;
 pub mod sandbox;

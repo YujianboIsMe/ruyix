@@ -144,8 +144,12 @@ fn decode_ansi_codepage(bytes: &[u8]) -> Option<String> {
     Some(String::from_utf16_lossy(&buf))
 }
 
+/// 杀**整棵进程树**（不是只杀直接子进程）。
+///
+/// 公开给 [`crate::proc`] 复用：托管服务多是 `cmd → mvn.cmd → java` 这样的多层树，
+/// 只杀最外层会留下占着端口的 `java`，而那个孤儿会让后面每一次启动都拿到假的失败信号。
 #[cfg(target_os = "windows")]
-fn kill_tree(pid: u32) {
+pub fn kill_tree(pid: u32) {
     let _ = Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
         .stdout(Stdio::null())
@@ -157,7 +161,7 @@ fn kill_tree(pid: u32) {
 /// Unix 侧等价实现：spawn 时已用 `process_group(0)` 把子进程放进独立进程组
 /// （pgid == pid），对负 pid 发 SIGKILL 即杀整个进程组，效果等同 `taskkill /T`。
 #[cfg(unix)]
-fn kill_tree(pid: u32) {
+pub fn kill_tree(pid: u32) {
     let _ = Command::new("kill")
         .args(["-9", &format!("-{pid}")])
         .stdout(Stdio::null())
@@ -199,11 +203,7 @@ pub fn run_with_cap(
     };
 
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(args).current_dir(cwd).stdin(Stdio::null());
     // Windows：release 下 GUI 子系统没有控制台，不加标志会闪黑窗；
     // Unix：放进独立进程组，超时强杀才能连子进程树一起杀掉。
     #[cfg(target_os = "windows")]
@@ -213,6 +213,22 @@ pub fn run_with_cap(
     for (k, v) in envs {
         cmd.env(k, v);
     }
+
+    run_prepared(cmd, display, started, timeout, max_stdout)
+}
+
+/// spawn + 收输出 + 超时强杀的公共部分（[`run_with_cap`] 与 [`run_line`] 共用）。
+///
+/// 分开的理由不是好看：两条路构造 [`Command`] 的方式**必须不同**（见 [`shell_command`]
+/// 的 `raw_arg` 说明），但"喂管道 → 排空 → 超时杀树 → 按代码页解码"这套必须**只有一份**。
+fn run_prepared(
+    mut cmd: Command,
+    display: String,
+    started: Instant,
+    timeout: Duration,
+    max_stdout: usize,
+) -> CmdOutput {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -344,14 +360,54 @@ pub fn resolve_bin(bin: &str, timeout: Duration) -> Option<String> {
 ///
 /// 需要完整输出（退出码 / stdout / stderr）用这个；只要版本首行用 [`bin_version`]。
 pub fn run_line(cwd: &Path, cmdline: &str, timeout: Duration) -> CmdOutput {
+    let cmd = shell_command(cwd, cmdline);
+    run_prepared(
+        cmd,
+        cmdline.to_string(),
+        Instant::now(),
+        timeout,
+        DEFAULT_STDOUT_CAP,
+    )
+}
+
+/// 构造一个"过 shell 跑**一条拼接出来的命令行**"的 [`Command`]（不 spawn，由调用方自己
+/// 决定输出去哪）。
+///
+/// **Windows 上这两条缺一不可**，都是实测踩出来的（复现：`examples/proc_demo.rs`）：
+///
+/// 1. 用 `raw_arg` 而不是 `arg`。std 的 `arg` 会按 Windows 参数规则先加工：参数含空格就
+///    整体加引号、并把内部引号转义成 `\"`。于是 cmd 收到的第一个 token 变成
+///    `\"C:\path\x.exe\"`，认不出可执行文件，回一句 `'\"...\"' 不是内部或外部命令`。
+/// 2. 用 `/S /C` 并**自己把整条命令行裹一层引号**。`cmd /C` 对"以引号开头的串"有一套
+///    额外的剥引号规则，条件不满足就不剥 —— 命令行里带引号时正好不满足，于是 cmd 把
+///    `"C:\x.exe" --hold "C:\y" 30` 当成文件名去解析，回
+///    `文件名、目录名或卷标语法不正确。`。加 `/S` 后 cmd **无条件**剥掉最外层那一对引号，
+///    里面的内容原样执行（包括内部的引号）。
+///
+/// Unix 侧没有这些问题（`execvp` 直接传 argv，不经过任何字符串往返），但为了"只有一份
+/// shell 构造"仍走同一个入口。
+///
+/// 公开给 [`crate::proc`] 复用：托管进程要把 stdout/stderr 重定向到**引擎指定的日志文件**，
+/// 不能走 [`run_line`]（它内部收管道），所以要拿到 [`Command`] 自己配 IO 再 spawn。
+pub fn shell_command(cwd: &Path, line: &str) -> Command {
     #[cfg(target_os = "windows")]
-    {
-        run(cwd, "cmd", &["/C", cmdline], timeout, &[])
-    }
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.arg("/S").arg("/C").raw_arg(format!("\"{line}\""));
+        c
+    };
     #[cfg(not(target_os = "windows"))]
-    {
-        run(cwd, "sh", &["-c", cmdline], timeout, &[])
-    }
+    let mut cmd = {
+        let mut c = Command::new("sh");
+        c.args(["-c", line]);
+        c
+    };
+    cmd.current_dir(cwd).stdin(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
 }
 
 /// 取版本首行。**不看退出码** —— `java -version` 走的是 stderr，不少工具版本也非 0 退出。
@@ -421,6 +477,30 @@ mod tests {
         assert!(c.contains("省略"));
         // 没有 panic 且仍是合法 UTF-8 即说明切在了字符边界上
         assert!(std::str::from_utf8(c.as_bytes()).is_ok());
+    }
+
+    /// 病根回归：命令行里带引号必须**原样**到 shell。
+    ///
+    /// 实测病根（`examples/proc_demo.rs` 暴露）：把整条命令行当普通参数交给 std，
+    /// Windows 下 std 会给它整体加引号并把内部引号转义成 `\"`，cmd 收到的第一个 token 是
+    /// `\"C:\path\x.exe\"` → `不是内部或外部命令`；换成 `raw_arg` 后又撞上 `cmd /C` 对
+    /// "以引号开头的串"的剥引号规则 → `文件名、目录名或卷标语法不正确。`。
+    /// 修法是 `raw_arg` + 自己裹一层引号 + `/S /C`（无条件剥最外层）。
+    /// 这里用 `echo "a b"` 验：引号转义会留下反斜杠，一眼可见。
+    #[test]
+    fn run_line_passes_quotes_to_the_shell_verbatim() {
+        let out = run_line(
+            &std::env::temp_dir(),
+            "echo \"a b\"",
+            Duration::from_secs(20),
+        );
+        assert_eq!(out.exit_code, Some(0), "stderr={}", out.stderr);
+        assert!(out.stdout.contains("a b"), "stdout={:?}", out.stdout);
+        assert!(
+            !out.stdout.contains('\\'),
+            "引号被 std 转义成了反斜杠（raw_arg / /S /C 回归）：stdout={:?}",
+            out.stdout
+        );
     }
 
     /// 合法 UTF-8 必须直通 —— 本机大量工具（cargo / node / 设了 `PYTHONUTF8` 的 python）
