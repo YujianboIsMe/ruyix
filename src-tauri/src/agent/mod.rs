@@ -12,6 +12,7 @@
 pub mod apply;
 pub mod config_bridge;
 pub mod connect;
+pub mod env_setup;
 pub mod machine;
 pub mod project_context;
 pub mod sessions;
@@ -191,7 +192,8 @@ pub async fn agent_reply(
     // 取消位跨命令共享：起跑清零，agent_cancel 置位。机械验证（cargo test 级）和复核
     // 都可能跑很久，没有取消路径会很糟。
     state.cancel.store(false, Ordering::Relaxed);
-    let conn = connect::RuyixConnector::new(&app, mcp_mgr.inner(), Some(&root));
+    let conn =
+        connect::RuyixConnector::new(&app, mcp_mgr.inner(), Some(&root), cfg.env.install_enabled);
     let sink = AgentSink::new(app);
     let out = engine::agent::run(
         &cfg,

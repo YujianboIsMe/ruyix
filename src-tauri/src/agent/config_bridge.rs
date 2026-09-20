@@ -60,6 +60,8 @@ pub struct BridgeValues {
     pub discover_enabled: Option<String>,
     pub discover_ttl_secs: Option<String>,
     pub discover_extra: Option<String>,
+    // v0.5 环境准备：缺失工具的按需安装（走 Connect，宿主裁量 + 留记录）
+    pub env_install_enabled: Option<String>,
 }
 
 impl BridgeValues {
@@ -107,6 +109,7 @@ impl BridgeValues {
             discover_enabled: read(mgr, "ruyix.code.harness.discover.enabled", project_root),
             discover_ttl_secs: read(mgr, "ruyix.code.harness.discover.ttl_secs", project_root),
             discover_extra: read(mgr, "ruyix.code.harness.discover.extra", project_root),
+            env_install_enabled: read(mgr, "ruyix.code.harness.env.install_enabled", project_root),
         }
     }
 }
@@ -273,6 +276,12 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
+    }
+
+    // v0.5 环境准备：默认**开**（自成长闭环的最后一环）。关掉后宿主连清单都不摆 env 目标，
+    // 模型侧彻底看不见 —— 所以这里只是一行可回退的开关，不涉及任何判定逻辑。
+    if let Some(e) = v.env_install_enabled.as_deref() {
+        cfg.env.install_enabled = e == "true" || e == "1";
     }
 
     // 运行目录：ruyix 默认 ~/.ruyix/code/agent/runs（D5）
@@ -456,6 +465,35 @@ mod tests {
             },
         );
         assert_eq!(cfg3.discover.ttl_secs, 300);
+    }
+
+    /// v0.5：环境准备（按需安装）默认开，`false` 能关回去
+    #[test]
+    fn env_install_bridge_defaults_on_and_can_be_turned_off() {
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &BridgeValues::default());
+        assert!(cfg.env.install_enabled, "默认开：这是自成长闭环的最后一环");
+
+        let mut off = base();
+        apply_overrides(
+            &mut off,
+            &BridgeValues {
+                env_install_enabled: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!off.env.install_enabled, "必须能一行回退");
+
+        // "1" 也算开
+        let mut on = base();
+        apply_overrides(
+            &mut on,
+            &BridgeValues {
+                env_install_enabled: Some("1".into()),
+                ..Default::default()
+            },
+        );
+        assert!(on.env.install_enabled);
     }
 
     #[test]

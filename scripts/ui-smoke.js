@@ -42,6 +42,9 @@
  *   U19 cmd-discover  命令发现（v0.5）：本机有哪些命令必须实测后写进上下文 —— 一张数据表 +
  *                     两步探测（where/command -v 解析 + 过 shell 取版本，Windows 的 .cmd 不被
  *                     CreateProcess 认）+ 可用与不可用都写 + 主循环与子步骤都注入
+ *   U20 env-install   环境准备（v0.5）：缺失工具按需安装 —— **不是新原语**，走 Connect；
+ *                     引擎零分支（ENV_CONNECTOR_KIND 约定 + 缺失指向 connect），包管理器知识
+ *                     全在宿主一张表；每次动作留记录（jsonl + UI 事件）；安装命令必须过 shell
  */
 
 "use strict";
@@ -401,6 +404,29 @@ function runStaticChecks() {
       has(configJs, '"discover.enabled"') &&
       has(configJs, '"discover.extra"'),
     "命令发现没接上：工具表 / 两步探测（where+shell）/ 可用与不可用都写 / 主循环与子步骤都注入 / 配置项 缺一不可");
+
+  // U20 env-install：环境准备（v0.5）—— 缺工具时的按需安装。它**不是第五种原语、不占新的 connect
+  // 形态**：引擎侧零改动，宿主在清单里多摆一个 `kind="env"` 的目标并在 `call` 里认它即可 ——
+  // 这是"能力进连接器/数据，不进引擎分支"的样板。必须钉住：① 引擎只留约定常量（ENV_CONNECTOR_KIND）
+  // 与"缺失指向 connect"② 宿主连接器把 env 目标摆进清单、且在 `call` 里**先按名字分流**（否则落进
+  // MCP 的"没登记"分支）③ 包管理器知识全在宿主的一张表（加平台是加一行）④ 每次动作**留记录**
+  // （jsonl + UI 事件）⑤ 开关能一行回退（关掉后清单里不再出现 env，模型彻底看不见）
+  // ⑥ 安装命令必须**过 shell**（`.cmd` 不能被 CreateProcess 直接执行）。
+  const connectRs = read("src-tauri/src/agent/connect.rs");
+  const envSetupRs = read("src-tauri/src/agent/env_setup.rs");
+  check("U20", "env-install",
+    has(intentRs, "ENV_CONNECTOR_KIND") &&
+      has(connectRs, "env_setup::ENV_SERVER") &&
+      has(connectRs, "async fn install_env(") &&
+      has(envSetupRs, "pub enum Pm") &&
+      has(envSetupRs, "pub fn pick_manager(") &&
+      has(envSetupRs, "pub fn install(") &&
+      has(envSetupRs, "installs.jsonl") &&
+      has(envSetupRs, "discover::invalidate_cache()") &&
+      has(execRs, "pub fn run_line(") &&
+      has(cfgBridgeRs, "env.install_enabled") &&
+      has(configJs, '"env.install_enabled"'),
+    "环境准备没接上：宿主 env 目标（清单 + call 分流）/ 包管理器表 / 留记录 / 走 shell / 缓存失效 / 开关 缺一不可");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌

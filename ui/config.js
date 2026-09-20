@@ -66,6 +66,10 @@ window.ConfigUI = (() => {
         { key: "discover.enabled", kind: "toggle" },
         { key: "discover.ttl_secs", kind: "number" },
         { key: "discover.extra", kind: "text" },
+        // v0.5 环境准备：缺失工具按需安装，走 connect（宿主挑包管理器，每次留记录）。默认开 ——
+        // 这是自成长闭环的最后一环（探测 → 告知 → 请求安装 → 再探测）。关掉后宿主连清单都不摆
+        // env 目标，模型侧彻底看不见。
+        { key: "env.install_enabled", kind: "toggle" },
       ],
     },
   ];
