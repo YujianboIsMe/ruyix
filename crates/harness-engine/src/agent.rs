@@ -40,7 +40,9 @@ use std::time::{Duration, Instant};
 /// 循环轮次上限（每轮 = 一次模型调用，产出工具调用或最终答复）
 pub const MAX_STEPS: usize = 96;
 /// 连续模型调用失败的容忍上限：瞬时空内容/网络抖动退避后重试，连续超限才终止会话
-const LLM_FAIL_LIMIT: u32 = 3;
+/// 连续模型调用失败几次算致命。步骤执行体（`crate::step_agent`）复用同一条判据 ——
+/// "抖两次就放弃"与"抖十次才放弃"是两种产品行为，不该在两个模块里各写一个数。
+pub(crate) const LLM_FAIL_LIMIT: u32 = 3;
 const READ_CLIP: usize = 8_000;
 const EXEC_CLIP: usize = 4_000;
 const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -259,7 +261,7 @@ impl VerifyOutcome {
     }
 
     /// 回灌主循环的观察文本（模型看到的是"哪一层的什么检查失败了、怎么修"）
-    fn to_observation(&self) -> String {
+    pub(crate) fn to_observation(&self) -> String {
         let mut s = format!("[机械验证·{}] {}\n", self.layer_label(), self.verdict);
         if let Some(r) = &self.skipped_reason {
             s.push_str(&format!("跳过原因：{r}\n"));
@@ -525,11 +527,38 @@ fn parse_action(raw: &str) -> Result<Action, String> {
     }
 }
 
+/// 步骤执行体（`crate::step_agent`）能用的动作子集 —— 主循环解析结果的**收窄视图**。
+///
+/// 为什么不把 `Action` 直接开给子 agent：`plan` 会变成嵌套计划（父的计划谁维护？），
+/// `connect` 会把外部能力的上下文塞进子上下文（它与本步无关，代价还是父的 token）。
+/// 解析仍然只有 `parse_action` 一处真相，这里只做"哪些能用"的裁剪：
+/// 不支持的能力回一条 `Unsupported`，让模型看到明确拒绝后自己收敛，而不是整步失败。
+#[derive(Clone, Debug)]
+pub(crate) enum StepAction {
+    Final(String),
+    Read(String),
+    Write(String, String),
+    Execute(String, Option<u64>),
+    Unsupported(&'static str),
+}
+
+/// 主循环动作 → 步骤动作（plan / connect 收窄成「不支持」）
+pub(crate) fn parse_step_action(raw: &str) -> Result<StepAction, String> {
+    Ok(match parse_action(raw)? {
+        Action::Final(t) => StepAction::Final(t),
+        Action::Read(p) => StepAction::Read(p),
+        Action::Write(p, c) => StepAction::Write(p, c),
+        Action::Execute(c, t) => StepAction::Execute(c, t),
+        Action::Plan(_) => StepAction::Unsupported("plan"),
+        Action::Connect(_) => StepAction::Unsupported("connect"),
+    })
+}
+
 /// 解析失败的回灌消息（JSON 字符串，直接作为 user 消息）。
 /// 两种病两种药：截断（finish_reason=length）叫模型**写短**，格式烂才叫它重发。
 /// 错误文本一律经 serde 编码 —— parse_action 的报错带着 JSON 片段，裸拼会把
 /// 引号漏进字符串值，让这条反馈自己变成非法 JSON。
-fn parse_failure_feedback(err: &str, finish_reason: Option<&str>) -> String {
+pub(crate) fn parse_failure_feedback(err: &str, finish_reason: Option<&str>) -> String {
     let hint = if finish_reason == Some("length") {
         format!(
             "你的上一条输出被 max_tokens 截断了（finish_reason=length），不是格式问题：{err}。\
@@ -551,7 +580,14 @@ fn parse_failure_feedback(err: &str, finish_reason: Option<&str>) -> String {
 
 /// 覆盖层：本会话已写/改的内容。read 优先读它（模型改完能读回自己的修改），
 /// Stage 策略下磁盘未动也能保持一致的视图。
-struct Ctx<'a> {
+///
+/// 步骤执行体（`crate::step_agent`）借的是**同一份** `&mut Ctx`，不是自己的副本：
+/// `emit_step_progress` / `gate_before_final` / `flush_stage` 全依赖这一份 overlay 与
+/// changes，各持一份就得写 merge 与冲突处理，而收益只有"父能看到中间态"。
+///
+/// 它是 `pub` 只因为出现在 `step_agent::run_step` 的签名里；字段与工具方法仍然是
+/// crate 内可见 —— 外部拿不到一份可用的上下文，工具循环的唯一入口是 [`run`]。
+pub struct Ctx<'a> {
     proj: &'a Path,
     overlay: BTreeMap<String, String>,
     changes: Vec<FileChange>,
@@ -560,8 +596,28 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    pub(crate) fn new(proj: &'a Path, policy: WritePolicy) -> Self {
+        Self {
+            proj,
+            overlay: BTreeMap::new(),
+            changes: Vec::new(),
+            policy,
+            backup_dir: None,
+        }
+    }
+
+    /// 本会话改了哪些文件（步骤执行体按"本步写过的路径"筛自己那部分）
+    pub(crate) fn changes(&self) -> &[FileChange] {
+        &self.changes
+    }
+
+    /// 项目根（execute 的工作目录）
+    pub(crate) fn project_root(&self) -> &Path {
+        self.proj
+    }
+
     /// read：目录给结构树（复用 repair 的列表逻辑），文件给内容；"." = 项目根
-    fn tool_read(&self, raw: &str) -> Result<String, String> {
+    pub(crate) fn tool_read(&self, raw: &str) -> Result<String, String> {
         let raw_trim = raw.trim();
         if raw_trim == "." || raw_trim == "./" {
             // 项目根结构：read "." 是模型探索项目的第一步
@@ -596,7 +652,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// write：记录变更进覆盖层；Apply 策略立刻落盘（覆盖前备份）
-    fn tool_write(&mut self, path: &str, content: &str) -> Result<String, String> {
+    pub(crate) fn tool_write(&mut self, path: &str, content: &str) -> Result<String, String> {
         let rel = safe_rel_path(path)?;
         if content.is_empty() {
             return Err("content 为空 —— 不允许静默清空文件".into());
@@ -722,7 +778,7 @@ fn run_shell(proj: &Path, cmd: &str, timeout: Duration) -> exec::CmdOutput {
     return exec::run(proj, "sh", &["-c", cmd], timeout, &[]);
 }
 
-fn tool_execute(proj: &Path, cmd: &str, timeout_secs: Option<u64>) -> String {
+pub(crate) fn tool_execute(proj: &Path, cmd: &str, timeout_secs: Option<u64>) -> String {
     execute_allowed(cmd).map_or_else(
         |e| format!("❌ {e}"),
         |_| {
@@ -840,6 +896,14 @@ fn plan_to_outline(task: &str, steps: Vec<PlanStep>) -> Plan {
     }
 }
 
+/// 步骤声明的文件里，有多少已经在本 run 落地（overlay = 本 run 写过的相对路径 → 内容）
+fn produced_files(s: &PlanStep, overlay: &BTreeMap<String, String>) -> usize {
+    s.files
+        .iter()
+        .filter(|f| overlay.contains_key(f.as_str()))
+        .count()
+}
+
 /// 步骤完成度 → 推给 UI（全部文件落地 = done ✅；部分 = running ⛏️）
 fn emit_step_progress(sink: &dyn Sink, steps: &[PlanStep], overlay: &BTreeMap<String, String>) {
     let total = steps.len();
@@ -869,70 +933,6 @@ fn emit_step_progress(sink: &dyn Sink, steps: &[PlanStep], overlay: &BTreeMap<St
     }
 }
 
-// ============================================
-// 门禁：机械验证 + 反思（v0.3）
-// ============================================
-
-/// 一次 run 内的门禁状态
-#[derive(Default)]
-struct GateState {
-    /// 存在"改动后还没通过全量验证"的内容
-    dirty: bool,
-    /// 全量验证连续失败次数（防"验证不过就无限修"）
-    full_failures: u32,
-    /// 复核结论回灌主循环的次数
-    reflect_rounds: u32,
-    /// 要写进最终答复的补充说明（跳过原因 / 预算用尽 / 复核未完成）
-    notes: Vec<String>,
-}
-
-/// 窄验证：对**这一轮的改动内容**做单文件语法检查。
-///
-/// 作用在覆盖层内容上（不是磁盘），所以确认模式"磁盘未动"也安全。
-/// 代价小是刻意的：它每写一次就跑一次，是给模型的即时反馈，不是交付判据。
-async fn narrow_verify(cfg: &AppConfig, changes: &[FileChange]) -> VerifyOutcome {
-    let files: Vec<(String, String)> = changes
-/// 步骤声明的文件里，有多少已经在本 run 落地（overlay = 本 run 写过的相对路径 → 内容）
-fn produced_files(s: &PlanStep, overlay: &BTreeMap<String, String>) -> usize {
-    s.files
-        .iter()
-        .filter(|f| overlay.contains_key(f.as_str()))
-        .count()
-}
-
-        .iter()
-        .map(|c| (c.path.clone(), c.after.clone()))
-        .collect();
-    let v = cfg.verify.clone();
-    let timeout = Duration::from_secs(cfg.gate.staged_timeout_secs);
-    let started = Instant::now();
-    let checks =
-        tokio::task::spawn_blocking(move || verify::staged_syntax_checks(&v, &files, timeout))
-            .await
-            .unwrap_or_default();
-    VerifyOutcome::from_checks("narrow", &checks, started.elapsed().as_millis())
-}
-
-/// 全量验证：复用 `verify::run`（语法 + 单测，隔离出口一处决定）+ lint（规约）。
-///
-/// **只在写入/自主模式跑**：确认模式下改动还在暂存区、项目磁盘没变，在那里跑出来的
-/// "通过"是假结论 —— 宁可显式跳过（带原因），也不给一个假的通过。
-async fn full_verify(
-    cfg: &AppConfig,
-    proj: &Path,
-    policy: WritePolicy,
-    cancel: &CancelFlag,
-) -> VerifyOutcome {
-    if policy == WritePolicy::Stage {
-        return VerifyOutcome::skip(
-            "full",
-            "确认模式下改动只在暂存区（项目磁盘未动），跑不了全量验证；本次只做了语法层。\
-             切到写入/自主模式才会跑全量"
-                .into(),
-        );
-    }
-    let started = Instant::now();
-    let (root, cfg_v, flag) = (proj.to_path_buf(), cfg.clone(), cancel.clone());
 /// run 收尾：把计划里每个步骤都落到终态。
 ///
 /// 沙漏（⌛）的语义是**等待执行** —— run 已经结束还显示等待，就是在骗人。
@@ -993,6 +993,62 @@ fn settle_steps(
     }
 }
 
+// ============================================
+// 门禁：机械验证 + 反思（v0.3）
+// ============================================
+
+/// 一次 run 内的门禁状态
+#[derive(Default)]
+struct GateState {
+    /// 存在"改动后还没通过全量验证"的内容
+    dirty: bool,
+    /// 全量验证连续失败次数（防"验证不过就无限修"）
+    full_failures: u32,
+    /// 复核结论回灌主循环的次数
+    reflect_rounds: u32,
+    /// 要写进最终答复的补充说明（跳过原因 / 预算用尽 / 复核未完成）
+    notes: Vec<String>,
+}
+
+/// 窄验证：对**这一轮的改动内容**做单文件语法检查。
+///
+/// 作用在覆盖层内容上（不是磁盘），所以确认模式"磁盘未动"也安全。
+/// 代价小是刻意的：它每写一次就跑一次，是给模型的即时反馈，不是交付判据。
+pub(crate) async fn narrow_verify(cfg: &AppConfig, changes: &[FileChange]) -> VerifyOutcome {
+    let files: Vec<(String, String)> = changes
+        .iter()
+        .map(|c| (c.path.clone(), c.after.clone()))
+        .collect();
+    let v = cfg.verify.clone();
+    let timeout = Duration::from_secs(cfg.gate.staged_timeout_secs);
+    let started = Instant::now();
+    let checks =
+        tokio::task::spawn_blocking(move || verify::staged_syntax_checks(&v, &files, timeout))
+            .await
+            .unwrap_or_default();
+    VerifyOutcome::from_checks("narrow", &checks, started.elapsed().as_millis())
+}
+
+/// 全量验证：复用 `verify::run`（语法 + 单测，隔离出口一处决定）+ lint（规约）。
+///
+/// **只在写入/自主模式跑**：确认模式下改动还在暂存区、项目磁盘没变，在那里跑出来的
+/// "通过"是假结论 —— 宁可显式跳过（带原因），也不给一个假的通过。
+async fn full_verify(
+    cfg: &AppConfig,
+    proj: &Path,
+    policy: WritePolicy,
+    cancel: &CancelFlag,
+) -> VerifyOutcome {
+    if policy == WritePolicy::Stage {
+        return VerifyOutcome::skip(
+            "full",
+            "确认模式下改动只在暂存区（项目磁盘未动），跑不了全量验证；本次只做了语法层。\
+             切到写入/自主模式才会跑全量"
+                .into(),
+        );
+    }
+    let started = Instant::now();
+    let (root, cfg_v, flag) = (proj.to_path_buf(), cfg.clone(), cancel.clone());
     let report =
         match tokio::task::spawn_blocking(move || verify::run(&cfg_v, "agent-gate", &root, &flag))
             .await
@@ -1198,14 +1254,10 @@ pub async fn run(
         return Err("消息不能为空".into());
     }
     let started = Instant::now();
-    let mut ctx = Ctx {
-        proj,
-        overlay: BTreeMap::new(),
-        changes: Vec::new(),
-        policy,
-        backup_dir: None,
-    };
+    let mut ctx = Ctx::new(proj, policy);
     let mut plan_steps: Vec<PlanStep> = Vec::new();
+    // 本次是否真的交付了 final（收尾时决定计划步骤能不能算完成，见 settle_steps）
+    let mut delivered = false;
     let mut out = AgentOutcome::default();
     let mut gate = GateState::default();
     // 这一轮读过哪些文件（依据核对的证据集合，复核员会看到这份清单）
@@ -1256,8 +1308,6 @@ pub async fn run(
                 // 鉴权/余额这类确定性失败重试无意义；其余（空内容/网络抖动）退避后
                 // 吃下一轮 —— 轮次预算本身就是防死循环的闸
                 if llm::is_fatal_error(&e) || llm_failures >= LLM_FAIL_LIMIT {
-    // 本次是否真的交付了 final（收尾时决定计划步骤能不能算完成，见 settle_steps）
-    let mut delivered = false;
                     sink.log("error", format!("[agent] 第 {step} 轮模型调用失败：{e}"));
                     return Err(e);
                 }
@@ -1331,6 +1381,7 @@ pub async fn run(
                 }
                 None => {
                     out.answer = text;
+                    delivered = true;
                     sink.log("ok", clip(&format!("[agent] 完成，共 {step} 轮"), 200));
                     break;
                 }
@@ -1381,7 +1432,6 @@ pub async fn run(
         });
         let level = if ok { "info" } else { "warn" };
         let status_icon = if ok { "✓" } else { "✗" };
-                    delivered = true;
         sink.log(
             level,
             clip(
@@ -1436,6 +1486,11 @@ pub async fn run(
         }
     }
 
+    // 计划落定：run 结束了，大纲区不该再留沙漏（⌛ 是"等待执行"，不是"没做成"）
+    if !plan_steps.is_empty() {
+        settle_steps(sink, &plan_steps, &ctx.overlay, delivered);
+    }
+
     // 门禁留下的补充说明（跳过原因 / 预算用尽 / 复核未完成）：
     // 写在答复末尾 —— 用户不该去翻日志才知道"这次其实没验成"
     if !gate.notes.is_empty() {
@@ -1486,11 +1541,6 @@ mod tests {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&p).unwrap();
-    // 计划落定：run 结束了，大纲区不该再留沙漏（⌛ 是"等待执行"，不是"没做成"）
-    if !plan_steps.is_empty() {
-        settle_steps(sink, &plan_steps, &ctx.overlay, delivered);
-    }
-
             TempDir(p)
         }
         fn write(&self, rel: &str, content: &str) {

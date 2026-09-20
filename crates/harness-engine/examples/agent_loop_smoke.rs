@@ -10,6 +10,8 @@
 //! - **arm 3 预算用尽**：验证连续失败到预算上限 → 放行，但答复必须写明"未通过"
 //!
 //! 用法：`cargo run -p harness-engine --example agent_loop_smoke`（无需 API Key）
+//!
+//! 假 LLM 复用 `harness_engine::testllm`（与单测同一份实现，别各写一遍）。
 
 use harness_engine::agent::{
     self, AgentOutcome, ConnectFuture, ConnectOutcome, ConnectRequest, ConnectTarget, Connector,
@@ -17,11 +19,9 @@ use harness_engine::agent::{
 };
 use harness_engine::config::AppConfig;
 use harness_engine::pipeline::Sink;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use harness_engine::testllm::{FakeLlm, fake_llm};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 // ============================================
 // 断言小工具
@@ -41,84 +41,6 @@ impl Report {
             self.failed.push(name.to_string());
         }
     }
-}
-
-// ============================================
-// 假 LLM：OpenAI 兼容端点，按剧本逐条回话
-// ============================================
-
-struct FakeLlm {
-    base_url: String,
-    seen: Arc<Mutex<Vec<String>>>,
-}
-
-impl FakeLlm {
-    fn request(&self, i: usize) -> String {
-        self.seen
-            .lock()
-            .unwrap()
-            .get(i)
-            .cloned()
-            .unwrap_or_default()
-    }
-    fn count(&self) -> usize {
-        self.seen.lock().unwrap().len()
-    }
-}
-
-/// 起一个最小 OpenAI 兼容服务：第 i 个请求回 `script[i]`，并把请求体留档给断言看。
-fn fake_llm(script: Vec<String>) -> FakeLlm {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定假 LLM 端口");
-    let addr = listener.local_addr().unwrap();
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let served = Arc::new(AtomicUsize::new(0));
-    let seen_bg = Arc::clone(&seen);
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let i = served.fetch_add(1, Ordering::SeqCst);
-            if i >= script.len() {
-                break; // 剧本演完收工：多出来的请求说明循环比预期多跑了一轮
-            }
-            let body = read_http_body(&mut stream);
-            seen_bg.lock().unwrap().push(body);
-            let reply = format!(
-                r#"{{"model":"fake","choices":[{{"message":{{"role":"assistant","content":{}}}}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#,
-                serde_json::to_string(&script[i]).unwrap()
-            );
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            );
-            let _ = stream.write_all(resp.as_bytes());
-            let _ = stream.flush();
-        }
-    });
-    FakeLlm {
-        base_url: format!("http://{addr}"),
-        seen,
-    }
-}
-
-fn read_http_body(stream: &mut std::net::TcpStream) -> String {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut len = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        if line.trim().is_empty() {
-            break;
-        }
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            len = v.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut buf = vec![0u8; len];
-    let _ = reader.read_exact(&mut buf);
-    String::from_utf8_lossy(&buf).to_string()
 }
 
 // ============================================

@@ -244,6 +244,31 @@ impl Default for ReflectConfig {
     }
 }
 
+/// 计划步骤的执行体（子 agent，v0.4）。
+///
+/// 模型调 `plan` 之后，引擎按序把每个步骤派发给 [`crate::step_agent::run_step`]：
+/// 它开自己的 messages（只有 `STEP_SYSTEM` + 本步输入包），读写走主循环**同一份**
+/// `Ctx`（覆盖层不分裂），做完交回一行引擎写的事实。父循环的 `MAX_STEPS` 因此
+/// 变成"最多多少个步骤/干预轮"——步骤内部的轮次不再计入父预算，这是它独立的预算。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StepAgentConfig {
+    /// 单个步骤内部自己的工具轮次上限（与主循环的 `MAX_STEPS` 相互独立）
+    #[serde(default = "d_step_max_steps")]
+    pub max_steps: usize,
+}
+
+impl Default for StepAgentConfig {
+    fn default() -> Self {
+        Self {
+            max_steps: d_step_max_steps(),
+        }
+    }
+}
+
+fn d_step_max_steps() -> usize {
+    24
+}
+
 fn d_python() -> String {
     // Windows 惯例是 `python`；macOS/Linux 系统自带且普遍在 PATH 上的是 `python3`
     if cfg!(target_os = "windows") {
@@ -537,6 +562,9 @@ pub struct AppConfig {
     /// 工具循环的反思（复核 agent，v0.3）
     #[serde(default)]
     pub reflect: ReflectConfig,
+    /// 计划步骤的执行体（子 agent，v0.4）
+    #[serde(default)]
+    pub step: StepAgentConfig,
     #[serde(default)]
     pub lint: LintConfig,
     #[serde(default)]
@@ -560,6 +588,7 @@ impl Default for AppConfig {
             verify: VerifyConfig::default(),
             gate: GateConfig::default(),
             reflect: ReflectConfig::default(),
+            step: StepAgentConfig::default(),
             lint: LintConfig::default(),
             entropy: EntropyConfig::default(),
             sandbox: SandboxConfig::default(),
