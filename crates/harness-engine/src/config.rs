@@ -259,9 +259,13 @@ pub struct StepAgentConfig {
     /// 打开后父循环的一轮 = 一个步骤（或一次失败后的干预轮），`MAX_STEPS` 的含义随之从
     /// "最多多少次模型调用"变成"最多多少个步骤/干预轮"——步骤内部的轮次不再计入父预算。
     ///
-    /// 默认**关**：`plan` 从"给用户看进度"变成"引擎的驱动指令"是破坏性语义变更，
-    /// 先留一个一行可回退的开关（关掉即完全回到旧行为，逐字节不变）。
-    #[serde(default)]
+    /// 默认**开**（v0.4 起）。原先默认关是为了留一条"关掉即逐字节回到旧行为"的退路；
+    /// 但关着的时候大纲的进度只能靠**推断**（拿模型事前列的 `files` 对账），
+    /// 实测会大面积误判 —— run `agent-20260920-142405` 8 步判出 6 个"跳过"，
+    /// 其中 4 步其实写了一半以上、还有一步声明的文件本来就存在。
+    /// **引擎自己知道每步跑没跑完**，这个事实比任何推断都准，所以让它是默认路径；
+    /// 退路仍然保留：配 `false` 即完全回到旧行为。
+    #[serde(default = "d_step_execute_plan")]
     pub execute_plan: bool,
 }
 
@@ -269,13 +273,17 @@ impl Default for StepAgentConfig {
     fn default() -> Self {
         Self {
             max_steps: d_step_max_steps(),
-            execute_plan: false,
+            execute_plan: d_step_execute_plan(),
         }
     }
 }
 
 fn d_step_max_steps() -> usize {
     24
+}
+
+fn d_step_execute_plan() -> bool {
+    true
 }
 
 /// 工具循环的整体预算（v0.4）。
@@ -794,6 +802,13 @@ mod tests {
         assert!(cfg.llm.model.starts_with("deepseek"));
         assert!(cfg.verify.test_timeout_secs > cfg.verify.cmd_timeout_secs);
         assert!(!cfg.workspace_root.is_empty());
+        // 计划即执行默认开：关着的时候大纲进度只能靠"声明文件是否落地"推断，
+        // 实测 run agent-20260920-142405 8 步判出 6 个"跳过"（4 步其实做了一半以上）。
+        // 引擎自己知道每步的终态，那才该是默认路径。这条断言就是"默认值是它"的凭据。
+        assert!(cfg.step.execute_plan, "execute_plan 默认必须开");
+        // 用户显式写 false 仍要能关回去（退路）。
+        let off: AppConfig = toml::from_str("[step]\nexecute_plan = false\n").unwrap();
+        assert!(!off.step.execute_plan, "配 false 必须能回到旧行为");
     }
 
     #[test]

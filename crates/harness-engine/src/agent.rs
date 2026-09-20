@@ -387,7 +387,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - write   写文件：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}} —— 新建或整文件重写。改已有文件前先 read 拿到现状，交回的必须是整份内容，不许用省略号或"其余不变"敷衍。
 - execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化、git 都走它。
 - connect 连外部能力：{"tool":"connect","args":{"action":"list"}} 先看有哪些可连；调 MCP 工具用 {"tool":"connect","args":{"action":"call","server":"服务器名","tool":"工具名","arguments":{}}}；把任务委托给远端 Agent 用 {"tool":"connect","args":{"action":"send","agent":"名字","text":"任务描述"}}。可用清单在提示词里给过，没有的就别硬猜名字。
-- plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 {"tool":"plan","args":{"steps":[{"title":"短标题","detail":"做什么","files":["相对路径"]}]}}，用户会在大纲区看到进度。
+- plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 {"tool":"plan","args":{"steps":[{"title":"短标题","detail":"做什么","files":["相对路径"]}]}}，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
 规则：
 1. 每轮只输出一个 JSON 对象（一次能力调用，或最终答复），不要输出解释文字、不要 markdown 代码块包裹。
@@ -909,6 +909,11 @@ fn produced_files(s: &PlanStep, overlay: &BTreeMap<String, String>) -> usize {
 }
 
 /// 步骤完成度 → 推给 UI（全部文件落地 = done ✅；部分 = running ⛏️）
+///
+/// **只在 `execute_plan` 关着的时候用**（开着时状态由派发逻辑报，两条通道同时跑只会互相矛盾）。
+/// 它刻意不查"文件是否本来就存在"：run 中途我们没法知道模型的意图，能诚实说的只有
+/// "本 run 写出来几个"。所以它只会把状态**往前推**（never downgrade）——
+/// 拿"声明文件本来就存在"当满足是收尾（[`settle_steps`]）才做的判断。
 fn emit_step_progress(sink: &dyn Sink, steps: &[PlanStep], overlay: &BTreeMap<String, String>) {
     let total = steps.len();
     for (i, s) in steps.iter().enumerate() {
@@ -978,10 +983,22 @@ fn step_failure_feedback(
 ///
 /// `delivered` = 本次交付了 final（按契约，模型在 final 里断言"全部完成后"），
 /// 否则是轮次上限 / 用户取消 / 致命错误收场 —— 那种场合一步都不能算完成。
+///
+/// **这个推断分支只在没有引擎事实可用时才走**（`execute_plan` 关着，或步骤还没轮到派发）。
+/// 它的判据是 `PlanStep::files` —— 模型**动手前**自己写的产出清单，会漂移，所以口径要宽：
+///
+/// * `missing` 只认「本 run 没写 **且** 磁盘上也没有」。声明了却本来就存在、无需重写的文件
+///   （实测 run `agent-20260920-142405` 第 7 步声明 `vite.config.js`，那是前一天就有的文件）
+///   不算缺 —— 否则界面会指着一个静静躺在那儿的文件说"缺它"。
+/// * 「有产出但对不上声明」落 `partial`（未对齐），不再冒充 `skipped`。
+///   `skipped`（跳过）的意思是"这步一件没做"，而实测里 6 个 `skipped` 有 4 个其实做了
+///   一半以上、只是改名或少写 —— 用一个比事实更重的词去描述，和沙漏是同一种骗人。
 fn settle_steps(
     sink: &dyn Sink,
     steps: &[PlanStep],
     overlay: &BTreeMap<String, String>,
+    // 项目根：用来把"声明了、本 run 没写"再分成「真缺」和「本来就在」
+    proj: &Path,
     delivered: bool,
     // 每个步骤**已执行过**的终态（`execute_plan` 下由派发逻辑写）。有它的步骤直接照抄：
     // 引擎知道"这一步跑完了 / 失败了"这个事实，比"声明文件是否落地"的推断准得多。
@@ -1004,23 +1021,51 @@ fn settle_steps(
             );
             continue;
         }
-        let missing: Vec<&str> = s
+        // 声明了、本 run 却没写的文件（两种成因，别混成一句"缺失"）：
+        let unwritten: Vec<&str> = s
             .files
             .iter()
             .filter(|f| !overlay.contains_key(f.as_str()))
             .map(String::as_str)
             .collect();
-        // 三种情形分开判，别让"没交付"一刀切把已做完的步骤降级：
-        //   ① 声明了文件却没产出 → 不冒充完成，落成终态并把缺什么写清楚（UI 放 title 提示）
-        //   ② 计划里根本没声明文件（「编译验证」这类没有文件级判据的步骤）→ 只有交付才算完成
-        //   ③ 声明的文件全部落地 → done，与交付与否无关（取消前已经做完的步骤不该被降级）
-        let (status, notes) = if !missing.is_empty() {
+        // 真缺 = 没写、磁盘上也没有。已经躺在项目里的文件不算缺（那只是"无需重写"）。
+        let missing: Vec<&str> = unwritten
+            .iter()
+            .copied()
+            .filter(|f| !proj.join(f).exists())
+            .collect();
+        // 本 run 真写出来的声明文件（partial 的说明里要列清楚"已经写了哪些"）
+        let produced: Vec<&str> = s
+            .files
+            .iter()
+            .filter(|f| overlay.contains_key(f.as_str()))
+            .map(String::as_str)
+            .collect();
+        // 四种情形分开判，别让"没交付"一刀切把已做完的步骤降级：
+        //   ① 真缺、且一件没写 → skipped，把缺什么写清楚（这是"跳过"的正当用法）
+        //   ② 真缺、但有产出 → partial「未对齐」：做了，只是产出与它自己事前列的清单不一致
+        //   ③ 计划里根本没声明文件（「编译验证」这类没有文件级判据的步骤）→ 只有交付才算完成
+        //   ④ 声明的文件全部满足（写过 or 本来就在）→ done，与交付与否无关
+        //      （取消前已经做完的步骤不该被降级）
+        // 注意 ④ 不留 note：声明文件本来就在是**正常**的，给它挂个 ⚠ 只会让用户学会忽略提示。
+        let (status, notes) = if !missing.is_empty() && produced.is_empty() {
+            // 一件没写：这才是"跳过"
             let why = if delivered {
                 "本次未产出声明的文件："
             } else {
                 "本次未完成；未产出："
             };
             ("skipped", format!("{why}{}", missing.join("、")))
+        } else if !missing.is_empty() {
+            // 有产出但没对齐：做了事，只是产出与它自己事前列的清单不一致
+            (
+                "partial",
+                format!(
+                    "产出与声明不一致（已写 {}；还缺 {}）",
+                    produced.join("、"),
+                    missing.join("、")
+                ),
+            )
         } else if s.files.is_empty() {
             if delivered {
                 ("done", String::new())
@@ -1706,7 +1751,14 @@ pub async fn run(
 
     // 计划落定：run 结束了，大纲区不该再留沙漏（⌛ 是"等待执行"，不是"没做成"）
     if !plan_steps.is_empty() {
-        settle_steps(sink, &plan_steps, &ctx.overlay, delivered, &step_states);
+        settle_steps(
+            sink,
+            &plan_steps,
+            &ctx.overlay,
+            proj,
+            delivered,
+            &step_states,
+        );
     }
 
     // 门禁留下的补充说明（跳过原因 / 预算用尽 / 复核未完成）：
@@ -2437,6 +2489,7 @@ mod tests {
     /// 收尾不留沙漏：没声明文件的步骤交付即完成；声明了却没产出的落成"本次未完成"并写明缺什么
     #[test]
     fn settle_steps_closes_every_hourglass() {
+        let d = TempDir::new("settle");
         let mut overlay = BTreeMap::new();
         overlay.insert("pom.xml".to_string(), "x".to_string());
         // 复刻实测那一次 run（agent-20260920-091436）：只暂存了 pom.xml，
@@ -2447,7 +2500,7 @@ mod tests {
             plan_step(3, "同步文档", &["CLAUDE.md"], "docs"),
         ];
         let sink = StepSink::default();
-        settle_steps(&sink, &steps, &overlay, true, &[]);
+        settle_steps(&sink, &steps, &overlay, &d.0, true, &[]);
         let ev = sink.events();
         assert_eq!(ev.len(), 3, "每个步骤都要落定，否则界面留沙漏：{ev:?}");
         assert_eq!(ev[0].2, "done");
@@ -2461,6 +2514,7 @@ mod tests {
     /// 但**已经落地全部声明文件的步骤不能被降级**（取消前它就做完了）
     #[test]
     fn settle_steps_never_claims_done_without_delivery() {
+        let d = TempDir::new("settle-nodeliver");
         let mut overlay = BTreeMap::new();
         overlay.insert("m.py".to_string(), "x".to_string());
         let steps = [
@@ -2468,12 +2522,72 @@ mod tests {
             plan_step(2, "同步文档", &[], "docs"),
         ];
         let sink = StepSink::default();
-        settle_steps(&sink, &steps, &overlay, false, &[]);
+        settle_steps(&sink, &steps, &overlay, &d.0, false, &[]);
         let ev = sink.events();
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].2, "done", "文件已全部落地，取消不该把它降级");
         assert_eq!(ev[1].2, "skipped");
         assert!(ev[1].3.contains("未完成"), "{}", ev[1].3);
+    }
+
+    /// 复刻实测 run `agent-20260920-142405`（用户看着 2 ✅ / 6 ⏹ 说"质量差"那次）：
+    /// 8 步里 6 步被判 `skipped`，可其中 4 步其实写了一半以上。两个口径病：
+    ///
+    /// ① **本来就存在于项目里的声明文件不算缺**。第 7 步声明 `vite.config.js`，
+    ///    那是前一天就有的文件、本步根本不需要重写 —— 修前界面指着一个躺在那儿的
+    ///    文件说"缺它"。
+    /// ② **有产出但对不上声明 → `partial`（未对齐），不是 `skipped`**。`skipped` 是
+    ///    "这步一件没做"；用它描述"做了 5/9"比事实更重，和沙漏是同一种骗人。
+    #[test]
+    fn settle_steps_distinguishes_unaligned_from_skipped() {
+        let d = TempDir::new("settle-partial");
+        // 项目里本来就有的文件（本 run 没有任何一步写过它）
+        d.write("web/vite.config.js", "export default {}");
+
+        let mut overlay = BTreeMap::new();
+        overlay.insert("web/src/api/http.js".to_string(), "x".to_string());
+        overlay.insert("web/src/styles.css".to_string(), "x".to_string());
+
+        let steps = [
+            // 声明 3 个，只写了 1 个 → 有产出但对不上：partial
+            plan_step(
+                1,
+                "前端页面骨架",
+                &[
+                    "web/src/api/products.js",
+                    "web/src/api/http.js",
+                    "web/src/styles.css",
+                ],
+                "code",
+            ),
+            // 声明的是**已经存在**的文件，本 run 没写它 → 不是缺 → done
+            plan_step(2, "dev 代理", &["web/vite.config.js"], "code"),
+            // 声明 2 个，一个都没写、磁盘上也没有 → 这才是 skipped
+            plan_step(3, "前端测试", &["web/test/form.test.js"], "test"),
+        ];
+
+        let sink = StepSink::default();
+        settle_steps(&sink, &steps, &overlay, &d.0, true, &[]);
+        let ev = sink.events();
+        assert_eq!(ev.len(), 3, "每个步骤都要落定：{ev:?}");
+        assert_eq!(
+            ev[0].2, "partial",
+            "有产出但对不上声明，不该说成'跳过'：{:?}",
+            ev[0]
+        );
+        assert!(ev[0].3.contains("http.js"), "要写明已写哪些：{}", ev[0].3);
+        assert!(
+            ev[0].3.contains("products.js"),
+            "要写明还缺哪些：{}",
+            ev[0].3
+        );
+        assert_eq!(
+            ev[1].2, "done",
+            "声明文件本来就在项目里（无需重写），不该判缺失：{:?}",
+            ev[1]
+        );
+        assert_eq!(ev[2].2, "skipped", "一件没写才是跳过：{:?}", ev[2]);
+        assert!(ev[2].3.contains("form.test.js"), "{}", ev[2].3);
     }
 
     // ============================================

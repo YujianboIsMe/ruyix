@@ -222,8 +222,9 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         cfg.reflect.model = m.clone();
     }
 
-    // v0.4 计划步骤执行体：默认关 —— 打开后 `plan` 从"给用户看进度"变成引擎的驱动指令，
-    // 父循环一轮 = 一个步骤。用户不配就是旧行为，不配也读得到默认值。
+    // v0.4 计划步骤执行体：默认**开**（引擎自己知道每步跑没跑完，比"声明文件是否落地"
+    // 的推断准；推断那条路实测会大面积误判）。父循环一轮 = 一个步骤。
+    // 退路仍在：配 `false` 即完全回到旧行为。
     if let Some(e) = v.step_execute_plan.as_deref() {
         cfg.step.execute_plan = e == "true" || e == "1";
     }
@@ -324,14 +325,29 @@ mod tests {
         );
     }
 
-    /// v0.4：计划执行开关与总时长闸。**不配就是旧行为** —— 这条断言是"可回退"的凭据
+    /// v0.4：计划执行开关与总时长闸。默认**开**（引擎事实优先），但 `false` 必须能关回去
+    /// —— 这两条断言合起来才是"可回退"的凭据
     #[test]
     fn step_execute_plan_and_elapsed_budget_bridge() {
         let mut cfg = base();
         apply_overrides(&mut cfg, &BridgeValues::default());
-        assert!(!cfg.step.execute_plan, "默认必须关：不配即旧行为");
+        assert!(
+            cfg.step.execute_plan,
+            "默认必须开：关着的时候进度只能靠推断，实测会大面积误判"
+        );
         assert_eq!(cfg.step.max_steps, 24);
         assert_eq!(cfg.agent.max_elapsed_secs, 1800);
+
+        // 一行回退：配 false 就回到"plan 只给用户看"的旧行为
+        let mut off = base();
+        apply_overrides(
+            &mut off,
+            &BridgeValues {
+                step_execute_plan: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!off.step.execute_plan, "退路必须真的能关掉");
 
         apply_overrides(
             &mut cfg,

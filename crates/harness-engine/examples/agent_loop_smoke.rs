@@ -196,7 +196,18 @@ fn arm_happy_path(rep: &mut Report) {
         // 交付门禁触发的复核调用，走的是同一条假 LLM 通路
         r#"{"verdict":"ok","summary":"与任务一致","findings":[]}"#.into(),
     ];
-    let (llm, conn, out) = run_loop(&dir, "把 hello.py 写上问候语并验证", script, true, |_| {});
+    // 本臂考的是**四原语 + 门禁 + 干净上下文复核**，不是计划派发：脚本是"一轮一个动作"，
+    // 一旦让引擎按计划派发步骤，下面这几条断言测的就不是同一件事了。
+    // 所以这里显式关掉，别让 `execute_plan` 的默认值变化静默改写本臂的剧本。
+    let (llm, conn, out) = run_loop(
+        &dir,
+        "把 hello.py 写上问候语并验证",
+        script,
+        true,
+        |c| {
+            c.step.execute_plan = false;
+        },
+    );
 
     // ① 连接清单进首条用户消息（模型不该猜名字）
     let first = llm.request(0);
