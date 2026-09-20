@@ -78,6 +78,8 @@ struct ApiResp {
 struct Choice {
     #[serde(default)]
     message: Option<MsgBody>,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -203,6 +205,8 @@ pub async fn chat(
                             crate::exec::clip(&text, 500)
                         )
                     })?;
+                    let finish_reason =
+                        parsed.choices.first().and_then(|c| c.finish_reason.clone());
                     let content = parsed
                         .choices
                         .first()
@@ -210,36 +214,41 @@ pub async fn chat(
                         .map(|m| m.content.clone())
                         .unwrap_or_default();
                     if content.trim().is_empty() {
-                        last_err = "模型返回了空内容".to_string();
-                        // 空内容不值得重试
-                        return Err(last_err);
+                        // 空内容多是模型波动或被 max_tokens 截断：按可重试错误走重试循环
+                        last_err = if finish_reason.as_deref() == Some("length") {
+                            "模型返回了空内容（finish_reason=length，疑似被 max_tokens 截断，可在设置里调大）".to_string()
+                        } else {
+                            "模型返回了空内容".to_string()
+                        };
+                        observe_llm_fail(cfg, messages, attempt, &last_err, started_ms);
+                    } else {
+                        let out = ChatOutcome {
+                            content,
+                            usage: parsed.usage.unwrap_or_default(),
+                            model: parsed.model.unwrap_or_else(|| cfg.model.clone()),
+                            elapsed_ms: started.elapsed().as_millis(),
+                        };
+                        // 记一次 LLM 调用：**这是"模型输出错了"唯一能复盘的地方**
+                        observe_llm(cfg, messages, &out, attempt, "ok", None, started_ms);
+                        return Ok(out);
                     }
-                    let out = ChatOutcome {
-                        content,
-                        usage: parsed.usage.unwrap_or_default(),
-                        model: parsed.model.unwrap_or_else(|| cfg.model.clone()),
-                        elapsed_ms: started.elapsed().as_millis(),
-                    };
-                    // 记一次 LLM 调用：**这是"模型输出错了"唯一能复盘的地方**
-                    observe_llm(cfg, messages, &out, attempt, "ok", None, started_ms);
-                    return Ok(out);
+                } else {
+                    let detail =
+                        api_error_message(&text).unwrap_or_else(|| crate::exec::clip(&text, 400));
+                    // 鉴权/余额类错误：重试无意义，直接抛
+                    if status.as_u16() == 401 || status.as_u16() == 403 {
+                        let msg = format!("DeepSeek 鉴权失败(HTTP {status}): {detail}");
+                        observe_llm_fail(cfg, messages, attempt, &msg, started_ms);
+                        return Err(msg);
+                    }
+                    if status.as_u16() == 402 {
+                        return Err(format!("DeepSeek 账户余额/额度问题(HTTP 402): {detail}"));
+                    }
+                    if status.as_u16() == 400 {
+                        return Err(format!("DeepSeek 请求被拒绝(HTTP 400): {detail}"));
+                    }
+                    last_err = format!("HTTP {status}: {detail}");
                 }
-
-                let detail =
-                    api_error_message(&text).unwrap_or_else(|| crate::exec::clip(&text, 400));
-                // 鉴权/余额类错误：重试无意义，直接抛
-                if status.as_u16() == 401 || status.as_u16() == 403 {
-                    let msg = format!("DeepSeek 鉴权失败(HTTP {status}): {detail}");
-                    observe_llm_fail(cfg, messages, attempt, &msg, started_ms);
-                    return Err(msg);
-                }
-                if status.as_u16() == 402 {
-                    return Err(format!("DeepSeek 账户余额/额度问题(HTTP 402): {detail}"));
-                }
-                if status.as_u16() == 400 {
-                    return Err(format!("DeepSeek 请求被拒绝(HTTP 400): {detail}"));
-                }
-                last_err = format!("HTTP {status}: {detail}");
             }
             Err(e) => {
                 last_err = format!("网络错误: {e}");
@@ -253,6 +262,21 @@ pub async fn chat(
     }
 
     Err(format!("DeepSeek 调用失败（已重试 3 次）: {last_err}"))
+}
+
+/// 哪些 `chat` 错误是"重试也不会好"的确定性失败（缺 Key / 鉴权 / 余额 / 参数被拒）。
+/// 调用方据此区分"退避后再试"和"立刻放弃"，不必再猜错误字符串的含义。
+pub fn is_fatal_error(e: &str) -> bool {
+    [
+        "尚未配置",
+        "鉴权失败",
+        "余额",
+        "额度",
+        "请求被拒绝",
+        "构建 HTTP 客户端失败",
+    ]
+    .iter()
+    .any(|m| e.contains(m))
 }
 
 fn api_error_message(text: &str) -> Option<String> {

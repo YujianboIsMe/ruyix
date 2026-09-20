@@ -455,7 +455,7 @@ harness.reflect.model           str    默认空 = 与主循环同模型
 ## 附录 D：Agent 四原语（Read / Write / Execute / Connect）
 
 会话里的 Agent **不是一堆专项工具**，只有四条能力原语 + 一条展示通道。模型每轮输出一个
-JSON 对象选一个能力，直到给出 `{"final": ...}`（上限 24 轮，`agent::MAX_STEPS`）。
+JSON 对象选一个能力，直到给出 `{"final": ...}`（上限 96 轮，`agent::MAX_STEPS`）。
 
 | 原语 | 参数 | 边界 |
 |------|------|------|

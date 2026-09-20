@@ -38,7 +38,9 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 /// 循环轮次上限（每轮 = 一次模型调用，产出工具调用或最终答复）
-pub const MAX_STEPS: usize = 24;
+pub const MAX_STEPS: usize = 96;
+/// 连续模型调用失败的容忍上限：瞬时空内容/网络抖动退避后重试，连续超限才终止会话
+const LLM_FAIL_LIMIT: u32 = 3;
 const READ_CLIP: usize = 8_000;
 const EXEC_CLIP: usize = 4_000;
 const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -1110,6 +1112,8 @@ pub async fn run(
     let mut gate = GateState::default();
     // 这一轮读过哪些文件（依据核对的证据集合，复核员会看到这份清单）
     let mut read_paths: Vec<String> = Vec::new();
+    // 连续模型调用失败计数：成功一轮即清零
+    let mut llm_failures: u32 = 0;
 
     let mut msgs = vec![ChatMessage::system(AGENT_SYSTEM)];
     for m in tail_history(history, 12) {
@@ -1145,10 +1149,26 @@ pub async fn run(
             break;
         }
         let reply = match llm::chat(&cfg.llm, &msgs, true).await {
-            Ok(r) => r,
+            Ok(r) => {
+                llm_failures = 0;
+                r
+            }
             Err(e) => {
-                sink.log("error", format!("[agent] 第 {step} 轮模型调用失败：{e}"));
-                return Err(e);
+                llm_failures += 1;
+                // 鉴权/余额这类确定性失败重试无意义；其余（空内容/网络抖动）退避后
+                // 吃下一轮 —— 轮次预算本身就是防死循环的闸
+                if llm::is_fatal_error(&e) || llm_failures >= LLM_FAIL_LIMIT {
+                    sink.log("error", format!("[agent] 第 {step} 轮模型调用失败：{e}"));
+                    return Err(e);
+                }
+                sink.log(
+                    "warn",
+                    format!(
+                        "[agent] 第 {step} 轮模型调用失败（连续 {llm_failures}/{LLM_FAIL_LIMIT}，退避后重试）：{e}"
+                    ),
+                );
+                tokio::time::sleep(Duration::from_millis(1200 * llm_failures as u64)).await;
+                continue;
             }
         };
         out.usage.add(&reply.usage);
