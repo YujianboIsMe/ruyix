@@ -500,7 +500,10 @@
   // run 收尾时引擎再发一轮终态（settle_steps）：没有声明文件的步骤、以及声明了文件
   // 却没产出的步骤，都在这时落定 —— 否则它们会永远停在初始的 ⌛（沙漏=等待执行，
   // run 已经结束还显示等待就是在骗人）。
-  // 重启后打开旧会话，由最近一条带 run_id 的消息回读 run 记录补缓存（hydratePlan）。
+  // run 结束把当前计划（含终态）挂到助手消息上随会话落盘：会话跑的是工具循环，
+  // 它不落 RunRecord、run_id 是空的，重启后没有别的可回读 —— 不存快照，
+  // 重开旧会话时大纲区的任务列表会整个消失（不是沙漏，是压根没有）。
+  // 老会话没有快照字段，仍按最近一条带 run_id 的消息回读 run 记录（hydratePlan）。
   // ============================================
 
   const STEP_EMOJI = {
@@ -524,6 +527,48 @@
       note: "",
     }));
     renderOutline(s);
+  }
+
+  /**
+   * s._plan（UI 形状）→ 落盘快照：步骤定义与各步终态分开存，
+   * 与 `RunRecord.plan` + `RunRecord.generation.steps` 是同一种分工。
+   */
+  function planSnapshot(steps) {
+    if (!steps?.length) return null;
+    return {
+      steps: steps.map((x) => ({
+        id: x.id ?? 0,
+        title: x.title ?? "",
+        detail: x.detail ?? "",
+        files: x.files ?? [],
+        kind: x.kind ?? "code",
+      })),
+      states: steps.map((x) => ({
+        id: x.id ?? 0,
+        st: x.st ?? "pending",
+        note: x.note ?? "",
+      })),
+    };
+  }
+
+  /** 落盘快照 → s._plan（终态按 id 合并回来；快照缺 states 时退化成全 ⌛） */
+  function planFromSnapshot(snap) {
+    const steps = snap?.steps ?? [];
+    if (!steps.length) return null;
+    const states = snap.states ?? [];
+    const byId = new Map(states.map((x) => [x.id, x]));
+    return steps.map((x, i) => {
+      const s2 = byId.get(x.id) ?? states[i];
+      return {
+        id: x.id,
+        title: x.title || "",
+        detail: x.detail ?? "",
+        files: x.files ?? [],
+        kind: x.kind ?? "code",
+        st: s2?.st || "pending",
+        note: s2?.note ?? "",
+      };
+    });
   }
 
   /** agent://step → 推进对应步骤（index 从 1 起，与计划步骤一一对应） */
@@ -569,10 +614,20 @@
     renderOutline(s);
   }
 
-  /** 无缓存时按最近一条带 run_id 的消息回读计划（重启后打开会话也有任务列表） */
+  /** 无缓存时恢复大纲：先读助手消息里的计划快照，再回退到带 run_id 的 run 记录 */
   function hydratePlan(s) {
     if (s._plan || s._planHydrated) return;
     s._planHydrated = true;
+    // 工具循环（会话里的 run）不落 RunRecord，run_id 是空的 —— 计划就存在消息上
+    const snap = [...s.messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.plan?.steps?.length)?.plan;
+    if (snap) {
+      s._plan = planFromSnapshot(snap);
+      renderOutline(s);
+      return;
+    }
+    // 老会话（快照字段出现之前落的盘）：仍按最近一条带 run_id 的消息回读 run 记录
     const invoke = getInvoke();
     if (!invoke || !root()) return;
     const last = [...s.messages].reverse().find((m) => m.role === "assistant" && m.run_id);
@@ -703,6 +758,10 @@
       runningPlaceholder = null;
       runSession = null;
       setBusy(false);
+      // 计划（含终态）跟着这条消息落盘：工具循环不落 RunRecord，run_id 是空的，
+      // 这是重启后恢复大纲区任务列表的唯一来源
+      const snap = planSnapshot(s._plan);
+      if (snap) placeholder.plan = snap;
       fillMsgs(wrap, s);
       renderList();
       persist(s);

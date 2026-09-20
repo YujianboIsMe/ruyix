@@ -5,8 +5,37 @@
 //! 持久化在项目内：`<root>/.ruyix/code/agent/sessions/<id>.json`
 //! （agent 只在项目内可用，会话与项目同生命周期）。
 
+use harness_engine::agent::VerifyOutcome;
+use harness_engine::plan::PlanStep;
+use harness_engine::reflect::Reflection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// 一轮任务计划的持久化快照。
+///
+/// 步骤**定义**直接复用引擎的 [`PlanStep`]（id / title / detail / files / kind），
+/// 不在这里另抄一份字段；`states` 只补 UI 侧那份引擎不管的东西 —— 每步的终态。
+/// 分工与 `RunRecord.plan` + `RunRecord.generation.steps` 一致。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PlanSnap {
+    #[serde(default)]
+    pub steps: Vec<PlanStep>,
+    #[serde(default)]
+    pub states: Vec<PlanStepState>,
+}
+
+/// 计划步骤的终态（UI 侧事实）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PlanStepState {
+    /// 对应 [`PlanStep::id`]
+    pub id: u32,
+    /// pending | running | done | error | skipped
+    #[serde(default)]
+    pub st: String,
+    /// 终态说明（skipped 缺什么 / error 为什么），进 tooltip
+    #[serde(default)]
+    pub note: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionMsg {
@@ -21,6 +50,20 @@ pub struct SessionMsg {
     /// run 终态：planned/generated/verified/failed/canceled（非 run 消息为空）
     #[serde(default)]
     pub status: Option<String>,
+    /// 该轮的任务计划快照（步骤定义 + 各步终态）。
+    ///
+    /// 为什么计划要跟着消息走而不是靠 `run_id` 回读：会话跑的是工具循环
+    /// （`agent_reply`），它**不落 RunRecord**，`run_id` 天然为空 ——
+    /// 于是重启 app 打开旧会话时 `agent_run_load` 无迹可寻，大纲区的任务列表
+    /// 整个消失（不是沙漏，是压根没有）。老会话没有这个字段，照旧解析。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanSnap>,
+    /// 本轮的机械验证结论（v0.3：窄层 + 全量层）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verify: Vec<VerifyOutcome>,
+    /// 本轮的复核结论（干净上下文反思）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reflect: Vec<Reflection>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -113,15 +156,18 @@ pub fn delete(project_root: &str, id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ruyix-session-test-{}", std::process::id()));
+    /// 每个用例一个独立临时目录：同进程内的用例是并行跑的，共用目录会让
+    /// 彼此的 `remove_dir_all` 互删（曾让 `roundtrip_and_list_order` 看到 1 条消息）。
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("ruyix-session-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
 
     #[test]
     fn roundtrip_and_list_order() {
-        let root = dir();
+        let root = dir("roundtrip");
         let root = root.to_str().unwrap().to_string();
         let s1 = Session {
             id: "sess_a".into(),
@@ -135,6 +181,9 @@ mod tests {
                     ts: "t1".into(),
                     run_id: None,
                     status: None,
+                    plan: None,
+                    verify: vec![],
+                    reflect: vec![],
                 },
                 SessionMsg {
                     role: "assistant".into(),
@@ -142,6 +191,9 @@ mod tests {
                     ts: "t2".into(),
                     run_id: Some("run-1".into()),
                     status: Some("planned".into()),
+                    plan: None,
+                    verify: vec![],
+                    reflect: vec![],
                 },
             ],
         };
@@ -182,5 +234,105 @@ mod tests {
             assert!(session_path("x", &id).is_ok(), "id 未过白名单: {id}");
             assert!(id.starts_with("sess_2"), "id 缺少可排序时间前缀: {id}");
         }
+    }
+
+    /// 计划快照必须能往返，**尤其终态**：重启后大纲区若把 done/skipped 读回成 pending，
+    /// 就等于把"run 已经结束"重新显示成"⌛ 等待执行" —— 与沙漏 bug 同一种骗人。
+    #[test]
+    fn plan_snapshot_roundtrip_keeps_terminal_states() {
+        let root = dir("plan");
+        let root = root.to_str().unwrap().to_string();
+        let snap = PlanSnap {
+            steps: vec![
+                PlanStep {
+                    id: 1,
+                    title: "实现 word_count".into(),
+                    detail: "核心函数".into(),
+                    files: vec!["wc.py".into()],
+                    kind: "code".into(),
+                },
+                PlanStep {
+                    id: 2,
+                    title: "写单测".into(),
+                    detail: String::new(),
+                    files: vec!["test_wc.py".into()],
+                    kind: "test".into(),
+                },
+            ],
+            states: vec![
+                PlanStepState {
+                    id: 1,
+                    st: "done".into(),
+                    note: String::new(),
+                },
+                PlanStepState {
+                    id: 2,
+                    st: "skipped".into(),
+                    note: "缺 test_wc.py".into(),
+                },
+            ],
+        };
+        let s = Session {
+            id: "sess_plan".into(),
+            title: "带计划".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            messages: vec![SessionMsg {
+                role: "assistant".into(),
+                text: "做完了".into(),
+                ts: "t3".into(),
+                run_id: None,
+                status: None,
+                plan: Some(snap),
+                verify: vec![VerifyOutcome {
+                    layer: "full".into(),
+                    status: "failed".into(),
+                    verdict: "1 项没通过".into(),
+                    failed: 1,
+                    ..Default::default()
+                }],
+                reflect: vec![Reflection {
+                    verdict: "suspect".into(),
+                    summary: "断言与实现不符".into(),
+                    ..Default::default()
+                }],
+            }],
+        };
+        save(&s, &root).unwrap();
+
+        let back = load(&root, "sess_plan").unwrap();
+        let m = &back.messages[0];
+        let p = m.plan.as_ref().expect("计划快照丢了");
+        assert_eq!(p.steps.len(), 2);
+        assert_eq!(p.steps[1].kind, "test");
+        assert_eq!(p.steps[1].files, vec!["test_wc.py".to_string()]);
+        assert_eq!(p.states.len(), 2);
+        assert_eq!(p.states[0].st, "done");
+        assert_eq!(p.states[1].st, "skipped", "终态被读回成别的状态");
+        assert_eq!(p.states[1].note, "缺 test_wc.py");
+        // 同一类缺陷的另两个字段：UI 把结论挂在消息上，Rust 结构体不声明就会被
+        // agent_session_save 的往返顺手抹掉（UI 拿返回值覆盖自己的 messages）
+        assert_eq!(m.verify.len(), 1, "验证结论丢了");
+        assert_eq!(m.verify[0].layer, "full");
+        assert_eq!(m.verify[0].verdict, "1 项没通过");
+        assert_eq!(m.reflect.len(), 1, "复核结论丢了");
+        assert_eq!(m.reflect[0].verdict, "suspect");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 老会话（这些字段出现之前落的盘）必须照旧能读 —— 少一个字段不该让整段对话打不开。
+    #[test]
+    fn legacy_message_without_plan_still_loads() {
+        let msg: SessionMsg =
+            serde_json::from_str(r#"{"role":"assistant","text":"旧消息","ts":"t"}"#)
+                .expect("老消息解析失败");
+        assert!(msg.plan.is_none());
+        assert!(msg.run_id.is_none());
+        assert!(msg.verify.is_empty());
+        assert!(msg.reflect.is_empty());
+        // 老会话序列化回去不许凭空长出字段（否则每个旧文件都被改写一遍）
+        let back = serde_json::to_string(&msg).unwrap();
+        assert!(!back.contains("plan"), "空计划不该写进 JSON: {back}");
+        assert!(!back.contains("verify"), "空验证结论不该写进 JSON: {back}");
     }
 }
