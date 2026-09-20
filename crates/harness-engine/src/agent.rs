@@ -21,6 +21,7 @@
 //! 才落盘；Apply = 直接写进项目（被覆盖文件先备份到 `.ruyix/backups/`）。
 
 use crate::config::AppConfig;
+use crate::discover;
 use crate::exec::{self, CancelFlag, clip, is_cancelled};
 use crate::generate::{StepOutcome, safe_rel_path};
 use crate::lint;
@@ -285,6 +286,15 @@ impl VerifyOutcome {
 // ============================================
 // Connect 原语：引擎定契约，宿主接外部系统
 // ============================================
+
+/// 宿主提供的"环境准备"连接的 kind 值。
+///
+/// 它不是第五种原语，也不是新的 connect 形态：宿主只要在 `list()` 里摆出这个 kind 的
+/// 目标、并在 `call()` 里认它，引擎侧**零改动**就能用。装什么、用哪个包管理器、装不装 ——
+/// 全是宿主的裁量（引擎不知道 choco / apt / brew 的存在，也就不会一格一格补分支）。
+///
+/// 引擎只关心一件事：**有这么个连接时，缺失工具才允许指向 connect**（见 `discover::render_note`）。
+pub const ENV_CONNECTOR_KIND: &str = "env";
 
 /// 一个可连接的外部能力（`connect` 的 list 结果，也是注入提示词的清单项）
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -1432,6 +1442,20 @@ pub async fn run(
     let connectables = conn.list().await.unwrap_or_default();
     let mut head = format!("项目根目录：{}", proj.display());
     if let Some(note) = connect_note(&connectables) {
+        head.push_str(&format!("\n\n{note}"));
+    }
+    // 命令发现：本机到底有哪些命令能用。实测 run agent-20260920-152312（cloud-shop 修一个
+    // Maven 依赖）有 5~6 轮纯粹在试探 `mvn` / `java` 在不在，而引擎早就探过 —— 只是从没
+    // 告诉模型。可用与**不可用**都要写：只说"有 mvn"治不了空转，还得说"没有 gradle"。
+    // 缺失工具怎么补，取决于宿主有没有接"环境准备"连接（没有就不许提 connect，不虚报能力）。
+    let tools = discover::discover(
+        proj,
+        &cfg.discover,
+        &cfg.verify.python_bin,
+        &cfg.verify.node_bin,
+    );
+    let env_connector = connectables.iter().any(|c| c.kind == ENV_CONNECTOR_KIND);
+    if let Some(note) = discover::render_note(&tools, env_connector) {
         head.push_str(&format!("\n\n{note}"));
     }
     // 运行模式必须写进上下文：确认模式下 write 只暂存、execute 看到旧文件，
@@ -2670,6 +2694,72 @@ mod tests {
         );
         assert_eq!(ev[2].2, "skipped", "一件没写才是跳过：{:?}", ev[2]);
         assert!(ev[2].3.contains("form.test.js"), "{}", ev[2].3);
+    }
+
+    /// 命令发现：本机有什么命令必须**实测后告诉模型**，而不是让模型自己试。
+    ///
+    /// 这条断言的是"真的进了首条 user 消息"，不是"函数返回了非空" —— 后者在纯函数单测里
+    /// 早就绿了，却完全可能因为拼装点写错而根本到不了模型面前（那个 65 轮空转就是这么来的：
+    /// 引擎探过，只是没写进上下文）。
+    #[test]
+    fn first_user_message_carries_the_discovered_command_list() {
+        let llm = crate::testllm::fake_llm(vec![r#"{"final":"好"}"#.into()]);
+        let dir = TempDir::new("discover-note");
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+
+        let sink = StepSink::default();
+        block_on(run(
+            &cfg,
+            &dir.0,
+            "随便问一句",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &sink,
+        ))
+        .expect("run 不该失败");
+
+        let first = llm.request(0);
+        assert!(first.contains("本机命令"), "命令清单没进首条消息：{first}");
+        assert!(first.contains("git"), "常驻项 git 该在清单里：{first}");
+    }
+
+    /// 关掉开关，整段就该消失 —— 提示词不许虚报："没探"和"探了但没有"是两件事。
+    #[test]
+    fn discovered_command_list_disappears_when_disabled() {
+        let llm = crate::testllm::fake_llm(vec![r#"{"final":"好"}"#.into()]);
+        let dir = TempDir::new("discover-off");
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.discover.enabled = false;
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+
+        let sink = StepSink::default();
+        block_on(run(
+            &cfg,
+            &dir.0,
+            "随便问一句",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &sink,
+        ))
+        .expect("run 不该失败");
+
+        let first = llm.request(0);
+        assert!(!first.contains("本机命令"), "{first}");
     }
 
     // ============================================

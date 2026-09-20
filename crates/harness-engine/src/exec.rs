@@ -234,8 +234,71 @@ fn drain<R: Read>(reader: &mut R, buf: &Arc<Mutex<Vec<u8>>>) {
     }
 }
 
+/// 解析一个二进制：**在不在、在哪**。只有这一步能回答"在不在"。
+///
+/// 为什么不能用 `Command::new(bin)` 直接试：Windows 上 `CreateProcess` 不走 PATHEXT，
+/// `.cmd` / `.bat` / `.ps1` 一律认不出。本机实测（`examples/cmd_probe.rs`，可复核）：
+/// `Command::new("mvn")` → `program not found`，而 `mvn` 真实位置是
+/// `D:\Tools\Maven\apache-maven-3.9.16\bin\mvn.cmd`；`where mvn` 则正常返回路径。
+/// 也就是说 —— 直接试的写法对 Maven / npm / gradle 这类工具**天然失明**。
+///
+/// 为什么可用性只看这一步：`cmd /C` 对不存在的命令实测返回退出码 **1**（不是 9009），
+/// 和"命令跑了但退出码是 1"分不开；`where` / `command -v` 的退出码才是干净的判据。
+pub fn resolve_bin(bin: &str, timeout: Duration) -> Option<String> {
+    let cwd = std::env::temp_dir();
+    #[cfg(target_os = "windows")]
+    let out = run(&cwd, "where", &[bin], timeout, &[]);
+    #[cfg(not(target_os = "windows"))]
+    let out = run(
+        &cwd,
+        "sh",
+        &["-c", &format!("command -v {bin}")],
+        timeout,
+        &[],
+    );
+    if out.exit_code != Some(0) {
+        return None;
+    }
+    out.stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// 取版本首行。**不看退出码** —— `java -version` 走的是 stderr，不少工具版本也非 0 退出。
+///
+/// 必须过 shell：即使解析出了完整路径，`.cmd` 也不能被 `CreateProcess` 直接执行
+/// （见 [`resolve_bin`]）。Windows 走 `cmd /C`、Unix 走 `sh -c`，与
+/// `agent::run_shell` 保持同一套做法。
+pub fn bin_version(bin: &str, args: &[&str], timeout: Duration) -> String {
+    let cmdline = if args.is_empty() {
+        bin.to_string()
+    } else {
+        format!("{bin} {}", args.join(" "))
+    };
+    let cwd = std::env::temp_dir();
+    #[cfg(target_os = "windows")]
+    let out = run(&cwd, "cmd", &["/C", &cmdline], timeout, &[]);
+    #[cfg(not(target_os = "windows"))]
+    let out = run(&cwd, "sh", &["-c", &cmdline], timeout, &[]);
+    let text = if out.stdout.trim().is_empty() {
+        out.stderr
+    } else {
+        out.stdout
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| clip(l, 120))
+        .unwrap_or_default()
+}
+
 /// 探针：二进制是否可用 + 版本首行。用于 UI 提前提示"环境缺什么"，
 /// 而不是等用户点了运行才在验证阶段炸。
+///
+/// 可用性来自 [`resolve_bin`]（不是"跑一下看退出码"）—— 这样 `.cmd` 工具也能认出来，
+/// 见该函数的说明。命令发现（[`crate::discover`]）走的是同一对函数，一处实现两处消费。
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct Probe {
     pub name: String,
@@ -245,32 +308,20 @@ pub struct Probe {
 }
 
 pub fn probe(name: &str, bin: &str, version_args: &[&str]) -> Probe {
-    let cwd = std::env::temp_dir();
-    let out = run(&cwd, bin, version_args, Duration::from_secs(15), &[]);
-    if let Some(e) = &out.spawn_error {
-        return Probe {
+    let timeout = Duration::from_secs(15);
+    match resolve_bin(bin, timeout) {
+        None => Probe {
             name: name.to_string(),
             bin: bin.to_string(),
             available: false,
-            version: e.clone(),
-        };
-    }
-    let text = if out.stdout.trim().is_empty() {
-        out.stderr
-    } else {
-        out.stdout
-    };
-    let first = text
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    Probe {
-        name: name.to_string(),
-        bin: bin.to_string(),
-        available: out.exit_code.is_some() && !out.timed_out,
-        version: first,
+            version: format!("未找到（where / command -v 解析不到 {bin}）"),
+        },
+        Some(_) => Probe {
+            name: name.to_string(),
+            bin: bin.to_string(),
+            available: true,
+            version: bin_version(bin, version_args, timeout),
+        },
     }
 }
 

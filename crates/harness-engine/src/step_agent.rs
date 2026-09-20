@@ -24,6 +24,7 @@ use crate::agent::{
     tool_execute,
 };
 use crate::config::AppConfig;
+use crate::discover;
 use crate::exec::{CancelFlag, clip, is_cancelled};
 use crate::llm::{self, ChatMessage, Usage};
 use crate::pipeline::Sink;
@@ -310,6 +311,18 @@ pub async fn run_step(
     // 运行模式与父循环共用同一份说明（同一处真相）：确认模式下本步的 write 只暂存，
     // execute 看不到 —— 不说清这条，子步会像父一样拿 execute 的失败反复"修"一个已经写对的改动
     if let Some(note) = policy_system_note(cx.policy()) {
+        user.push_str(&format!("\n\n{note}"));
+    }
+    // 命令发现：子步骤与父循环**上下文隔离**，父那份到不了这里 —— 不补一遍，每个步骤
+    // 都会各自重新"试 mvn 在不在"（就是那个 65 轮空转的放大版）。
+    // 第二个参数恒 false：`STEP_SYSTEM` 里没有 connect 原语，缺失工具只能如实说明。
+    let tools = discover::discover(
+        inp.project_root,
+        &cfg.discover,
+        &cfg.verify.python_bin,
+        &cfg.verify.node_bin,
+    );
+    if let Some(note) = discover::render_note(&tools, false) {
         user.push_str(&format!("\n\n{note}"));
     }
     let mut msgs = vec![ChatMessage::system(STEP_SYSTEM), ChatMessage::user(user)];
@@ -769,6 +782,44 @@ mod tests {
             .and_then(|m| m["content"].as_str())
             .unwrap_or_default();
         assert!(exec_result.contains("改动前"), "{exec_result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 子步骤的上下文与父循环是**隔离**的（这是刻意的），所以命令发现那份说明必须在
+    /// 每个步骤里**重来一遍**。父那份到不了这儿 —— 不补就是"每个步骤各自试一遍
+    /// mvn 在不在"，正是那个 65 轮空转的放大版。
+    #[test]
+    fn step_context_repeats_the_discovered_command_list() {
+        let dir = temp_project("step-discover-note");
+        let llm = fake_llm(vec![format!(r#"{{"final":{}}}"#, js("本步没动文件。"))]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看一眼工具链", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "随便问一句",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let _ = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该是致命失败");
+
+        let user_msg = body(&llm.request(0));
+        let text = user_msg["messages"][1]["content"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("本机命令"), "{text}");
+        // `STEP_SYSTEM` 里没有 connect 原语 —— 缺失工具只能"如实说明"，不许指向 connect
+        assert!(!text.contains("connect"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

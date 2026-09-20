@@ -592,6 +592,51 @@ impl Default for KbConfig {
     }
 }
 
+fn d_discover_enabled() -> bool {
+    true
+}
+fn d_discover_ttl() -> u64 {
+    300
+}
+fn d_discover_timeout() -> u64 {
+    10
+}
+
+/// 命令发现配置（v0.5）。
+///
+/// 默认**开**：实测 run `agent-20260920-152312` 有 5~6 轮纯粹在试探 `mvn` / `java`
+/// 在不在，而引擎早就探过、只是没告诉模型。默认关掉等于把这个空转留着。
+///
+/// 探测结果**只进上下文**，不改任何判断 —— 所以开开关关都不影响正确性，
+/// 只影响模型是"知道"还是"去试"。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiscoverConfig {
+    /// 关掉就不探测（上下文里也不会出现命令段）
+    #[serde(default = "d_discover_enabled")]
+    pub enabled: bool,
+    /// 探测结果缓存多久（秒）。0 = 每次都重新探（换工具链后想立刻生效就用它）
+    #[serde(default = "d_discover_ttl")]
+    pub ttl_secs: u64,
+    /// 单条探测的超时（秒）—— 探测不许把一轮对话卡死
+    #[serde(default = "d_discover_timeout")]
+    pub timeout_secs: u64,
+    /// 追加要探的二进制名（用 `--version`）。表没覆盖的工具走这里，
+    /// **不用改代码** —— 这是「能力长在数据里」的落点之一。
+    #[serde(default)]
+    pub extra: Vec<String>,
+}
+
+impl Default for DiscoverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: d_discover_enabled(),
+            ttl_secs: d_discover_ttl(),
+            timeout_secs: d_discover_timeout(),
+            extra: Vec::new(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     #[serde(default)]
@@ -618,6 +663,9 @@ pub struct AppConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub kb: KbConfig,
+    /// 命令发现（把"本机有什么命令"实测出来喂进模型上下文，v0.5）
+    #[serde(default)]
+    pub discover: DiscoverConfig,
     #[serde(default = "d_workspace")]
     pub workspace_root: String,
     #[serde(default = "d_max_context")]
@@ -639,6 +687,7 @@ impl Default for AppConfig {
             entropy: EntropyConfig::default(),
             sandbox: SandboxConfig::default(),
             kb: KbConfig::default(),
+            discover: DiscoverConfig::default(),
             workspace_root: d_workspace(),
             max_context_chars: d_max_context(),
         }

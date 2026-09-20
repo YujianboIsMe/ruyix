@@ -9,9 +9,11 @@
 //! - [`pipeline::plan_stage`]：只出规划（agent_plan）
 //! - [`workspace`]：运行记录的落盘/加载/列举/删除
 //! - [`verify::run`] / [`lint::run_lint`] / [`repair::propose`]：单阶段能力
+//! - [`discover`]：命令发现（把"本机有什么命令"实测出来喂进模型上下文）
 
 pub mod agent;
 pub mod config;
+pub mod discover;
 pub mod entropy;
 pub mod eval;
 pub mod exec;
