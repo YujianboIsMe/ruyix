@@ -51,6 +51,10 @@
  *   U22 help-markdown 帮助正文的**源**是 markdown 文件（ui/help-zh.md / ui/help-en.md），打开时
  *                     用 markdown-it 渲染进 #help-body —— 不再是手写 HTML 表格，也不再塞进
  *                     只读代码编辑器；旧的字符串拼接（getHelpText）必须删干净
+ *   U23 proc-lifecycle 永不退出的服务（v0.6）：**不是第五原语**，是 execute 的第三个生命周期
+ *                     维度 —— 后台起 + 就绪判据是**一条命令**（引擎零 app 知识）+ 句柄 op=status/
+ *                     log/stop。三个出口各带证据；起之前先探一次判据（别人已满足就别起，防孤儿）；
+ *                     引擎持有就引擎收（run 结束按项目收，宿主退出全收），杀必连子进程树
  */
 
 "use strict";
@@ -487,6 +491,71 @@ function runStaticChecks() {
       has(discoverRs, "pub fn available_names(") &&
       /preflight_execute\(proj, cmd\)/.test(intentRs),
     "执行前闸门没接上：三类拦截（启动器 / 路径式垃圾 / 没装的命令）+ 可用清单 + 接进 tool_execute");
+
+  // U23 proc-lifecycle：永不退出的服务（v0.6）。**不加第五原语** —— 四个原语编码的是"效果"
+  // （读 / 写 / 执行 / 连接），而"活多久"是**时长**，它不属于任何一个效果。所以给 execute 补
+  // 第三个维度：前台 / 后台起 / 句柄操作。实测那次 17 轮空转的病根不是模型笨：服务其实起来了
+  // （日志里有 `Started AdminApplication`），证据落在项目根的 log 里、模型看不见，而上一轮的
+  // `java` 孤儿还占着 8083 → 每次重启都拿到假的"端口被占" → 自我强化的失败循环。
+  //
+  // 六环缺一不可：① 托管进程表（项目归属，收尾能划界）② 就绪判据**是一条命令**（退出码 0 即就绪
+  // —— 引擎不认识它测的是什么，这就是"零 app 知识"）③ 起之前**先探一次**判据：别人已满足就拒绝
+  // 并附证据（这条是整轮最值钱的守卫，直接掐掉孤儿重演）④ 三个出口都带证据（就绪给命中行 / 已退出
+  // 给退出码+日志尾 / 未就绪给"没命中"的证据）⑤ 日志落**项目内** `.ruyix/proc/<handle>.log`
+  // （路径由引擎给，模型不写重定向；不走管道 → 不会被写满阻塞）⑥ 引擎持有就引擎收：
+  // run 结束按**项目**收（越界会踩到并行/嵌套的别人），宿主退出**全收**；杀必连子进程树
+  // （只杀 mvn 不杀 java = 又造一个占端口的孤儿）。
+  const procRs = read("crates/harness-engine/src/proc.rs");
+  const libRs = read("crates/harness-engine/src/lib.rs");
+  const configRs = read("crates/harness-engine/src/config.rs");
+
+  check("U23", "proc-lifecycle",
+    has(libRs, "pub mod proc;") &&
+      has(procRs, "struct Managed") &&
+      has(procRs, "pub fn start(") &&
+      has(procRs, "pub fn status(") &&
+      has(procRs, "pub fn log_tail(") &&
+      has(procRs, "pub fn stop(") &&
+      has(procRs, "pub fn shutdown_for(") &&
+      has(procRs, "pub fn shutdown_all(") &&
+      has(procRs, "MAX_BACKGROUND_HARD"),
+    "托管进程模块没立起来：进程表 / start-status-log-stop / 项目级与全局收尾 / 并发硬顶 缺一不可");
+
+  check("U23", "proc-lifecycle",
+    has(procRs, "fn probe_ready(") &&
+      has(procRs, ".join(\".ruyix\").join(\"proc\")") &&
+      has(procRs, "pub const LOG_TAIL_LINES") &&
+      has(execRs, "pub fn kill_tree(") &&
+      has(execRs, "pub fn shell_command(") &&
+      has(procRs, "exec::shell_command(") &&
+      has(execRs, "raw_arg(") &&
+      has(execRs, "\"/S\""),
+    "就绪判据 / 日志落项目内 / 连子进程树杀 / shell 构造只有一份（raw_arg + /S /C 是带引号命令行能跑通的前提）—— 缺一样就回到孤儿占端口的老路");
+
+  check("U23", "proc-lifecycle",
+    has(intentRs, "ExecBg(crate::proc::StartSpec)") &&
+      has(intentRs, "pub(crate) enum ProcOp") &&
+      has(intentRs, "fn parse_execute(") &&
+      has(intentRs, "shutdown_for(proj") &&
+      has(stepRs, "StepAction::ExecBg(") &&
+      has(stepRs, "tool_exec_bg") &&
+      has(stepRs, "tool_proc"),
+    "execute 的生命周期维度没接上：解析入口 / 句柄三操作 / run 结束按项目收 / 子步骤同款派发");
+
+  check("U23", "proc-lifecycle",
+    has(intentRs, "\"background\"") && has(stepRs, "background") &&
+      has(stepRs, "ready_cmd") && has(stepRs, "handle"),
+    "两份提示词都要写后台模式：父子上下文隔离，缺一份每个步骤都会各自重新用 start 去绕");
+
+  check("U23", "proc-lifecycle",
+    has(configRs, "pub struct ProcConfig") &&
+      has(configRs, "pub proc: ProcConfig") &&
+      has(cfgBridgeRs, "ruyix.code.harness.proc.enabled") &&
+      has(cfgBridgeRs, "proc.ready_timeout_secs") &&
+      has(configJs, '"proc.enabled"') && has(configJs, '"proc.max"') &&
+      has(configJs, '"proc.ready_timeout_secs"') &&
+      has(mainRs, "harness_engine::proc::shutdown_all(false)"),
+    "proc 配置没贯通或宿主退出未收尾：引擎 ProcConfig → 配置桥三键 → UI 三字段 → 退出全收");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
@@ -979,7 +1048,11 @@ async function runHelpChecks() {
       return { loadHelpDoc, showHelpPage, hideHelpPage, openHelp, openHelpTab };`)();
 
     // ---- 无项目：菜单/命令 → 帮助页（markdown 渲染进 #help-body）----
-    await help.openHelp();
+    // openHelp 是同步派发（内部 showHelpPage 才 await 加载），回放要等一轮宏任务
+    const tick = () => new Promise((r) => setImmediate(r));
+    help.openHelp();
+    await tick();
+    await tick();
     let body = el("help-body").innerHTML;
     check("U22", "help-replay",
       fetched.length === 1 && /help-zh\.md$/.test(fetched[0]),

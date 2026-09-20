@@ -15,7 +15,7 @@ cargo fmt --check                  # Rust 格式（rustfmt.toml: max_width 100 �
 node scripts/check-style.js        # JS/HTML/CSS/JSON 风格（零依赖，0 error 才算过）
 node scripts/ui-smoke.js           # UI 冒烟：契约静态断言 + agent 面板演示回放（零依赖）
 cargo clippy --all-targets         # 静态检查，必须 0 warning
-cargo test                         # 单元测试（引擎 159+8 ignored / ruyix 41）
+cargo test                         # 单元测试（引擎 256+8 ignored / ruyix 96+3 ignored）
 ```
 
 Notes: `ui/xterm.js` / `ui/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
@@ -130,6 +130,24 @@ The `state` object drives the UI:
 
 三条硬约束（改动 apply.rs 时不得绕过）：路径封闭（拒绝绝对路径 / `..` / `.git`）、拒绝把产物写进沙箱自身（否则上一次产物会变成项目源码）、写前备份。UI 侧所有写入（面板确认与自动模式）收敛到 `session.js` 的 `applyPaths` 唯一入口（恒 `backup: true`）；由 ui-smoke U14 守住"三模式完整 + 唯一写入口 + 写入模式验证门禁"。
 
+### 常驻服务托管（execute 的第三个生命周期维度，v0.6）
+
+**不是第五个原语。** 四个原语（Read / Write / Execute / Connect）编码的是**效果**，而"活多久"是**时长**——它不属于任何一个效果。所以 `execute` 多一个维度，模型侧仍是同一个工具：
+
+| 维度 | 请求 | 语义 |
+|------|------|------|
+| 前台（默认） | `{cmd, timeout_secs}` | 跑完才回，退出码就是结论 |
+| 后台 | `{cmd, background:true, ready_cmd, ready_timeout_secs?, keep_alive?}` | 起完按 `ready_cmd` 等就绪；返回 `handle` |
+| 句柄 | `{op:"status"\|"log"\|"stop", handle}` | 查状态 / 读日志尾 / 停（连子进程树） |
+
+- **就绪判据是一条命令**：退出码 0 即就绪。引擎不认识它测的是什么（端口？文件？HTTP？），这就是"零 app 知识"的落点——加一个 app 不改引擎。
+- **起之前先探一次判据**：若启动前就已命中，说明有别的东西满足它（最常见是上一轮的进程还占着端口），这次"就绪"不可能是真的 → 拒绝并附证据。这条守卫直接掐掉"孤儿占端口 → 每次重启都拿到假失败 → 自我强化"的循环。
+- **三个出口都带证据**：Ready 给命中的那行；Exited 给退出码 + 日志尾；NotReady 给日志尾 + "没命中"的说明。
+- **日志落项目内** `<proj>/.ruyix/proc/<handle>.log`，路径由引擎给（模型不写重定向）；走文件不走管道 → 不会被写满阻塞。读日志按字节读、最后一步再按活动代码页解码（复用 `exec::decode_output`）。
+- **引擎持有就引擎收**：run 结束 `shutdown_for(proj, honor_keep_alive=true)` **只收本项目的**（并行/嵌套/测试的进程不归这次 run 管）；宿主退出 `RunEvent::Exit` 里 `shutdown_all(false)` **全收**。少这一步，关掉 IDE 就又攒下一批占端口的孤儿。
+- **shell 构造只有一份**：`exec::shell_command`，Windows 走 `cmd /S /C` + `raw_arg` + 自己裹一层引号。两条都是实测踩出来的——用 std 的 `arg` 会把内部引号转义成 `\"`（cmd 回"不是内部或外部命令"）；只换 `raw_arg` 又会撞上 `cmd /C` 对"以引号开头的串"的剥引号规则（回"文件名、目录名或卷标语法不正确"）。`examples/proc_demo.rs` 是这条的可复现证明。
+- 可复现证明：`cargo run -q -p harness-engine --example proc_demo`（用示例自身当"永不退出的服务"替身，不依赖 java/maven，任何平台都能跑出同一份结论）。契约见 ui-smoke U23。
+
 ## Command System (command.js)
 
 ### Architecture
@@ -243,6 +261,7 @@ Known config keys:
 - `ruyix.code.harness.reflect.enabled` / `reflect.max_rounds` / `reflect.model`（v0.3 复核 agent）
 - `ruyix.code.harness.discover.enabled` / `discover.ttl_secs` / `discover.extra`（v0.5 命令发现；`extra` 逗号分隔，追加工具表没覆盖的命令）
 - `ruyix.code.harness.env.install_enabled`（v0.5 环境准备：缺失工具按需安装；默认开，关掉后宿主不再把 env 目标摆进 connect 清单）
+- `ruyix.code.harness.proc.enabled` / `proc.max` / `proc.ready_timeout_secs`（v0.6 常驻服务托管；默认开，`max` 上限 16，`ready_timeout_secs` 范围 1~600）
 
 ## Tauri Commands (main.rs)
 
