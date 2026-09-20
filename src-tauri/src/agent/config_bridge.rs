@@ -56,6 +56,10 @@ pub struct BridgeValues {
     pub step_execute_plan: Option<String>,
     pub step_max_steps: Option<String>,
     pub agent_max_elapsed_secs: Option<String>,
+    // v0.5 命令发现：把"本机有什么命令"实测出来喂进上下文
+    pub discover_enabled: Option<String>,
+    pub discover_ttl_secs: Option<String>,
+    pub discover_extra: Option<String>,
 }
 
 impl BridgeValues {
@@ -100,6 +104,9 @@ impl BridgeValues {
                 "ruyix.code.harness.agent.max_elapsed_secs",
                 project_root,
             ),
+            discover_enabled: read(mgr, "ruyix.code.harness.discover.enabled", project_root),
+            discover_ttl_secs: read(mgr, "ruyix.code.harness.discover.ttl_secs", project_root),
+            discover_extra: read(mgr, "ruyix.code.harness.discover.extra", project_root),
         }
     }
 }
@@ -244,6 +251,30 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         cfg.agent.max_elapsed_secs = n;
     }
 
+    // v0.5 命令发现：默认**开**。实测那次 65 轮空转里有 5~6 轮纯粹在试探 `mvn` / `java`
+    // 在不在，而引擎早就探过、只是没告诉模型 —— 默认关掉等于把这段空转留着。
+    // 探测结果只进上下文、不参与任何判断，所以开关不影响正确性，只影响模型是"知道"还是"去试"。
+    if let Some(e) = v.discover_enabled.as_deref() {
+        cfg.discover.enabled = e == "true" || e == "1";
+    }
+    if let Some(n) = v
+        .discover_ttl_secs
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        cfg.discover.ttl_secs = n;
+    }
+    // `extra` 是「能力长在数据里」的落点：工具表没覆盖的写在这儿，**不用改代码**。
+    // 逗号 / 分号 / 空白都能当分隔符 —— 手写配置的人不该被格式绊住。
+    if let Some(x) = v.discover_extra.as_deref() {
+        cfg.discover.extra = x
+            .split([',', ';', '\n', ' ', '\t'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+
     // 运行目录：ruyix 默认 ~/.ruyix/code/agent/runs（D5）
     cfg.workspace_root = v
         .workspace_root
@@ -374,6 +405,57 @@ mod tests {
         );
         assert_eq!(cfg2.step.max_steps, 24);
         assert_eq!(cfg2.agent.max_elapsed_secs, 1800);
+    }
+
+    /// v0.5：命令发现默认开，`false` 能关回去；`extra` 的手写格式要容错
+    #[test]
+    fn discover_bridge_defaults_on_and_parses_the_extra_list() {
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &BridgeValues::default());
+        assert!(
+            cfg.discover.enabled,
+            "默认必须开：关着的时候模型只能自己试命令在不在，实测会烧掉好几轮"
+        );
+        assert_eq!(cfg.discover.ttl_secs, 300);
+        assert!(cfg.discover.extra.is_empty());
+
+        let mut off = base();
+        apply_overrides(
+            &mut off,
+            &BridgeValues {
+                discover_enabled: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!off.discover.enabled, "退路必须真的能关掉");
+
+        // 逗号 / 分号 / 空白混着写都要能拆开，空项忽略
+        let mut cfg2 = base();
+        apply_overrides(
+            &mut cfg2,
+            &BridgeValues {
+                discover_ttl_secs: Some("0".into()),
+                discover_extra: Some("helm, curl; jq\n terraform  ".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg2.discover.ttl_secs, 0, "0 = 不缓存，是合法值");
+        assert_eq!(
+            cfg2.discover.extra,
+            vec!["helm", "curl", "jq", "terraform"],
+            "分隔符与空白都要容错"
+        );
+
+        // 非法值保持默认（配置桥不做硬失败）
+        let mut cfg3 = base();
+        apply_overrides(
+            &mut cfg3,
+            &BridgeValues {
+                discover_ttl_secs: Some("很久".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg3.discover.ttl_secs, 300);
     }
 
     #[test]

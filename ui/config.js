@@ -60,6 +60,12 @@ window.ConfigUI = (() => {
         { key: "step.execute_plan", kind: "toggle" },
         { key: "step.max_steps", kind: "number" },
         { key: "agent.max_elapsed_secs", kind: "number" },
+        // v0.5 命令发现：把"本机有什么命令"实测后写进模型上下文。默认开 —— 关掉之后模型
+        // 只能自己一轮轮试（实测有 5~6 轮纯耗在探 mvn / java 在不在）。extra 是逃生口：
+        // 工具表没覆盖的命令写在这里，逗号分隔，不用改代码。
+        { key: "discover.enabled", kind: "toggle" },
+        { key: "discover.ttl_secs", kind: "number" },
+        { key: "discover.extra", kind: "text" },
       ],
     },
   ];

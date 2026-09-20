@@ -39,6 +39,9 @@
  *                     这些字段，agent_session_save 的往返会当场把它们抹掉
  *   U16 agent-loop    会话 = 工具循环（Read/Write/Execute/Connect 四大原子能力），无问答/任务预分类；
  *                     Connect 必须真接上宿主（mod.rs 建连接器 → connect.rs 落 MCP/A2A）
+ *   U19 cmd-discover  命令发现（v0.5）：本机有哪些命令必须实测后写进上下文 —— 一张数据表 +
+ *                     两步探测（where/command -v 解析 + 过 shell 取版本，Windows 的 .cmd 不被
+ *                     CreateProcess 认）+ 可用与不可用都写 + 主循环与子步骤都注入
  */
 
 "use strict";
@@ -372,6 +375,32 @@ function runStaticChecks() {
       has(sessionJs, "m.plan?.steps?.length") &&
       has(sessionJs, "agent_run_load"),
     "计划跨重启会丢：sessions.rs 未声明 plan/verify/reflect / session.js 未挂快照或未从消息恢复");
+
+  // U19 cmd-discover：命令发现（v0.5）——「本机有什么命令」必须**实测后真的进模型上下文**。
+  // 实测 run agent-20260920-152312 有 5~6 轮纯耗在探 mvn / java 在不在；引擎早就探过，只是
+  // 从没写进上下文。四环缺一不可：① 一张数据表（加工具是加一行，不是加一个分支）② 两步探测
+  // （`where` / `command -v` 解析出"在不在"，再过 shell 取版本 —— Windows 上 `.cmd` 不被
+  // CreateProcess 认，实测 `Command::new("mvn")` 直接 not found）③ 渲染时**可用与不可用都写**
+  // （只说"有 mvn"治不了空转）④ 主循环与子步骤**都**注入（子步骤上下文隔离，父那份到不了）。
+  // 宿主侧还要能关掉、能追加工具，否则用户无从干预。
+  const discoverRs = read("crates/harness-engine/src/discover.rs");
+  const execRs = read("crates/harness-engine/src/exec.rs");
+  const stepRs = read("crates/harness-engine/src/step_agent.rs");
+  const cfgBridgeRs = read("src-tauri/src/agent/config_bridge.rs");
+  check("U19", "cmd-discover",
+    has(discoverRs, "pub const TOOLS") &&
+      has(discoverRs, "pub fn discover(") &&
+      has(discoverRs, "pub fn render_note(") &&
+      has(discoverRs, "本机**没有**") &&
+      has(discoverRs, "exec::resolve_bin(") &&
+      has(execRs, "pub fn resolve_bin(") &&
+      has(execRs, "pub fn bin_version(") &&
+      has(intentRs, "discover::render_note(") &&
+      has(stepRs, "discover::render_note(") &&
+      has(cfgBridgeRs, "discover.extra") &&
+      has(configJs, '"discover.enabled"') &&
+      has(configJs, '"discover.extra"'),
+    "命令发现没接上：工具表 / 两步探测（where+shell）/ 可用与不可用都写 / 主循环与子步骤都注入 / 配置项 缺一不可");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
