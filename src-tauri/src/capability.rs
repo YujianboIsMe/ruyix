@@ -236,7 +236,8 @@ pub async fn probe_tool(cfg: &ToolCfg) -> ToolProbe {
             };
         }
     };
-    let version = String::from_utf8_lossy(&output.stdout)
+    // 版本行同样要按活动代码页解码（中文 Windows 上 `java -version` 走的是 GBK 的 stderr）
+    let version = harness_engine::exec::decode_output(&output.stdout)
         .lines()
         .next()
         .unwrap_or("")

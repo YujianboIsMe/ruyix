@@ -667,8 +667,10 @@ async fn run_target(
 
         Ok(RunOutput {
             exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            // 按活动代码页解码：中文 Windows 上 mvn / java / cmd 的输出是 GBK，
+            // 直接 from_utf8_lossy 会把这行输出变成乱码（与 agent 侧同一处实现）。
+            stdout: harness_engine::exec::decode_output(&output.stdout),
+            stderr: harness_engine::exec::decode_output(&output.stderr),
             killed: false,
         })
     })

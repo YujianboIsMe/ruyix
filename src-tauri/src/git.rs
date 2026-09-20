@@ -72,8 +72,9 @@ fn run_git(project_root: &str, args: &[&str]) -> Result<GitOutput, String> {
 
     Ok(GitOutput {
         exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        // git 的本地化提示（"不是 git 仓库"之类）是活动代码页编码，不能当 UTF-8 硬解
+        stdout: harness_engine::exec::decode_output(&output.stdout),
+        stderr: harness_engine::exec::decode_output(&output.stderr),
     })
 }
 
