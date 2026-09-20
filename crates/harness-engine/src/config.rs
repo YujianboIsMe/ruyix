@@ -637,6 +637,34 @@ impl Default for DiscoverConfig {
     }
 }
 
+fn d_env_install_enabled() -> bool {
+    true
+}
+
+/// 环境准备配置（v0.5）。
+///
+/// 命令发现（[`DiscoverConfig`]）只解决"模型**知道**缺什么"，补不上。补的能力走 Connect：
+/// 宿主在清单里摆一个 `kind = "env"` 的目标，模型 `connect` 请求安装，宿主编排包管理器。
+/// 引擎**不碰** choco / apt / brew，只把这个开关透给宿主 —— 关掉后清单里不再出现 env 目标，
+/// 模型看不到、也就不会请求安装（引擎侧无需再判一次）。
+///
+/// 默认**开**：这是自成长闭环的最后一环（探测 → 告知 → 请求 → 安装 → 再探测），
+/// 默认关掉等于把闭环断在最后一步。装什么、用哪个包管理器、装不装，全是**宿主裁量**。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EnvConfig {
+    /// 关掉后宿主不再把这些能力摆进 connect 清单（模型侧彻底看不见）
+    #[serde(default = "d_env_install_enabled")]
+    pub install_enabled: bool,
+}
+
+impl Default for EnvConfig {
+    fn default() -> Self {
+        Self {
+            install_enabled: d_env_install_enabled(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     #[serde(default)]
@@ -666,6 +694,9 @@ pub struct AppConfig {
     /// 命令发现（把"本机有什么命令"实测出来喂进模型上下文，v0.5）
     #[serde(default)]
     pub discover: DiscoverConfig,
+    /// 环境准备（缺失工具的按需安装，走 Connect，v0.5）
+    #[serde(default)]
+    pub env: EnvConfig,
     #[serde(default = "d_workspace")]
     pub workspace_root: String,
     #[serde(default = "d_max_context")]
@@ -688,6 +719,7 @@ impl Default for AppConfig {
             sandbox: SandboxConfig::default(),
             kb: KbConfig::default(),
             discover: DiscoverConfig::default(),
+            env: EnvConfig::default(),
             workspace_root: d_workspace(),
             max_context_chars: d_max_context(),
         }

@@ -266,6 +266,25 @@ pub fn resolve_bin(bin: &str, timeout: Duration) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// 跑一条**命令行**（交给命令解释器，不是把可执行名丢给 `CreateProcess`）。
+///
+/// 为什么必须有它：`.cmd` / `.bat` / `.ps1` 不能被 `CreateProcess` 直接执行（见
+/// [`resolve_bin`]）——`scoop.cmd`、`mvn.cmd`、`gradle.bat` 这类全中招。凡是"拼接出来的
+/// 命令行"（安装、构建、探版本）都要走这里。Windows 用 `cmd /C`，Unix 用 `sh -c`，
+/// 与 [`crate::agent`] 的 shell 执行保持同一套做法。
+///
+/// 需要完整输出（退出码 / stdout / stderr）用这个；只要版本首行用 [`bin_version`]。
+pub fn run_line(cwd: &Path, cmdline: &str, timeout: Duration) -> CmdOutput {
+    #[cfg(target_os = "windows")]
+    {
+        run(cwd, "cmd", &["/C", cmdline], timeout, &[])
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        run(cwd, "sh", &["-c", cmdline], timeout, &[])
+    }
+}
+
 /// 取版本首行。**不看退出码** —— `java -version` 走的是 stderr，不少工具版本也非 0 退出。
 ///
 /// 必须过 shell：即使解析出了完整路径，`.cmd` 也不能被 `CreateProcess` 直接执行
@@ -277,11 +296,7 @@ pub fn bin_version(bin: &str, args: &[&str], timeout: Duration) -> String {
     } else {
         format!("{bin} {}", args.join(" "))
     };
-    let cwd = std::env::temp_dir();
-    #[cfg(target_os = "windows")]
-    let out = run(&cwd, "cmd", &["/C", &cmdline], timeout, &[]);
-    #[cfg(not(target_os = "windows"))]
-    let out = run(&cwd, "sh", &["-c", &cmdline], timeout, &[]);
+    let out = run_line(&std::env::temp_dir(), &cmdline, timeout);
     let text = if out.stdout.trim().is_empty() {
         out.stderr
     } else {
