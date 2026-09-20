@@ -77,6 +77,73 @@ pub fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
+/// 解码子进程输出：**先按 UTF-8 严格解，不合法再按 Windows 活动代码页（中文机器 = GBK/CP936）解**。
+///
+/// 为什么不能只用 `from_utf8_lossy`：中文 Windows 上 `cmd` / `java` / `mvn` 的输出是 GBK，
+/// lossy 之后模型读到的是 `'\' �����ڲ����...`，**读不出"不是内部或外部命令"**——
+/// 于是它换一个更离谱的命令继续试，这就是"模型返回的命令总是不对"的机制。
+/// 实测字节（`cmd /C \admin-run\` 的 stderr，70 字节）：
+/// `27 5C 61 64 6D 69 6E 2D 72 75 6E 5C 27 20`（ASCII：`'\admin-run\' `）
+/// `B2 BB CA C7 C4 DA B2 BF BB F2 CD E2 B2 BF …`（GBK："不是内部或外部命令…"）。
+///
+/// 先试 UTF-8 是必须的：本机同样有大量工具（cargo / node / 设了 `PYTHONUTF8` 的 python）
+/// 本来就吐 UTF-8，不能一律当 GBK。误判窗口很小（GBK 字节恰好构成合法 UTF-8 的概率低），
+/// 且真命中时也只是显示问题，不会让命令本身失败。
+pub fn decode_output(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(s) = decode_ansi_codepage(bytes) {
+        return s;
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+// 按活动代码页（ANSI code page）解字节。引擎保持零依赖，这类系统调用直接声明 FFI，
+// 比为一个编码问题拉一个编码库划算；宿主侧的输出解码也走这里（一处实现多处消费）。
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetACP() -> u32;
+    fn MultiByteToWideChar(
+        code_page: u32,
+        flags: u32,
+        mb: *const u8,
+        mb_len: i32,
+        wide: *mut u16,
+        wide_len: i32,
+    ) -> i32;
+}
+
+/// 当前活动代码页：中文机器 936(GBK)、英文机器 1252。测试用它判断该不该断言中文。
+#[cfg(target_os = "windows")]
+pub fn ansi_codepage() -> u32 {
+    unsafe { GetACP() }
+}
+
+/// `None` = 系统也解不了（调用方退回 lossy）
+#[cfg(target_os = "windows")]
+fn decode_ansi_codepage(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let cp = ansi_codepage();
+    let len = i32::try_from(bytes.len()).ok()?;
+    // 先问长度再要内容（不确定尾部填充）
+    let need = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if need <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; need as usize];
+    let got = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), len, buf.as_mut_ptr(), need) };
+    if got <= 0 {
+        return None;
+    }
+    buf.truncate(got as usize);
+    Some(String::from_utf16_lossy(&buf))
+}
+
 #[cfg(target_os = "windows")]
 fn kill_tree(pid: u32) {
     let _ = Command::new("taskkill")
@@ -206,8 +273,10 @@ pub fn run_with_cap(
         let _ = t.join();
     }
 
-    let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap()).to_string();
-    let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap()).to_string();
+    // 关键：不能 from_utf8_lossy —— 中文 Windows 的 cmd/java/mvn 输出是 GBK，
+    // lossy 之后模型读到乱码，读不出失败原因（见 decode_output 的说明）。
+    let stdout = decode_output(&out_buf.lock().unwrap());
+    let stderr = decode_output(&err_buf.lock().unwrap());
 
     CmdOutput {
         cmd: display,
@@ -352,6 +421,61 @@ mod tests {
         assert!(c.contains("省略"));
         // 没有 panic 且仍是合法 UTF-8 即说明切在了字符边界上
         assert!(std::str::from_utf8(c.as_bytes()).is_ok());
+    }
+
+    /// 合法 UTF-8 必须直通 —— 本机大量工具（cargo / node / 设了 `PYTHONUTF8` 的 python）
+    /// 本来就吐 UTF-8，不能一律当 GBK 解。
+    #[test]
+    fn decode_output_passes_valid_utf8_through() {
+        assert_eq!(decode_output("中文 ok".as_bytes()), "中文 ok");
+        assert_eq!(decode_output(b""), "");
+    }
+
+    /// 非法字节序列不许 panic（兜底 lossy），可打印部分要保留。
+    #[test]
+    fn decode_output_never_panics_on_garbage() {
+        let s = decode_output(&[0xFF, 0xFE, 0x00, 0x41]);
+        assert!(s.contains('A'), "可打印部分该保留: {s:?}");
+    }
+
+    /// 病根回归：中文 Windows 上 cmd 的报错是 GBK，解码后必须可读。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn decode_output_reads_gbk_error_output() {
+        if ansi_codepage() != 936 {
+            return; // 非中文 Windows 本来就不是 GBK
+        }
+        // 实测取样的真实字节：`cmd /C \admin-run\` 的 stderr
+        let bytes: &[u8] = &[
+            0x27, 0x5C, 0x61, 0x64, 0x6D, 0x69, 0x6E, 0x2D, 0x72, 0x75, 0x6E, 0x5C, 0x27, 0x20,
+            0xB2, 0xBB, 0xCA, 0xC7, 0xC4, 0xDA, 0xB2, 0xBF, 0xBB, 0xF2, 0xCD, 0xE2, 0xB2, 0xBF,
+            0xC3, 0xFC, 0xC1, 0xEE,
+        ];
+        let s = decode_output(bytes);
+        assert!(s.starts_with("'\\admin-run\\'"), "ASCII 前缀应保留: {s:?}");
+        assert!(s.contains("不是内部或外部命令"), "GBK 应解成中文: {s:?}");
+    }
+
+    /// 端到端：跑一条不存在的命令，agent 拿到的错误必须是**可读中文**。
+    /// 修之前这里是乱码，模型读不出"不是内部或外部命令"，只能换个更离谱的命令继续试。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn run_reports_a_readable_chinese_error() {
+        let out = run(
+            &std::env::temp_dir(),
+            "cmd",
+            &["/C", "zzz-no-such-tool-zzz"],
+            Duration::from_secs(20),
+            &[],
+        );
+        assert_eq!(out.exit_code, Some(1));
+        if ansi_codepage() == 936 {
+            assert!(
+                out.stderr.contains("不是内部或外部命令"),
+                "实际: {:?}",
+                out.stderr
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
