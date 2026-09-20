@@ -29,6 +29,7 @@ use crate::pipeline::Sink;
 use crate::plan::{Plan, PlanStep};
 use crate::reflect::{self, Reflection};
 use crate::repair;
+use crate::step_agent::{self, StepInput, StepReport, StepSummary};
 use crate::verify;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,6 +51,9 @@ const EXEC_MIN_TIMEOUT_SECS: u64 = 5;
 const EXEC_MAX_TIMEOUT_SECS: u64 = 120;
 /// 连接清单注入提示词时的单目标工具名裁剪（服务器工具可能几十个）
 const CONNECT_CLIP: usize = 400;
+/// `execute_plan` 下允许模型重排计划几次。重排会把游标归零（新计划从第 1 步重跑），
+/// 不设上限的话"失败 → 重排 → 又失败 → 再重排"能烧光整个轮次预算却什么都不产出。
+const MAX_PLAN_RESETS: u32 = 2;
 
 /// 会话历史消息（调用方从 session 消息流裁剪后传入；只认 user/assistant）
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -933,6 +937,36 @@ fn emit_step_progress(sink: &dyn Sink, steps: &[PlanStep], overlay: &BTreeMap<St
     }
 }
 
+/// 子步骤失败后交回模型的那一轮 —— 这是 `execute_plan` 下模型唯一的干预通道。
+///
+/// 为什么不闷头继续跑下一步：第 1 步就崩了的话后面全白跑。把"哪一步、为什么、已经产出
+/// 什么"如实回灌，让模型自己选：重排计划 / 自己动手补齐 / 直接交付（并说明为何没做）。
+fn step_failure_feedback(
+    step: &PlanStep,
+    index: usize,
+    total: usize,
+    report: &StepReport,
+) -> String {
+    let reason = report.error.clone().unwrap_or_else(|| "未说明原因".into());
+    let produced = if report.files.is_empty() {
+        "无".to_string()
+    } else {
+        report.files.join("、")
+    };
+    let msg = format!(
+        "步骤 {index}/{total}「{}」执行失败：{reason}\n\
+         本步已产出的文件：{produced}（已留在覆盖层里，不回滚）。\n\
+         请决定下一步：① 调整计划后继续（重新输出 plan —— 注意新计划会从第 1 步重新执行）\
+         ② 你自己动手补齐（read / write / execute）\
+         ③ 直接交付（final，并说明这一步为何没做）。",
+        step.title.trim()
+    );
+    format!(
+        "{{\"ok\": false, \"error\": {}}}",
+        serde_json::to_string(&msg).unwrap_or_else(|_| "\"\"".into())
+    )
+}
+
 /// run 收尾：把计划里每个步骤都落到终态。
 ///
 /// 沙漏（⌛）的语义是**等待执行** —— run 已经结束还显示等待，就是在骗人。
@@ -949,9 +983,27 @@ fn settle_steps(
     steps: &[PlanStep],
     overlay: &BTreeMap<String, String>,
     delivered: bool,
+    // 每个步骤**已执行过**的终态（`execute_plan` 下由派发逻辑写）。有它的步骤直接照抄：
+    // 引擎知道"这一步跑完了 / 失败了"这个事实，比"声明文件是否落地"的推断准得多。
+    executed: &[Option<(String, String)>],
 ) {
     let total = steps.len();
     for (i, s) in steps.iter().enumerate() {
+        if let Some(Some((status, notes))) = executed.get(i) {
+            sink.step(
+                i + 1,
+                total,
+                &StepOutcome {
+                    step_id: s.id,
+                    title: s.title.clone(),
+                    status: status.clone(),
+                    notes: notes.clone(),
+                    files: s.files.clone(),
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
         let missing: Vec<&str> = s
             .files
             .iter()
@@ -1256,6 +1308,20 @@ pub async fn run(
     let started = Instant::now();
     let mut ctx = Ctx::new(proj, policy);
     let mut plan_steps: Vec<PlanStep> = Vec::new();
+    // ---- 计划执行（`step.execute_plan` 开启时）----
+    // 游标在**引擎**手里：让模型每轮自选"我要做第几步"必然乱序、跳步、重复，而且
+    // "选哪一步"本身还要烧一轮。模型的调整能力由"干预轮"补回来 —— 只有子步骤失败时，
+    // 才把控制权交回模型一次。
+    let mut plan_cursor: usize = 0;
+    let mut plan_resets: u32 = 0;
+    let mut intervene = false;
+    // 已完成步骤的引擎侧事实（跨步骤唯一通道：子步骤输入包里的那一行）
+    let mut plan_done: Vec<StepSummary> = Vec::new();
+    // 每个步骤的终态（done / error + 说明）。收尾优先用它，而不是"文件是否落地"的推断
+    let mut step_states: Vec<Option<(String, String)>> = Vec::new();
+    // 总时长闸（0 = 不限）：父循环与每个子步骤共用同一条 deadline
+    let deadline = (cfg.agent.max_elapsed_secs > 0)
+        .then(|| started + Duration::from_secs(cfg.agent.max_elapsed_secs));
     // 本次是否真的交付了 final（收尾时决定计划步骤能不能算完成，见 settle_steps）
     let mut delivered = false;
     let mut out = AgentOutcome::default();
@@ -1298,6 +1364,126 @@ pub async fn run(
             sink.log("warn", out.answer.clone());
             break;
         }
+        // 总时长闸：到点就收手，把"为什么停"写进答复（子步骤内部看的是同一条 deadline）
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            out.answer = format!(
+                "（达到总时长上限 {} 秒，循环停止。已完成 {} 轮工具调用、{} 个文件变更；请基于以上进展继续指示。）",
+                cfg.agent.max_elapsed_secs,
+                out.steps.len(),
+                ctx.changes.len()
+            );
+            sink.log("warn", out.answer.clone());
+            break;
+        }
+
+        // 计划即执行：这一轮就做一件事 —— 跑完一个步骤（失败则再给模型一次干预轮）。
+        // 步骤由引擎按序派发，模型不参与调度（理由见 plan_cursor 的注释）。
+        if cfg.step.execute_plan && !intervene && plan_cursor < plan_steps.len() {
+            let idx = plan_cursor;
+            let cur = plan_steps[idx].clone();
+            let total = plan_steps.len();
+            // 派发**之前**就报"进行中"：原先 running 只在 write 之后才发，用户会盯着 ⌛
+            // 干等几十秒（一个步骤内部往往要先 read 好几个文件）
+            sink.step(
+                idx + 1,
+                total,
+                &StepOutcome {
+                    step_id: cur.id,
+                    title: cur.title.clone(),
+                    status: "running".into(),
+                    files: cur.files.clone(),
+                    ..Default::default()
+                },
+            );
+            sink.log(
+                "info",
+                clip(
+                    &format!(
+                        "[agent] 第 {step} 轮 派发步骤 {}/{}「{}」",
+                        idx + 1,
+                        total,
+                        cur.title.trim()
+                    ),
+                    240,
+                ),
+            );
+            let inp = StepInput {
+                project_root: proj,
+                task,
+                step: &cur,
+                index: idx + 1,
+                total,
+                done: &plan_done,
+            };
+            // 致命模型错误上抛（与主循环同一判据）；其余一律是 Ok(status=error) 的报告
+            let report = step_agent::run_step(cfg, &mut ctx, &inp, cancel, deadline, sink).await?;
+            out.usage.add(&report.usage);
+            let ok = report.ok();
+            if !report.files.is_empty() {
+                gate.dirty = true; // 子步骤写了文件 → final 时该跑全量验证
+            }
+            // 子步骤的 read 不进父上下文，但它查过什么必须让父知道（复核员的证据集合）
+            for p in &report.read_paths {
+                if !read_paths.contains(p) {
+                    read_paths.push(p.clone());
+                }
+            }
+            let facts = report.as_summary(&cur);
+            step_states[idx] = Some((
+                report.status.clone(),
+                if facts.note.trim().is_empty() {
+                    report.error.clone().unwrap_or_default()
+                } else {
+                    facts.note.clone()
+                },
+            ));
+            if ok {
+                plan_done.push(facts);
+            }
+            sink.step(
+                idx + 1,
+                total,
+                &StepOutcome {
+                    step_id: cur.id,
+                    title: cur.title.clone(),
+                    status: report.status.clone(),
+                    notes: report.note.clone(),
+                    error: report.error.clone(),
+                    files: report.files.clone(),
+                    no_files: report.files.is_empty(),
+                    ..Default::default()
+                },
+            );
+            let headline = clip(&report.headline(&cur), 400);
+            out.steps.push(StepTrace {
+                step,
+                tool: "step".into(),
+                brief: headline.clone(),
+                ok,
+            });
+            sink.log(
+                if ok { "info" } else { "warn" },
+                format!(
+                    "[agent] 第 {step} 轮 step {} {headline}",
+                    if ok { "✓" } else { "✗" }
+                ),
+            );
+            plan_cursor += 1;
+            if !ok {
+                // 停下交回模型一次：第 1 步就崩了，闷头往下跑全是白费
+                intervene = true;
+                msgs.push(ChatMessage::user(step_failure_feedback(
+                    &cur,
+                    idx + 1,
+                    total,
+                    &report,
+                )));
+            }
+            continue;
+        }
+
         let reply = match llm::chat(&cfg.llm, &msgs, true).await {
             Ok(r) => {
                 llm_failures = 0;
@@ -1392,14 +1578,40 @@ pub async fn run(
             // Final 已在上面处理（这里只是让 match 穷尽）
             Action::Final(_) => unreachable!("Final 在门禁分支里已经处理"),
             Action::Plan(steps) => {
-                plan_steps = steps;
-                let p = plan_to_outline(task, plan_steps.clone());
-                sink.plan(&p);
-                (
-                    "plan".into(),
-                    format!("{} 个步骤", plan_steps.len()),
-                    Ok("任务清单已展示给用户（大纲区），按清单继续。".into()),
-                )
+                let is_reset = !plan_steps.is_empty();
+                if cfg.step.execute_plan && is_reset && plan_resets >= MAX_PLAN_RESETS {
+                    // 重排次数用尽：忽略这一次，按现有计划继续 —— 否则
+                    // "失败 → 重排 → 又失败 → 再重排"能把整个轮次预算烧光却什么都不产出
+                    (
+                        "plan".into(),
+                        "重排被忽略（已达上限）".into(),
+                        Ok(format!(
+                            "计划重排次数已达上限（{MAX_PLAN_RESETS} 次），继续按现有计划执行。"
+                        )),
+                    )
+                } else {
+                    plan_steps = steps;
+                    // 新计划 = 从头执行（游标归零）。已完成的步骤事实留在 plan_done 里，
+                    // 子步骤输入包会带上它，模型仍能看到"前面做过什么"。
+                    plan_cursor = 0;
+                    step_states = vec![None; plan_steps.len()];
+                    if is_reset {
+                        plan_resets += 1;
+                    }
+                    let p = plan_to_outline(task, plan_steps.clone());
+                    sink.plan(&p);
+                    (
+                        "plan".into(),
+                        format!("{} 个步骤", plan_steps.len()),
+                        Ok(if cfg.step.execute_plan {
+                            "计划已收到，引擎将按序执行各步骤；全部做完后输出 final。\
+                             若要调整计划，重新输出 plan（注意：会从第 1 步重新执行）。"
+                                .into()
+                        } else {
+                            "任务清单已展示给用户（大纲区），按清单继续。".into()
+                        }),
+                    )
+                }
             }
             Action::Read(path) => {
                 let brief = format!("read {path}");
@@ -1440,7 +1652,9 @@ pub async fn run(
             ),
         );
 
-        if !plan_steps.is_empty() && tool == "write" {
+        // execute_plan 下步骤状态由派发逻辑报告（引擎知道"这一步跑完了"这个事实，比
+        // "声明文件是否落地"的推断准得多），两条通道混用只会互相打架
+        if !cfg.step.execute_plan && !plan_steps.is_empty() && tool == "write" {
             emit_step_progress(sink, &plan_steps, &ctx.overlay);
         }
 
@@ -1476,6 +1690,10 @@ pub async fn run(
         };
         msgs.push(ChatMessage::user(result_text));
 
+        // 模型已经对失败做出过回应（无论它选了哪个动作），把控制权交回引擎继续派发。
+        // 解析失败 / 门禁打回那两条 `continue` 不清它 —— 那种场合模型还没给出有效决定。
+        intervene = false;
+
         if step == MAX_STEPS {
             out.answer = format!(
                 "（达到 {MAX_STEPS} 轮上限，循环停止。已完成 {} 次工具调用、{} 个文件变更；请基于以上进展继续指示。）",
@@ -1488,7 +1706,7 @@ pub async fn run(
 
     // 计划落定：run 结束了，大纲区不该再留沙漏（⌛ 是"等待执行"，不是"没做成"）
     if !plan_steps.is_empty() {
-        settle_steps(sink, &plan_steps, &ctx.overlay, delivered);
+        settle_steps(sink, &plan_steps, &ctx.overlay, delivered, &step_states);
     }
 
     // 门禁留下的补充说明（跳过原因 / 预算用尽 / 复核未完成）：
@@ -1802,7 +2020,9 @@ mod tests {
 
     fn block_on<F: Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            // enable_all 而不是只用 enable_time：整循环级用例要真发 HTTP 请求（假 LLM
+            // 是本地 TCP 服务），只开 time driver 会连不上
+            .enable_all()
             .build()
             .unwrap()
             .block_on(f)
@@ -2227,7 +2447,7 @@ mod tests {
             plan_step(3, "同步文档", &["CLAUDE.md"], "docs"),
         ];
         let sink = StepSink::default();
-        settle_steps(&sink, &steps, &overlay, true);
+        settle_steps(&sink, &steps, &overlay, true, &[]);
         let ev = sink.events();
         assert_eq!(ev.len(), 3, "每个步骤都要落定，否则界面留沙漏：{ev:?}");
         assert_eq!(ev[0].2, "done");
@@ -2248,12 +2468,162 @@ mod tests {
             plan_step(2, "同步文档", &[], "docs"),
         ];
         let sink = StepSink::default();
-        settle_steps(&sink, &steps, &overlay, false);
+        settle_steps(&sink, &steps, &overlay, false, &[]);
         let ev = sink.events();
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].2, "done", "文件已全部落地，取消不该把它降级");
         assert_eq!(ev[1].2, "skipped");
         assert!(ev[1].3.contains("未完成"), "{}", ev[1].3);
+    }
+
+    // ============================================
+    // execute_plan：父循环的一轮 = 一个计划步骤
+    // ============================================
+
+    /// 打开 `execute_plan` 时的完整闭环：模型给计划 → 引擎按序派发两个步骤 → 模型交付。
+    ///
+    /// 这条用例盯三件事（都不是断言语义，而是断言**实际发生了什么**）：
+    /// ① 调度权在引擎手里：模型从头到尾没说"做第几步"，两步仍按 1→2 跑完；
+    /// ② 上下文真的隔离：子步骤写进文件的内容（MARKER）绝不能出现在父的请求体里；
+    /// ③ UI 收到的是 running→done 两拍，而不是从"文件是否落地"倒推。
+    #[test]
+    fn execute_plan_runs_each_step_in_its_own_context() {
+        const MARKER: &str = "step-file-secret-a41f";
+        let llm = crate::testllm::fake_llm(vec![
+            // 父第 1 轮：一份两步计划
+            r#"{"tool":"plan","args":{"steps":[
+                {"title":"写模块","detail":"写 m.py","files":["m.py"]},
+                {"title":"写测试","detail":"写 t.py","files":["t.py"]}]}}"#
+                .into(),
+            // 子步骤 1：写文件 → 交回
+            format!(r#"{{"tool":"write","args":{{"path":"m.py","content":"{MARKER}"}}}}"#),
+            r#"{"final":"m.py 写好了"}"#.into(),
+            // 子步骤 2：写文件 → 交回
+            r#"{"tool":"write","args":{"path":"t.py","content":"t = 1"}}"#.into(),
+            r#"{"final":"t.py 写好了"}"#.into(),
+            // 父最后的交付
+            r#"{"final":"两步都完成了"}"#.into(),
+        ]);
+
+        let dir = TempDir::new("plan-exec");
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.step.execute_plan = true;
+        // 与本用例无关的重活全部关掉：窄验证要起 python/node，全量验证要沙箱，复核要再
+        // 烧一轮模型调用 —— 任一开着都会把"请求第几条"的断言搅乱
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+
+        let sink = StepSink::default();
+        let out = block_on(run(
+            &cfg,
+            &dir.0,
+            "把 m.py 和 t.py 写出来",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &sink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(out.answer, "两步都完成了");
+        assert_eq!(
+            out.changes.len(),
+            2,
+            "两个子步骤各写了一个文件：{:?}",
+            out.changes
+        );
+
+        // ① 派发顺序 + UI 事件：running→done，两步依次
+        let ev = sink.events();
+        let head: Vec<(usize, String)> = ev.iter().take(4).map(|e| (e.0, e.2.clone())).collect();
+        assert_eq!(
+            head,
+            vec![
+                (1, "running".to_string()),
+                (1, "done".to_string()),
+                (2, "running".to_string()),
+                (2, "done".to_string()),
+            ],
+            "全部事件：{ev:?}"
+        );
+        assert_eq!(ev.len(), 6, "收尾时每个步骤再落一次终态：{ev:?}");
+
+        // ② 隔离的真判据：父轮次 = 1(plan) + 2(两个步骤) + 1(final) = 4，最后一个请求
+        //    就是父在交付前看到的东西。子步骤写进文件的内容**不该**出现在里面。
+        assert_eq!(llm.count(), 6, "父 4 轮 + 子步骤各 2 轮");
+        let last = llm.request(5);
+        assert!(last.contains("plan"), "父该记得那份计划：{last}");
+        assert!(
+            !last.contains(MARKER),
+            "子步骤写进文件的内容漏进了父上下文 —— 隔离没生效：{last}"
+        );
+    }
+
+    /// 步骤失败：落 ❌ 并**停下交回模型一轮**（而不是闷头跑下一步）。
+    /// `error` 这个步骤状态在 agent 路径上原先不可达，这里是它第一个正当来源。
+    #[test]
+    fn execute_plan_hands_a_failed_step_back_to_the_model() {
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"tool":"plan","args":{"steps":[
+                {"title":"第一步","files":["a.py"]},
+                {"title":"第二步","files":["b.py"]}]}}"#
+                .into(),
+            // 子步骤 1 只写了文件、没交回 —— `step.max_steps = 1` 让它立刻预算用尽
+            r#"{"tool":"write","args":{"path":"a.py","content":"a = 1"}}"#.into(),
+            // 父的干预轮：模型选择直接交付
+            r#"{"final":"只做完第一步，第二步没做"}"#.into(),
+        ]);
+
+        let dir = TempDir::new("plan-fail");
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.step.execute_plan = true;
+        cfg.step.max_steps = 1;
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+
+        let sink = StepSink::default();
+        let out = block_on(run(
+            &cfg,
+            &dir.0,
+            "写两个文件",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &sink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(out.answer, "只做完第一步，第二步没做");
+
+        let st: Vec<(usize, String)> = sink.events().iter().map(|e| (e.0, e.2.clone())).collect();
+        assert_eq!(
+            st,
+            vec![
+                (1, "running".to_string()),
+                (1, "error".to_string()),
+                // 收尾再落一次终态（settle_steps 的契约）
+                (1, "error".to_string()),
+                // 第二步从没被派发过（游标停在失败那一步），收尾如实标"未完成"
+                (2, "skipped".to_string()),
+            ],
+            "失败步骤必须留痕，未执行的步骤也不能留沙漏"
+        );
+
+        // 干预轮真的把失败事实递给了模型
+        assert_eq!(llm.count(), 3, "父 3 轮：plan / 干预 / final");
+        let intervene = llm.request(2);
+        assert!(intervene.contains("执行失败"), "{intervene}");
+        assert!(intervene.contains("第一步"), "{intervene}");
     }
 
     #[test]

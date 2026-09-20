@@ -255,18 +255,52 @@ pub struct StepAgentConfig {
     /// 单个步骤内部自己的工具轮次上限（与主循环的 `MAX_STEPS` 相互独立）
     #[serde(default = "d_step_max_steps")]
     pub max_steps: usize,
+    /// **计划即执行**：模型调 `plan` 之后由引擎按序把每个步骤派发给步骤执行体。
+    /// 打开后父循环的一轮 = 一个步骤（或一次失败后的干预轮），`MAX_STEPS` 的含义随之从
+    /// "最多多少次模型调用"变成"最多多少个步骤/干预轮"——步骤内部的轮次不再计入父预算。
+    ///
+    /// 默认**关**：`plan` 从"给用户看进度"变成"引擎的驱动指令"是破坏性语义变更，
+    /// 先留一个一行可回退的开关（关掉即完全回到旧行为，逐字节不变）。
+    #[serde(default)]
+    pub execute_plan: bool,
 }
 
 impl Default for StepAgentConfig {
     fn default() -> Self {
         Self {
             max_steps: d_step_max_steps(),
+            execute_plan: false,
         }
     }
 }
 
 fn d_step_max_steps() -> usize {
     24
+}
+
+/// 工具循环的整体预算（v0.4）。
+///
+/// 子步骤执行体（[`crate::step_agent`]）能自己跑循环之后，没有**全局**闸它就是个成本
+/// 放大器：`MAX_STEPS` 管的是父循环的轮数，而每个父轮底下可能挂着几十轮子调用。
+/// 这道闸按墙钟时间收口，主循环与子步骤**都**看它。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AgentConfig {
+    /// 单次 run 的总时长上限（秒）。**0 = 不限**。
+    /// 到时立刻收手并把原因写进答复 —— 宁可"这次没做完"，也不要让一个 run 无声烧下去。
+    #[serde(default = "d_agent_max_elapsed_secs")]
+    pub max_elapsed_secs: u64,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_elapsed_secs: d_agent_max_elapsed_secs(),
+        }
+    }
+}
+
+fn d_agent_max_elapsed_secs() -> u64 {
+    1800
 }
 
 fn d_python() -> String {
@@ -562,6 +596,9 @@ pub struct AppConfig {
     /// 工具循环的反思（复核 agent，v0.3）
     #[serde(default)]
     pub reflect: ReflectConfig,
+    /// 工具循环的整体预算（v0.4：总时长闸）
+    #[serde(default)]
+    pub agent: AgentConfig,
     /// 计划步骤的执行体（子 agent，v0.4）
     #[serde(default)]
     pub step: StepAgentConfig,
@@ -588,6 +625,7 @@ impl Default for AppConfig {
             verify: VerifyConfig::default(),
             gate: GateConfig::default(),
             reflect: ReflectConfig::default(),
+            agent: AgentConfig::default(),
             step: StepAgentConfig::default(),
             lint: LintConfig::default(),
             entropy: EntropyConfig::default(),

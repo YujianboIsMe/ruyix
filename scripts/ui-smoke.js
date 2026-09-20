@@ -30,6 +30,9 @@
  *   U14 apply-writeback 产物写回真实项目（三模式：确认=暂存面板人工写入，写入/自主=循环直写）：
  *                      暂存落盘唯一入口 applyStage 恒备份、stage.rs 路径封闭、apply.rs 三条安全约束在
  *   U15 outline-plan  任务计划进大纲区：plan 事件 → ✅ ⌛ ⛏️ 三态 + ❌ 失败 → 会话 tab 渲染
+ *   U15b plan-settle  收尾落定：每个步骤都要有终态（沙漏是"等待执行"，run 结束还挂着就是骗人）
+ *   U15c plan-execute 计划即执行（step.execute_plan）：游标在引擎手里，派发前发 running，
+ *                     失败落 error 并停下给模型一轮干预
  *   U16 agent-loop    会话 = 工具循环（Read/Write/Execute/Connect 四大原子能力），无问答/任务预分类；
  *                     Connect 必须真接上宿主（mod.rs 建连接器 → connect.rs 落 MCP/A2A）
  */
@@ -308,11 +311,23 @@ function runStaticChecks() {
   // → 交付分支真的把 delivered 置真（否则所有步骤都被判成"本次未完成"）。
   check("U15", "plan-settle",
     has(intentRs, "fn settle_steps(") &&
-      /settle_steps\(sink, &plan_steps, &ctx\.overlay, delivered\)/.test(intentRs) &&
+      /settle_steps\(sink, &plan_steps, &ctx\.overlay, delivered, &step_states\)/.test(intentRs) &&
       /out\.answer = text;\s*\n\s*delivered = true;/.test(intentRs) &&
       /"skipped"/.test(intentRs) &&
       /不冒充完成|settle_steps/.test(intentRs),
     "计划收尾未落定：agent.rs 缺 settle_steps / 收尾未调用 / delivered 未在 final 分支置真 —— 界面会留永久沙漏");
+
+  // U15c plan-execute：计划即执行（v0.4，`step.execute_plan`，默认关）。
+  // 调度权必须留在**引擎**手里：游标（plan_cursor）由引擎维护 → 派发前先发 running
+  // （否则 run 期间一直挂 ⌛）→ 真调用 run_step，且把父的 `&mut ctx` 传进去（覆盖层不分裂）
+  // → 失败落 error 并停下给模型一轮干预（step_failure_feedback），而不是闷头跑下一步。
+  check("U15", "plan-execute",
+    has(intentRs, "plan_cursor") &&
+      has(intentRs, "MAX_PLAN_RESETS") &&
+      has(intentRs, "step_failure_feedback") &&
+      /run_step\(cfg, &mut ctx, &inp, cancel, deadline, sink\)/.test(intentRs) &&
+      has(intentRs, "cfg.step.execute_plan"),
+    "计划执行未接上主循环：引擎缺游标 / 未传共享 Ctx 派发 run_step / 失败未回灌干预轮");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌

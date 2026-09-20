@@ -52,6 +52,10 @@ pub struct BridgeValues {
     pub reflect_enabled: Option<String>,
     pub reflect_max_rounds: Option<String>,
     pub reflect_model: Option<String>,
+    // v0.4 计划步骤执行体 + run 级总时长闸
+    pub step_execute_plan: Option<String>,
+    pub step_max_steps: Option<String>,
+    pub agent_max_elapsed_secs: Option<String>,
 }
 
 impl BridgeValues {
@@ -89,6 +93,13 @@ impl BridgeValues {
             reflect_enabled: read(mgr, "ruyix.code.harness.reflect.enabled", project_root),
             reflect_max_rounds: read(mgr, "ruyix.code.harness.reflect.max_rounds", project_root),
             reflect_model: read(mgr, "ruyix.code.harness.reflect.model", project_root),
+            step_execute_plan: read(mgr, "ruyix.code.harness.step.execute_plan", project_root),
+            step_max_steps: read(mgr, "ruyix.code.harness.step.max_steps", project_root),
+            agent_max_elapsed_secs: read(
+                mgr,
+                "ruyix.code.harness.agent.max_elapsed_secs",
+                project_root,
+            ),
         }
     }
 }
@@ -211,6 +222,27 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         cfg.reflect.model = m.clone();
     }
 
+    // v0.4 计划步骤执行体：默认关 —— 打开后 `plan` 从"给用户看进度"变成引擎的驱动指令，
+    // 父循环一轮 = 一个步骤。用户不配就是旧行为，不配也读得到默认值。
+    if let Some(e) = v.step_execute_plan.as_deref() {
+        cfg.step.execute_plan = e == "true" || e == "1";
+    }
+    if let Some(n) = v
+        .step_max_steps
+        .as_deref()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        cfg.step.max_steps = n;
+    }
+    // run 级总时长闸（秒，0 = 不限）
+    if let Some(n) = v
+        .agent_max_elapsed_secs
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        cfg.agent.max_elapsed_secs = n;
+    }
+
     // 运行目录：ruyix 默认 ~/.ruyix/code/agent/runs（D5）
     cfg.workspace_root = v
         .workspace_root
@@ -290,6 +322,42 @@ mod tests {
             before,
             (cfg.llm.temperature, cfg.llm.max_tokens, cfg.kb.top_k)
         );
+    }
+
+    /// v0.4：计划执行开关与总时长闸。**不配就是旧行为** —— 这条断言是"可回退"的凭据
+    #[test]
+    fn step_execute_plan_and_elapsed_budget_bridge() {
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &BridgeValues::default());
+        assert!(!cfg.step.execute_plan, "默认必须关：不配即旧行为");
+        assert_eq!(cfg.step.max_steps, 24);
+        assert_eq!(cfg.agent.max_elapsed_secs, 1800);
+
+        apply_overrides(
+            &mut cfg,
+            &BridgeValues {
+                step_execute_plan: Some("true".into()),
+                step_max_steps: Some("12".into()),
+                agent_max_elapsed_secs: Some("0".into()),
+                ..Default::default()
+            },
+        );
+        assert!(cfg.step.execute_plan);
+        assert_eq!(cfg.step.max_steps, 12);
+        assert_eq!(cfg.agent.max_elapsed_secs, 0, "0 = 不限，是合法值");
+
+        // 非法值保持默认（配置桥不做硬失败）
+        let mut cfg2 = base();
+        apply_overrides(
+            &mut cfg2,
+            &BridgeValues {
+                step_max_steps: Some("很多".into()),
+                agent_max_elapsed_secs: Some("-5".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg2.step.max_steps, 24);
+        assert_eq!(cfg2.agent.max_elapsed_secs, 1800);
     }
 
     #[test]

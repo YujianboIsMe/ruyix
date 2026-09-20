@@ -104,6 +104,9 @@ pub struct StepReport {
     pub status: String,
     /// 本步实际写入的文件（按写入顺序）
     pub files: Vec<String>,
+    /// 本步读过哪些文件/目录。父循环要拿它喂复核员（"依据核对"的证据集合）——
+    /// 子步骤的 read 不进父上下文，这份清单是**唯一**能让父知道"它查过什么"的通道。
+    pub read_paths: Vec<String>,
     /// 引擎写的本步事实（产出 + 语法检查结论）—— 交回父循环与下一步用的就是它
     pub note: String,
     /// 模型自己写的交付说明。**仅供参考**（它可能自述"已完成"而文件根本没写），
@@ -250,9 +253,11 @@ fn unsupported_reason(name: &str) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn error_report(
     reason: String,
     written: Vec<String>,
+    read: Vec<String>,
     verify: Option<VerifyOutcome>,
     rounds: usize,
     usage: Usage,
@@ -263,6 +268,7 @@ fn error_report(
     StepReport {
         status: "error".into(),
         files: written,
+        read_paths: read,
         note,
         self_report: String::new(),
         error: Some(reason),
@@ -284,11 +290,15 @@ pub async fn run_step(
     cx: &mut Ctx<'_>,
     inp: &StepInput<'_>,
     cancel: &CancelFlag,
+    // run 级总时长的截止时刻（`None` = 不限）。父循环与子步骤看的是**同一条**闸 ——
+    // 只掐父循环不够：一个步骤内部可能连跑几十轮编译/测试，父那边毫无感知。
+    deadline: Option<Instant>,
     sink: &dyn Sink,
 ) -> Result<StepReport, String> {
     let started = Instant::now();
     let mut usage = Usage::default();
     let mut written: Vec<String> = Vec::new();
+    let mut read: Vec<String> = Vec::new();
     let mut trace: Vec<String> = Vec::new();
     let mut last_verify: Option<VerifyOutcome> = None;
     let mut llm_failures: u32 = 0;
@@ -305,6 +315,22 @@ pub async fn run_step(
             return Ok(error_report(
                 "用户取消，本步骤中断".into(),
                 written,
+                read,
+                last_verify,
+                round.saturating_sub(1),
+                usage,
+                trace,
+                started,
+            ));
+        }
+        // 总时长闸：与父循环共用同一条 deadline，超了立刻交回（已产出的文件留在覆盖层里）
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            return Ok(error_report(
+                "本次 run 的总时长预算已用尽，本步骤中断".into(),
+                written,
+                read,
                 last_verify,
                 round.saturating_sub(1),
                 usage,
@@ -361,6 +387,7 @@ pub async fn run_step(
             let report = StepReport {
                 status: "done".into(),
                 files: written,
+                read_paths: read,
                 note,
                 self_report: clip(&text, SELF_REPORT_CLIP),
                 error: None,
@@ -378,7 +405,13 @@ pub async fn run_step(
             StepAction::Final(_) => unreachable!("Final 在上面已经返回"),
             StepAction::Read(path) => {
                 let brief = format!("read {path}");
-                ("read".into(), brief, cx.tool_read(&path))
+                let r = cx.tool_read(&path);
+                // 读过什么 = 父循环喂给复核员的证据集合（子步骤的 read 不进父上下文，
+                // 这份清单是父唯一能知道"它查过什么"的通道）
+                if r.is_ok() && !read.contains(&path) {
+                    read.push(path.clone());
+                }
+                ("read".into(), brief, r)
             }
             StepAction::Write(path, content) => {
                 let brief = format!("write {path}（{} 字节）", content.len());
@@ -434,6 +467,7 @@ pub async fn run_step(
     Ok(error_report(
         format!("{max_steps} 轮内没有交付本步（预算用尽）"),
         written,
+        read,
         last_verify,
         max_steps,
         usage,
@@ -594,8 +628,15 @@ mod tests {
             total: 3,
             done: &done,
         };
-        let rep = block_on(run_step(&cfg, &mut cx, &inp, &new_cancel_flag(), &Quiet))
-            .expect("不该是致命失败");
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该是致命失败");
 
         assert_eq!(rep.status, "done");
         assert_eq!(rep.files, vec!["util.py".to_string()]);
@@ -683,8 +724,15 @@ mod tests {
             total: 1,
             done: &[],
         };
-        let rep =
-            block_on(run_step(&cfg, &mut cx, &inp, &new_cancel_flag(), &Quiet)).expect("不该失败");
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
 
         assert_eq!(rep.status, "done");
         let v = rep.verify.as_ref().expect("开了窄验证就必须有结论");
@@ -715,8 +763,15 @@ mod tests {
             total: 1,
             done: &[],
         };
-        let rep =
-            block_on(run_step(&cfg, &mut cx, &inp, &new_cancel_flag(), &Quiet)).expect("不该失败");
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
 
         assert_eq!(rep.status, "done");
         assert_eq!(llm.count(), 3);
@@ -757,8 +812,15 @@ mod tests {
             total: 1,
             done: &[],
         };
-        let rep =
-            block_on(run_step(&cfg, &mut cx, &inp, &new_cancel_flag(), &Quiet)).expect("不该失败");
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
 
         assert_eq!(rep.status, "error");
         assert!(!rep.ok());
@@ -789,7 +851,8 @@ mod tests {
         };
         let flag = new_cancel_flag();
         flag.store(true, Ordering::Relaxed);
-        let rep = block_on(run_step(&cfg, &mut cx, &inp, &flag, &Quiet)).expect("取消不是致命错误");
+        let rep =
+            block_on(run_step(&cfg, &mut cx, &inp, &flag, None, &Quiet)).expect("取消不是致命错误");
 
         assert_eq!(rep.status, "error");
         assert!(rep.error.as_deref().unwrap_or_default().contains("取消"));
@@ -812,7 +875,15 @@ mod tests {
             total: 1,
             done: &[],
         };
-        let err = block_on(run_step(&cfg, &mut cx, &inp, &new_cancel_flag(), &Quiet)).unwrap_err();
+        let err = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .unwrap_err();
         assert!(err.contains("API Key"), "{err}");
         assert!(err.contains("步骤 1"), "{err}");
     }
