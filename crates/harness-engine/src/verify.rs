@@ -591,6 +591,9 @@ fn syntax_checks(
 ///
 /// 判不了的语言显式跳过并写明原因（Rust 必须整包编译：单文件 `rustc` 会因为跨文件引用
 /// 和外部 crate 误报）。宁可"这次没验成"，也不要给模型一个假失败。
+/// 同一秒内多次调用 `staged_syntax_checks` 的目录序号（见下面目录命名的注释）
+static SYNTAX_DIR_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn staged_syntax_checks(
     v: &VerifyConfig,
     files: &[(String, String)],
@@ -600,8 +603,16 @@ pub fn staged_syntax_checks(
     if files.is_empty() {
         return out;
     }
-    let dir =
-        std::env::temp_dir().join(format!("ruyix-syntax-{}", crate::workspace::now_compact()));
+    // 目录必须**逐次唯一**：`now_compact` 只到秒，同一秒内的两个并发调用（同进程的并行
+    // 单测，或两个会话同时触发窄验证）会落进同一个目录。它们不仅互相覆盖同名文件，更致命
+    // 的是函数末尾会把目录整个删掉 —— 先跑完的那个一删，后者 `py_compile 0-ok.py` 就找不
+    // 着文件，本该 passed 的判定变成 failed（串行跑绿、并行跑红，就是这么来的）。
+    let dir = std::env::temp_dir().join(format!(
+        "ruyix-syntax-{}-{}-{}",
+        crate::workspace::now_compact(),
+        std::process::id(),
+        SYNTAX_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return vec![CheckResult::skipped(
             "syntax",
