@@ -847,11 +847,7 @@ fn emit_step_progress(sink: &dyn Sink, steps: &[PlanStep], overlay: &BTreeMap<St
         if s.files.is_empty() {
             continue;
         }
-        let produced = s
-            .files
-            .iter()
-            .filter(|f| overlay.contains_key(f.as_str()))
-            .count();
+        let produced = produced_files(s, overlay);
         let st = if produced == s.files.len() {
             "done"
         } else if produced > 0 {
@@ -896,6 +892,14 @@ struct GateState {
 /// 代价小是刻意的：它每写一次就跑一次，是给模型的即时反馈，不是交付判据。
 async fn narrow_verify(cfg: &AppConfig, changes: &[FileChange]) -> VerifyOutcome {
     let files: Vec<(String, String)> = changes
+/// 步骤声明的文件里，有多少已经在本 run 落地（overlay = 本 run 写过的相对路径 → 内容）
+fn produced_files(s: &PlanStep, overlay: &BTreeMap<String, String>) -> usize {
+    s.files
+        .iter()
+        .filter(|f| overlay.contains_key(f.as_str()))
+        .count()
+}
+
         .iter()
         .map(|c| (c.path.clone(), c.after.clone()))
         .collect();
@@ -929,6 +933,66 @@ async fn full_verify(
     }
     let started = Instant::now();
     let (root, cfg_v, flag) = (proj.to_path_buf(), cfg.clone(), cancel.clone());
+/// run 收尾：把计划里每个步骤都落到终态。
+///
+/// 沙漏（⌛）的语义是**等待执行** —— run 已经结束还显示等待，就是在骗人。
+/// 步骤状态原先只由 [`emit_step_progress`] 在 write 轮里按「声明文件是否落地」推，
+/// 于是两类步骤会永远停在初始态：① 计划里没声明文件的步骤（「编译验证」这类
+/// 没有文件级判据的步骤）；② 声明了文件、这次却没写的步骤 —— 实测 run
+/// `agent-20260920-091436` 只暂存了 `cloud-shop-admin/pom.xml`，而计划第 3 步
+/// 「同步文档」声明的文档文件零产出，界面永远停在 2/3 + ⌛。
+///
+/// `delivered` = 本次交付了 final（按契约，模型在 final 里断言"全部完成后"），
+/// 否则是轮次上限 / 用户取消 / 致命错误收场 —— 那种场合一步都不能算完成。
+fn settle_steps(
+    sink: &dyn Sink,
+    steps: &[PlanStep],
+    overlay: &BTreeMap<String, String>,
+    delivered: bool,
+) {
+    let total = steps.len();
+    for (i, s) in steps.iter().enumerate() {
+        let missing: Vec<&str> = s
+            .files
+            .iter()
+            .filter(|f| !overlay.contains_key(f.as_str()))
+            .map(String::as_str)
+            .collect();
+        // 三种情形分开判，别让"没交付"一刀切把已做完的步骤降级：
+        //   ① 声明了文件却没产出 → 不冒充完成，落成终态并把缺什么写清楚（UI 放 title 提示）
+        //   ② 计划里根本没声明文件（「编译验证」这类没有文件级判据的步骤）→ 只有交付才算完成
+        //   ③ 声明的文件全部落地 → done，与交付与否无关（取消前已经做完的步骤不该被降级）
+        let (status, notes) = if !missing.is_empty() {
+            let why = if delivered {
+                "本次未产出声明的文件："
+            } else {
+                "本次未完成；未产出："
+            };
+            ("skipped", format!("{why}{}", missing.join("、")))
+        } else if s.files.is_empty() {
+            if delivered {
+                ("done", String::new())
+            } else {
+                ("skipped", "本次未完成".into())
+            }
+        } else {
+            ("done", String::new())
+        };
+        sink.step(
+            i + 1,
+            total,
+            &StepOutcome {
+                step_id: s.id,
+                title: s.title.clone(),
+                status: status.into(),
+                notes,
+                files: s.files.clone(),
+                ..Default::default()
+            },
+        );
+    }
+}
+
     let report =
         match tokio::task::spawn_blocking(move || verify::run(&cfg_v, "agent-gate", &root, &flag))
             .await
@@ -1192,6 +1256,8 @@ pub async fn run(
                 // 鉴权/余额这类确定性失败重试无意义；其余（空内容/网络抖动）退避后
                 // 吃下一轮 —— 轮次预算本身就是防死循环的闸
                 if llm::is_fatal_error(&e) || llm_failures >= LLM_FAIL_LIMIT {
+    // 本次是否真的交付了 final（收尾时决定计划步骤能不能算完成，见 settle_steps）
+    let mut delivered = false;
                     sink.log("error", format!("[agent] 第 {step} 轮模型调用失败：{e}"));
                     return Err(e);
                 }
@@ -1315,6 +1381,7 @@ pub async fn run(
         });
         let level = if ok { "info" } else { "warn" };
         let status_icon = if ok { "✓" } else { "✗" };
+                    delivered = true;
         sink.log(
             level,
             clip(
@@ -1419,6 +1486,11 @@ mod tests {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&p).unwrap();
+    // 计划落定：run 结束了，大纲区不该再留沙漏（⌛ 是"等待执行"，不是"没做成"）
+    if !plan_steps.is_empty() {
+        settle_steps(sink, &plan_steps, &ctx.overlay, delivered);
+    }
+
             TempDir(p)
         }
         fn write(&self, rel: &str, content: &str) {
@@ -2044,35 +2116,94 @@ mod tests {
         );
     }
 
-    /// plan 步骤进度：文件全部落地 → done；部分 → running；没动 → 不发事件
+    /// 记录 step 事件的 Sink —— 断言 UI 真会收到什么，而不是把谓词再抄一遍
+    #[derive(Default)]
+    struct StepSink {
+        seen: std::sync::Mutex<Vec<(usize, usize, String, String)>>,
+    }
+    impl Sink for StepSink {
+        fn step(&self, i: usize, total: usize, st: &StepOutcome) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((i, total, st.status.clone(), st.notes.clone()));
+        }
+    }
+    impl StepSink {
+        /// (index, total, status, notes)
+        fn events(&self) -> Vec<(usize, usize, String, String)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn plan_step(id: u32, title: &str, files: &[&str], kind: &str) -> PlanStep {
+        PlanStep {
+            id,
+            title: title.into(),
+            detail: String::new(),
+            files: files.iter().map(|f| (*f).to_string()).collect(),
+            kind: kind.into(),
+        }
+    }
+
+    /// 进行中：文件全部落地 → done；部分 → running；一步没动 → 不发事件（留给 settle_steps 收尾）
     #[test]
     fn plan_progress_marks_steps_by_files() {
         let mut overlay = BTreeMap::new();
         overlay.insert("m.py".to_string(), "x".to_string());
         let steps = [
-            PlanStep {
-                id: 1,
-                title: "写模块".into(),
-                detail: String::new(),
-                files: vec!["m.py".into()],
-                kind: "code".into(),
-            },
-            PlanStep {
-                id: 2,
-                title: "写模块+测试".into(),
-                detail: String::new(),
-                files: vec!["m.py".into(), "t.py".into()],
-                kind: "test".into(),
-            },
+            plan_step(1, "写模块", &["m.py"], "code"),
+            plan_step(2, "写模块+测试", &["m.py", "t.py"], "test"),
+            plan_step(3, "同步文档", &["docs/readme.md"], "docs"),
         ];
-        let produced = |s: &PlanStep| {
-            s.files
-                .iter()
-                .filter(|f| overlay.contains_key(f.as_str()))
-                .count()
-        };
-        assert_eq!(produced(&steps[0]), 1); // done
-        assert_eq!(produced(&steps[1]), 1); // running（1/2）
+        let sink = StepSink::default();
+        emit_step_progress(&sink, &steps, &overlay);
+        let ev = sink.events();
+        assert_eq!(ev.len(), 2, "{ev:?}");
+        assert_eq!((ev[0].0, ev[0].2.as_str()), (1, "done"));
+        assert_eq!((ev[1].0, ev[1].2.as_str()), (2, "running")); // 1/2
+    }
+
+    /// 收尾不留沙漏：没声明文件的步骤交付即完成；声明了却没产出的落成"本次未完成"并写明缺什么
+    #[test]
+    fn settle_steps_closes_every_hourglass() {
+        let mut overlay = BTreeMap::new();
+        overlay.insert("pom.xml".to_string(), "x".to_string());
+        // 复刻实测那一次 run（agent-20260920-091436）：只暂存了 pom.xml，
+        // 第 3 步「同步文档」声明的文档文件零产出 —— 修前界面永远 2/3 + ⌛
+        let steps = [
+            plan_step(1, "加 Spring Security", &["pom.xml"], "code"),
+            plan_step(2, "编译验证依赖解析", &[], "verify"),
+            plan_step(3, "同步文档", &["CLAUDE.md"], "docs"),
+        ];
+        let sink = StepSink::default();
+        settle_steps(&sink, &steps, &overlay, true);
+        let ev = sink.events();
+        assert_eq!(ev.len(), 3, "每个步骤都要落定，否则界面留沙漏：{ev:?}");
+        assert_eq!(ev[0].2, "done");
+        assert_eq!(ev[1].2, "done", "没有文件级判据的步骤，交付即算完成");
+        assert_eq!(ev[2].2, "skipped");
+        assert!(ev[2].3.contains("CLAUDE.md"), "缺什么要写清楚：{}", ev[2].3);
+        assert_eq!(ev[2].1, 3, "total 要带上，UI 才能算 x/y");
+    }
+
+    /// 不是交付收场（轮次上限 / 取消 / 致命错误）：没做完的不算完成，
+    /// 但**已经落地全部声明文件的步骤不能被降级**（取消前它就做完了）
+    #[test]
+    fn settle_steps_never_claims_done_without_delivery() {
+        let mut overlay = BTreeMap::new();
+        overlay.insert("m.py".to_string(), "x".to_string());
+        let steps = [
+            plan_step(1, "写模块", &["m.py"], "code"),
+            plan_step(2, "同步文档", &[], "docs"),
+        ];
+        let sink = StepSink::default();
+        settle_steps(&sink, &steps, &overlay, false);
+        let ev = sink.events();
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0].2, "done", "文件已全部落地，取消不该把它降级");
+        assert_eq!(ev[1].2, "skipped");
+        assert!(ev[1].3.contains("未完成"), "{}", ev[1].3);
     }
 
     #[test]

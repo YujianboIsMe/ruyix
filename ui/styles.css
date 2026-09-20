@@ -1408,6 +1408,12 @@ html, body {
   color: #f48771;
 }
 
+/* 本次未完成的步骤：run 已结束却没产出 —— 压暗，不抢已完成步骤的注意力 */
+.outline-plan-step--skipped {
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
 /* 大纲区多标签（大纲 / Git） */
 .outline-tabs {
   display: flex;

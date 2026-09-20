@@ -494,9 +494,12 @@
   // 大纲区 · 任务计划
   //
   // 模型返回任务计划后，大纲区显示任务列表，步骤状态：
-  //   ✅ 已完成   ⌛ 等待执行   ⛏️ 进行中   ❌ 失败
+  //   ✅ 已完成   ⌛ 等待执行   ⛏️ 进行中   ❌ 失败   ⏹️ 本次未完成
   // 任务列表在模型调用伪工具 plan 的瞬间经 agent://plan 事件到达；
   // 随后 agent://step 事件按「步骤文件是否全部落地」推进状态（全落地 ✅ / 部分 ⛏️）。
+  // run 收尾时引擎再发一轮终态（settle_steps）：没有声明文件的步骤、以及声明了文件
+  // 却没产出的步骤，都在这时落定 —— 否则它们会永远停在初始的 ⌛（沙漏=等待执行，
+  // run 已经结束还显示等待就是在骗人）。
   // 重启后打开旧会话，由最近一条带 run_id 的消息回读 run 记录补缓存（hydratePlan）。
   // ============================================
 
@@ -504,7 +507,8 @@
     done: "✅",       // 已完成
     running: "⛏️",   // 进行中
     error: "❌",      // 失败（独立状态：一眼看出 run 断在哪一步）
-    pending: "⌛",    // 等待执行（skipped 归入未完成，原因放 title 提示）
+    pending: "⌛",    // 等待执行（plan 刚到、还没轮到它）
+    skipped: "⏹️",   // 本次未完成（run 结束了还没产出；原因放 title 提示）
   };
 
   /** 计划（agent://plan 载荷或 RunRecord.plan）→ 会话步骤缓存（全 ⌛ 起步） */
@@ -533,8 +537,9 @@
       st.st = "done";
       st.note = "";
     } else if (p.status === "skipped") {
-      st.st = "pending";
-      st.note = L("已跳过", "skipped") + (p.notes ? `：${p.notes}` : "");
+      // 终态：run 结束了这一步没产出（引擎在收尾事件里带上缺什么）
+      st.st = "skipped";
+      st.note = p.notes || L("本次未完成", "not done this run");
     } else {
       st.st = "error";
       st.note = L("本步失败", "failed") + (p.error ? `：${p.error}` : "");
@@ -554,8 +559,11 @@
         st.st = "done";
         st.note = "";
       } else if (f === "skipped" || f === "error") {
-        st.st = f === "skipped" ? "pending" : "error";
-        st.note = f === "skipped" ? L("已跳过", "skipped") : L("本步失败", "failed");
+        st.st = f === "skipped" ? "skipped" : "error";
+        st.note =
+          f === "skipped"
+            ? L("本次未完成", "not done this run")
+            : L("本步失败", "failed");
       }
     });
     renderOutline(s);
@@ -592,8 +600,11 @@
     }
     const done = steps.filter((x) => x.st === "done").length;
     const failed = steps.filter((x) => x.st === "error").length;
+    // 未完成也要计数，否则「✅ 2/3」里的那个 1 没有解释
+    const notDone = steps.filter((x) => x.st === "skipped").length;
     el.innerHTML =
       `<div class="outline-plan-head">${L("任务计划", "Task plan")} · ✅ ${done}/${steps.length}` +
+      (notDone ? ` · ⏹️ ${notDone}` : "") +
       (failed ? ` · ❌ ${failed}` : "") + `</div>` +
       steps.map((x) => {
         const tip = [
@@ -604,7 +615,9 @@
         ].filter(Boolean).join("\n");
         const cls = x.st === "running"
           ? " outline-plan-step--running"
-          : x.st === "error" ? " outline-plan-step--error" : "";
+          : x.st === "error"
+            ? " outline-plan-step--error"
+            : x.st === "skipped" ? " outline-plan-step--skipped" : "";
         return `<div class="outline-item outline-plan-step${cls}"` +
           ` title="${esc(tip)}">` +
           `<span class="outline-plan-emoji">${STEP_EMOJI[x.st] ?? STEP_EMOJI.pending}</span>` +

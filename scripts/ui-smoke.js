@@ -288,17 +288,31 @@ function runStaticChecks() {
       has(connRs, "call_tool") && has(connRs, "send_task"),
     "Connect 原语没接上宿主：mod.rs 未建 RuyixConnector / 未传 McpManager，或 connect.rs 缺 MCP/A2A 通路");
 
-  // U15 outline-plan：模型返回计划 → 大纲区任务列表（✅ ⌛ ⛏️ 三态 + ❌ 失败独立状态）。
-  // 链路四环缺一不可：引擎发 plan 事件 → sink emit → session.js 监听并渲染 → main.js 会话分支调用。
+  // U15 outline-plan：模型返回计划 → 大纲区任务列表（✅ ⌛ ⛏️ 四态 + ❌ 失败 / ⏹️ 未完成）。
+  // 链路五环缺一不可：引擎发 plan 事件 → sink emit → session.js 监听并渲染 → main.js 会话分支调用
+  // → run 收尾时 settle_steps 把每个步骤都落到终态（否则没声明文件 / 声明了没产出的步骤
+  //   会永远停在 ⌛「等待执行」，实测 run agent-20260920-091436 就是 2/3 + 永久沙漏）。
   const uiMainJs = read("ui/main.js");
   const stylesCss = read("ui/styles.css");
   check("U15", "outline-plan",
     has(sinkRs, 'emit("agent://plan"') &&
       has(sessionJs, "STEP_EMOJI") &&
-      ["✅", "⌛", "⛏️", "❌"].every((e) => has(sessionJs, e)) &&
+      ["✅", "⌛", "⛏️", "❌", "⏹️"].every((e) => has(sessionJs, e)) &&
       /SessionUI\?\.renderOutline\(/.test(uiMainJs) &&
-      has(stylesCss, "outline-plan-step") && has(stylesCss, "outline-plan-step--error"),
-    "任务计划未接入大纲区：sink 未发 agent://plan / session.js 缺四态 emoji 渲染 / main.js 未调 renderOutline / 缺样式");
+      has(stylesCss, "outline-plan-step") && has(stylesCss, "outline-plan-step--error") &&
+      has(stylesCss, "outline-plan-step--skipped"),
+    "任务计划未接入大纲区：sink 未发 agent://plan / session.js 缺五态 emoji 渲染 / main.js 未调 renderOutline / 缺样式");
+
+  // U15b plan-settle：run 收尾必须把计划落定（沙漏是"等待执行"，run 结束还挂着就是骗人）。
+  // 三环：引擎有 settle_steps → 收尾处真调用且带上 delivered（交付与否决定能不能算完成）
+  // → 交付分支真的把 delivered 置真（否则所有步骤都被判成"本次未完成"）。
+  check("U15", "plan-settle",
+    has(intentRs, "fn settle_steps(") &&
+      /settle_steps\(sink, &plan_steps, &ctx\.overlay, delivered\)/.test(intentRs) &&
+      /out\.answer = text;\s*\n\s*delivered = true;/.test(intentRs) &&
+      /"skipped"/.test(intentRs) &&
+      /不冒充完成|settle_steps/.test(intentRs),
+    "计划收尾未落定：agent.rs 缺 settle_steps / 收尾未调用 / delivered 未在 final 分支置真 —— 界面会留永久沙漏");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
