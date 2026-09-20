@@ -396,14 +396,16 @@ html, body {
   margin: 6px 0;
 }
 
-.help-table {
+/* 以下选择器面向 markdown-it 渲染结果（裸 table / code / ul …），
+   不是手写的 HTML —— 帮助正文源文件为 ui/help-zh.md、ui/help-en.md */
+.help-content table {
   width: 100%;
   border-collapse: collapse;
   margin: 8px 0 16px;
   font-size: 13px;
 }
 
-.help-table th {
+.help-content th {
   text-align: left;
   color: var(--text-primary);
   font-weight: 500;
@@ -411,22 +413,75 @@ html, body {
   border-bottom: 1px solid var(--border-color);
 }
 
-.help-table td {
+.help-content td {
   color: var(--text-secondary);
   padding: 4px 12px 4px 0;
+  vertical-align: top;
 }
 
-.help-table code {
+.help-content code {
   color: var(--accent);
   font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  padding: 1px 4px;
 }
 
-.help-note {
-  margin: 12px 0 0 !important;
+.help-content pre {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0 16px;
 }
 
-.help-note kbd {
+.help-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.help-content ul,
+.help-content ol {
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.help-content li {
+  margin: 2px 0;
+}
+
+.help-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.help-content a:hover {
+  text-decoration: underline;
+}
+
+.help-content strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.help-content blockquote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.help-content hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 20px 0;
+}
+
+.help-content kbd {
   display: inline-block;
   padding: 1px 6px;
   font-family: inherit;
@@ -438,7 +493,8 @@ html, body {
 }
 
 .help-back-btn {
-  margin-top: 32px;
+  display: block;
+  margin: 32px auto 0;
   padding: 8px 20px;
   font-size: 13px;
   color: var(--text-primary);

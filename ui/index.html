@@ -256,44 +256,10 @@
           <!-- 欢迎内容（无项目时显示）— 由 loadWelcome() 从 welcome-zh.html / welcome-en.html 动态加载 -->
           <div id="welcome-content" class="welcome" style="display:none"></div>
 
-          <!-- 帮助页 -->
+          <!-- 帮助页：正文是 markdown 源文件（help-zh.md / help-en.md），由 markdown-it 渲染 -->
           <div id="help-page" class="help-page" style="display:none">
-            <div class="help-content">
-              <h1 data-i18n="help.title">帮助</h1>
-              <h2 data-i18n="help.section_commands">命令系统</h2>
-              <table class="help-table">
-                <tr><th data-i18n="help.table_cmd">命令</th><th data-i18n="help.table_desc">说明</th></tr>
-                <tr><td><code data-i18n="help.cmd_open_project">open project &lt;路径&gt;</code></td><td data-i18n="help.desc_open_project">打开 / 切换项目文件夹</td></tr>
-                <tr><td><code data-i18n="help.cmd_open_file">open file &lt;路径&gt;</code></td><td data-i18n="help.desc_open_file">打开文件</td></tr>
-                <tr><td><code data-i18n="help.cmd_close_project">close project</code></td><td data-i18n="help.desc_close_project">关闭当前项目</td></tr>
-                <tr><td><code data-i18n="help.cmd_close_all">close all</code></td><td data-i18n="help.desc_close_all">关闭所有标签页</td></tr>
-                <tr><td><code data-i18n="help.cmd_close_index">close &lt;序号&gt;</code></td><td data-i18n="help.desc_close_index">按序号关闭标签页（负数从右数）</td></tr>
-                <tr><td><code data-i18n="help.cmd_close_other">close other</code></td><td data-i18n="help.desc_close_other">关闭除当前外的标签页</td></tr>
-                <tr><td><code data-i18n="help.cmd_close_left">close left</code></td><td data-i18n="help.desc_close_left">关闭当前标签页左侧所有</td></tr>
-                <tr><td><code data-i18n="help.cmd_close_right">close right</code></td><td data-i18n="help.desc_close_right">关闭当前标签页右侧所有</td></tr>
-                <tr><td><code data-i18n="help.cmd_new_type">new py|rs|md|c &lt;名称&gt;</code></td><td data-i18n="help.desc_new_type">创建文件（自动加后缀）</td></tr>
-                <tr><td><code data-i18n="help.cmd_new_file">new file &lt;相对路径&gt;</code></td><td data-i18n="help.desc_new_file">创建文件</td></tr>
-                <tr><td><code data-i18n="help.cmd_new_folder">new folder|dir &lt;相对路径&gt;</code></td><td data-i18n="help.desc_new_folder">创建目录</td></tr>
-                <tr><td><code data-i18n="help.cmd_del">del|delete|remove|rm &lt;相对路径&gt;</code></td><td data-i18n="help.desc_del">删除文件/目录（弹窗确认）</td></tr>
-                <tr><td><code data-i18n="help.cmd_config">config add|get|update|remove [-g|-p|-r] &lt;key&gt;[=&lt;value&gt;]</code></td><td data-i18n="help.desc_config">配置管理</td></tr>
-              </table>
-              <p class="help-note"><span data-i18n="help.shortcut_label">快捷键：</span><kbd>Ctrl+S</kbd> <span data-i18n="help.shortcut_save_action">保存当前文件</span></p>
-              <h2 data-i18n="help.section_highlight">语法高亮支持</h2>
-              <table class="help-table">
-                <tr><th data-i18n="help.table_lang">语言</th><th data-i18n="help.table_ext">扩展名</th></tr>
-                <tr><td>Python</td><td>.py</td></tr>
-                <tr><td>Rust</td><td>.rs</td></tr>
-                <tr><td data-i18n="help.lang_html">HTML（含嵌入 CSS/JS）</td><td>.html, .htm</td></tr>
-                <tr><td>CSS</td><td>.css</td></tr>
-                <tr><td>JavaScript</td><td>.js, .mjs, .cjs</td></tr>
-                <tr><td>Markdown</td><td>.md, .markdown</td></tr>
-                <tr><td>SQL</td><td>.sql</td></tr>
-                <tr><td>Java</td><td>.java</td></tr>
-              </table>
-              <h2 data-i18n="help.section_contact">联系方式</h2>
-              <p><span data-i18n="help.contact_follow">关注 </span><a href="https://newest-ai.com" target="_blank"><strong>https://newest-ai.com</strong></a><span data-i18n="help.contact_mid">，邮箱 </span><strong>yujianboisme@outlook.com</strong><span data-i18n="help.contact_end">。</span></p>
-              <button id="btn-help-back" class="help-back-btn" data-i18n="help.back">← 返回</button>
-            </div>
+            <div id="help-body" class="help-content"></div>
+            <button id="btn-help-back" class="help-back-btn" data-i18n="help.back">← 返回</button>
           </div>
 
           <!-- Agent 控制台（融合计划 Z4）：引擎落位前含演示回放 -->

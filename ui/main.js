@@ -243,6 +243,16 @@ function refreshI18nUI() {
   // 欢迎页：按当前语言加载对应文件（welcome-zh.html / welcome-en.html）
   loadWelcome();
 
+  // 帮助页：正文是 markdown 源文件，切语言后若正显示则重新渲染
+  const helpPage = document.getElementById("help-page");
+  if (helpPage && helpPage.style.display !== "none") showHelpPage();
+  // 帮助标签页的标题随语言走
+  const helpTab = state.tabs.find((t) => t._isHelp);
+  if (helpTab) {
+    helpTab.name = I18N.t("help.title");
+    renderTabs();
+  }
+
   // 编辑器空状态
   const emptyEl = document.querySelector("#editor-empty p");
   if (emptyEl) emptyEl.textContent = I18N.t("editor.empty");
@@ -515,6 +525,12 @@ function switchTab(tabId) {
     return;
   }
   hideSessionView();
+  if (tab._isHelp) {
+    // 帮助标签页 — markdown 文档视图（不走代码编辑器，content 恒为空）
+    hideEditorView();
+    showHelpPage();
+    return;
+  }
   if (tab._isTerminal) {
     // xterm.js 终端标签页 — 重新挂载到容器中
     hideEditorView();
@@ -1345,7 +1361,7 @@ async function saveCurrentFile() {
 }
 
 // ============================================
-// 帮助页
+// 帮助页（正文源文件 = ui/help-zh.md / help-en.md，由 markdown-it 渲染）
 // ============================================
 function setupHelpMenu() {
   const btn = document.getElementById("menu-help");
@@ -1358,20 +1374,65 @@ function setupHelpMenu() {
   document.getElementById("btn-help-back")?.addEventListener("click", () => hideHelpPage());
 }
 
-function openHelp() {
+/** markdown-it 渲染器懒构造（vendor 自 ui/markdown-it.min.js） */
+let _mdRenderer = null;
+
+/** markdown → HTML；无渲染器时退化为转义文本（保留换行） */
+function markdownToHtml(text) {
+  if (!_mdRenderer && typeof window.markdownit === "function") {
+    _mdRenderer = window.markdownit({ html: false, breaks: true, linkify: true });
+  }
+  if (_mdRenderer) return _mdRenderer.render(text ?? "");
+  return escapeHtml(text ?? "").replace(/\n/g, "<br>");
+}
+
+/** 帮助文档缓存：{ lang, html }；按语言缓存，切语言时重新加载 */
+let _helpCache = { lang: null, html: "" };
+// 加载令牌：防止并发加载时旧请求覆盖新内容
+let _helpLoadToken = 0;
+
+/** 按当前语言加载帮助文档（help-zh.md / help-en.md）并渲染为 HTML */
+async function loadHelpDoc() {
+  const lang = I18N.getLang() || "zh-CN";
+  if (_helpCache.lang === lang) return _helpCache.html;
+
+  const file = lang === "en" ? "help-en.md" : "help-zh.md";
+  const token = ++_helpLoadToken;
+
+  try {
+    const base = window.location.origin || "https://ruyix.localhost";
+    const resp = await fetch(`${base}/${file}`);
+    if (!resp.ok) return "";
+    const md = await resp.text();
+    if (token !== _helpLoadToken) return ""; // 已有更新的加载请求，丢弃本次结果
+    _helpCache = { lang, html: markdownToHtml(md) };
+    return _helpCache.html;
+  } catch {
+    return ""; // 加载失败：保留现有内容
+  }
+}
+
+/** 帮助入口。**必须 await showHelpPage**：正文要现取 md 源文件再渲染，
+ *  不返回 promise 的话调用方（含回放测试）拿到的是"还没填内容"的空容器。 */
+async function openHelp() {
   if (!state.currentProject) {
-    showHelpPage();
+    await showHelpPage();
   } else {
     openHelpTab();
   }
 }
 
-function showHelpPage() {
+async function showHelpPage() {
   // 导航区保持可见；编辑区显示帮助内容
   const welcome = document.getElementById("welcome-content");
   const help = document.getElementById("help-page");
   const editorBody = document.getElementById("editor-body");
   const agent = document.getElementById("agent-page");
+
+  const html = await loadHelpDoc();
+  const body = document.getElementById("help-body");
+  if (body && html) body.innerHTML = html;
+
   if (welcome) welcome.style.display = "none";
   if (help) help.style.display = "";
   if (editorBody) editorBody.style.display = "none";
@@ -1381,6 +1442,12 @@ function showHelpPage() {
 function hideHelpPage() {
   const help = document.getElementById("help-page");
   if (help) help.style.display = "none";
+  // 帮助标签页打开着 → 关闭它，回到相邻标签（或欢迎页）
+  const helpTab = state.tabs.find((t) => t._isHelp);
+  if (helpTab) {
+    closeTab(helpTab.id);
+    return;
+  }
   // 恢复到适合当前项目状态的视图
   if (state.currentProject) {
     showProjectWorkspace();
@@ -1401,16 +1468,12 @@ function openHelpTab() {
     id: "help-" + Date.now().toString(),
     name: I18N.t("help.title"),
     path: "",
-    content: getHelpText(),
+    content: "",
     _isHelp: true,
   };
   state.tabs.push(tab);
   renderTabs();
   switchTab(tab.id);
-  renderPlainCode(tab);
-
-  const textarea = document.getElementById("editor-textarea");
-  if (textarea) textarea.readOnly = true;
 }
 
 // ============================================

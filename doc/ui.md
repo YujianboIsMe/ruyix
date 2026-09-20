@@ -49,13 +49,25 @@
 
 ## 帮助页
 分运行时状态
-- 开启项目状态：点击顶部菜单帮助，在编辑器区打开帮助页。
+- 开启项目状态：点击顶部菜单帮助，在编辑器区打开帮助页（占一个标签页）。
 - 未开启项目状态：替换欢迎页为帮助页
+
+帮助页正文的**源文件是 markdown**，按语言分成两份，打开时用 markdown-it 渲染进 `#help-body`：
+
+|语言|源文件|
+|:----:|:----:|
+|中文|`ui/help-zh.md`|
+|English|`ui/help-en.md`|
+
+正文不再写在 `index.html` 里（原手写表格）、也不再由 `command.js` 拼纯文本
+（原 `getHelpText()` 已删）——要改文案就改 md 文件。渲染器沿用会话气泡那个
+vendor 的 `ui/markdown-it.min.js`（`html: false`，不执行内嵌 HTML）。
 
 帮助页内容：
 1. 命令系统
-2. 语法高亮支持
-3. 联系方式：CSDN 关注 醒过来摸鱼，私信即可
+2. 快捷键
+3. 语法高亮支持
+4. 联系方式：关注 https://newest-ai.com ，邮箱 yujianboisme@outlook.com
 
 ## 多语言
 

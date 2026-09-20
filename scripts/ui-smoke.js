@@ -48,6 +48,9 @@
  *   U21 exec-safety   执行前闸门 + 输出按代码页解码（v0.6）：`\`、`\admin-run\` 这类"不是命令"
  *                     的字符串不许再原样交给 cmd（真控制台里 start 系会弹桌面窗、输出全丢）；
  *                     中文 Windows 的 GBK 输出必须解成可读中文（否则模型读不懂自己的失败）
+ *   U22 help-markdown 帮助正文的**源**是 markdown 文件（ui/help-zh.md / ui/help-en.md），打开时
+ *                     用 markdown-it 渲染进 #help-body —— 不再是手写 HTML 表格，也不再塞进
+ *                     只读代码编辑器；旧的字符串拼接（getHelpText）必须删干净
  */
 
 "use strict";
@@ -281,6 +284,33 @@ function runStaticChecks() {
   check("U14", "apply-writeback",
     has(stageRs, "is_safe_stage_rel") && has(stageRs, ".ruyix"),
     "stage.rs 缺安全约束：暂存路径封闭（含拒绝写进 .ruyix 自身）");
+
+  // U22 help-markdown：帮助正文的**源**是 markdown 文件（ui/help-zh.md / ui/help-en.md），
+  // 打开时用 markdown-it 渲染进 #help-body —— 不是手写的 HTML 表格，也不是只读代码编辑器。
+  // 守住：双语源文件存在且真是 markdown（含表格）、旧的字符串拼接已删除、
+  // main.js 有「加载 md → 渲染 → 填容器」链路、帮助 tab 走文档视图而非 renderPlainCode。
+  const helpMd = ["ui/help-zh.md", "ui/help-en.md"].map((p) => ({
+    p, text: fs.existsSync(path.join(ROOT, p)) ? read(p) : "",
+  }));
+  check("U22", "help-markdown", helpMd.every((f) => f.text.length > 0),
+    `帮助源 markdown 缺失或为空: ${helpMd.filter((f) => !f.text).map((f) => f.p).join(", ")}`);
+  const badMd = helpMd.filter((f) => !/^#\s.+$/m.test(f.text) || !/\|\s*-{3,}\s*\|/.test(f.text));
+  check("U22", "help-markdown", badMd.length === 0,
+    `帮助源文件不是有效的 markdown（缺标题或表格）: ${badMd.map((f) => f.p).join(", ")}`);
+  check("U22", "help-markdown", !has(commandJs, "getHelpText"),
+    "command.js 仍在拼接纯文本帮助（getHelpText）——正文应只维护 md 源文件");
+  const mainJs = read("ui/main.js");
+  check("U22", "help-markdown",
+    has(mainJs, "async function loadHelpDoc()") && has(mainJs, "markdownToHtml") &&
+      has(mainJs, "window.markdownit") && has(mainJs, "help-zh.md") && has(mainJs, "help-en.md"),
+    "main.js 缺少帮助文档链路（按语言加载 md → markdown-it 渲染）");
+  check("U22", "help-markdown",
+    has(html, 'id="help-body"') && !has(html, "help-table"),
+    "index.html 应只留 #help-body 容器（正文由渲染结果填充），不再内嵌手写表格");
+  check("U22", "help-markdown",
+    has(mainJs, "if (tab._isHelp)") && has(mainJs, "showHelpPage()") &&
+      !has(mainJs, "content: getHelpText()"),
+    "帮助标签页必须走 markdown 文档视图（_isHelp → showHelpPage），不再塞进只读编辑器");
 
   // U16 agent-loop：会话 = 工具循环（Read/Write/Execute/Connect 四原语），不做问答/任务预分类。
   // 三环：session.js 走 agent_reply 并带模式与历史；mod.rs 调 engine::agent::run 并接连接器；
@@ -872,6 +902,127 @@ async function runConfigChecks() {
   }
 }
 
+/**
+ * U22 help-replay：帮助页回放 —— 打开帮助必须真的拿到 md 源文件、真的过渲染器、
+ * 真的把 HTML 填进容器。静态契约只能证明"代码里写了"，这里跑一遍真实链路。
+ *
+ * 回放方式：从 main.js 里切出帮助页整段源码（markdownToHtml → openHelpTab），
+ * 配最小 DOM stub + 真 markdown-it + 假 fetch（喂 ui/help-*.md 的真实内容）。
+ */
+async function runHelpChecks() {
+  const mainJs = read("ui/main.js");
+  const start = mainJs.indexOf("/** markdown-it 渲染器懒构造");
+  const endMark = mainJs.indexOf("// 编辑器 textarea 同步");
+  const end = endMark > 0 ? mainJs.lastIndexOf("// ====", endMark) : -1;
+  if (start < 0 || end <= start) {
+    check("U22", "help-replay", false,
+      "main.js 中定位不到帮助页代码段（区间标记变了，请同步本回放）");
+    return;
+  }
+  const helpSrc = mainJs.slice(start, end);
+
+  // 真渲染器：vendor 的 markdown-it.min.js（UMD，需浏览器式全局 window）
+  const mdCtx = {};
+  mdCtx.window = mdCtx;
+  mdCtx.self = mdCtx;
+  require("vm").createContext(mdCtx);
+  require("vm").runInContext(read("ui/markdown-it.min.js"), mdCtx);
+  const markdownit = mdCtx.window.markdownit;
+
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+  let lang = "zh-CN";
+  const appState = { tabs: [], activeTabId: null, currentProject: null };
+  const closed = [];
+  const fetched = [];
+  const sandbox = {
+    I18N: {
+      getLang: () => lang,
+      t: (k) => (k === "help.title" ? (lang === "en" ? "Help" : "帮助") : k),
+    },
+    window: {
+      location: { origin: "https://ruyix.localhost" },
+      markdownit,
+    },
+    document: { getElementById: el },
+    state: appState,
+    escapeHtml: (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;"),
+    renderTabs() {},
+    switchTab(id) {
+      appState.activeTabId = id;
+    },
+    closeTab(id) {
+      closed.push(id);
+    },
+    showProjectWorkspace() {},
+    showWelcomePage() {},
+    fetch: async (url) => {
+      fetched.push(url);
+      const file = String(url).split("/").pop();
+      const text = fs.existsSync(path.join(ROOT, "ui", file))
+        ? read(path.join("ui", file))
+        : "";
+      return { ok: text.length > 0, text: async () => text };
+    },
+  };
+
+  const saved = ["window", "document", "state", "fetch", "I18N"].map(
+    (k) => [k, globalThis[k]]
+  );
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    const help = new Function(`${helpSrc}
+      return { loadHelpDoc, showHelpPage, hideHelpPage, openHelp, openHelpTab };`)();
+
+    // ---- 无项目：菜单/命令 → 帮助页（markdown 渲染进 #help-body）----
+    await help.openHelp();
+    let body = el("help-body").innerHTML;
+    check("U22", "help-replay",
+      fetched.length === 1 && /help-zh\.md$/.test(fetched[0]),
+      `打开帮助应按当前语言取 md 源文件，实际请求: ${JSON.stringify(fetched)}`);
+    check("U22", "help-replay",
+      body.includes("<h1>帮助</h1>") && body.includes("<table>") &&
+        body.includes("<code>open project") && !body.includes("&lt;h1&gt;"),
+      `帮助正文不是 markdown 渲染结果（无 h1/table/code，或整段被转义）: ${body.slice(0, 80)}`);
+    check("U22", "help-replay",
+      el("help-page").style.display === "" && el("editor-body").style.display === "none",
+      "帮助页未切换到前台（help-page 未显示 / editor-body 未让位）");
+
+    // ---- 切英文：同一入口必须换源文件并重新渲染 ----
+    lang = "en";
+    await help.showHelpPage();
+    body = el("help-body").innerHTML;
+    check("U22", "help-replay",
+      fetched.length === 2 && /help-en\.md$/.test(fetched[1]) && body.includes("<h1>Help</h1>"),
+      `切语言后未重新加载/渲染英文帮助: ${JSON.stringify(fetched)}`);
+    lang = "zh-CN";
+    await help.showHelpPage();
+
+    // ---- 已打开项目：帮助进标签页，且不再塞纯文本给只读编辑器 ----
+    appState.currentProject = { name: "demo", path: "D:/Projects/Rust/ruyix" };
+    await help.openHelp();
+    const tab = appState.tabs.find((t) => t._isHelp);
+    check("U22", "help-replay",
+      !!tab && tab.content === "" && appState.activeTabId === tab.id,
+      "帮助标签页未创建/未激活，或仍在往 content 里塞帮助文本（应为 markdown 视图）");
+
+    // ---- 返回：关闭帮助标签页（而不是把文档留在编辑区后面）----
+    help.hideHelpPage();
+    check("U22", "help-replay",
+      closed.includes(tab?.id) && el("help-page").style.display === "none",
+      "帮助页返回按钮未关闭帮助标签页");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
 // ============================================
 // 入口
 // ============================================
@@ -882,6 +1033,7 @@ async function main() {
     ["U1", "static-checks", runStaticChecks],
     ["U6", "session-replay", runSessionChecks],
     ["U9", "config-replay", runConfigChecks],
+    ["U22", "help-replay", runHelpChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {
