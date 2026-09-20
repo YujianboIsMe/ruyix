@@ -20,7 +20,8 @@
 
 use crate::agent::{
     Ctx, FileChange, LLM_FAIL_LIMIT, StepAction, VerifyOutcome, narrow_verify,
-    parse_failure_feedback, parse_step_action, tool_execute,
+    parse_failure_feedback, parse_step_action, policy_system_note, staged_execute_note,
+    tool_execute,
 };
 use crate::config::AppConfig;
 use crate::exec::{CancelFlag, clip, is_cancelled};
@@ -305,10 +306,13 @@ pub async fn run_step(
     let max_steps = cfg.step.max_steps.max(1);
 
     // 上下文隔离的落点：从零开始，只有系统提示词 + 本步输入包
-    let mut msgs = vec![
-        ChatMessage::system(STEP_SYSTEM),
-        ChatMessage::user(build_user_prompt(inp)),
-    ];
+    let mut user = build_user_prompt(inp);
+    // 运行模式与父循环共用同一份说明（同一处真相）：确认模式下本步的 write 只暂存，
+    // execute 看不到 —— 不说清这条，子步会像父一样拿 execute 的失败反复"修"一个已经写对的改动
+    if let Some(note) = policy_system_note(cx.policy()) {
+        user.push_str(&format!("\n\n{note}"));
+    }
+    let mut msgs = vec![ChatMessage::system(STEP_SYSTEM), ChatMessage::user(user)];
 
     for round in 1..=max_steps {
         if is_cancelled(cancel) {
@@ -421,11 +425,16 @@ pub async fn run_step(
                 }
                 ("write".into(), brief, r)
             }
-            StepAction::Execute(cmd, t) => (
-                "execute".into(),
-                format!("execute {}", clip(&cmd, 80)),
-                Ok(tool_execute(cx.project_root(), &cmd, t)),
-            ),
+            StepAction::Execute(cmd, t) => {
+                let mut r = tool_execute(cx.project_root(), &cmd, t);
+                // 确认模式 + 本步已有暂存改动：这条命令看不到本次修改，贴一行说明兜住
+                r.push_str(staged_execute_note(cx.policy(), !cx.changes().is_empty()));
+                (
+                    "execute".into(),
+                    format!("execute {}", clip(&cmd, 80)),
+                    Ok(r),
+                )
+            }
             StepAction::Unsupported(name) => (
                 name.to_string(),
                 format!("{name}（本步不支持）"),
@@ -695,6 +704,71 @@ mod tests {
         assert_eq!(cx.changes().len(), 1);
         assert_eq!(cx.changes()[0].path, "util.py");
         assert!(cx.changes()[0].after.contains("a + b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 确认模式（Stage）：上下文必须说清"写入只暂存、execute 看到的是改动前的文件" ——
+    /// 不说这条，子步会像父循环那样拿 execute 的失败反复"修"一个已经写对的改动
+    /// （实测 run `agent-20260920-152312`：65 轮里 45+ 轮就是这种空转）。
+    #[test]
+    fn confirm_mode_is_declared_in_the_step_context() {
+        let dir = temp_project("stage-note");
+        std::fs::write(dir.join("util.py"), "def add(a, b):\n    return a - b\n").unwrap();
+        let good = "def add(a, b):\n    return a + b\n";
+        let llm = fake_llm(vec![
+            format!(
+                r#"{{"tool":"write","args":{{"path":"util.py","content":{}}}}}"#,
+                js(good)
+            ),
+            // 紧接着跑一次 execute —— 这正是原来会点燃"再修一次"死循环的那一步
+            r#"{"tool":"execute","args":{"cmd":"findstr a util.py"}}"#.into(),
+            format!(r#"{{"final":{}}}"#, js("改成 a + b，已暂存待确认。")),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Stage);
+        let s = plan_step(1, "修正 add", &["util.py"]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "把 util.py 的 add 改对",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该是致命失败");
+        assert_eq!(rep.status, "done");
+
+        // ① 首条 user 消息（本步输入包）里带着确认模式说明
+        let first = body(&llm.request(0));
+        let user_msg = first["messages"][1]["content"].as_str().unwrap_or_default();
+        assert!(user_msg.contains("确认模式"), "{user_msg}");
+        assert!(user_msg.contains("暂存"), "{user_msg}");
+        assert!(user_msg.contains("不要用 execute"), "{user_msg}");
+
+        // ② 确认模式不许碰项目磁盘：文件还是旧的
+        assert!(
+            std::fs::read_to_string(dir.join("util.py"))
+                .unwrap()
+                .contains("a - b"),
+            "Stage 策略不该改磁盘"
+        );
+
+        // ③ execute 的结果里贴了"看到的是改动前文件"的说明（兜住模型不读提示的情况）
+        let third = body(&llm.request(2));
+        let exec_result = third["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or_default();
+        assert!(exec_result.contains("改动前"), "{exec_result}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

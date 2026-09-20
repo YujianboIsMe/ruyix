@@ -411,6 +411,43 @@ fn agent_system_prompt() -> String {
     s
 }
 
+/// 确认模式（Stage）下必须显式告诉模型的三件事 —— 不写它，模型会拿 `execute` 的失败
+/// 当成"我的改动错了"，反复 findstr/type/dir 对账，烧掉几十轮。
+///
+/// 实测 run `agent-20260920-152312`（cloud-shop 修一个 Maven 依赖）：写 `pom.xml` 只进暂存区后，
+/// `read`（本会话覆盖层）看到**新**内容、`execute`（真实磁盘）看到**旧**内容 —— 两个工具给出
+/// **互相矛盾**的证据，模型调和不了，65 轮里 45+ 轮在做无效侦察。根因不是模型能力，是提示词
+/// 从未提"写入可能只暂存"，而规则 4 还写着"用 execute 验证改动" —— 确认模式下那条是陷阱，
+/// execute 永远看到旧文件、永远失败。
+///
+/// 写入/自主模式（[`WritePolicy::Apply`]）磁盘真会变，没有这层矛盾 —— 返回 `None`，提示词不虚报。
+pub(crate) fn policy_system_note(policy: WritePolicy) -> Option<&'static str> {
+    match policy {
+        WritePolicy::Stage => Some(
+            "当前运行模式：**确认模式**。你的 write 只写进 `.ruyix/stage/` 暂存区，\
+             **项目磁盘上的文件不会变**，要等用户在界面里确认后才落盘。因此：\n\
+             - `read` 看到的是你**暂存后**的内容（本会话覆盖层），这是对的，不是文件真变了；\n\
+             - `execute` 跑的是**项目真实磁盘**，看到的是**改动前**的旧文件。两者不一致时以 read 为准，\
+             那不是你的改动出错；\n\
+             - **不要用 execute 验证本次改动**（编译、测试、findstr、type、dir 都一样）：它看不到你的\
+             修改，失败不等于改动错了、成功也不等于生效，反复试只会白烧轮次；\n\
+             - 改完直接输出 final，在答复里写明「改动已暂存、待确认」，并给出用户确认后该跑的验证命令。",
+        ),
+        WritePolicy::Apply => None,
+    }
+}
+
+/// 确认模式下 `execute` 结果的随附提示：本命令读的是项目磁盘，看到的是**改动前**的文件。
+/// 只在"已经有暂存改动"时贴 —— 没写过东西就没有这层歧义，省 token。
+pub(crate) fn staged_execute_note(policy: WritePolicy, has_changes: bool) -> &'static str {
+    if policy == WritePolicy::Stage && has_changes {
+        "\n\n（注意：确认模式下项目磁盘未改动，上面这条命令读到的仍是**改动前**的文件；\
+         你本次的写入还在暂存区。别拿它的结果判断本次改动的成败 —— 改完直接 final。）"
+    } else {
+        ""
+    }
+}
+
 // ============================================
 // 动作解析（模型输出 → 结构化动作）
 // ============================================
@@ -620,6 +657,12 @@ impl<'a> Ctx<'a> {
         self.proj
     }
 
+    /// 本会话的写入策略。子步骤执行体（`crate::step_agent`）借同一份 `Ctx`，
+    /// 要靠它决定要不要把"确认模式：execute 看不到你的改动"贴进自己的上下文。
+    pub(crate) fn policy(&self) -> WritePolicy {
+        self.policy
+    }
+
     /// read：目录给结构树（复用 repair 的列表逻辑），文件给内容；"." = 项目根
     pub(crate) fn tool_read(&self, raw: &str) -> Result<String, String> {
         let raw_trim = raw.trim();
@@ -666,7 +709,8 @@ impl<'a> Ctx<'a> {
             "已写入 {rel}（{} 字节）{}",
             content.len(),
             if self.policy == WritePolicy::Stage {
-                "（已暂存，用户确认后生效）"
+                // 说清"磁盘没变"这半句 —— 只说"已暂存"，模型仍会去 execute 里找它的改动
+                "（已暂存到 .ruyix/stage/，项目磁盘未变，用户确认后才生效）"
             } else {
                 ""
             }
@@ -1390,6 +1434,11 @@ pub async fn run(
     if let Some(note) = connect_note(&connectables) {
         head.push_str(&format!("\n\n{note}"));
     }
+    // 运行模式必须写进上下文：确认模式下 write 只暂存、execute 看到旧文件，
+    // 不告诉模型这条，它会拿 execute 的失败反复当"改动错了"来修（见 policy_system_note）
+    if let Some(note) = policy_system_note(policy) {
+        head.push_str(&format!("\n\n{note}"));
+    }
     msgs.push(ChatMessage::user(format!("{head}\n\n用户消息：\n{task}")));
 
     sink.stage(
@@ -1674,8 +1723,10 @@ pub async fn run(
             }
             Action::Execute(cmd, t) => {
                 let brief = format!("execute {}", clip(&cmd, 80));
-                let r = Ok(tool_execute(proj, &cmd, t));
-                ("execute".into(), brief, r)
+                let mut r = tool_execute(proj, &cmd, t);
+                // 确认模式 + 已有暂存改动：这条命令必然看不到本次修改，贴一行说明兜住
+                r.push_str(staged_execute_note(policy, !ctx.changes.is_empty()));
+                ("execute".into(), brief, Ok(r))
             }
             Action::Connect(ca) => connect_step(conn, ca).await,
         };
@@ -1916,6 +1967,37 @@ mod tests {
         } else {
             assert_eq!(p, AGENT_SYSTEM, "非 Windows 不拼任何平台补充");
         }
+    }
+
+    /// 运行模式说明只在确认模式下出现，且必须点名"暂存 / 磁盘未变 / 别用 execute 验证" ——
+    /// 少了任何一条，模型就会拿 execute 的失败当成"改动错了"去反复修（65 轮空转那次）
+    #[test]
+    fn confirm_mode_note_is_conditional_and_complete() {
+        let stage = policy_system_note(WritePolicy::Stage).expect("确认模式必须有说明");
+        for k in ["确认模式", "暂存", "磁盘", "不要用 execute"] {
+            assert!(stage.contains(k), "缺关键点 {k}：{stage}");
+        }
+        assert!(
+            policy_system_note(WritePolicy::Apply).is_none(),
+            "写入/自主模式磁盘真会变，没有矛盾就不该加提示（不虚报）"
+        );
+    }
+
+    /// execute 的随附说明：只在"确认模式 + 已有暂存改动"时贴 —— 没写过东西就没有歧义，省 token
+    #[test]
+    fn staged_execute_note_gated_by_mode_and_changes() {
+        let on = staged_execute_note(WritePolicy::Stage, true);
+        assert!(on.contains("改动前"), "{on}");
+        assert_eq!(
+            staged_execute_note(WritePolicy::Stage, false),
+            "",
+            "没有暂存改动时不该贴"
+        );
+        assert_eq!(
+            staged_execute_note(WritePolicy::Apply, true),
+            "",
+            "写入/自主模式磁盘已变，没有这层矛盾"
+        );
     }
 
     /// 解析失败的回灌：截断叫写短、格式烂叫重发；错误文本带引号时
