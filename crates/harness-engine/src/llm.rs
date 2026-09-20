@@ -61,6 +61,10 @@ pub struct ChatOutcome {
     pub content: String,
     pub usage: Usage,
     pub model: String,
+    /// 本次补全的结束原因（"stop" / "length" / ...）。length = 内容被 max_tokens
+    /// 截断（推理模型的思考 token 也计入预算，长输出最容易撞线）—— 调用方据此
+    /// 区分"格式烂"和"没写完"，两种病的纠偏指令完全不同。
+    pub finish_reason: Option<String>,
     pub elapsed_ms: u128,
 }
 
@@ -226,6 +230,7 @@ pub async fn chat(
                             content,
                             usage: parsed.usage.unwrap_or_default(),
                             model: parsed.model.unwrap_or_else(|| cfg.model.clone()),
+                            finish_reason,
                             elapsed_ms: started.elapsed().as_millis(),
                         };
                         // 记一次 LLM 调用：**这是"模型输出错了"唯一能复盘的地方**

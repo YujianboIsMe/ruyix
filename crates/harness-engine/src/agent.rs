@@ -391,6 +391,20 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 5. 项目之外的东西（数据库、浏览器、远端服务、另一个 Agent）走 connect —— 不要自己写脚本硬凑协议，也不要把外部能力的事当成项目内的改动。
 6. 全部完成后输出最终答复：{"final":"给用户的完整说明（Markdown：结论、改了哪些文件、验证结果）"}"#;
 
+/// 系统提示词 = [`AGENT_SYSTEM`] + 平台特定补充。
+/// Windows 上 findstr 的多文件掩码语义不稳（`/c:"串"` 配多个通配符经常漏配），
+/// 实测模型要试 5-6 个变体才命中 —— 一行提示换掉这些试错轮。
+/// `AGENT_SYSTEM` 保持常量不动（测试直接断言其内容），平台差异在这里拼接。
+fn agent_system_prompt() -> String {
+    let mut s = AGENT_SYSTEM.to_string();
+    #[cfg(target_os = "windows")]
+    s.push_str(
+        "\n\nWindows 检索提示：内容搜索优先 git grep -i -l <词>（快且稳、跟随 .gitignore，项目不是 git 仓库时不可用）；\
+         \nfindstr 的多文件掩码行为不稳（/c:\"串\" 配多个通配符常漏配），需要时单掩码多次跑，或 for /r %f in (*.java) do findstr /m /c:\"词\" \"%f\" 逐个遍历。",
+    );
+    s
+}
+
 // ============================================
 // 动作解析（模型输出 → 结构化动作）
 // ============================================
@@ -509,6 +523,26 @@ fn parse_action(raw: &str) -> Result<Action, String> {
             "未知能力 {other:?}（只有 read / write / execute / connect 四种，外加 plan 清单，或输出 final）"
         )),
     }
+}
+
+/// 解析失败的回灌消息（JSON 字符串，直接作为 user 消息）。
+/// 两种病两种药：截断（finish_reason=length）叫模型**写短**，格式烂才叫它重发。
+/// 错误文本一律经 serde 编码 —— parse_action 的报错带着 JSON 片段，裸拼会把
+/// 引号漏进字符串值，让这条反馈自己变成非法 JSON。
+fn parse_failure_feedback(err: &str, finish_reason: Option<&str>) -> String {
+    let hint = if finish_reason == Some("length") {
+        format!(
+            "你的上一条输出被 max_tokens 截断了（finish_reason=length），不是格式问题：{err}。\
+             请精简后重发：plan 的 detail 每条一句话、必要时减少 steps，不要重复刚才的长输出。"
+        )
+    } else {
+        format!("你的上一条输出无法解析：{err}。请重新只输出一个 JSON 对象。")
+    };
+    format!(
+        "{{\"ok\": false, \"error\": {}}}",
+        serde_json::to_string(&hint)
+            .unwrap_or_else(|_| "\"输出无法解析，请重发一个 JSON 对象\"".into())
+    )
 }
 
 // ============================================
@@ -1115,7 +1149,7 @@ pub async fn run(
     // 连续模型调用失败计数：成功一轮即清零
     let mut llm_failures: u32 = 0;
 
-    let mut msgs = vec![ChatMessage::system(AGENT_SYSTEM)];
+    let mut msgs = vec![ChatMessage::system(agent_system_prompt())];
     for m in tail_history(history, 12) {
         msgs.push(if m.role == "assistant" {
             ChatMessage::assistant(m.text)
@@ -1175,10 +1209,22 @@ pub async fn run(
         let action = match parse_action(&reply.content) {
             Ok(a) => a,
             Err(e) => {
-                // 解析失败不终止：把错误告诉模型让它重出（消耗轮次预算，防死循环）
-                sink.log("warn", format!("[agent] 第 {step} 轮输出无法解析：{e}"));
-                msgs.push(ChatMessage::user(format!(
-                    "{{\"ok\": false, \"error\": \"你的上一条输出无法解析：{e}。请重新只输出一个 JSON 对象。\"}}"
+                // 解析失败不终止：把错误告诉模型让它重出（消耗轮次预算，防死循环）。
+                // 截断（finish_reason=length）与格式烂是两种病：截断必须叫模型写短，
+                // 否则它原样重发再截断一次（实测连烧三轮才碰巧写短过关）
+                let truncated = reply.finish_reason.as_deref() == Some("length");
+                let tag = if truncated {
+                    "（finish_reason=length，已要求精简重发）"
+                } else {
+                    ""
+                };
+                sink.log(
+                    "warn",
+                    format!("[agent] 第 {step} 轮输出无法解析{tag}：{e}"),
+                );
+                msgs.push(ChatMessage::user(parse_failure_feedback(
+                    &e,
+                    reply.finish_reason.as_deref(),
                 )));
                 continue;
             }
@@ -1465,6 +1511,41 @@ mod tests {
             !AGENT_SYSTEM.contains("\"edit\""),
             "edit 已并入 write（整份内容），提示词里不该再有 edit"
         );
+    }
+
+    /// 平台补充只该出现在对应平台的提示词里，且主体（AGENT_SYSTEM）不被改写
+    #[test]
+    fn platform_hint_matches_target_os() {
+        let p = agent_system_prompt();
+        assert!(p.starts_with(AGENT_SYSTEM), "主体必须原样开头");
+        if cfg!(windows) {
+            assert!(p.contains("git grep"), "Windows 上应带检索提示");
+            assert!(p.len() > AGENT_SYSTEM.len());
+        } else {
+            assert_eq!(p, AGENT_SYSTEM, "非 Windows 不拼任何平台补充");
+        }
+    }
+
+    /// 解析失败的回灌：截断叫写短、格式烂叫重发；错误文本带引号时
+    /// 反馈自己仍必须是合法 JSON（老实现裸拼会碎）
+    #[test]
+    fn parse_feedback_distinguishes_truncation() {
+        let trunc = parse_failure_feedback("EOF while parsing an object", Some("length"));
+        assert!(trunc.contains("max_tokens 截断"));
+        assert!(trunc.contains("精简"));
+        assert!(serde_json::from_str::<serde_json::Value>(&trunc).is_ok());
+
+        // 报错文本里带引号和花括号（parse_action 的真实输出形态）
+        let messy =
+            parse_failure_feedback("输出不是合法 JSON: ...；片段: {\"tool\":\"plan\",", None);
+        assert!(messy.contains("请重新只输出一个 JSON 对象"));
+        assert!(serde_json::from_str::<serde_json::Value>(&messy).is_ok());
+
+        // stop 是正常收笔，不算截断
+        let stop = parse_failure_feedback("烂格式", Some("stop"));
+        assert!(stop.contains("请重新只输出一个 JSON 对象"));
+        assert!(!stop.contains("max_tokens"));
+        assert!(serde_json::from_str::<serde_json::Value>(&stop).is_ok());
     }
 
     #[test]
