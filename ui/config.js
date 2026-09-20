@@ -70,6 +70,12 @@ window.ConfigUI = (() => {
         // 这是自成长闭环的最后一环（探测 → 告知 → 请求安装 → 再探测）。关掉后宿主连清单都不摆
         // env 目标，模型侧彻底看不见。
         { key: "env.install_enabled", kind: "toggle" },
+        // v0.6 托管进程：永不退出的服务有了生命周期出口。后台起 + 一条命令判就绪 + 句柄收。
+        // 这不是新原语，是 execute 的第三个维度。默认开 —— 关掉后 background 一律被拒，
+        // 模型会被推回 `start` / `Start-Process` 那套歪招（实测就死在这儿，空转 17 轮）。
+        { key: "proc.enabled", kind: "toggle" },
+        { key: "proc.max", kind: "number" },
+        { key: "proc.ready_timeout_secs", kind: "number" },
       ],
     },
   ];

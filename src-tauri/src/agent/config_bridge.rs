@@ -62,6 +62,10 @@ pub struct BridgeValues {
     pub discover_extra: Option<String>,
     // v0.5 环境准备：缺失工具的按需安装（走 Connect，宿主裁量 + 留记录）
     pub env_install_enabled: Option<String>,
+    // v0.6 托管进程：execute 的第三个生命周期维度（后台起 + 命令判就绪 + 句柄收）
+    pub proc_enabled: Option<String>,
+    pub proc_max: Option<String>,
+    pub proc_ready_timeout: Option<String>,
 }
 
 impl BridgeValues {
@@ -110,6 +114,13 @@ impl BridgeValues {
             discover_ttl_secs: read(mgr, "ruyix.code.harness.discover.ttl_secs", project_root),
             discover_extra: read(mgr, "ruyix.code.harness.discover.extra", project_root),
             env_install_enabled: read(mgr, "ruyix.code.harness.env.install_enabled", project_root),
+            proc_enabled: read(mgr, "ruyix.code.harness.proc.enabled", project_root),
+            proc_max: read(mgr, "ruyix.code.harness.proc.max", project_root),
+            proc_ready_timeout: read(
+                mgr,
+                "ruyix.code.harness.proc.ready_timeout_secs",
+                project_root,
+            ),
         }
     }
 }
@@ -282,6 +293,25 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
     // 模型侧彻底看不见 —— 所以这里只是一行可回退的开关，不涉及任何判定逻辑。
     if let Some(e) = v.env_install_enabled.as_deref() {
         cfg.env.install_enabled = e == "true" || e == "1";
+    }
+
+    // v0.6 托管进程：默认**开**。这不是新原语 —— 是 execute 的第三个生命周期维度
+    // （前台 / 后台起 + 命令判就绪 / 句柄操作）。关掉后 `background:true` 一律被拒并回说明，
+    // 模型会被推回 `start` / `Start-Process` 那套歪招（实测就死在这儿），所以默认开。
+    // 三个键都是可解析才生效、非法值保持默认 —— 与上面 discover / env 同款纪律。
+    if let Some(e) = v.proc_enabled.as_deref() {
+        cfg.proc.enabled = e == "true" || e == "1";
+    }
+    if let Some(n) = v.proc_max.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+        // 上限是**容量**，不是安全边界：真实夹取在 proc::start（1~16），这里只做可回退的旋钮。
+        cfg.proc.max = n;
+    }
+    if let Some(n) = v
+        .proc_ready_timeout
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        cfg.proc.ready_timeout_secs = n;
     }
 
     // 运行目录：ruyix 默认 ~/.ruyix/code/agent/runs（D5）
@@ -494,6 +524,68 @@ mod tests {
             },
         );
         assert!(on.env.install_enabled);
+    }
+
+    /// v0.6：托管进程默认开（关掉会把模型推回 start/Start-Process 歪招），三个键都可回退
+    #[test]
+    fn proc_bridge_defaults_on_and_each_knob_can_be_overridden() {
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &BridgeValues::default());
+        assert!(cfg.proc.enabled, "默认开：这是永不退出服务模式的唯一出口");
+        assert_eq!(cfg.proc.max, 4);
+        assert_eq!(cfg.proc.ready_timeout_secs, 60);
+
+        let mut off = base();
+        apply_overrides(
+            &mut off,
+            &BridgeValues {
+                proc_enabled: Some("false".into()),
+                proc_max: Some("8".into()),
+                proc_ready_timeout: Some("120".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!off.proc.enabled, "必须能一行回退");
+        assert_eq!(off.proc.max, 8);
+        assert_eq!(off.proc.ready_timeout_secs, 120);
+
+        // 非法值保持默认，不让一个手滑的数字把面板弄瘫
+        let mut bad = base();
+        apply_overrides(
+            &mut bad,
+            &BridgeValues {
+                proc_max: Some("很多".into()),
+                proc_ready_timeout: Some("-1".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(bad.proc.max, 4);
+        assert_eq!(bad.proc.ready_timeout_secs, 60);
+    }
+
+    /// 桥的键名一旦写错，三 scope 都会读空 —— 这里钉住它确实读的是 proc.* 三键
+    #[test]
+    fn proc_bridge_reads_its_own_keys_from_any_scope() {
+        let dir = std::env::temp_dir().join(format!("ruyix_bridge_proc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut mgr = ConfigManager::new_with_dir(dir.clone());
+
+        for (k, v) in [
+            ("ruyix.code.harness.proc.enabled", "false"),
+            ("ruyix.code.harness.proc.max", "7"),
+            ("ruyix.code.harness.proc.ready_timeout_secs", "180"),
+        ] {
+            mgr.config_write(&Scope::Runtime, k, v, None).unwrap();
+        }
+
+        let values = BridgeValues::from_config(&mgr, None);
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &values);
+        assert!(!cfg.proc.enabled, "runtime scope 的 false 必须被读到");
+        assert_eq!(cfg.proc.max, 7);
+        assert_eq!(cfg.proc.ready_timeout_secs, 180);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

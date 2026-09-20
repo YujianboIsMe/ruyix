@@ -1237,7 +1237,7 @@ fn main() {
     let config_mgr = Mutex::new(config::ConfigManager::new());
     let pty_mgr = Mutex::new(pty::PtyManager::new());
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(config_mgr)
         .manage(mcp::McpManager::new())
@@ -1342,8 +1342,26 @@ fn main() {
             skills_save,
             skills_remove,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // 宿主退出收尾：把引擎托管的进程**全收**（跨项目、且不放行 keep_alive）。
+    //
+    // 为什么必须在这儿收：托管的进程是宿主 spawn 的，但**不**在宿主的进程树里
+    // （Windows 上 `cmd → mvn.cmd → java` 三代），宿主一退，它们就变成占着端口的孤儿 ——
+    // 实测那次一个 `java` 孤儿占了 8083 端口 28 分钟，后面每一次重启都拿到假的"端口被占"
+    // 失败信号。引擎持有就引擎收，退出这一步是最后一道闸。
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            let (stopped, _kept) = harness_engine::proc::shutdown_all(false);
+            if !stopped.is_empty() {
+                eprintln!(
+                    "[ruyix] 退出：已收掉 {} 个托管进程（含子进程树）",
+                    stopped.len()
+                );
+            }
+        }
+    });
 }
 
 // ============================================
