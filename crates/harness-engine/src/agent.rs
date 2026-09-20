@@ -396,6 +396,10 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - read    读项目：{"tool":"read","args":{"path":"src/ 或 src/main.rs"}} —— 目录给结构树，文件给内容；Git 历史用 execute 跑 git log / git show 查。
 - write   写文件：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}} —— 新建或整文件重写。改已有文件前先 read 拿到现状，交回的必须是整份内容，不许用省略号或"其余不变"敷衍。
 - execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化、git 都走它。
+  永不退出的服务（spring-boot:run / java -jar / npm run dev / vite）**必须**用后台模式，不要用 start、Start-Process、往 %TEMP% 写 bat/ps1 那类花招（它们拿不到输出，进程还会脱离掌控）：
+  {"tool":"execute","args":{"cmd":"mvn spring-boot:run","background":true,"ready_cmd":"netstat -ano | findstr :8083","ready_timeout_secs":90}}
+  background 起完不等它；ready_cmd 是**一条命令**，退出码 0 即就绪（不写就等于不等、起完即返）。返回 handle、pid 与日志**文件路径**，输出全部落在那个文件里（路径由引擎给，别自己写重定向）。
+  之后用 execute {"op":"status","handle":"p1"} 查状态、op=log 读日志尾、op=stop 停掉（连子进程树一起杀）。重启同一个服务前先 status / stop：端口被上一次的进程占着时，"起不来"是假的。
 - connect 连外部能力：{"tool":"connect","args":{"action":"list"}} 先看有哪些可连；调 MCP 工具用 {"tool":"connect","args":{"action":"call","server":"服务器名","tool":"工具名","arguments":{}}}；把任务委托给远端 Agent 用 {"tool":"connect","args":{"action":"send","agent":"名字","text":"任务描述"}}。可用清单在提示词里给过，没有的就别硬猜名字。
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 {"tool":"plan","args":{"steps":[{"title":"短标题","detail":"做什么","files":["相对路径"]}]}}，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
@@ -469,7 +473,28 @@ enum Action {
     Read(String),
     Write(String, String),
     Execute(String, Option<u64>),
+    /// 后台启动：`execute` 的第三种生命周期（有界 / 无界托管 / 句柄操作）。
+    /// 模型侧仍是同一个 `execute` 工具，只是多了 `background` 这一维。
+    ExecBg(crate::proc::StartSpec),
+    /// 托管进程的句柄操作（status / log / stop）
+    Proc(ProcOp, String),
     Connect(ConnectAction),
+}
+
+/// `execute` 对托管进程的句柄操作
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcOp {
+    Status,
+    Log,
+    Stop,
+}
+
+pub(crate) fn proc_op_name(op: ProcOp) -> &'static str {
+    match op {
+        ProcOp::Status => "status",
+        ProcOp::Log => "log",
+        ProcOp::Stop => "stop",
+    }
 }
 
 /// connect 的三形态：看清单 / 调 MCP 工具 / 委托远端 Agent
@@ -553,10 +578,7 @@ fn parse_action(raw: &str) -> Result<Action, String> {
             }))
         }
         // execute 是原语名；bash 留作别名 —— 老历史里写着 bash 的模型不该白烧一轮
-        "execute" | "bash" => Ok(Action::Execute(
-            get_str(&args, "cmd")?,
-            args.get("timeout_secs").and_then(|x| x.as_u64()),
-        )),
+        "execute" | "bash" => parse_execute(&args),
         "plan" => {
             let mut steps: Vec<PlanStep> =
                 serde_json::from_value(args.get("steps").cloned().unwrap_or(serde_json::json!([])))
@@ -578,6 +600,55 @@ fn parse_action(raw: &str) -> Result<Action, String> {
     }
 }
 
+/// `execute` 的三副面孔（同一个工具的三个生命周期）：
+///
+/// - `{cmd, timeout_secs}` —— **有界**：跑完为止（编译 / 测试 / git）
+/// - `{cmd, background:true, ready_cmd, ready_timeout_secs, keep_alive}` —— **无界托管**：
+///   起完即返，[`crate::proc`] 接管（服务 / 长驻进程）
+/// - `{op:status|log|stop, handle}` —— **句柄操作**
+///
+/// 为什么不加第五个原语：见 [`crate::proc`] 模块文档 —— "常驻"没有引入新的*效果*，
+/// 模型不该多一次毫无信息量的选型决策。
+fn parse_execute(args: &serde_json::Value) -> Result<Action, String> {
+    if let Some(op) = args.get("op").and_then(|x| x.as_str()) {
+        let op = match op.trim().to_ascii_lowercase().as_str() {
+            "status" => ProcOp::Status,
+            "log" | "logs" | "tail" => ProcOp::Log,
+            "stop" | "kill" => ProcOp::Stop,
+            other => {
+                return Err(format!(
+                    "execute.op 只支持 status / log / stop，收到 {other:?}"
+                ));
+            }
+        };
+        return Ok(Action::Proc(op, get_str(args, "handle")?));
+    }
+    let cmd = get_str(args, "cmd")?;
+    let background = args
+        .get("background")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    if !background {
+        return Ok(Action::Execute(
+            cmd,
+            args.get("timeout_secs").and_then(|x| x.as_u64()),
+        ));
+    }
+    Ok(Action::ExecBg(crate::proc::StartSpec {
+        cmd,
+        ready_cmd: args
+            .get("ready_cmd")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        ready_timeout_secs: args.get("ready_timeout_secs").and_then(|x| x.as_u64()),
+        keep_alive: args
+            .get("keep_alive")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+    }))
+}
+
 /// 步骤执行体（`crate::step_agent`）能用的动作子集 —— 主循环解析结果的**收窄视图**。
 ///
 /// 为什么不把 `Action` 直接开给子 agent：`plan` 会变成嵌套计划（父的计划谁维护？），
@@ -590,6 +661,8 @@ pub(crate) enum StepAction {
     Read(String),
     Write(String, String),
     Execute(String, Option<u64>),
+    ExecBg(crate::proc::StartSpec),
+    Proc(ProcOp, String),
     Unsupported(&'static str),
 }
 
@@ -600,6 +673,8 @@ pub(crate) fn parse_step_action(raw: &str) -> Result<StepAction, String> {
         Action::Read(p) => StepAction::Read(p),
         Action::Write(p, c) => StepAction::Write(p, c),
         Action::Execute(c, t) => StepAction::Execute(c, t),
+        Action::ExecBg(s) => StepAction::ExecBg(s),
+        Action::Proc(op, h) => StepAction::Proc(op, h),
         Action::Plan(_) => StepAction::Unsupported("plan"),
         Action::Connect(_) => StepAction::Unsupported("connect"),
     })
@@ -1047,6 +1122,186 @@ pub(crate) fn tool_execute(proj: &Path, cmd: &str, timeout_secs: Option<u64>) ->
         s.push_str(&format!("\nstderr:\n{}", clip(&out.stderr, EXEC_CLIP)));
     }
     s
+}
+
+/// 把一次后台启动的结果渲染给模型。**每个出口都带证据**：判据命中的那行 / 退出码 +
+/// 日志尾 + 判据最后结果 / 判据未命中 + 日志尾。
+///
+/// 另外两件必须说清的事：① 日志在哪、后续怎么操作（不然模型还得猜）；
+/// ② **如实记账** —— 同一就绪判据已经有别的进程在跑，就直说。实测那 17 轮空转里最毒的一环
+/// 就是"上一轮的进程还占着端口，于是每次重启拿到的都是假信号"。引擎不该猜模型的意图，
+/// 但把事实摆出来，模型自己就会先 stop 再起。
+fn render_start(proj: &Path, out: &crate::proc::StartOutcome) -> String {
+    use crate::proc::StartKind;
+    let i = &out.info;
+    let secs = out.waited_ms as f64 / 1000.0;
+    let (mut s, tail) = match &out.kind {
+        StartKind::Ready { evidence } => (
+            format!(
+                "✓ 后台已就绪 handle={} pid={} 用时 {secs:.1}s\n就绪判据命中：{evidence}",
+                i.handle, i.pid
+            ),
+            None,
+        ),
+        StartKind::Exited {
+            code,
+            tail,
+            last_probe,
+        } => (
+            format!(
+                "✗ 进程已退出（没等到就绪）handle={} pid={} 用时 {secs:.1}s exit={}\n\
+                 就绪判据最后一次：{}",
+                i.handle,
+                i.pid,
+                code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+                last_probe.clone().unwrap_or_else(|| "（没跑过）".into())
+            ),
+            Some(tail.clone()),
+        ),
+        StartKind::NotReady { evidence, tail } => (
+            format!(
+                "⚠ 进程还活着，但就绪判据在窗口内没命中 handle={} pid={} 用时 {secs:.1}s\n\
+                 判据最后一次：{evidence}\n\
+                 （判据没命中 ≠ 启动失败：慢启动很常见。看下面的日志尾，分辨它在启动还是卡住了。）",
+                i.handle, i.pid
+            ),
+            Some(tail.clone()),
+        ),
+        StartKind::Started => (
+            format!(
+                "✓ 后台已启动（没给就绪判据，不等它）handle={} pid={}",
+                i.handle, i.pid
+            ),
+            None,
+        ),
+    };
+    if let Some(t) = tail
+        && !t.trim().is_empty()
+    {
+        s.push_str(&format!("\n日志尾部：\n{t}"));
+    }
+    s.push_str(&format!(
+        "\n日志文件（可直接 read，或用 execute {{\"op\":\"log\",\"handle\":\"{}\"}}）：{}",
+        i.handle, i.log
+    ));
+    s.push_str(&format!(
+        "\n查状态 / 读日志 / 停掉：execute {{\"op\":\"status\"|\"log\"|\"stop\",\"handle\":\"{}\"}}",
+        i.handle
+    ));
+    if i.keep_alive {
+        s.push_str(
+            "\n（已声明 keep_alive：本次 run 结束**不**收它，宿主面板可见可停；IDE 退出时一并收。）",
+        );
+    } else {
+        s.push_str("\n（引擎持有：本次 run 结束会自动收掉它，不会留孤儿。）");
+    }
+
+    let others: Vec<crate::proc::ProcInfo> = crate::proc::listing_for(proj)
+        .into_iter()
+        .filter(|p| !crate::proc::is_dead(&p.state) && p.handle != i.handle)
+        .collect();
+    if !others.is_empty() {
+        s.push_str(&format!(
+            "\n其他托管进程：{}",
+            crate::proc::render_listing(&others)
+        ));
+        if let Some(rc) = &i.ready_cmd {
+            let same = others
+                .iter()
+                .filter(|p| p.ready_cmd.as_deref() == Some(rc.as_str()))
+                .count();
+            if same > 0 {
+                s.push_str(&format!(
+                    "\n⚠ 上面有 {same} 个用的是**同一个就绪判据**。如果你是在反复重启同一个服务：\
+                     先 stop 掉旧的再起 —— 重复起一个已经跑着的服务通常只会撞端口占用，\
+                     而那个失败是假的。"
+                ));
+            }
+        }
+    }
+    s
+}
+
+/// 后台启动的入口。
+///
+/// **`Err` = "这次请求本身没能执行"**（开关关着 / 闸门拒了 / 判据在启动前就已命中 /
+/// 到并发上限 / 起不来），`Ok` = "真的跑起来了，结果好坏都写在文本里"。
+/// 与 [`parse_action`] 的分界一致：句柄不存在等同于参数不合法，不该伪装成一次成功的工具调用。
+pub(crate) fn tool_exec_bg(
+    proj: &Path,
+    cfg: &AppConfig,
+    spec: &crate::proc::StartSpec,
+) -> Result<String, String> {
+    if !cfg.proc.enabled {
+        return Err(
+            "后台启动已关闭（ruyix.code.harness.proc.enabled = false）。请改用前台 execute，\
+                    或在设置里打开 —— 关着的时候去用 start / Start-Process 那类花招只会更糟：\
+                    输出拿不到、进程还脱离掌控。"
+                .into(),
+        );
+    }
+    // 闸门对后台同样生效：跑多久不改变"它是不是一条命令"
+    preflight_execute(proj, &spec.cmd)?;
+    execute_allowed(&spec.cmd)?;
+    if let Some(rc) = &spec.ready_cmd {
+        preflight_execute(proj, rc).map_err(|e| format!("就绪判据没通过闸门：\n{e}"))?;
+        execute_allowed(rc).map_err(|e| format!("就绪判据被拒绝：{e}"))?;
+    }
+    let out = crate::proc::start(proj, spec, cfg.proc.max, cfg.proc.ready_timeout_secs)?;
+    Ok(render_start(proj, &out))
+}
+
+/// 托管进程的句柄操作：查状态 / 读日志尾 / 停掉（连子进程树）。
+pub(crate) fn tool_proc(op: ProcOp, handle: &str) -> Result<String, String> {
+    match op {
+        ProcOp::Status => {
+            let i = crate::proc::status(handle)?;
+            let ready = i.ready_cmd.clone().unwrap_or_else(|| "（无）".into());
+            let mut s = format!(
+                "handle={} {} pid={} 已跑 {:.1}s\n命令：{}\n就绪判据：{ready}\n日志：{}",
+                i.handle,
+                i.state,
+                i.pid,
+                i.elapsed_ms as f64 / 1000.0,
+                clip(&i.cmd, 160),
+                i.log
+            );
+            if crate::proc::is_dead(&i.state) {
+                s.push_str(&format!(
+                    "\n进程已退出 —— 退出码在上面 state 里；日志尾部用 \
+                     execute {{\"op\":\"log\",\"handle\":\"{}\"}} 看。",
+                    i.handle
+                ));
+            } else {
+                s.push_str(&format!(
+                    "\n还在跑。读日志尾：execute {{\"op\":\"log\",\"handle\":\"{}\"}}；\
+                     停掉：execute {{\"op\":\"stop\",\"handle\":\"{}\"}}",
+                    i.handle, i.handle
+                ));
+            }
+            Ok(s)
+        }
+        ProcOp::Log => {
+            let i = crate::proc::status(handle)?;
+            let tail = crate::proc::log_tail(handle, crate::proc::LOG_TAIL_LINES)?;
+            let what = if tail.trim().is_empty() {
+                "（空 —— 进程可能还没吐东西）"
+            } else {
+                "（末尾若干行）"
+            };
+            Ok(format!(
+                "handle={} {} pid={} 日志{what}：\n{tail}\n—— 全文在 {}",
+                i.handle, i.state, i.pid, i.log
+            ))
+        }
+        ProcOp::Stop => {
+            let i = crate::proc::stop(handle)?;
+            Ok(format!(
+                "✓ 已停止 handle={} pid={}（连子进程树一起杀，端口会立刻释放）\n日志留着：{}",
+                i.handle, i.pid, i.log
+            ))
+        }
+    }
 }
 
 /// 执行一次 connect：看清单 / 调 MCP 工具 / 委托远端 Agent。
@@ -1929,6 +2184,17 @@ pub async fn run(
                 r.push_str(staged_execute_note(policy, !ctx.changes.is_empty()));
                 ("execute".into(), brief, Ok(r))
             }
+            Action::ExecBg(spec) => {
+                let brief = format!("execute bg {}", clip(&spec.cmd, 70));
+                // 后台启动看到的是真实磁盘（它本就不在覆盖层里），暂存横幅对它没有意义
+                ("execute".into(), brief, tool_exec_bg(proj, cfg, &spec))
+            }
+            Action::Proc(op, handle) => {
+                let brief = format!("execute {} {handle}", proc_op_name(op));
+                let r = tool_proc(op, &handle);
+                // 句柄不存在 = 参数不合法（与解析报错同一类），不该记成一次成功的工具调用
+                ("execute".into(), brief, r)
+            }
             Action::Connect(ca) => connect_step(conn, ca).await,
         };
 
@@ -1999,6 +2265,30 @@ pub async fn run(
             );
             sink.log("warn", out.answer.clone());
         }
+    }
+
+    // 收尾：**引擎持有就引擎收**。
+    // 不这么做，模型用 start / Start-Process 绕出来的进程就会变成杀不到的孤儿
+    // （实测：一个占着 8083 的 java 活了 28 分钟，还让后面每一次重启都拿到假的失败信号）。
+    // keep_alive 是唯一例外 —— 显式声明的才留，且仍在进程表里（宿主面板可见可停）。
+    let (stopped_procs, kept_procs) = crate::proc::shutdown_for(proj, true);
+    if !stopped_procs.is_empty() || !kept_procs.is_empty() {
+        let mut note = Vec::new();
+        if !stopped_procs.is_empty() {
+            note.push(format!(
+                "本次 run 收掉了 {} 个托管进程：{}",
+                stopped_procs.len(),
+                crate::proc::render_listing(&stopped_procs)
+            ));
+        }
+        if !kept_procs.is_empty() {
+            note.push(format!(
+                "按 keep_alive 留着 {} 个（IDE 退出时一并收）：{}",
+                kept_procs.len(),
+                crate::proc::render_listing(&kept_procs)
+            ));
+        }
+        gate.notes.push(note.join("\n"));
     }
 
     // 计划落定：run 结束了，大纲区不该再留沙漏（⌛ 是"等待执行"，不是"没做成"）
@@ -2307,6 +2597,120 @@ mod tests {
         let r = tool_execute(&d.0, r"\admin-run\", None);
         assert!(r.starts_with('❌'), "{r}");
         assert!(!r.contains("exit="), "拒绝时不该有执行结果：{r}");
+    }
+
+    /// execute 的三副面孔：前台（原样）/ 后台托管 / 句柄操作。同一个工具，三种生命周期。
+    #[test]
+    fn parse_action_accepts_the_three_execute_lifetimes() {
+        // ① 前台：一个字节都没变（老历史里的输出必须继续解析得动）
+        assert!(matches!(
+            parse_action(r#"{"tool":"execute","args":{"cmd":"ls"}}"#).unwrap(),
+            Action::Execute(c, None) if c == "ls"
+        ));
+        // bash 别名仍然是同一个动作
+        assert!(matches!(
+            parse_action(r#"{"tool":"bash","args":{"cmd":"ls"}}"#).unwrap(),
+            Action::Execute(_, _)
+        ));
+
+        // ② 后台：cmd + background 加就绪判据
+        let raw = r#"{"tool":"execute","args":{"cmd":"mvn spring-boot:run","background":true,"ready_cmd":"netstat -ano | findstr :8083","ready_timeout_secs":90}}"#;
+        match parse_action(raw).unwrap() {
+            Action::ExecBg(s) => {
+                assert_eq!(s.cmd, "mvn spring-boot:run");
+                assert_eq!(s.ready_cmd.as_deref(), Some("netstat -ano | findstr :8083"));
+                assert_eq!(s.ready_timeout_secs, Some(90));
+                assert!(!s.keep_alive, "keep_alive 默认必须是 false");
+            }
+            other => panic!("应当是后台启动，实际 {other:?}"),
+        }
+        // 空白判据 = 没给判据（起完即返），不能变成一个永远跑不通的空命令
+        match parse_action(
+            r#"{"tool":"execute","args":{"cmd":"npm run dev","background":true,"ready_cmd":"   "}}"#,
+        )
+        .unwrap()
+        {
+            Action::ExecBg(s) => assert!(s.ready_cmd.is_none()),
+            other => panic!("应当是后台启动，实际 {other:?}"),
+        }
+
+        // ③ 句柄操作
+        assert!(matches!(
+            parse_action(r#"{"tool":"execute","args":{"op":"stop","handle":"p1"}}"#).unwrap(),
+            Action::Proc(ProcOp::Stop, h) if h == "p1"
+        ));
+        assert!(matches!(
+            parse_action(r#"{"tool":"execute","args":{"op":"logs","handle":"p2"}}"#).unwrap(),
+            Action::Proc(ProcOp::Log, _)
+        ));
+    }
+
+    /// 请求本身不合法的三种写法都要报错，而不是静默变成"前台跑一条叫 op 的命令"。
+    #[test]
+    fn parse_action_rejects_malformed_execute_requests() {
+        for bad in [
+            r#"{"tool":"execute","args":{"op":"restart","handle":"p1"}}"#,
+            r#"{"tool":"execute","args":{"op":"stop"}}"#,
+            r#"{"tool":"execute","args":{"background":true}}"#,
+            r#"{"tool":"execute","args":{"cmd":"   "}}"#,
+        ] {
+            assert!(parse_action(bad).is_err(), "该报错：{bad}");
+        }
+    }
+
+    /// 后台启动同样过闸门与开关 —— 跑多久不改变"它是不是一条命令"。
+    #[test]
+    fn background_start_goes_through_the_same_gate_and_switch() {
+        let d = TempDir::new("bg-gate");
+        let spec = |cmd: &str, ready: Option<&str>| crate::proc::StartSpec {
+            cmd: cmd.into(),
+            ready_cmd: ready.map(str::to_string),
+            ready_timeout_secs: Some(5),
+            keep_alive: false,
+        };
+
+        // 开关关着：直接拒，并给出可操作的下一步
+        let mut off = AppConfig::default();
+        off.proc.enabled = false;
+        let e = tool_exec_bg(&d.0, &off, &spec("cargo run", None)).expect_err("关掉就该拒");
+        assert!(e.contains("proc.enabled"), "{e}");
+
+        // 闸门（启动器 / 垃圾命令）对后台同样生效
+        let on = AppConfig::default();
+        assert!(
+            tool_exec_bg(&d.0, &on, &spec("start foo", None)).is_err(),
+            "start 那类外包给外壳的写法不该被后台模式放行"
+        );
+        assert!(tool_exec_bg(&d.0, &on, &spec(r"\admin-run\", None)).is_err());
+
+        // 就绪判据也要过闸门 —— 它是引擎去跑的命令，不能是个未知命令
+        let e = tool_exec_bg(
+            &d.0,
+            &on,
+            &spec("cargo build", Some("zzz-no-such-tool-zzz")),
+        )
+        .expect_err("判据不可执行就该拒");
+        assert!(e.contains("判据"), "{e}");
+    }
+
+    /// 句柄不存在 = 请求不合法（与解析报错同类），不该记成一次成功的工具调用。
+    #[test]
+    fn handle_ops_treat_an_unknown_handle_as_a_request_error() {
+        assert!(tool_proc(ProcOp::Status, "p999999").is_err());
+        assert!(tool_proc(ProcOp::Log, "p999999").is_err());
+        assert!(tool_proc(ProcOp::Stop, "p999999").is_err());
+    }
+
+    /// 提示词必须把后台模式说清 —— 不说，模型就还用 start / Start-Process 那套花招，
+    /// 而那正是这轮的病根（输出拿不到 + 进程脱离掌控 + 桌面弹窗）。
+    #[test]
+    fn system_prompt_documents_the_background_mode() {
+        for k in ["background", "ready_cmd", "handle", "就绪"] {
+            assert!(
+                AGENT_SYSTEM.contains(k),
+                "提示词缺 {k}：模型没有表达常驻的词汇"
+            );
+        }
     }
 
     /// read：文件给内容、目录给树、overlay 优先、路径封闭

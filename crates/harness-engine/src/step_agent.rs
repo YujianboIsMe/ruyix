@@ -20,8 +20,8 @@
 
 use crate::agent::{
     Ctx, FileChange, LLM_FAIL_LIMIT, StepAction, VerifyOutcome, narrow_verify,
-    parse_failure_feedback, parse_step_action, policy_system_note, staged_execute_note,
-    tool_execute,
+    parse_failure_feedback, parse_step_action, policy_system_note, proc_op_name,
+    staged_execute_note, tool_exec_bg, tool_execute, tool_proc,
 };
 use crate::config::AppConfig;
 use crate::discover;
@@ -50,6 +50,7 @@ pub const STEP_SYSTEM: &str = r#"你是 ruyix 的步骤执行体：只负责**�
 - read    读项目：{"tool":"read","args":{"path":"src/ 或 src/main.rs"}} —— 目录给结构树，文件给内容。
 - write   写文件：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}} —— 改已有文件前先 read 拿到现状，交回的必须是整份内容，不许用省略号或"其余不变"敷衍。
 - execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化都走它。
+  永不退出的服务（spring-boot:run / java -jar / npm run dev）用后台模式："background":true 加一条 "ready_cmd"（一条命令，退出码 0 即就绪），返回 handle；随后 op=status / op=log / op=stop 用 handle 操作。不要用 start / Start-Process 那类花招。同一个服务重启前先 status 或 stop。
 
 规则：
 1. 每轮只输出一个 JSON 对象（一次能力调用，或本步的交付说明），不要解释文字、不要 markdown 代码块包裹。
@@ -448,6 +449,19 @@ pub async fn run_step(
                     Ok(r),
                 )
             }
+            StepAction::ExecBg(spec) => {
+                let r = tool_exec_bg(cx.project_root(), cfg, &spec);
+                (
+                    "execute".into(),
+                    format!("execute bg {}", clip(&spec.cmd, 70)),
+                    r,
+                )
+            }
+            StepAction::Proc(op, handle) => (
+                "execute".into(),
+                format!("execute {} {handle}", proc_op_name(op)),
+                tool_proc(op, &handle),
+            ),
             StepAction::Unsupported(name) => (
                 name.to_string(),
                 format!("{name}（本步不支持）"),
@@ -500,6 +514,14 @@ pub async fn run_step(
 
 #[cfg(test)]
 mod tests {
+    /// 子步骤的提示词也要有后台模式：父子上下文隔离，父那份到不了这里 —— 不补一遍，
+    /// 每个步骤都会各自重新"用 start 去绕"，正是那 17 轮空转的放大版。
+    #[test]
+    fn step_prompt_documents_the_background_mode() {
+        for k in ["background", "ready_cmd", "handle"] {
+            assert!(STEP_SYSTEM.contains(k), "子步骤提示词缺 {k}");
+        }
+    }
     use super::*;
     use crate::agent::WritePolicy;
     use crate::exec::new_cancel_flag;
