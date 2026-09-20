@@ -45,6 +45,9 @@
  *   U20 env-install   环境准备（v0.5）：缺失工具按需安装 —— **不是新原语**，走 Connect；
  *                     引擎零分支（ENV_CONNECTOR_KIND 约定 + 缺失指向 connect），包管理器知识
  *                     全在宿主一张表；每次动作留记录（jsonl + UI 事件）；安装命令必须过 shell
+ *   U21 exec-safety   执行前闸门 + 输出按代码页解码（v0.6）：`\`、`\admin-run\` 这类"不是命令"
+ *                     的字符串不许再原样交给 cmd（真控制台里 start 系会弹桌面窗、输出全丢）；
+ *                     中文 Windows 的 GBK 输出必须解成可读中文（否则模型读不懂自己的失败）
  */
 
 "use strict";
@@ -427,6 +430,33 @@ function runStaticChecks() {
       has(cfgBridgeRs, "env.install_enabled") &&
       has(configJs, '"env.install_enabled"'),
     "环境准备没接上：宿主 env 目标（清单 + call 分流）/ 包管理器表 / 留记录 / 走 shell / 缓存失效 / 开关 缺一不可");
+
+  // U21 exec-safety：执行前闸门 + 输出按代码页解码（v0.6）。两个病根各钉一遍：
+  // ① **闸门**：`\`、`\admin-run\` 这类"根本不是命令"的字符串以前会被原样交给 cmd；真控制台里
+  //    `start` 系还会把失败变成**桌面弹窗**、stdout/stderr 一律拿不到 —— 现在三类在**执行前**拒掉，
+  //    并回一条可读纠正（附本机实测可用清单 —— 同一张工具表，既喂上下文也当验证器）。
+  // ② **编码**：中文 Windows 上 cmd/java/mvn/git 输出是 GBK，`from_utf8_lossy` 解成乱码，
+  //    模型读不懂"不是内部或外部命令"，只能换个更离谱的命令继续试（"命令总是不对"的直接原因）。
+  //    必须一处实现多处消费：引擎 run_with_cap + 宿主 run_target / probe_tool / git.rs。
+  const gitRs = read("src-tauri/src/git.rs");
+  const capabilityRs = read("src-tauri/src/capability.rs");
+  check("U21", "exec-safety",
+    has(execRs, "pub fn decode_output(") &&
+      has(execRs, "GetACP") &&
+      has(execRs, "decode_output(&out_buf") &&
+      has(mainRs, "harness_engine::exec::decode_output") &&
+      has(gitRs, "harness_engine::exec::decode_output") &&
+      has(capabilityRs, "harness_engine::exec::decode_output"),
+    "输出编码没接上：引擎 decode_output（按活动代码页）+ 宿主三处复用，缺一不可");
+  check("U21", "exec-safety",
+    has(intentRs, "pub(crate) fn preflight_execute(") &&
+      has(intentRs, "const SHELL_BUILTINS") &&
+      has(intentRs, "const LAUNCHERS") &&
+      has(intentRs, "SHELL_ESCAPES") &&
+      has(discoverRs, "pub fn is_available(") &&
+      has(discoverRs, "pub fn available_names(") &&
+      /preflight_execute\(proj, cmd\)/.test(intentRs),
+    "执行前闸门没接上：三类拦截（启动器 / 路径式垃圾 / 没装的命令）+ 可用清单 + 接进 tool_execute");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
