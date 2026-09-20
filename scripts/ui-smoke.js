@@ -33,6 +33,9 @@
  *   U15b plan-settle  收尾落定：每个步骤都要有终态（沙漏是"等待执行"，run 结束还挂着就是骗人）
  *   U15c plan-execute 计划即执行（step.execute_plan）：游标在引擎手里，派发前发 running，
  *                     失败落 error 并停下给模型一轮干预
+ *   U15d plan-persist 计划要活着跨过一次重启：工具循环不落 RunRecord（run_id 恒空），
+ *                     计划（含终态）与验证/复核结论只能跟着助手消息落盘 —— Rust 侧不声明
+ *                     这些字段，agent_session_save 的往返会当场把它们抹掉
  *   U16 agent-loop    会话 = 工具循环（Read/Write/Execute/Connect 四大原子能力），无问答/任务预分类；
  *                     Connect 必须真接上宿主（mod.rs 建连接器 → connect.rs 落 MCP/A2A）
  */
@@ -328,6 +331,25 @@ function runStaticChecks() {
       /run_step\(cfg, &mut ctx, &inp, cancel, deadline, sink\)/.test(intentRs) &&
       has(intentRs, "cfg.step.execute_plan"),
     "计划执行未接上主循环：引擎缺游标 / 未传共享 Ctx 派发 run_step / 失败未回灌干预轮");
+
+  // U15d plan-persist：计划必须活着跨过一次重启。
+  // 会话跑的是**工具循环**（agent_reply），它不落 RunRecord、run_id 恒为空 ——
+  // 计划（含终态）与验证/复核结论都只能跟着助手消息落盘。Rust 侧漏声明字段最隐蔽：
+  // UI 明明挂上去了，agent_session_save 的往返会把它抹掉（UI 拿返回值 Object.assign
+  // 覆盖自己的 messages），表现出来就是"重开旧会话，大纲区的任务列表整个消失"。
+  // 四环：Rust 有字段 → UI 落盘前挂快照 → hydratePlan 先从消息恢复 → 老会话回退到 run_id 路径。
+  const sessionsRs = read("src-tauri/src/agent/sessions.rs");
+  check("U15", "plan-persist",
+    has(sessionsRs, "pub plan: Option<PlanSnap>") &&
+      has(sessionsRs, "pub struct PlanStepState") &&
+      has(sessionsRs, "pub verify: Vec<VerifyOutcome>") &&
+      has(sessionsRs, "pub reflect: Vec<Reflection>") &&
+      has(sessionJs, "function planSnapshot(") &&
+      has(sessionJs, "function planFromSnapshot(") &&
+      has(sessionJs, "placeholder.plan = snap") &&
+      has(sessionJs, "m.plan?.steps?.length") &&
+      has(sessionJs, "agent_run_load"),
+    "计划跨重启会丢：sessions.rs 未声明 plan/verify/reflect / session.js 未挂快照或未从消息恢复");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
