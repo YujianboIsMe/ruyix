@@ -289,9 +289,8 @@ fn render_without_snippets(ctx: &ProjectContext) -> String {
     s
 }
 
-/// 渲染成给大模型看的文本块（不含哨兵标记）。
-/// 调用方负责加 `CONTEXT_BEGIN` / `CONTEXT_END`。
-pub fn render(ctx: &ProjectContext) -> String {
+/// 渲染主体（项目段 + 树 + 片段 + 截断说明）：管线版与 agent 版共用。
+fn render_body(ctx: &ProjectContext) -> String {
     let mut s = String::new();
     s.push_str("# 当前项目（这是**已存在的真实项目**，不要新建项目）\n\n");
     s.push_str(&render_without_snippets(ctx));
@@ -313,7 +312,13 @@ pub fn render(ctx: &ProjectContext) -> String {
     if ctx.truncated {
         s.push_str("\n（上下文已被截断：项目较大，以上只包含主要结构。）\n");
     }
+    s
+}
 
+/// 渲染成给大模型看的文本块（不含哨兵标记）。
+/// 调用方负责加 `CONTEXT_BEGIN` / `CONTEXT_END`。
+pub fn render(ctx: &ProjectContext) -> String {
+    let mut s = render_body(ctx);
     s.push_str(
         "\n要求：\n\
          1. 所有文件路径都相对上面这个项目根目录，禁止另起一个新项目。\n\
@@ -335,6 +340,26 @@ pub fn with_context(task: &str, root: Option<&str>, budget: usize) -> String {
             "{}\n{}\n{}\n{}",
             CONTEXT_BEGIN,
             render(&ctx),
+            CONTEXT_END,
+            task.trim()
+        ),
+        Err(_) => task.to_string(),
+    }
+}
+
+/// 会话 Agent 版注入：与 [`with_context`] 同一份采集，但**不带**结尾的
+/// "要求"段 —— 那是规划管线的口吻（"在步骤里写出路径"），工具循环里只是噪音；
+/// 路径相对根、改前先读这些纪律 `AGENT_SYSTEM` 已经讲了。
+/// 哨兵对与管线版相同，`strip_context` 通用。
+pub fn with_context_for_agent(task: &str, root: Option<&str>, budget: usize) -> String {
+    let Some(root) = root.map(str::trim).filter(|r| !r.is_empty()) else {
+        return task.to_string();
+    };
+    match collect(root, budget) {
+        Ok(ctx) => format!(
+            "{}\n{}\n{}\n{}",
+            CONTEXT_BEGIN,
+            render_body(&ctx),
             CONTEXT_END,
             task.trim()
         ),
@@ -446,6 +471,25 @@ mod tests {
         if let Some(s) = ctx.snippets.iter().find(|s| s.path == "README.md") {
             assert!(s.body.chars().count() <= MAX_SNIPPET_CHARS);
         }
+    }
+
+    #[test]
+    fn agent_variant_has_no_planner_requirements() {
+        let d = tdir("agentctx");
+        std::fs::write(d.join("go.mod"), "module gw\n").unwrap();
+        let task = "把这个项目的 README 补一段安装说明";
+
+        let full = with_context_for_agent(task, Some(&d.to_string_lossy()), DEFAULT_BUDGET);
+        assert!(full.starts_with(CONTEXT_BEGIN) && full.contains(CONTEXT_END));
+        assert!(full.ends_with(task), "任务原话压在最后");
+        assert!(full.contains("项目语言：go"));
+        assert!(!full.contains("要求："), "agent 版不该带规划口吻的要求段");
+        // UI 剥离兼容：与管线版共用同一对哨兵
+        assert_eq!(strip_context(&full), task);
+
+        // 管线版保持原样（要求段还在）
+        let plan = with_context(task, Some(&d.to_string_lossy()), DEFAULT_BUDGET);
+        assert!(plan.contains("要求："));
     }
 
     #[test]

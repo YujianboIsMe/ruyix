@@ -12,6 +12,7 @@
 pub mod apply;
 pub mod config_bridge;
 pub mod connect;
+pub mod machine;
 pub mod project_context;
 pub mod sessions;
 pub mod sink;
@@ -174,6 +175,19 @@ pub async fn agent_reply(
         Some("write") | Some("auto") => engine::agent::WritePolicy::Apply,
         _ => engine::agent::WritePolicy::Stage,
     };
+    // 环境 + 项目一瞥拼在任务头：省掉模型开头的盲目探索（猜 shell 语法 / read . 摸结构）。
+    // 预算比规划管线小（/6、封顶 3000）—— agent 自己有 read，地图（目录树）比
+    // 内容（文件片段）更有用。历史里存的是用户原话（前端存的），注入只在每轮 head 一次。
+    // GPU 探测要跑子进程（首次之后走缓存），放 spawn_blocking 别堵异步运行时。
+    let budget = (cfg.max_context_chars / 6).clamp(1200, 3000);
+    let machine_note = tokio::task::spawn_blocking(machine::note)
+        .await
+        .map_err(|e| format!("环境采集失败: {e}"))?;
+    let task = format!(
+        "{}\n\n{}",
+        machine_note,
+        project_context::with_context_for_agent(task.trim(), Some(&root), budget)
+    );
     // 取消位跨命令共享：起跑清零，agent_cancel 置位。机械验证（cargo test 级）和复核
     // 都可能跑很久，没有取消路径会很糟。
     state.cancel.store(false, Ordering::Relaxed);
