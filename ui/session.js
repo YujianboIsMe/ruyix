@@ -494,12 +494,14 @@
   // 大纲区 · 任务计划
   //
   // 模型返回任务计划后，大纲区显示任务列表，步骤状态：
-  //   ✅ 已完成   ⌛ 等待执行   ⛏️ 进行中   ❌ 失败   ⏹️ 本次未完成
-  // 任务列表在模型调用伪工具 plan 的瞬间经 agent://plan 事件到达；
-  // 随后 agent://step 事件按「步骤文件是否全部落地」推进状态（全落地 ✅ / 部分 ⛏️）。
-  // run 收尾时引擎再发一轮终态（settle_steps）：没有声明文件的步骤、以及声明了文件
-  // 却没产出的步骤，都在这时落定 —— 否则它们会永远停在初始的 ⌛（沙漏=等待执行，
-  // run 已经结束还显示等待就是在骗人）。
+  //   ✅ 已完成   ⌛ 等待执行   ⛏️ 进行中   ⚠️ 未对齐   ❌ 失败   ⏹️ 本次未完成
+  // 任务列表在模型调用伪工具 plan 的瞬间经 agent://plan 事件到达。
+  // execute_plan 开启时（默认）状态由**引擎**报：派发前 ⛏️、跑完 ✅、失败 ❌。
+  // 关着的时候只能靠推断（"步骤声明的文件是否落地"：全落地 ✅ / 部分 ⛏️）。
+  // run 收尾时引擎再发一轮终态（settle_steps），给每个步骤一个终态 —— 否则没轮到派发的
+  // 步骤会永远停在初始的 ⌛（沙漏=等待执行，run 已经结束还显示等待就是在骗人）。
+  // 收尾的推断口径要**宽**：声明了却本来就存在、无需重写的文件不算缺；有产出但对不上
+  // 声明的落 ⚠️「未对齐」而不是 ⏹️"跳过"（跳过=一件没做，比事实重，和沙漏是同一种骗人）。
   // run 结束把当前计划（含终态）挂到助手消息上随会话落盘：会话跑的是工具循环，
   // 它不落 RunRecord、run_id 是空的，重启后没有别的可回读 —— 不存快照，
   // 重开旧会话时大纲区的任务列表会整个消失（不是沙漏，是压根没有）。
@@ -510,9 +512,17 @@
     done: "✅",       // 已完成
     running: "⛏️",   // 进行中
     error: "❌",      // 失败（独立状态：一眼看出 run 断在哪一步）
+    partial: "⚠️",   // 未对齐：做了，产出却和它自己开列的清单不一致（改名/少写/只写一部分）
     pending: "⌛",    // 等待执行（plan 刚到、还没轮到它）
     skipped: "⏹️",   // 本次未完成（run 结束了还没产出；原因放 title 提示）
   };
+
+  /** 大纲头部的计数：每种终态各几个（pending 不数，它就是"还没轮到"） */
+  function outlineCounts(steps) {
+    const n = { done: 0, partial: 0, error: 0, skipped: 0 };
+    for (const x of steps) if (n[x.st] !== undefined) n[x.st] += 1;
+    return n;
+  }
 
   /** 计划（agent://plan 载荷或 RunRecord.plan）→ 会话步骤缓存（全 ⌛ 起步） */
   function setPlanSteps(s, plan) {
@@ -582,9 +592,14 @@
       st.st = "done";
       st.note = "";
     } else if (p.status === "skipped") {
-      // 终态：run 结束了这一步没产出（引擎在收尾事件里带上缺什么）
+      // 终态：run 结束了这一步一件没做（引擎在收尾事件里带上缺什么）
       st.st = "skipped";
       st.note = p.notes || L("本次未完成", "not done this run");
+    } else if (p.status === "partial") {
+      // 终态：做了事，产出却和它自己开列的清单不一致。**不能落到下面的 error** ——
+      // 那是"失败"，比事实重；引擎在 notes 里带了「已写哪些 / 还缺哪些」。
+      st.st = "partial";
+      st.note = p.notes || L("产出与声明不一致", "produced ≠ declared");
     } else {
       st.st = "error";
       st.note = L("本步失败", "failed") + (p.error ? `：${p.error}` : "");
@@ -655,11 +670,14 @@
     }
     const done = steps.filter((x) => x.st === "done").length;
     const failed = steps.filter((x) => x.st === "error").length;
-    // 未完成也要计数，否则「✅ 2/3」里的那个 1 没有解释
-    const notDone = steps.filter((x) => x.st === "skipped").length;
+    // ⚠️/⏹️ 都要计数：不给数字，用户没法解释「✅ 2/8」剩下的 6 是什么。
+    // 两者必须分开 —— ⚠️ 是"做了但产出与声明不一致"，⏹️ 才是"这步一件没做"；
+    // 把前者也说成"跳过"是拿比事实更重的词描述，和沙漏是同一种骗人。
+    const c = outlineCounts(steps);
     el.innerHTML =
       `<div class="outline-plan-head">${L("任务计划", "Task plan")} · ✅ ${done}/${steps.length}` +
-      (notDone ? ` · ⏹️ ${notDone}` : "") +
+      (c.partial ? ` · ⚠️ ${c.partial}` : "") +
+      (c.skipped ? ` · ⏹️ ${c.skipped}` : "") +
       (failed ? ` · ❌ ${failed}` : "") + `</div>` +
       steps.map((x) => {
         const tip = [
@@ -668,11 +686,10 @@
           ...(x.files ?? []),
           x.note ? `⚠ ${x.note}` : "",
         ].filter(Boolean).join("\n");
-        const cls = x.st === "running"
-          ? " outline-plan-step--running"
-          : x.st === "error"
-            ? " outline-plan-step--error"
-            : x.st === "skipped" ? " outline-plan-step--skipped" : "";
+        const cls = x.st === "running" || x.st === "partial" || x.st === "error" ||
+          x.st === "skipped"
+          ? ` outline-plan-step--${x.st}`
+          : "";
         return `<div class="outline-item outline-plan-step${cls}"` +
           ` title="${esc(tip)}">` +
           `<span class="outline-plan-emoji">${STEP_EMOJI[x.st] ?? STEP_EMOJI.pending}</span>` +

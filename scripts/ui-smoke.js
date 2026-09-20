@@ -29,10 +29,11 @@
  *   U13 config-cancel  取消重扫丢弃改动；无项目不扫 project；已打开项目必须能扫 project
  *   U14 apply-writeback 产物写回真实项目（三模式：确认=暂存面板人工写入，写入/自主=循环直写）：
  *                      暂存落盘唯一入口 applyStage 恒备份、stage.rs 路径封闭、apply.rs 三条安全约束在
- *   U15 outline-plan  任务计划进大纲区：plan 事件 → ✅ ⌛ ⛏️ 三态 + ❌ 失败 → 会话 tab 渲染
- *   U15b plan-settle  收尾落定：每个步骤都要有终态（沙漏是"等待执行"，run 结束还挂着就是骗人）
- *   U15c plan-execute 计划即执行（step.execute_plan）：游标在引擎手里，派发前发 running，
- *                     失败落 error 并停下给模型一轮干预
+ *   U15 outline-plan  任务计划进大纲区：plan 事件 → ✅ ⌛ ⛏️ ⚠️ 六态 + ❌ 失败 → 会话 tab 渲染
+ *   U15b plan-settle  收尾落定：每个步骤都要有终态（沙漏是"等待执行"，run 结束还挂着就是骗人）；
+ *                     口径要宽 —— 声明了但本来就存在的文件不算缺，有产出但对不上声明落 ⚠️ 不落 ⏹️
+ *   U15c plan-execute 计划即执行（step.execute_plan，默认开）：游标在引擎手里，派发前发 running，
+ *                     失败落 error 并停下给模型一轮干预（配 false 即回到旧的纯展示行为）
  *   U15d plan-persist 计划要活着跨过一次重启：工具循环不落 RunRecord（run_id 恒空），
  *                     计划（含终态）与验证/复核结论只能跟着助手消息落盘 —— Rust 侧不声明
  *                     这些字段，agent_session_save 的往返会当场把它们抹掉
@@ -294,33 +295,54 @@ function runStaticChecks() {
       has(connRs, "call_tool") && has(connRs, "send_task"),
     "Connect 原语没接上宿主：mod.rs 未建 RuyixConnector / 未传 McpManager，或 connect.rs 缺 MCP/A2A 通路");
 
-  // U15 outline-plan：模型返回计划 → 大纲区任务列表（✅ ⌛ ⛏️ 四态 + ❌ 失败 / ⏹️ 未完成）。
+  // U15 outline-plan：模型返回计划 → 大纲区任务列表（✅ ⌛ ⛏️ ⚠️ 六态 + ❌ 失败 / ⏹️ 未完成）。
   // 链路五环缺一不可：引擎发 plan 事件 → sink emit → session.js 监听并渲染 → main.js 会话分支调用
-  // → run 收尾时 settle_steps 把每个步骤都落到终态（否则没声明文件 / 声明了没产出的步骤
-  //   会永远停在 ⌛「等待执行」，实测 run agent-20260920-091436 就是 2/3 + 永久沙漏）。
+  // → run 收尾时 settle_steps 把每个步骤都落到终态（否则没轮到派发的步骤会永远停在
+  //   ⌛「等待执行」，实测 run agent-20260920-091436 就是 2/3 + 永久沙漏）。
   const uiMainJs = read("ui/main.js");
   const stylesCss = read("ui/styles.css");
   check("U15", "outline-plan",
     has(sinkRs, 'emit("agent://plan"') &&
       has(sessionJs, "STEP_EMOJI") &&
-      ["✅", "⌛", "⛏️", "❌", "⏹️"].every((e) => has(sessionJs, e)) &&
+      ["✅", "⌛", "⛏️", "❌", "⏹️", "⚠️"].every((e) => has(sessionJs, e)) &&
       /SessionUI\?\.renderOutline\(/.test(uiMainJs) &&
       has(stylesCss, "outline-plan-step") && has(stylesCss, "outline-plan-step--error") &&
-      has(stylesCss, "outline-plan-step--skipped"),
-    "任务计划未接入大纲区：sink 未发 agent://plan / session.js 缺五态 emoji 渲染 / main.js 未调 renderOutline / 缺样式");
+      has(stylesCss, "outline-plan-step--skipped") &&
+      has(stylesCss, "outline-plan-step--partial"),
+    "任务计划未接入大纲区：sink 未发 agent://plan / session.js 缺六态 emoji 渲染 / main.js 未调 renderOutline / 缺样式");
 
   // U15b plan-settle：run 收尾必须把计划落定（沙漏是"等待执行"，run 结束还挂着就是骗人）。
-  // 三环：引擎有 settle_steps → 收尾处真调用且带上 delivered（交付与否决定能不能算完成）
-  // → 交付分支真的把 delivered 置真（否则所有步骤都被判成"本次未完成"）。
+  // 四环：引擎有 settle_steps → 收尾处真调用（**带上项目根**，见下）且带上 delivered
+  //（交付与否决定能不能算完成）→ 交付分支真的把 delivered 置真（否则所有步骤都被判成
+  // "本次未完成"）→ 推断口径要把"未对齐"与"跳过"分开。
+  //
+  // 收尾判据的两条纪律，缺一条就会像实测 run agent-20260920-142405 那样
+  // 8 步判出 6 个"跳过"（其中 4 步其实写了一半以上、还有一步声明的文件本来就存在）：
+  //   ① 声明了、本 run 没写，但**磁盘上已经有**的文件不算缺（proj.join(f).exists()）
+  //   ② 有产出但对不上声明 → `partial`（未对齐），不是 `skipped`
   check("U15", "plan-settle",
     has(intentRs, "fn settle_steps(") &&
-      /settle_steps\(sink, &plan_steps, &ctx\.overlay, delivered, &step_states\)/.test(intentRs) &&
+      /settle_steps\(\s*sink,\s*&plan_steps,\s*&ctx\.overlay,\s*proj,\s*delivered,\s*&step_states,?\s*\)/.test(intentRs) &&
+      /proj\.join\(f\)\.exists\(\)/.test(intentRs) &&
+      /"partial"/.test(intentRs) &&
       /out\.answer = text;\s*\n\s*delivered = true;/.test(intentRs) &&
       /"skipped"/.test(intentRs) &&
       /不冒充完成|settle_steps/.test(intentRs),
-    "计划收尾未落定：agent.rs 缺 settle_steps / 收尾未调用 / delivered 未在 final 分支置真 —— 界面会留永久沙漏");
+    "计划收尾未落定：agent.rs 缺 settle_steps / 收尾未调用或没带项目根 / 未把「实体存在」与「未对齐」分开 / delivered 未在 final 分支置真 —— 界面会留永久沙漏或虚报跳过");
 
-  // U15c plan-execute：计划即执行（v0.4，`step.execute_plan`，默认关）。
+  // U15b2 plan-partial：前端必须认这个新终态。
+  // 最阴的一条：applyStepEvent 的分支是 running / done / skipped / **else → error**，
+  // 少了 partial 那一支，引擎报"未对齐"会被界面渲染成 ❌ 失败 —— 又是拿比事实重的词骗人。
+  check("U15", "plan-partial",
+    has(sessionJs, "p.status === \"partial\"") &&
+      /partial:\s*"⚠️"/.test(sessionJs) &&
+      /outlineCounts/.test(sessionJs) &&
+      has(stylesCss, "outline-plan-step--partial"),
+    "未对齐（partial）终态没接上 UI：session.js 的 applyStepEvent 会把 partial 落到 error / 缺 emoji / 缺样式");
+
+  // U15c plan-execute：计划即执行（v0.4，`step.execute_plan`，**默认开**）。
+  // 默认开是因为关着的时候进度只能靠"文件是否落地"推断（实测会大面积误判成"跳过"）；
+  // 引擎自己知道每步跑没跑完，这个事实才该是默认路径。退路仍在：配 false 即旧行为。
   // 调度权必须留在**引擎**手里：游标（plan_cursor）由引擎维护 → 派发前先发 running
   // （否则 run 期间一直挂 ⌛）→ 真调用 run_step，且把父的 `&mut ctx` 传进去（覆盖层不分裂）
   // → 失败落 error 并停下给模型一轮干预（step_failure_feedback），而不是闷头跑下一步。

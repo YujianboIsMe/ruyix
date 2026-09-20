@@ -1408,6 +1408,13 @@ html, body {
   color: #f48771;
 }
 
+/* 未对齐的步骤：做了事，产出却和它自己开列的清单不一致（改名 / 少写 / 只写一部分）。
+   既不是失败（红）也不是没做（压暗），所以用告警色 —— 描述得比事实重和比事实轻
+   都是在骗人，这个态的作用就是别再把它归到"跳过"里。 */
+.outline-plan-step--partial {
+  color: var(--agent-warn, #d7ba7d);
+}
+
 /* 本次未完成的步骤：run 已结束却没产出 —— 压暗，不抢已完成步骤的注意力 */
 .outline-plan-step--skipped {
   color: var(--text-secondary);

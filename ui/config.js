@@ -54,6 +54,12 @@ window.ConfigUI = (() => {
         { key: "lint.max_repair_rounds", kind: "number" },
         { key: "kb.enabled", kind: "toggle" },
         { key: "kb.top_k", kind: "number" },
+        // v0.4 计划即执行：默认开。关掉就回到"plan 只给用户看进度"的旧行为 ——
+        // 但关着的时候大纲进度只能靠推断（拿模型事前列的 files 对账），实测会大面积误判，
+        // 所以这个开关要摆在明面上，用户看得见"我关了什么"。
+        { key: "step.execute_plan", kind: "toggle" },
+        { key: "step.max_steps", kind: "number" },
+        { key: "agent.max_elapsed_secs", kind: "number" },
       ],
     },
   ];
