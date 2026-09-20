@@ -178,6 +178,50 @@ pub fn invalidate_cache() {
     if let Ok(mut g) = cache().lock() {
         g.clear();
     }
+    if let Ok(mut g) = avail_cache().lock() {
+        g.clear();
+    }
+}
+
+/// "这个二进制在不在"的缓存。与版本缓存分开存：**存在性判定不取版本**。
+fn avail_cache() -> &'static Mutex<HashMap<String, (Instant, bool)>> {
+    static C: OnceLock<Mutex<HashMap<String, (Instant, bool)>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 存在性判定的超时 / 缓存 TTL。只调一次 `where`（几十毫秒），可以给得宽松些。
+const AVAIL_TIMEOUT: Duration = Duration::from_secs(10);
+const AVAIL_TTL: Duration = Duration::from_secs(300);
+
+/// 本机有没有这个命令（`where` / `command -v`，进程内缓存）。
+///
+/// 与 [`probe_bin`] 的区别：**不取版本**。执行前闸门只要一个布尔值 ——
+/// 为它起一次 JVM 去问 `mvn -v`（~1s）毫无意义。
+pub fn is_available(bin: &str) -> bool {
+    if let Ok(g) = avail_cache().lock()
+        && let Some((at, ok)) = g.get(bin)
+        && at.elapsed() < AVAIL_TTL
+    {
+        return *ok;
+    }
+    let ok = exec::resolve_bin(bin, AVAIL_TIMEOUT).is_some();
+    if let Ok(mut g) = avail_cache().lock() {
+        g.insert(bin.to_string(), (Instant::now(), ok));
+    }
+    ok
+}
+
+/// 闸门拒绝一条命令时附的"那有什么"：本项目该有、且本机确实有的命令名。
+///
+/// 只用内置工具表按项目标记筛一次（不跑版本探测）。`python` / `node` 用表里的默认名，
+/// 不做配置替换 —— 这是**错误提示里的参考清单**，不是给模型下结论的事实来源
+/// （后者是 [`discover`] + [`render_note`]）。
+pub fn available_names(root: &Path) -> Vec<String> {
+    plan(root, &[], "python", "node")
+        .into_iter()
+        .filter(|j| is_available(&j.bin))
+        .map(|j| j.name)
+        .collect()
 }
 
 /// 待探的一项。

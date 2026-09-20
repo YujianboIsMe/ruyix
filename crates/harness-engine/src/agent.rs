@@ -829,6 +829,181 @@ pub(crate) fn execute_allowed(cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// shell **内置**命令：`where` / `command -v` 查不到，但绝不是"命令不存在"。
+/// 表而不是分支 —— 与 `discover::TOOLS` 同一哲学：无界的那一类靠数据长，不靠加 if。
+const SHELL_BUILTINS: &[&str] = &[
+    // cmd.exe
+    "cd", "chdir", "dir", "echo", "set", "type", "copy", "move", "del", "erase", "md", "mkdir",
+    "rd", "rmdir", "cls", "title", "ver", "date", "time", "exit", "call", "shift", "if", "for",
+    "goto", "pause", "pushd", "popd", "assoc", "ftype", "color", "prompt", "rem",
+    // sh / bash
+    "export", "source", "test", "true", "false", "pwd", "unset", "alias", "read", "umask", "local",
+    "return", "printf", "ulimit", "trap", "exec", "eval", "wait", "kill", "jobs", "bg", "fg", ".",
+];
+
+/// "把执行交给外壳"的启动器：**输出脱离捕获**（stdout / stderr 一律拿不到），
+/// 真控制台里还会把"找不到"变成桌面弹窗。
+const LAUNCHERS: &[&str] = &["start", "explorer", "rundll32", "open", "xdg-open"];
+
+/// 命令文本里出现这些就拒：PowerShell 的外壳转发同样脱离捕获。
+const SHELL_ESCAPES: &[&str] = &["start-process", "invoke-item"];
+
+/// execute 的**执行前闸门**：把"确定是垃圾"的命令挡在 shell 之外，并回一条可读的纠正。
+///
+/// 为什么要有：execute 是模型唯一的写入口，一次瞎试就是一轮。实测 run
+/// `agent-20260920-152312` 里模型为"mvn / java 到底存不存在"空转 5~6 轮；而 `\`、
+/// `\admin-run\` 这类**根本不是命令**的字符串也会被原样交给 cmd —— 模型只看到一行它
+/// 读不懂的报错（GBK 乱码，见 [`exec::decode_output`]），于是换个更离谱的继续试。
+///
+/// **保守原则**：只拦三类，拿不准一律放行。闸门误杀一条合法命令的代价，
+/// 远大于放过去一条垃圾命令。
+///
+/// 与 discover 的关系：同一张工具表，两种用法 —— 探测结果既喂上下文
+/// （[`discover::render_note`]），也在这里当**验证器**。
+pub(crate) fn preflight_execute(proj: &Path, cmd: &str) -> Result<(), String> {
+    // ① 启动器 / 外壳转发：必然拿不到输出，真控制台还会弹窗
+    if let Some(l) = launcher_of(cmd) {
+        return Err(format!(
+            "❌ 这条命令没有执行：`{l}` 会把执行交给外壳 —— stdout / stderr 一律拿不到，\
+             出错还会在桌面上弹窗。请直接运行程序本身（例：`mvn -v`、`java -jar app.jar`）；\
+             确实需要新窗口时，把这条命令写进最终答复让用户手动跑。"
+        ));
+    }
+    let Some(tok) = first_token(cmd) else {
+        return Err("❌ 空命令。".into());
+    };
+    // ② 路径式写法，但本机与项目里都没有这个文件
+    if path_like(&tok) {
+        if path_exists(proj, &tok) {
+            return Ok(());
+        }
+        return Err(format!(
+            "❌ 这条命令没有执行：`{tok}` 是路径写法，但本机与项目里都没有这个文件。\n\
+             项目根：{}\n\
+             要跑程序就写命令名（例：`mvn -v`）；要跑项目里的脚本就写**存在的**相对路径。\n{}",
+            proj.display(),
+            available_hint(proj)
+        ));
+    }
+    // ③ 本机没有这个命令（先排除 shell 内置与项目内脚本）
+    if !SHELL_BUILTINS.contains(&tok.as_str())
+        && !path_exists(proj, &tok)
+        && !discover::is_available(&tok)
+    {
+        return Err(format!(
+            "❌ 这条命令没有执行：本机没有 `{tok}`。别猜工具名，先看这份实测清单。\n{}",
+            available_hint(proj)
+        ));
+    }
+    Ok(())
+}
+
+/// 极简命令行切分：按空白切，引号内的空白不算分隔符。
+/// 够闸门用（不做转义与变量展开）—— 但**必须**认引号，否则
+/// `"C:\Program Files\Git\bin\bash.exe"` 会被切成两半而误判。
+fn tokens(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut q: Option<char> = None;
+    for ch in cmd.chars() {
+        match q {
+            Some(qc) => {
+                if ch == qc {
+                    q = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None if ch == '"' || ch == '\'' => q = Some(ch),
+            None if ch.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            None => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// 首个**有意义的** token：跳过前置环境赋值（`FOO=bar prog`）与纯操作符（`& prog`）。
+fn first_token(cmd: &str) -> Option<String> {
+    tokens(cmd).into_iter().find(|t| {
+        !matches!(t.as_str(), "&" | "&&" | "|" | "||" | "(" | ")")
+            && !(t.contains('=') && !t.starts_with('-') && !path_like(t))
+    })
+}
+
+/// 带路径分隔符 = 模型在写路径（而不是命令名）
+fn path_like(tok: &str) -> bool {
+    tok.contains('\\') || tok.contains('/')
+}
+
+/// 这个路径（项目相对 / 绝对）真的指向一个可执行文件吗。
+/// 覆盖三件事：绝对路径、项目内相对路径、以及项目内 `gradlew` / `mvnw`
+/// 这类**不带扩展名**、靠 `.cmd` / `.bat` 落地的包装脚本。
+fn path_exists(proj: &Path, tok: &str) -> bool {
+    let p = Path::new(tok);
+    if p.file_name().is_none() {
+        return false; // 纯分隔符 / 盘根：不是可执行的东西
+    }
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        proj.join(p)
+    };
+    if abs.is_file() {
+        return true;
+    }
+    if p.extension().is_none() {
+        for ext in [".cmd", ".bat", ".exe", ".ps1", ".sh"] {
+            if proj.join(format!("{tok}{ext}")).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 首 token（含 `cmd /C start …` 这种包一层的情况）是启动器就返回它。
+fn launcher_of(cmd: &str) -> Option<String> {
+    let low = cmd.to_ascii_lowercase();
+    if let Some(e) = SHELL_ESCAPES.iter().find(|e| low.contains(**e)) {
+        return Some((*e).to_string());
+    }
+    let toks = tokens(cmd);
+    let mut i = 0;
+    if toks.len() >= 2
+        && matches!(
+            toks[0].to_ascii_lowercase().as_str(),
+            "cmd" | "cmd.exe" | "sh" | "bash" | "bash.exe"
+        )
+        && matches!(toks[1].to_ascii_lowercase().as_str(), "/c" | "-c")
+    {
+        i = 2;
+    }
+    let t = toks.get(i)?;
+    let base = t.rsplit(['\\', '/']).next().unwrap_or(t.as_str());
+    let name = base.to_ascii_lowercase();
+    let name = name
+        .strip_suffix(".exe")
+        .unwrap_or(name.as_str())
+        .to_string();
+    LAUNCHERS.contains(&name.as_str()).then_some(name)
+}
+
+/// 拒绝命令时附上"那有什么" —— 光说"这条不存在"治不了空转。
+fn available_hint(proj: &Path) -> String {
+    let names = discover::available_names(proj);
+    if names.is_empty() {
+        return "（本机没探到可用命令；先看看上下文里的『本机命令』段）".to_string();
+    }
+    format!("本机可用：{}", names.join(" / "))
+}
+
 fn run_shell(proj: &Path, cmd: &str, timeout: Duration) -> exec::CmdOutput {
     #[cfg(target_os = "windows")]
     return exec::run(proj, "cmd", &["/C", cmd], timeout, &[]);
@@ -837,39 +1012,41 @@ fn run_shell(proj: &Path, cmd: &str, timeout: Duration) -> exec::CmdOutput {
 }
 
 pub(crate) fn tool_execute(proj: &Path, cmd: &str, timeout_secs: Option<u64>) -> String {
-    execute_allowed(cmd).map_or_else(
-        |e| format!("❌ {e}"),
-        |_| {
-            let t = Duration::from_secs(
-                timeout_secs
-                    .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
-                    .clamp(EXEC_MIN_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS),
-            );
-            let out = run_shell(proj, cmd, t);
-            let mut s = format!(
-                "exit={} 耗时 {}ms{}",
-                out.exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "?".into()),
-                out.duration_ms,
-                if out.timed_out {
-                    "（超时被杀）"
-                } else {
-                    ""
-                }
-            );
-            if let Some(e) = &out.spawn_error {
-                s.push_str(&format!("\n启动失败: {e}"));
-            }
-            if !out.stdout.trim().is_empty() {
-                s.push_str(&format!("\nstdout:\n{}", clip(&out.stdout, EXEC_CLIP)));
-            }
-            if !out.stderr.trim().is_empty() {
-                s.push_str(&format!("\nstderr:\n{}", clip(&out.stderr, EXEC_CLIP)));
-            }
-            s
-        },
-    )
+    // 闸门在破坏性模式之前：先判"这条命令有没有意义"，再判"它危不危险"。
+    if let Err(e) = preflight_execute(proj, cmd) {
+        return e;
+    }
+    if let Err(e) = execute_allowed(cmd) {
+        return format!("❌ {e}");
+    }
+    let t = Duration::from_secs(
+        timeout_secs
+            .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
+            .clamp(EXEC_MIN_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS),
+    );
+    let out = run_shell(proj, cmd, t);
+    let mut s = format!(
+        "exit={} 耗时 {}ms{}",
+        out.exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into()),
+        out.duration_ms,
+        if out.timed_out {
+            "（超时被杀）"
+        } else {
+            ""
+        }
+    );
+    if let Some(e) = &out.spawn_error {
+        s.push_str(&format!("\n启动失败: {e}"));
+    }
+    if !out.stdout.trim().is_empty() {
+        s.push_str(&format!("\nstdout:\n{}", clip(&out.stdout, EXEC_CLIP)));
+    }
+    if !out.stderr.trim().is_empty() {
+        s.push_str(&format!("\nstderr:\n{}", clip(&out.stderr, EXEC_CLIP)));
+    }
+    s
 }
 
 /// 执行一次 connect：看清单 / 调 MCP 工具 / 委托远端 Agent。
@@ -2059,6 +2236,77 @@ mod tests {
         for ok in ["cargo test", "git log --oneline", "python -m pytest -q"] {
             assert!(execute_allowed(ok).is_ok(), "不该拒绝：{ok}");
         }
+    }
+
+    /// 闸门第一类：路径式垃圾与"把执行交给外壳"的启动器。
+    /// 用户截图里的 `\` 与 `\admin-run\` 就是前者 —— 真控制台里它们会被
+    /// ShellExecute 变成桌面弹窗，输出完全拿不到。
+    #[test]
+    fn preflight_refuses_path_garbage_and_launchers() {
+        let d = TempDir::new("gate-bad");
+        for bad in [
+            r"\",
+            r"\admin-run\",
+            r"D:\nope\whatever.exe",
+            "start mvn -v",
+            r"cmd /C start \admin-run\",
+            "explorer .",
+            "powershell -NoProfile -Command Start-Process notepad",
+            "",
+        ] {
+            assert!(preflight_execute(&d.0, bad).is_err(), "应拒绝：{bad:?}");
+        }
+    }
+
+    /// 闸门要"教"：光说没有、不给清单，模型还会接着瞎试。
+    #[test]
+    fn preflight_tells_the_model_what_is_installed() {
+        let d = TempDir::new("gate-hint");
+        let e = preflight_execute(&d.0, "zzz-no-such-tool-zzz --version").unwrap_err();
+        assert!(e.contains("本机没有"), "{e}");
+        assert!(e.contains("本机可用"), "拒绝时要附可用清单：{e}");
+    }
+
+    /// 保守原则：常见写法一条都不许误杀（shell 内置、前置赋值、前置操作符、常驻工具）。
+    #[test]
+    fn preflight_lets_the_common_cases_through() {
+        let d = TempDir::new("gate-ok");
+        for ok in [
+            "git --version",
+            "cd . && git status",
+            "echo hi",
+            "& git --version",
+            "set FOO=1 && git --version",
+        ] {
+            assert!(preflight_execute(&d.0, ok).is_ok(), "不该拒绝：{ok}");
+        }
+    }
+
+    /// 引号必须保住带空格的路径，否则会被切成两半、误判成"路径不存在"。
+    #[test]
+    fn preflight_keeps_a_quoted_path_in_one_piece() {
+        let toks = tokens(r#""C:\Program Files\Git\bin\bash.exe" -lc "echo hi""#);
+        assert_eq!(toks[0], r"C:\Program Files\Git\bin\bash.exe");
+        assert_eq!(toks[1], "-lc");
+    }
+
+    /// 项目内的包装脚本（`mvnw` / `gradlew`）既不在 PATH 里、也可能不带扩展名，不能误杀。
+    #[test]
+    fn preflight_allows_a_project_local_script_that_exists() {
+        let d = TempDir::new("gate-script");
+        d.write("mvnw.cmd", "@echo off\n");
+        assert!(preflight_execute(&d.0, r".\mvnw.cmd -v").is_ok());
+        assert!(preflight_execute(&d.0, "mvnw -v").is_ok());
+        assert!(preflight_execute(&d.0, r".\nope.cmd").is_err());
+    }
+
+    /// 端到端：被闸门挡住时不该留下"执行痕迹"（模型会以为跑过了）。
+    #[test]
+    fn tool_execute_refuses_garbage_before_touching_the_shell() {
+        let d = TempDir::new("gate-exec");
+        let r = tool_execute(&d.0, r"\admin-run\", None);
+        assert!(r.starts_with('❌'), "{r}");
+        assert!(!r.contains("exit="), "拒绝时不该有执行结果：{r}");
     }
 
     /// read：文件给内容、目录给树、overlay 优先、路径封闭
