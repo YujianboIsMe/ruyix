@@ -23,6 +23,8 @@
 | `run <名称>=<命令>` | 快捷添加项目运行目标 |
 | `config add\|get\|update\|remove [-g\|-p\|-r] <key>[=<value>]` | 配置管理（默认 `-r` 运行时） |
 | `agent [消息]` | 新建 Agent 会话；带消息则直接发出 |
+| `service` | 打开服务面板（agent 起的常驻进程） |
+| `service log <pid>` | 实时查看某个服务的终端输出 |
 | `git <参数...>` | 执行原生 git 命令（如 `git status`） |
 | `project lang <语言> <项目路径>` | 设置项目语言 |
 | `project edit "<路径>" "<名称>" <语言>` | 修改项目名称与图标 |

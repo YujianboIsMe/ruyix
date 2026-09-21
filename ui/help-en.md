@@ -24,6 +24,8 @@ the AI translator, which rewrites it into a standard command.
 | `run <name>=<cmd>` | Quick-add a run target |
 | `config add\|get\|update\|remove [-g\|-p\|-r] <key>[=<value>]` | Manage configuration (default `-r` runtime) |
 | `agent [message]` | Open a new Agent session; sends the message when given |
+| `service` | Open the service panel (long-running processes started by the agent) |
+| `service log <pid>` | Follow a service's terminal output live |
 | `git <args...>` | Run a native git command (e.g. `git status`) |
 | `project lang <lang> <project path>` | Set project language |
 | `project edit "<path>" "<name>" <lang>` | Edit project name and icon |
