@@ -339,5 +339,18 @@
   "nav.tab_sessions": "会话",
   "session.new": "＋ 新建会话",
   "session.list": "会话列表",
-  "project.pick_folder": "选择项目文件夹"
+  "project.pick_folder": "选择项目文件夹",
+  "menu.service": "服务",
+  "service.title": "服务",
+  "service.hint": "这里列出 agent 用后台模式启动的常驻服务（mvn spring-boot:run、java -jar、npm run dev 等）；停止会连同子进程树一起收掉。",
+  "service.btn_refresh": "刷新",
+  "service.btn_stop": "停止",
+  "service.stopping": "停止中…",
+  "service.stop_fail": "停止失败（进程可能已经退出了）",
+  "service.load_fail": "读取服务列表失败",
+  "service.no_tauri": "后端不可用：浏览器直开时读不到托管进程",
+  "service.empty": "当前没有运行中的服务",
+  "service.th_pid": "PID",
+  "service.th_started": "启动时间",
+  "service.th_cmd": "完整命令行"
 }

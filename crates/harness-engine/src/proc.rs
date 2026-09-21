@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::exec;
 
@@ -84,6 +84,10 @@ pub struct ProcInfo {
     pub state: String,
     pub keep_alive: bool,
     pub elapsed_ms: u128,
+    /// 启动的**墙钟时刻**（UNIX 毫秒）。`elapsed_ms` 是单调时长的另一种说法，
+    /// 面板要显示"几点起的"，只有时刻能算出来 —— 拿 elapsed 去减是不行的
+    /// （进程是这一刻起的，不是"页面打开前 N 毫秒"）。
+    pub started_at_ms: u64,
 }
 
 /// 一次后台启动的结果。`kind` 是三个出口 + "没给判据"。
@@ -122,6 +126,7 @@ struct Managed {
     keep_alive: bool,
     state: String,
     started: Instant,
+    started_at_ms: u64,
     child: Child,
 }
 
@@ -136,17 +141,43 @@ impl Managed {
             state: self.state.clone(),
             keep_alive: self.keep_alive,
             elapsed_ms: self.started.elapsed().as_millis(),
+            started_at_ms: self.started_at_ms,
         }
     }
 }
 
-fn table() -> &'static Mutex<HashMap<String, Managed>> {
-    static T: OnceLock<Mutex<HashMap<String, Managed>>> = OnceLock::new();
+/// 进程表的**主键是 pid**。
+///
+/// 为什么不是 handle（p1/p2 那种自造编号）：宿主面板、模型、日志里能拿到的一手证据
+/// 只有 pid —— `netstat` 给 pid、`tasklist` 给 pid、用户说"杀掉 38420"也是 pid。
+/// 拿自造编号当主键，等于在这些证据与表之间插一层翻译，而翻译层正是"看得见却管不着"
+/// 的来源（面板按 handle 查，用户按 pid 找，两边对不上）。
+/// handle 降级为 `Managed` 里的一个字段，只负责模型侧那句"p1 已就绪"的短引用。
+fn table() -> &'static Mutex<HashMap<u32, Managed>> {
+    static T: OnceLock<Mutex<HashMap<u32, Managed>>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn lock() -> Result<MutexGuard<'static, HashMap<String, Managed>>, String> {
+fn lock() -> Result<MutexGuard<'static, HashMap<u32, Managed>>, String> {
     table().lock().map_err(|_| "托管进程表已损坏".to_string())
+}
+
+/// 按 handle 找：handle 不再是主键，只在模型侧那一句短引用里出现，线性扫描足够。
+fn by_handle_mut<'a>(t: &'a mut HashMap<u32, Managed>, handle: &str) -> Option<&'a mut Managed> {
+    t.values_mut().find(|m| m.handle == handle)
+}
+
+fn by_handle<'a>(t: &'a HashMap<u32, Managed>, handle: &str) -> Option<&'a Managed> {
+    t.values().find(|m| m.handle == handle)
+}
+
+/// 当前时刻（UNIX 毫秒）。时钟回拨时退成 0 —— 面板少显示一个时间，
+/// 好过让"已启动多久"算出个负数。
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn next_handle() -> String {
@@ -174,7 +205,7 @@ fn log_dir(proj: &Path) -> PathBuf {
 /// `Err(())` = 句柄已不在表里（被 `stop` 了），调用方该停止轮询。
 fn poll_child(handle: &str) -> Result<Option<Option<i32>>, ()> {
     let Ok(mut t) = lock() else { return Err(()) };
-    let Some(m) = t.get_mut(handle) else {
+    let Some(m) = by_handle_mut(&mut t, handle) else {
         return Err(());
     };
     if is_dead(&m.state) {
@@ -190,7 +221,7 @@ fn poll_child(handle: &str) -> Result<Option<Option<i32>>, ()> {
     }
 }
 
-fn refresh_all(t: &mut HashMap<String, Managed>) {
+fn refresh_all(t: &mut HashMap<u32, Managed>) {
     for m in t.values_mut() {
         if is_dead(&m.state) {
             continue;
@@ -201,12 +232,12 @@ fn refresh_all(t: &mut HashMap<String, Managed>) {
     }
 }
 
-fn live_of(t: &HashMap<String, Managed>) -> Vec<&Managed> {
+fn live_of(t: &HashMap<u32, Managed>) -> Vec<&Managed> {
     t.values().filter(|m| !is_dead(&m.state)).collect()
 }
 
 /// 某个项目里还活着的托管进程（容量与"其他托管进程"都按项目划界）
-fn live_in(t: &HashMap<String, Managed>, proj: &Path) -> Vec<ProcInfo> {
+fn live_in(t: &HashMap<u32, Managed>, proj: &Path) -> Vec<ProcInfo> {
     t.values()
         .filter(|m| m.proj.as_path() == proj && !is_dead(&m.state))
         .map(Managed::info)
@@ -339,14 +370,14 @@ pub fn read_log_tail(path: &Path, lines: usize) -> String {
 
 fn info_of(handle: &str) -> Result<ProcInfo, String> {
     let t = lock()?;
-    t.get(handle)
+    by_handle(&t, handle)
         .map(Managed::info)
         .ok_or_else(|| format!("handle={handle} 已从进程表移除"))
 }
 
 fn set_state(handle: &str, state: &str) {
     if let Ok(mut t) = lock()
-        && let Some(m) = t.get_mut(handle)
+        && let Some(m) = by_handle_mut(&mut t, handle)
     {
         m.state = state.to_string();
     }
@@ -402,7 +433,7 @@ pub fn start(
                 .iter()
                 .filter(|(_, m)| m.proj.as_path() == proj && is_dead(&m.state))
                 .min_by_key(|(_, m)| m.started)
-                .map(|(k, _)| k.clone());
+                .map(|(k, _)| *k);
             match dead {
                 Some(k) => {
                     t.remove(&k);
@@ -443,7 +474,7 @@ pub fn start(
     {
         let mut t = lock()?;
         t.insert(
-            handle.clone(),
+            pid,
             Managed {
                 handle: handle.clone(),
                 proj: proj.to_path_buf(),
@@ -454,6 +485,7 @@ pub fn start(
                 keep_alive: spec.keep_alive,
                 state: "running".into(),
                 started,
+                started_at_ms: now_ms(),
                 child,
             },
         );
@@ -532,7 +564,7 @@ pub fn status(handle: &str) -> Result<ProcInfo, String> {
         refresh_all(&mut t);
         live_of(&t).iter().map(|m| m.info()).collect()
     };
-    let Some(m) = t.get_mut(handle) else {
+    let Some(m) = by_handle(&t, handle) else {
         return Err(format!(
             "没有 handle={handle} 这个托管进程。当前：{}",
             render_listing(&live)
@@ -541,11 +573,24 @@ pub fn status(handle: &str) -> Result<ProcInfo, String> {
     Ok(m.info())
 }
 
+/// 按 pid 查。宿主面板的一手证据是 pid（netstat / tasklist / 用户嘴里都是 pid），
+/// 不该让面板先去猜一个 handle。
+pub fn status_pid(pid: u32) -> Result<ProcInfo, String> {
+    let mut t = lock()?;
+    refresh_all(&mut t);
+    t.get(&pid).map(Managed::info).ok_or_else(|| {
+        format!(
+            "没有 pid={pid} 这个托管进程。当前：{}",
+            render_listing(&live_of(&t).iter().map(|m| m.info()).collect::<Vec<_>>())
+        )
+    })
+}
+
 /// 读某个托管进程的日志尾部（已按活动代码页解码）。
 pub fn log_tail(handle: &str, lines: usize) -> Result<String, String> {
     let path = {
         let t = lock()?;
-        t.get(handle)
+        by_handle(&t, handle)
             .map(|m| m.log.clone())
             .ok_or_else(|| format!("没有 handle={handle} 这个托管进程"))?
     };
@@ -557,15 +602,40 @@ pub fn log_tail(handle: &str, lines: usize) -> Result<String, String> {
 ///
 /// 这是必需项不是优化项：只杀 `mvn` 不杀 `java`，就是又造一个占着端口的孤儿。
 pub fn stop(handle: &str) -> Result<ProcInfo, String> {
+    let found = {
+        let t = lock()?;
+        by_handle(&t, handle).map(|m| m.pid)
+    };
+    match found {
+        Some(pid) => stop_pid(pid),
+        None => {
+            let live: Vec<ProcInfo> = match lock() {
+                Ok(mut t) => {
+                    refresh_all(&mut t);
+                    live_of(&t).iter().map(|x| x.info()).collect()
+                }
+                Err(_) => Vec::new(),
+            };
+            Err(format!(
+                "没有 handle={handle} 这个托管进程。当前：{}",
+                render_listing(&live)
+            ))
+        }
+    }
+}
+
+/// 按 pid 停掉一个托管进程 —— 宿主面板的"停止"按钮走这条：面板看得到 pid，
+/// 却在表里按 handle 存，就等于让用户拿着 pid 去找一个他查不到的编号。
+pub fn stop_pid(pid: u32) -> Result<ProcInfo, String> {
     let mut m = {
         let mut t = lock()?;
         refresh_all(&mut t);
         let live: Vec<ProcInfo> = live_of(&t).iter().map(|x| x.info()).collect();
-        match t.remove(handle) {
+        match t.remove(&pid) {
             Some(m) => m,
             None => {
                 return Err(format!(
-                    "没有 handle={handle} 这个托管进程。当前：{}",
+                    "没有 pid={pid} 这个托管进程。当前：{}",
                     render_listing(&live)
                 ));
             }
@@ -596,9 +666,9 @@ fn shutdown_where(
             return (stopped, kept);
         };
         refresh_all(&mut t);
-        let keys: Vec<String> = t.keys().cloned().collect();
+        let pids: Vec<u32> = t.keys().copied().collect();
         let mut victims = Vec::new();
-        for k in keys {
+        for k in pids {
             let (target, keep) = match t.get(&k) {
                 Some(m) => (pick(m), m.keep_alive && !is_dead(&m.state)),
                 None => continue,
@@ -757,6 +827,29 @@ mod tests {
         let st = status(&out.info.handle).expect("查得到");
         assert_eq!(st.state, "ready");
         stop(&out.info.handle).expect("停得掉");
+        cleanup(&proj);
+    }
+
+    /// 表的主键是 pid：面板（以及用户、netstat、tasklist）手里的一手证据只有 pid，
+    /// 必须能直接查、直接停，不能先翻译成自造编号。
+    #[test]
+    fn the_table_is_keyed_by_pid_and_carries_a_wall_clock_start() {
+        let _g = serial();
+        let proj = tmp_proj("pidkey");
+        let out = start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("应当起来");
+        let pid = out.info.pid;
+
+        let st = status_pid(pid).expect("按 pid 查得到");
+        assert_eq!(st.pid, pid, "按 pid 查回来的就是这个 pid");
+        assert!(
+            st.started_at_ms > 1_700_000_000_000,
+            "要带墙钟启动时刻（面板要显示几点起的）: {}",
+            st.started_at_ms
+        );
+
+        let stopped = stop_pid(pid).expect("按 pid 停得掉");
+        assert_eq!(stopped.state, "stopped");
+        assert!(status_pid(pid).is_err(), "停掉之后按 pid 也查不到");
         cleanup(&proj);
     }
 

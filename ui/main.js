@@ -51,12 +51,14 @@ async function initApp() {
   window.ToolsUI?.attach();
   window.SkillsUI?.attach();
   window.ConfigUI?.attach();
+  window.ServiceUI?.attach();
   setupCapabilityMenu();
   setupOutlineTabs();
   setupTextareaSync();
   setupTerminalList();
   setupKeyboardShortcuts();
   setupHelpMenu();
+  setupServiceMenu();
   try {
     await autoOpenLastProject();
   } catch (err) {
@@ -253,6 +255,14 @@ function refreshI18nUI() {
     renderTabs();
   }
 
+  // 服务标签页：标题随语言走，表头/按钮也要重新过一遍 i18n
+  const serviceTab = state.tabs.find((t) => t._isService);
+  if (serviceTab) {
+    serviceTab.name = I18N.t("service.title");
+    renderTabs();
+    window.ServiceUI?.render(serviceTab);
+  }
+
   // 编辑器空状态
   const emptyEl = document.querySelector("#editor-empty p");
   if (emptyEl) emptyEl.textContent = I18N.t("editor.empty");
@@ -444,6 +454,7 @@ function tabIcon(t) {
   if (t._isHelp) return "🔒";
   if (t._isSession) return "🤖";
   if (t._isTerminal) return "🖥️";
+  if (t._isService) return "🔌";
   return fileIcon(t.name);
 }
 
@@ -497,6 +508,9 @@ function switchTab(tabId) {
   hideTerminalView();
   hideImageView();
   hideConfigView();
+  hideServiceView();
+  // 服务面板的秒级刷新随面板走：切走了就别再问后端
+  window.ServiceUI?.close();
   if (tab._isConfig) {
     // 配置标签页 — 表单视图（扫描配置项 → 表单 + 保存/应用/取消）
     hideEditorView();
@@ -529,6 +543,13 @@ function switchTab(tabId) {
     // 帮助标签页 — markdown 文档视图（不走代码编辑器，content 恒为空）
     hideEditorView();
     showHelpPage();
+    return;
+  }
+  if (tab._isService) {
+    // 服务标签页 — 托管进程面板（自己拉 proc_list，content 恒为空）
+    hideEditorView();
+    showServiceView();
+    window.ServiceUI?.render(tab);
     return;
   }
   if (tab._isTerminal) {
@@ -576,6 +597,9 @@ function closeTab(tabId) {
   if (idx === -1) return;
 
   const tab = state.tabs[idx];
+
+  // 服务面板：停掉秒级刷新（否则关了标签页还在后台问后端）
+  if (tab._isService) window.ServiceUI?.close();
 
   // PTY 终端清理
   if (tab._isTerminal) {
@@ -629,6 +653,8 @@ function hideEditor() {
   document.getElementById("terminal-view").style.display = "none";
   document.getElementById("image-view").style.display = "none";
   document.getElementById("session-view").style.display = "none";
+  const serviceView = document.getElementById("service-view");
+  if (serviceView) serviceView.style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
   document.getElementById("editor-code-backdrop").innerHTML = "";
   document.getElementById("editor-textarea").value = "";
@@ -1358,6 +1384,17 @@ async function saveCurrentFile() {
   } catch (err) {
     setStatus(I18N.t("save.fail", { err }), "error");
   }
+}
+
+// ============================================
+// 服务页（agent 用 background 起的托管进程；面板读引擎同一份表）
+// ============================================
+function setupServiceMenu() {
+  const btn = document.getElementById("menu-service");
+  if (!btn) return;
+
+  btn.addEventListener("click", () => window.ServiceUI?.open());
+  btn.style.cursor = "pointer";
 }
 
 // ============================================
@@ -2811,6 +2848,17 @@ function showConfigView() {
 
 function hideConfigView() {
   const el = document.getElementById("config-view");
+  if (el) el.style.display = "none";
+}
+
+function showServiceView() {
+  document.getElementById("editor-empty").style.display = "none";
+  document.getElementById("editor-view").style.display = "none";
+  document.getElementById("service-view").style.display = "";
+}
+
+function hideServiceView() {
+  const el = document.getElementById("service-view");
   if (el) el.style.display = "none";
 }
 

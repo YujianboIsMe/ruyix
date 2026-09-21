@@ -69,6 +69,22 @@ vendor 的 `ui/markdown-it.min.js`（`html: false`，不执行内嵌 HTML）。
 3. 语法高亮支持
 4. 联系方式：关注 https://newest-ai.com ，邮箱 yujianboisme@outlook.com
 
+## 服务页
+
+顶部菜单【服务/Service】→ 中央编辑区打开一个标签页，列出 agent 用后台模式
+（`execute` 的 `background`）起的常驻服务。
+
+- 治的病：那些进程是宿主 spawn 的，却不在宿主的进程树里（cmd → mvn.cmd → java），
+  以前只活在引擎的进程表里 —— 起得来、看不见、也停不掉。
+- 面板读的是引擎**同一份**表（后端 `proc_list` → `harness_engine::proc::listing`），
+  不另扫端口、不另猜进程，面板和模型看同一份事实。
+- 进程表的主键是 **pid**（`HashMap<u32, Managed>`）：面板 / 用户 / netstat / tasklist
+  手里的一手证据只有 pid，所以"停止"直接按 pid 发（`proc_stop`，连子进程树一起收）。
+- 表格是**学术三线表**：只有顶线、表头下线、底线三条横线，没有竖线、没有内部行线。
+  字段三项：PID / 启动时间 / 完整命令行。启动时间形如
+  `2026-09-20 19:07:00 (2h23m36s)` —— 时刻与已启动时长都要给全。
+- 已退出的进程不进面板（没有可管理的对象）。面板打开时每秒刷新一次时长。
+
 ## 多语言
 
 |语言|文件|

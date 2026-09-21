@@ -582,6 +582,33 @@ fn get_run_targets(
     mgr.load_run_targets(project_root.as_deref())
 }
 
+// ============================================
+// 托管进程（"服务"面板）
+// ============================================
+//
+// 为什么宿主必须能看见它们：agent 用 background 起的服务（mvn spring-boot:run / java -jar）
+// 是**宿主** spawn 的，却不在宿主的进程树里 —— 以前它们只活在引擎的进程表里，
+// UI 上等于不存在：起得来、看不见、也停不掉（只能靠任务管理器按 pid 找）。
+// 面板读的是引擎那**同一份**表（`harness_engine::proc::listing`），不另立一份，
+// 否则面板和模型就会各说各话。
+
+/// 全部托管进程（含已退出待查的），状态已刷新。
+#[tauri::command]
+fn proc_list() -> Vec<harness_engine::proc::ProcInfo> {
+    harness_engine::proc::listing()
+}
+
+/// 按 pid 停掉一个托管进程，**连子进程树一起**（只杀 mvn 不杀 java 就是又造一个孤儿）。
+///
+/// 走 `spawn_blocking`：`kill_tree` + `wait` 会等进程真的退掉（秒级），
+/// 放在主线程会把 UI 卡住这段。
+#[tauri::command]
+async fn proc_stop(pid: u32) -> Result<harness_engine::proc::ProcInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || harness_engine::proc::stop_pid(pid))
+        .await
+        .map_err(|e| format!("停止任务失败：{e}"))?
+}
+
 #[derive(serde::Serialize, Clone)]
 struct RunOutput {
     exit_code: Option<i32>,
@@ -1286,6 +1313,8 @@ fn main() {
             migrate_projects,
             get_run_targets,
             run_target,
+            proc_list,
+            proc_stop,
             spawn_terminal,
             pty_spawn,
             pty_write,

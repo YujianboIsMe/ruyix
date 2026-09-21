@@ -316,6 +316,41 @@ function runStaticChecks() {
       !has(mainJs, "content: getHelpText()"),
     "帮助标签页必须走 markdown 文档视图（_isHelp → showHelpPage），不再塞进只读编辑器");
 
+  // U23 service-panel：agent 用 background 起的常驻服务必须**在 UI 里看得见、停得掉**。
+  //   （起得来却看不见 = 用户只能开任务管理器按 pid 找；这是本轮要治的病）
+  //   引擎侧：进程表按 pid 存 + 带墙钟启动时刻（面板要显示"几点起的、跑了多久"）
+  //   后端：proc_list / proc_stop 已注册
+  //   前端：菜单锚点 + 编辑区视图 + 三线表三字段（PID / 启动时间 / 完整命令行）
+  const managedRs = read("crates/harness-engine/src/proc.rs");
+  check("U23", "service-panel",
+    /HashMap<u32,\s*Managed>/.test(managedRs) && has(managedRs, "started_at_ms") &&
+      has(managedRs, "pub fn stop_pid"),
+    "proc.rs 的进程表必须按 pid 存、带墙钟启动时刻、支持按 pid 停（面板手里只有 pid）");
+  check("U23", "service-panel",
+    ["proc_list", "proc_stop"].every((c) => mainRs.includes(`${c},`)),
+    "main.rs 未注册 proc_list / proc_stop（服务面板读不到也停不掉）");
+  check("U23", "service-panel",
+    ["menu-service", "service-view", "service-body", "service-btn-refresh"]
+      .every((id) => has(html, `id="${id}"`)) && has(html, 'src="service.js"'),
+    "index.html 缺少服务菜单 / 服务视图容器 / service.js");
+  const serviceJs = read("ui/service.js");
+  check("U23", "service-panel",
+    ["service.th_pid", "service.th_started", "service.th_cmd"].every((k) => has(serviceJs, k)),
+    "服务表的字段必须是 PID / 启动时间 / 完整命令行三项");
+  check("U23", "service-panel",
+    has(serviceJs, '"proc_list"') && has(serviceJs, '"proc_stop"') &&
+      has(serviceJs, "{ pid }") && has(serviceJs, "data-stop"),
+    "服务面板的读取/停止链路不完整（proc_list / proc_stop({pid}) / 行内停止按钮）");
+  check("U23", "service-panel",
+    /getFullYear\(\)/.test(serviceJs) && /getSeconds\(\)/.test(serviceJs) &&
+      /\$\{h\}h\$\{m\}m\$\{s\}s/.test(serviceJs) && has(serviceJs, "isDead"),
+    "启动时间要显示到秒并带 h/m/s 时长；已退出的进程不该再占一行（没有可管的）");
+  check("U23", "service-panel",
+    has(mainJs, "tab._isService") && has(mainJs, "showServiceView") &&
+      has(mainJs, "ServiceUI?.close") && has(commandJs, 'case "service":') &&
+      /_isService\)\s*return/.test(mainJs),
+    "main.js 缺服务标签页分支（含标签图标）/ 切走时没停秒级刷新，或命令栏缺 service 动词");
+
   // U16 agent-loop：会话 = 工具循环（Read/Write/Execute/Connect 四原语），不做问答/任务预分类。
   // 三环：session.js 走 agent_reply 并带模式与历史；mod.rs 调 engine::agent::run 并接连接器；
   // 引擎 agent.rs 定义四原语 + 终止协议 + 破坏性命令拒绝；connect.rs 落 MCP/A2A 两条真实通路。
@@ -1096,6 +1131,152 @@ async function runHelpChecks() {
   }
 }
 
+/**
+ * U23 service-replay：服务面板回放 —— 真的加载 ui/service.js，喂两条托管进程，
+ * 断言三列表格、时间格式（到秒 + h/m/s 时长）、按 pid 停止、以及"离开面板就停刷新"。
+ */
+async function runServiceChecks() {
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+  // service.js 用 querySelectorAll("[data-i18n]") 刷新表头/按钮文案；
+  // 按 innerHTML 解析出节点对象（与 config 回放同一个套路，对象要能真的被写回）
+  const bodyEl = el("service-body");
+  bodyEl.querySelectorAll = (sel) => {
+    if (sel !== "[data-i18n]") return [];
+    const out = [];
+    const re = /data-i18n="([^"]+)"/g;
+    let m;
+    while ((m = re.exec(bodyEl.innerHTML))) {
+      out.push({ dataset: { i18n: m[1] }, textContent: "" });
+    }
+    bodyEl._i18n = out;
+    return out;
+  };
+
+  const appState = { tabs: [], activeTabId: null, currentProject: null };
+  const calls = [];
+  const timers = { started: 0, cleared: 0, ms: 0 };
+  // 8616000ms = 2h23m36s —— 与"已启动多久"的显示格式对着写，别让格式悄悄变了
+  const procs = [
+    {
+      handle: "p1", pid: 38420, cmd: "mvn spring-boot:run", log: "p1.log",
+      ready_cmd: null, state: "ready", keep_alive: false,
+      elapsed_ms: 8616000, started_at_ms: Date.parse("2026-09-20T19:07:00"),
+    },
+    {
+      handle: "p2", pid: 38421, cmd: "npm run dev", log: "p2.log",
+      ready_cmd: null, state: "running", keep_alive: false,
+      elapsed_ms: 5000, started_at_ms: Date.parse("2026-09-20T21:22:00"),
+    },
+    // 已退出的不该进面板：它没有"管理"可言
+    {
+      handle: "p3", pid: 39999, cmd: "java -jar gone.jar", log: "p3.log",
+      ready_cmd: null, state: "exited(7)", keep_alive: false,
+      elapsed_ms: 1000, started_at_ms: Date.parse("2026-09-20T21:20:00"),
+    },
+  ];
+
+  // 真实契约：i18n.js 挂的是 window.I18N，service.js 的 T() 认这个 ——
+  // stub 不给 window.I18N 就等于让回放跑在一个"多语言没加载"的世界里
+  const i18n = { getLang: () => "zh-CN", t: (k) => zh[k] ?? k };
+  const sandbox = {
+    I18N: i18n,
+    window: { state: appState, ServiceUI: null, I18N: i18n },
+    document: { getElementById: el, querySelector: () => null },
+    state: appState,
+    renderTabs() {},
+    switchTab(id) {
+      appState.activeTabId = id;
+    },
+    setStatus() {},
+    getTauriInvoke: () => async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "proc_list") return procs;
+      if (cmd === "proc_stop") {
+        const i = procs.findIndex((p) => p.pid === args.pid);
+        if (i >= 0) {
+          procs[i] = { ...procs[i], state: "stopped" };
+          return procs[i];
+        }
+        throw new Error("no such pid");
+      }
+      return null;
+    },
+    setInterval(fn, ms) {
+      timers.started += 1;
+      timers.ms = ms;
+      return 1;
+    },
+    clearInterval() {
+      timers.cleared += 1;
+    },
+  };
+
+  const saved = ["window", "document", "state", "setInterval", "clearInterval", "I18N"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/service.js"))();
+    const ServiceUI = sandbox.window.ServiceUI;
+    check("U23", "service-replay", !!ServiceUI && typeof ServiceUI.open === "function",
+      "service.js 未暴露 ServiceUI.open");
+
+    ServiceUI.open();
+    const tab = appState.tabs.find((t) => t._isService);
+    check("U23", "service-replay",
+      !!tab && appState.activeTabId === tab.id && tab.content === "",
+      "菜单点「服务」未打开/激活服务标签页（或往 content 里塞了东西）");
+
+    await ServiceUI.pull();
+    const html = bodyEl.innerHTML;
+    check("U23", "service-replay",
+      html.includes('<table class="service-table">') &&
+        html.includes("38420") && html.includes("mvn spring-boot:run") &&
+        html.includes("npm run dev") && html.includes('data-stop="38420"'),
+      `服务表没把 pid / 完整命令行 / 停止按钮渲染出来: ${html.slice(0, 120)}`);
+    check("U23", "service-replay",
+      /2026-09-20 19:07:00/.test(html) && html.includes("(2h23m36s)"),
+      "启动时间要显示 年月日 时分秒，并在括号里带 h/m/s 的已启动时长");
+    check("U23", "service-replay",
+      !html.includes("39999") && !html.includes("gone.jar"),
+      "已退出的进程不该进面板（没有可管理的对象）");
+    const heads = bodyEl._i18n || [];
+    check("U23", "service-replay",
+      heads.some((n) => n.dataset.i18n === "service.th_started" && n.textContent === "启动时间") &&
+        heads.some((n) => n.dataset.i18n === "service.th_pid" && n.textContent === "PID"),
+      `表头文案没过 i18n: ${JSON.stringify(heads.map((n) => [n.dataset.i18n, n.textContent]))}`);
+
+    // 刷新是秒级的（时长要"在走"），且离开面板必须停
+    ServiceUI.render();
+    check("U23", "service-replay", timers.started === 1 && timers.ms === 1000,
+      `服务面板应当起一个 1 秒的刷新定时器，实际: ${JSON.stringify(timers)}`);
+
+    // 按 pid 停 —— 面板手里的一手证据就是 pid，不该先翻译成引擎自造的 handle
+    await ServiceUI.stop(38420);
+    const stopCall = calls.find((c) => c.cmd === "proc_stop");
+    check("U23", "service-replay",
+      !!stopCall && stopCall.args.pid === 38420,
+      `停止必须按 pid 发（实际: ${JSON.stringify(calls.filter((c) => c.cmd === "proc_stop"))}）`);
+    await ServiceUI.pull();
+    check("U23", "service-replay", !bodyEl.innerHTML.includes("38420"),
+      "停掉之后这一行应当从面板上消失");
+
+    ServiceUI.close();
+    check("U23", "service-replay", timers.cleared >= 1,
+      "离开/关闭服务面板必须停掉秒级刷新（否则后台一直问后端）");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
 // ============================================
 // 入口
 // ============================================
@@ -1107,6 +1288,7 @@ async function main() {
     ["U6", "session-replay", runSessionChecks],
     ["U9", "config-replay", runConfigChecks],
     ["U22", "help-replay", runHelpChecks],
+    ["U23", "service-replay", runServiceChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

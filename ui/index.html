@@ -54,6 +54,11 @@
               </div>
             </div>
           </span>
+          <!-- 服务：agent 用 background 起的托管进程（mvn spring-boot:run / java -jar …），
+               引擎持有、UI 原先看不见也停不掉 —— 这个面板读的是引擎同一份表 -->
+          <span class="menu-item" id="menu-service" style="position:relative">
+            <span data-i18n="menu.service">服务</span>
+          </span>
           <!-- 帮助 -->
           <span class="menu-item" id="menu-help" style="position:relative">
             <span data-i18n="menu.help">帮助</span>
@@ -275,6 +280,20 @@
                 <textarea id="editor-textarea" class="editor-textarea" spellcheck="false"></textarea>
               </div>
             </div>
+            <div id="service-view" class="service-view" style="display:none">
+              <div class="service-head">
+                <div class="service-head-main">
+                  <span class="service-title" data-i18n="service.title">服务</span>
+                  <span id="service-count" class="service-count"></span>
+                </div>
+                <div class="service-head-actions">
+                  <button id="service-btn-refresh" class="service-btn"
+                          data-i18n="service.btn_refresh">刷新</button>
+                </div>
+              </div>
+              <div id="service-hint" class="service-hint" data-i18n="service.hint"></div>
+              <div id="service-body" class="service-body"></div>
+            </div>
             <div id="config-view" class="config-view" style="display:none">
               <div class="config-head">
                 <div class="config-head-main">
@@ -441,6 +460,7 @@
   <script src="a2a.js"></script>
   <script src="capability.js"></script>
   <script src="config.js"></script>
+  <script src="service.js"></script>
   <script src="main.js"></script>
 </body>
 </html>
