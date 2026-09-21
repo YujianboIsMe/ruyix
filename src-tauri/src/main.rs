@@ -1257,6 +1257,192 @@ fn skills_remove(
 }
 
 // ============================================
+// 外链：WebView 只是我们的画布，不是浏览器（P0）
+// ============================================
+//
+// 症状：agent 回一句「服务已起，访问 http://localhost:8080」，点一下链接，**整块 IDE 被那张网页替换**
+// —— 标签栏、文件树、会话全没了，而且回不去。
+//
+// 为什么一次点击能拆掉整个 IDE：聊天里的 agent 输出走 markdown-it 且开了 `linkify`，裸 URL 会变成
+// 真 `<a href>`；而 WebView2 对普通导航的默认动作就是**在本 WebView 里导航过去**。我们的前端全活在
+// **一个文档**里（标签页只是 DOM 状态），文档一换，状态跟着一起没。
+// （`target="_blank"` 反而不会：wry 没设新窗口处理器时直接把请求吞掉 —— 所以真凶只有一种：普通导航。
+//  加上 `on_new_window` 之后连这一种也不再"点了没反应"。）
+//
+// 这道闸门必须在**后端**：`on_navigation` 是 WebView 的导航闸门，任何来源（a 标签 / location.href /
+// form / window.open / 以后某个忘了拦的角落）都得过它。前端的拦截（`ui/external.js`）是**显式**的
+// 那一重 —— 在按下那一刻就把意图变成"交给系统浏览器"，连一次失败的导航都不发生。
+// 两重都要有：只靠前端＝下一处漏网就是又一次 P0；只靠后端＝点了没反应（浏览器不开）。
+//
+// 唯一的判据是"这条 URL 是不是应用自己的文档"，结局只有三种：放行 / 交给系统浏览器 / 拒掉。
+
+/// 一次导航的三种结局。
+#[derive(Debug, PartialEq, Eq)]
+enum Nav {
+    /// 应用自己的文档 —— 放行
+    Allow,
+    /// 外站 —— 拒掉导航，改用系统浏览器打开
+    External,
+    /// 既不是自家文档、也没有可交给浏览器的地方（同源的非文档路径，如 `tauri.localhost/src/main.rs`）
+    /// —— 拒掉。这种链接点下去只会换来一张 404 白页，和跳去外站一样丢状态
+    Refuse,
+}
+
+/// 应用自己的站点（自定义协议）在各平台的落地：Windows / Android 上是 `http://tauri.localhost`，
+/// 其它平台是 `tauri://localhost`。
+fn is_app_host(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => true,
+        "http" | "https" => url.host_str() == Some("tauri.localhost"),
+        _ => false,
+    }
+}
+
+/// 两个 URL 是不是同一个站点（scheme + host + port）。
+/// 不能用 `Url::origin()`：`tauri://` 这类非特殊 scheme 的 origin 是 opaque，序列化出来是 `null`。
+fn same_site(a: &tauri::Url, b: &tauri::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// 这条 URL 是不是"一个文档"（`/` 或 `*.html`）。
+/// 只看文档：子资源（css/js）不走导航事件，而同源的 `src/main.rs` 这种相对链接一旦导航过去就是白页。
+fn is_document_path(url: &tauri::Url) -> bool {
+    let path = url.path();
+    path.is_empty() || path == "/" || path.ends_with(".html")
+}
+
+/// 导航闸门（纯函数，可测）。
+///
+/// `dev_url` = `tauri.conf.json` 的 `build.devUrl`（本项目没配）。留着这条是因为 `tauri dev` 一旦改用
+/// 开发服务器，判据必须认它 —— 认的依据是**配置里写的那一条**，而不是"凡是 localhost 都放行"：
+/// agent 起的服务就在 localhost 上，那正是这次要拦的东西。
+fn nav_verdict(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> Nav {
+    // WebView 给 iframe 用的空文档，不是"去了别的站点"
+    if url.as_str() == "about:blank" {
+        return Nav::Allow;
+    }
+    let own_site = is_app_host(url) || dev_url.is_some_and(|dev| same_site(url, dev));
+    if !own_site {
+        return Nav::External;
+    }
+    if is_document_path(url) {
+        Nav::Allow
+    } else {
+        Nav::Refuse
+    }
+}
+
+/// 外链白名单：只放行 http / https / mailto。
+///
+/// 这是**能执行之前**的闸门，不是措辞洁癖：`file:` 会让一句"打开 file:///C:/…"变成在系统里点开本地
+/// 文件，`javascript:` / `data:text/html` 更是直接执行代码。链接可能来自模型输出、用户手输或页面上
+/// 的任意文本，白名单之外一律不交给系统。
+fn check_open_url(raw: &str) -> Result<String, String> {
+    let url = tauri::Url::parse(raw.trim()).map_err(|e| format!("不是合法的链接：{e}"))?;
+    match url.scheme() {
+        "http" | "https" | "mailto" => Ok(url.to_string()),
+        other => Err(format!(
+            "只允许 http / https / mailto 链接，这条是 `{other}:`，已拦下"
+        )),
+    }
+}
+
+/// 用操作系统的默认处理程序打开链接 —— 外链**唯一**的出口。
+#[tauri::command]
+fn open_external(url: String) -> Result<String, String> {
+    let url = check_open_url(&url)?;
+    launch_in_browser(&url)?;
+    Ok(url)
+}
+
+/// 交给操作系统。Windows 走 `ShellExecuteW`（"用默认处理程序打开"就是它），**不走 shell** ——
+/// URL 里带 `&` / 空格 / 中文是常态，`cmd /C start` 那套引号规则本项目已经踩过一次。
+#[cfg(windows)]
+fn launch_in_browser(url: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let file: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let hinstance = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+    // 返回值**不是**句柄：<= 32 全是错误码（微软文档写明了），所以"成功"的判据是 > 32 而不是"非零"。
+    let code = hinstance as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "系统没有能打开它的程序（ShellExecuteW 返回 {code}）"
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_in_browser(url: &str) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("系统没有能打开它的程序（{opener}: {e}）"))
+}
+
+/// 建主窗口。
+///
+/// **窗口必须在 Rust 里建，不能留在 `tauri.conf.json` 的 `app.windows`** —— 只有 Builder 上挂得了
+/// `on_navigation`，而那就是这道 P0 的闸门；配置里生出来的窗口没有闸门，链接一点就顶掉整个 IDE。
+/// 原来的配置项逐条照抄（标题 / 尺寸 / 无边框 / 居中 / devtools），漏一个就是启动时的观感回归。
+fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let dev_url = app.config().build.dev_url.clone();
+    let nav_dev_url = dev_url.clone();
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+        .title("Darkhorse Code")
+        .inner_size(1200.0, 800.0)
+        .decorations(false)
+        .center()
+        .devtools(true)
+        .on_navigation(move |url| match nav_verdict(url, nav_dev_url.as_ref()) {
+            Nav::Allow => true,
+            Nav::External => {
+                // 外站：不放行，改用系统浏览器 —— 用户要的是"打开这个链接"，
+                // 不是"把 IDE 换成这个页面"
+                if let Err(e) = launch_in_browser(url.as_str()) {
+                    eprintln!("[ruyix] 外链打不开：{e}（{url}）");
+                }
+                false
+            }
+            Nav::Refuse => {
+                eprintln!("[ruyix] 拦下一次应用内导航（不是文档路径）：{url}");
+                false
+            }
+        })
+        .on_new_window(move |url, _features| {
+            // `target="_blank"` / window.open 走的是这条路，不是导航。默认没人接就被静默吞掉，
+            // 于是"点了没反应"；这里跟导航用**同一张判定表**：外站交给系统浏览器。
+            if nav_verdict(&url, dev_url.as_ref()) == Nav::External
+                && let Err(e) = launch_in_browser(url.as_str())
+            {
+                eprintln!("[ruyix] 外链打不开：{e}（{url}）");
+            }
+            tauri::webview::NewWindowResponse::<tauri::Wry>::Deny
+        })
+        .build()
+}
+
+// ============================================
 // 入口
 // ============================================
 
@@ -1271,6 +1457,10 @@ fn main() {
         .manage(pty_mgr)
         .manage(agent::AgentState::new())
         .setup(|app| {
+            // 主窗口在这里建（不是 tauri.conf.json 的 app.windows）——
+            // 只有 Rust 侧的 Builder 挂得上 on_navigation，也就是外链的道闸，详见 build_main_window
+            build_main_window(app.handle())?;
+
             // 注册原生 Ctrl+S 快捷键 — 即使 WebView2 拦截了 JS 的 Ctrl+S，
             // 原生菜单 accelerator 仍能在 OS 层面捕获该组合键
             let save = MenuItemBuilder::with_id("save", "保存")
@@ -1315,6 +1505,7 @@ fn main() {
             run_target,
             proc_list,
             proc_stop,
+            open_external,
             spawn_terminal,
             pty_spawn,
             pty_write,
@@ -1641,5 +1832,108 @@ mod tests {
             "实际工作目录应包含 admin-web，实际输出: {:?}",
             out.stdout
         );
+    }
+
+    // ---- 外链闸门（P0：一次链接点击不能顶掉整个 IDE）----
+
+    fn u(s: &str) -> tauri::Url {
+        tauri::Url::parse(s).expect("测试用 URL 应当合法")
+    }
+
+    /// 用户踩到的那个 P0 原样复现：agent 起了服务、回了 `http://localhost:8080`，点一下整块 IDE 被换掉。
+    /// 判据是"是不是自家文档"，所以 **localhost 不是自家页面** —— 这正是这次要拦的东西。
+    #[test]
+    fn localhost_is_not_an_app_document() {
+        assert_eq!(
+            nav_verdict(&u("http://localhost:8080/"), None),
+            Nav::External
+        );
+        assert_eq!(
+            nav_verdict(&u("http://localhost:8080/actuator/health"), None),
+            Nav::External
+        );
+        assert_eq!(
+            nav_verdict(&u("http://127.0.0.1:8080/"), None),
+            Nav::External
+        );
+        assert_eq!(nav_verdict(&u("http://[::1]:8080/"), None), Nav::External);
+        assert_eq!(
+            nav_verdict(&u("https://newest-ai.com"), None),
+            Nav::External
+        );
+    }
+
+    /// 自家文档放行；同文档锚点还得放行 —— 拦了"跳到某节"就成了点了没反应。
+    #[test]
+    fn app_documents_are_allowed_along_with_in_page_anchors() {
+        assert_eq!(nav_verdict(&u("http://tauri.localhost/"), None), Nav::Allow);
+        assert_eq!(
+            nav_verdict(&u("http://tauri.localhost/index.html"), None),
+            Nav::Allow
+        );
+        assert_eq!(
+            nav_verdict(&u("tauri://localhost/index.html"), None),
+            Nav::Allow
+        );
+        assert_eq!(nav_verdict(&u("about:blank"), None), Nav::Allow);
+        assert_eq!(
+            nav_verdict(&u("http://tauri.localhost/index.html#sessions"), None),
+            Nav::Allow
+        );
+    }
+
+    /// 同源但**不是文档**的路径（markdown 里的相对链接 `src/main.rs` 解析出来就是它）不能放行：
+    /// 导航过去是一张 404 白页，和跳去外站一样丢状态；而它也没有"交给浏览器"的出口 → 拒。
+    #[test]
+    fn same_site_non_documents_are_refused_without_an_exit() {
+        assert_eq!(
+            nav_verdict(&u("http://tauri.localhost/src/main.rs"), None),
+            Nav::Refuse
+        );
+        assert_eq!(
+            nav_verdict(&u("http://tauri.localhost/styles.css"), None),
+            Nav::Refuse
+        );
+    }
+
+    /// 开发服务器（配置里写了才认）：认的是**配置那一条**，不是"凡是 localhost"。
+    #[test]
+    fn a_configured_dev_url_is_recognized_without_whitelisting_localhost() {
+        let dev = u("http://localhost:1420/");
+        assert_eq!(
+            nav_verdict(&u("http://localhost:1420/index.html"), Some(&dev)),
+            Nav::Allow
+        );
+        assert_eq!(
+            nav_verdict(&u("http://localhost:8080/"), Some(&dev)),
+            Nav::External,
+            "另一个 localhost 端口不是开发服务器"
+        );
+        assert_eq!(
+            nav_verdict(&u("https://newest-ai.com"), Some(&dev)),
+            Nav::External
+        );
+    }
+
+    /// 外链出口的白名单：只有三种 scheme 能落到操作系统，
+    /// `file:` / `javascript:` / `data:` 连试都不试（这是**能执行之前**的闸门）。
+    #[test]
+    fn open_url_whitelists_exactly_three_schemes() {
+        assert_eq!(
+            check_open_url("  https://newest-ai.com/x?a=1&b=2  ").expect("https 应当放行"),
+            "https://newest-ai.com/x?a=1&b=2",
+            "放行时要带上完整查询串"
+        );
+        assert!(check_open_url("http://localhost:8080/actuator").is_ok());
+        assert!(check_open_url("mailto:yujianboisme@outlook.com").is_ok());
+        for bad in [
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "not a url",
+            "",
+        ] {
+            assert!(check_open_url(bad).is_err(), "{bad} 必须被拦下");
+        }
     }
 }

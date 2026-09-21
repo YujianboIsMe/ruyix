@@ -52,6 +52,8 @@ async function initApp() {
   window.SkillsUI?.attach();
   window.ConfigUI?.attach();
   window.ServiceUI?.attach();
+  // 外链闸门（前端这一重）：agent 回的链接一律交给系统浏览器，绝不让 WebView 自己导航过去
+  window.ExternalLinks?.install();
   setupCapabilityMenu();
   setupOutlineTabs();
   setupTextareaSync();

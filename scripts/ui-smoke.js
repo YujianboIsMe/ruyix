@@ -55,6 +55,12 @@
  *                     维度 —— 后台起 + 就绪判据是**一条命令**（引擎零 app 知识）+ 句柄 op=status/
  *                     log/stop。三个出口各带证据；起之前先探一次判据（别人已满足就别起，防孤儿）；
  *                     引擎持有就引擎收（run 结束按项目收，宿主退出全收），杀必连子进程树
+ *   U24 external-link  agent 回的链接不能把 IDE 顶掉（P0）：整个 IDE 活在一个文档里，WebView2 对普通
+ *                     导航的默认动作就是在**本 WebView 里**导航过去 —— 文档一换状态全没。主窗口因此必须
+ *                     建在 Rust 里（配置窗口挂不上 on_navigation）；判定只有"是不是自家文档"三结局
+ *                     （放行 / 交给系统浏览器 / 拒掉），**localhost 不是自家页面**；出口 open_external
+ *                     只放行 http/https/mailto 并交给系统默认处理程序（不走 shell）；前端捕获阶段另有
+ *                     一重拦截，判定表与后端逐条对齐
  */
 
 "use strict";
@@ -350,6 +356,44 @@ function runStaticChecks() {
       has(mainJs, "ServiceUI?.close") && has(commandJs, 'case "service":') &&
       /_isService\)\s*return/.test(mainJs),
     "main.js 缺服务标签页分支（含标签图标）/ 切走时没停秒级刷新，或命令栏缺 service 动词");
+
+  // U24 external-link：agent 回的链接不能把 IDE 顶掉（P0）。
+  //   真凶：agent 输出走 markdown-it + linkify → 真 `<a href>`，而 WebView2 对普通导航的默认动作
+  //   就是**在本 WebView 里导航过去**；整个 IDE 活在一个文档里（标签页只是 DOM 状态）→ 文档一换，
+  //   标签栏 / 文件树 / 会话全跟着没。所以：
+  //     · 主窗口必须在 Rust 里建 —— 只有 Builder 挂得上 on_navigation（配置窗口没有闸门）；
+  //     · 判定只有一条"是不是自家文档"，三结局：放行 / 交给系统浏览器 / 拒掉；
+  //     · 出口是 open_external（白名单 http/https/mailto + 系统默认处理程序，不走 shell）；
+  //     · 前端另有一重捕获阶段拦截，判定表与后端一致（改一处必须同步另一处）。
+  const confJson = read("src-tauri/tauri.conf.json");
+  const extJs = read("ui/external.js");
+  check("U24", "external-link",
+    has(mainRs, "fn build_main_window") && has(mainRs, "on_navigation") &&
+      has(mainRs, "on_new_window") && !/"windows"\s*:\s*\[\s*\{/.test(confJson),
+    "主窗口必须建在 Rust 里并挂 on_navigation（tauri.conf.json 的 app.windows 不能再有窗口：配置窗口没有导航闸门）");
+  check("U24", "external-link",
+    ["fn nav_verdict", "fn is_app_host", "fn is_document_path", "Nav::External", "Nav::Refuse"]
+      .every((s) => has(mainRs, s)),
+    "导航判定必须落在 main.rs::nav_verdict（放行 / 交给系统浏览器 / 拒掉 三结局）");
+  check("U24", "external-link",
+    has(mainRs, "fn open_external") && has(mainRs, "fn check_open_url") &&
+      has(mainRs, "ShellExecuteW") && has(mainRs, "open_external,"),
+    "外链出口必须是 open_external（白名单 + 系统默认处理程序），且已注册到 invoke_handler");
+  check("U24", "external-link",
+    has(html, 'src="external.js"') && has(mainJs, "ExternalLinks?.install") &&
+      has(commandJs, 'case "url":') && has(commandJs, '"open_external"'),
+    "前端外链链路不完整（external.js 未加载/未安装、命令栏缺 open url、或没接上 open_external）");
+  check("U24", "external-link",
+    has(extJs, "OPENABLE") && has(extJs, "preventDefault") && has(extJs, "auxclick") &&
+      has(extJs, "isOwnDocument") && has(extJs, "open url "),
+    "external.js 的拦截不完整（白名单 / preventDefault / 中键 / 自家文档判定 / 出口）");
+  // 真窗口证明必须留在仓库里能跑：这条 P0 的病根只在**运行中的 WebView** 上显形，
+  // 静态断言再全也证明不了"页面真的没被导航走"，所以那份 CDP 探针是这条契约的另一半
+  const probeJs = read("scripts/nav-guard-probe.mjs");
+  check("U24", "external-link",
+    has(probeJs, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") && has(probeJs, "Runtime.evaluate") &&
+      has(probeJs, "markdownit") && has(probeJs, "location.href"),
+    "真窗口证明脚本不见了或不完整（必须真连 CDP、真读回 location.href、真点 markdown 渲出来的链接）");
 
   // U16 agent-loop：会话 = 工具循环（Read/Write/Execute/Connect 四原语），不做问答/任务预分类。
   // 三环：session.js 走 agent_reply 并带模式与历史；mod.rs 调 engine::agent::run 并接连接器；
@@ -1277,6 +1321,113 @@ async function runServiceChecks() {
   }
 }
 
+/**
+ * U24 external-link-replay：外链闸门回放 —— 真加载 ui/external.js，喂几条链接按下"点击"，
+ * 断言：点下去既不导航 WebView（preventDefault）也不静默吃掉，而是走命令系统交给系统浏览器；
+ * 白名单之外的 scheme 与自家文档里的非文档路径被拦下并给出说明；锚点与自家文档放行。
+ */
+async function runExternalLinkChecks() {
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const i18n = {
+    getLang: () => "zh-CN",
+    t: (k, params) => {
+      let s = zh[k] ?? k;
+      for (const [pk, pv] of Object.entries(params || {})) s = s.split(`{${pk}}`).join(pv);
+      return s;
+    },
+  };
+  // 自家站点 = Windows 上 Tauri 自定义协议的落地形式
+  const location = { origin: "http://tauri.localhost", href: "http://tauri.localhost/index.html" };
+  const calls = [];
+  const statuses = [];
+  const listeners = [];
+  const sandbox = {
+    I18N: i18n,
+    window: { I18N: i18n, location },
+    document: { addEventListener: (type, fn, capture) => listeners.push({ type, fn, capture }) },
+    handleCommand: (raw) => calls.push(raw),
+    setStatus: (msg) => statuses.push(msg),
+  };
+
+  const saved = ["window", "document", "handleCommand", "setStatus", "I18N"].map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/external.js"))();
+    const EL = sandbox.window.ExternalLinks;
+    check("U24", "external-link-replay", !!EL && typeof EL.install === "function",
+      "external.js 未暴露 ExternalLinks.install");
+
+    EL.install();
+    EL.install(); // 幂等：装两次不该挂两遍监听
+    check("U24", "external-link-replay",
+      listeners.filter((l) => l.type === "click").length === 1 &&
+        listeners.some((l) => l.type === "click" && l.capture === true) &&
+        listeners.some((l) => l.type === "auxclick"),
+      `拦截必须只挂在捕获阶段的 click 上一次（中键 auxclick 也要）: ${JSON.stringify(listeners.map((l) => [l.type, l.capture]))}`);
+    const click = listeners.find((l) => l.type === "click").fn;
+
+    // 按下一次点击；inner=true 表示点的是 <a> 里的子节点（真实聊天里的 <code> 就是这样）
+    const clickOn = (href, inner) => {
+      const a = { nodeType: 1, tagName: "A", getAttribute: () => href, parentNode: null };
+      const target = inner ? { nodeType: 1, tagName: "SPAN", parentNode: a } : a;
+      let prevented = false;
+      click({ target, preventDefault: () => { prevented = true; } });
+      return prevented;
+    };
+
+    // ① 用户踩到的那个 P0：agent 起了服务，回一句 http://localhost:8080
+    let prevented = clickOn("http://localhost:8080/actuator/health", true);
+    check("U24", "external-link-replay",
+      prevented && calls.length === 1 && calls[0] === "open url http://localhost:8080/actuator/health",
+      `localhost 链接必须拦下并交给系统浏览器（prevented=${prevented}, calls=${JSON.stringify(calls)}）`);
+
+    // ② 外站同理（注意 URL 规范化会补上结尾的 /）
+    prevented = clickOn("https://newest-ai.com");
+    check("U24", "external-link-replay",
+      prevented && calls[1] === "open url https://newest-ai.com/",
+      `外站链接同样交给系统浏览器: ${JSON.stringify(calls)}`);
+
+    // ③ 白名单之外：拦下 + 说明；**不**交给系统、更不执行
+    calls.length = 0;
+    statuses.length = 0;
+    prevented = clickOn("javascript:alert(1)");
+    check("U24", "external-link-replay",
+      prevented && calls.length === 0 && statuses.length === 1 && statuses[0].includes("javascript"),
+      `javascript: 必须拦下且不交给系统: prevented=${prevented} calls=${JSON.stringify(calls)} status=${JSON.stringify(statuses)}`);
+    prevented = clickOn("file:///C:/Windows/System32/calc.exe");
+    check("U24", "external-link-replay",
+      prevented && calls.length === 0 && statuses.length === 2 && statuses[1].includes("file"),
+      `file: 必须拦下: calls=${JSON.stringify(calls)} status=${JSON.stringify(statuses)}`);
+
+    // ④ 同源但非文档（chat 里的相对链接 src/main.rs 解析出来就是它）：拦下 ——
+    //    导航过去只是一张 404 白页，和跳去外站一样丢状态；而它也没有"交给浏览器"的去处
+    calls.length = 0;
+    statuses.length = 0;
+    prevented = clickOn("src/main.rs");
+    check("U24", "external-link-replay",
+      prevented && calls.length === 0 && statuses.length === 1 && statuses[0].includes("内部路径"),
+      `同源非文档必须拦下并说明: prevented=${prevented} calls=${JSON.stringify(calls)} status=${JSON.stringify(statuses)}`);
+
+    // ⑤ 同文档锚点与自家文档：放行 —— 拦了就成了"点了没反应"
+    calls.length = 0;
+    statuses.length = 0;
+    check("U24", "external-link-replay",
+      clickOn("#sessions") === false && clickOn("index.html") === false &&
+        calls.length === 0 && statuses.length === 0,
+      `锚点 / 自家文档必须放行: ${JSON.stringify({ calls, statuses })}`);
+
+    // ⑥ 没有 href 的不是链接（会话里的 run 徽章就是这个形状）
+    check("U24", "external-link-replay", clickOn(null) === false,
+      "没有 href 的元素不该被当成链接");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
 // ============================================
 // 入口
 // ============================================
@@ -1289,6 +1440,7 @@ async function main() {
     ["U9", "config-replay", runConfigChecks],
     ["U22", "help-replay", runHelpChecks],
     ["U23", "service-replay", runServiceChecks],
+    ["U24", "external-link-replay", runExternalLinkChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

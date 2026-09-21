@@ -67,6 +67,7 @@ ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Mo
 │   ├── capability.js     # capability panels: tool whitelist + SKILL editor
 │   ├── config.js         # Config form: scan 3 scopes → form → save/apply/cancel (window.ConfigUI)
 │   ├── service.js        # Service panel: managed processes from the engine's table + stop by pid (window.ServiceUI)
+│   ├── external.js       # External-link gate: capture-phase click/auxclick → preventDefault → `open url` (window.ExternalLinks)
 │   ├── welcome-zh.html   # Welcome page (Chinese), injected by loadWelcome()
 │   ├── welcome-en.html   # Welcome page (English), injected by loadWelcome()
 │   ├── xterm.js          # xterm.js library (vendored)
@@ -80,7 +81,8 @@ ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Mo
 │   └── examples/plan_only.rs  # plan-only e2e smoke (real LLM call via DEEPSEEK_API_KEY env)
 │   └── examples/agent_loop_smoke.rs  # 四原语工具循环 e2e（脚本化假 LLM，无需 Key，跑完自断言）
 ├── tools/lint/             # harness_lint python package (engine lint stage; HARNESS_LINT_DIR can override)
-├── scripts/                # check-style.js (style gate), ui-smoke.js (UI smoke: contracts + session/config replay)
+├── scripts/                # check-style.js (style gate), ui-smoke.js (UI smoke: contracts + panel replays),
+│                           # nav-guard-probe.mjs (真窗口证明：外链闸门，CDP 连 WebView2)
 ├── doc/                  # Design docs (Chinese)
 └── Cargo.toml            # Workspace manifest (members: src-tauri, crates/harness-engine)
 ```
@@ -149,6 +151,38 @@ The `state` object drives the UI:
 - **宿主看得见也停得掉**：那些服务是**宿主** spawn 的，却不在宿主的进程树里（Windows 上 cmd → mvn.cmd → java 三代），以前只活在引擎的进程表 → UI 上等于不存在。顶栏【服务】面板（`ui/service.js`）读的就是这份表（`proc_list` → `proc::listing`），停止按 **pid** 发（`proc_stop` → `proc::stop_pid`）。进程表的键因此是 **pid 不是 handle**：netstat / tasklist / 用户嘴里的一手证据只有 pid，拿自造编号当主键就等于在证据和表之间插一层翻译；`handle` 降级为字段，只服务模型侧那句短引用（`proc::status` / `log_tail` / `stop` 仍按 handle 收，只是内部先翻译成 pid）。面板表格是学术三线表（PID / 启动时间 / 完整命令行三项，启动时间 = 墙钟时刻 + 括号里的 h/m/s 时长），已退出的进程不进面板；契约见 ui-smoke U23。
 - **shell 构造只有一份**：`exec::shell_command`，Windows 走 `cmd /S /C` + `raw_arg` + 自己裹一层引号。两条都是实测踩出来的——用 std 的 `arg` 会把内部引号转义成 `\"`（cmd 回"不是内部或外部命令"）；只换 `raw_arg` 又会撞上 `cmd /C` 对"以引号开头的串"的剥引号规则（回"文件名、目录名或卷标语法不正确"）。`examples/proc_demo.rs` 是这条的可复现证明。
 - 可复现证明：`cargo run -q -p harness-engine --example proc_demo`（用示例自身当"永不退出的服务"替身，不依赖 java/maven，任何平台都能跑出同一份结论）。契约见 ui-smoke U23。
+
+### 外链：WebView 是画布，不是浏览器（P0）
+
+**这条 P0 的真身**：agent 回一句「服务已起，访问 `http://localhost:8080`」，点一下那个链接，**整块 IDE 变成那张网页**
+—— 标签栏、文件树、会话全没了，而且回不去。前端全活在**一个文档**里（标签页、文件树、会话都只是 DOM 状态），
+文档一换状态一起没。病灶不是链接，是**没人拦导航**：agent 输出走 markdown-it 且开了 `linkify`，裸 URL 会变成真
+`<a href>`，而 WebView2 对普通导航的默认动作就是在本 WebView 里导航过去（`target="_blank"` 反而不中招：wry 没设
+新窗口处理器时会把请求静默吞掉 —— 那只是"点了没反应"，不是"IDE 没了"）。
+
+规矩一句话：**外链一律交给操作系统浏览器，WebView 只准待在自家文档里。**两层闸门，缺一不可：
+
+- **兜底**：窗口的 `on_navigation`（`build_main_window`）+ 纯函数 `nav_verdict` —— 任何来源的导航都要过它
+  （`a` 标签 / `location.href` / form / `window.open` / 以后某个忘了拦的角落）。**因此主窗口必须建在 Rust 里**，
+  `tauri.conf.json` 的 `app.windows` 留空：配置里生出来的窗口挂不上闸门（ui-smoke U24 钉住这一条）。
+- **显式**：`ui/external.js` 在捕获阶段接 `click` / `auxclick`，按下那一刻就 `preventDefault` 并把意图变成
+  `handleCommand("open url …")`（走命令系统，不直接 `invoke`），拦下的链接还能给一句说明 —— 后端那层没有地方说话。
+  只靠前端＝下一处漏网就是又一次 P0；只靠后端＝用户点了没反应（浏览器不开）。
+
+判定只有一条"**这条 URL 是不是应用自己的文档**"，三结局：`Nav::Allow` / `Nav::External`（拒掉导航 + 交给系统浏览器）/
+`Nav::Refuse`（拒掉，且没有可交给浏览器的出口）。两个易错点：
+
+- **`localhost` 不是自家页面**：agent 起的服务就在 localhost 上，放行它等于没拦。自家站点只有自定义协议的落地形式
+  （Windows/Android `http://tauri.localhost`，其它平台 `tauri://localhost`），且只认**文档路径**（`/` 或 `*.html`：
+  子资源不走导航事件，同源的 `tauri.localhost/main.rs` 这种相对链接导航过去只是一张 404 白页）。
+  `build.devUrl` 配了才额外认它那一条 —— 认的依据是配置里写的那条，不是"凡是 localhost"。
+- **出口白名单**：`open_external` 只放行 http / https / mailto，Windows 走 `ShellExecuteW`（系统默认处理程序，**不走 shell**：
+  URL 带 `&`/空格/中文是常态）。`file:` / `javascript:` / `data:` 一律拦在**能执行之前**。前端 `link.opened` /
+  `link.blocked` 两条文案就是这条链路的回执。
+
+可复现证明（真窗口实测，六条路子）：`node scripts/nav-guard-probe.mjs` —— 用 CDP 直连运行中的 WebView2，
+亲手试原生导航 / 点 markdown 渲染出的链接 / 同源非文档 / `window.open` / `javascript:`，每次读回 `location.href`、
+page target 数与 `#app` 是否还在。用法与预注册判据见脚本头注释。契约见 ui-smoke U24。
 
 ## Command System (command.js)
 
@@ -296,6 +330,7 @@ Known config keys:
 | `run_target` | `(cmd, project_root?, bind?)` → `RunOutput` | One-shot, not interactive. cwd = directory of the `bind` manifest file (`resolve_run_dir()`), else project root |
 | `proc_list` | `()` → `Vec<ProcInfo>` | Managed processes, read from the engine's **same** table (`harness_engine::proc::listing`) — the host must not keep a second list |
 | `proc_stop` | `(pid)` → `ProcInfo` | Stop by **pid**, whole child tree (`proc::stop_pid`, on `spawn_blocking` because kill+wait is seconds) |
+| `open_external` | `(url)` → `String` | The **only** exit for external links: whitelists http / https / mailto, then hands the URL to the OS default handler (`ShellExecuteW`, no shell). Everything else is refused before it can execute |
 | `spawn_terminal` | `(cmd, project_root?)` → `()` | New OS console window |
 | `pty_spawn` | `(cmd, tabId, project_root?)` → `()` | PTY for inline xterm.js |
 | `pty_write` | `(tabId, data)` → `()` | |

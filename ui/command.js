@@ -46,7 +46,9 @@ async function handleCommand(raw, _fromAi = false) {
 
   switch (verb) {
     case "open":
-      await handleOpenCommand(parts.slice(1));
+      // 原始串一起交下去：`open url <链接>` 的 URL 里可能带 `&` / `=` / `%20`，
+      // 再按空白切一次就是给自己造 bug（与 `project lang/edit` 同一条处理）
+      await handleOpenCommand(parts.slice(1), raw);
       break;
     case "close":
       await handleCloseCommand(parts.slice(1));
@@ -469,7 +471,7 @@ async function handleAiCommand(raw) {
  *   open project <path>  — 打开项目
  *   open file <path>     — 打开文件 (待实现)
  */
-async function handleOpenCommand(args) {
+async function handleOpenCommand(args, raw = "") {
   if (args.length === 0) {
     setStatus(I18N.t("cmd.open.usage"));
     return;
@@ -477,6 +479,8 @@ async function handleOpenCommand(args) {
 
   const sub = args[0]?.toLowerCase();
   const targetPath = args.slice(1).join(" ");
+  // `open url <链接>`：从**原始串**里截（URL 别再被空白切一次）
+  const urlArg = (/^open\s+url\s+(.+)$/i.exec(String(raw).trim()) || [])[1] || "";
 
   switch (sub) {
     case "project":
@@ -493,8 +497,60 @@ async function handleOpenCommand(args) {
       }
       await openFile(targetPath);
       break;
+    case "url":
+      await openExternalUrl(urlArg || targetPath);
+      break;
     default:
+      // 直接给一条链接（`open http://…`）也算：比 `open url http://…` 顺口，AI 也常这么翻
+      if (isUrlLike(sub)) {
+        await openExternalUrl(String(raw).trim().replace(/^open\s+/i, ""));
+        break;
+      }
       setStatus(I18N.t("cmd.open.unknown", { sub }));
+  }
+}
+
+/** 去掉包裹的引号：`open url "http://…"` 是命令栏里最自然的写法 */
+function stripQuotes(s) {
+  const t = String(s ?? "").trim();
+  const first = t[0];
+  if (t.length >= 2 && (first === '"' || first === "'") && t[t.length - 1] === first) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
+/** 看着像链接（有 scheme）就给 `open` 一个机会 */
+function isUrlLike(s) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(String(s ?? "").trim());
+}
+
+/**
+ * 外链的**唯一出口**：交给操作系统浏览器。
+ *
+ * 为什么不能只是「让 WebView 打开」：整个 IDE 活在一个文档里（标签页只是 DOM 状态），
+ * 文档一换，标签栏 / 文件树 / 会话全跟着没 —— 这就是那个 P0。后端 `open_external`
+ * 只放行 http / https / mailto，并用系统默认处理程序打开。
+ */
+async function openExternalUrl(url) {
+  const target = stripQuotes(url);
+  if (!target) {
+    setStatus(I18N.t("cmd.open.url_usage"));
+    return;
+  }
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    // 浏览器直开（无后端）也没有"当前文档不能动"的问题，但仍不动它：开新标签
+    window.open(target, "_blank", "noopener");
+    return;
+  }
+
+  try {
+    const opened = await invoke("open_external", { url: target });
+    setStatus(I18N.t("link.opened", { url: opened || target }));
+  } catch (err) {
+    setStatus(I18N.t("cmd.open.url_fail", { err }), "error");
   }
 }
 

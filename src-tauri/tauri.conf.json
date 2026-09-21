@@ -10,16 +10,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Darkhorse Code",
-        "width": 1200,
-        "height": 800,
-        "decorations": false,
-        "center": true,
-        "devtools": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

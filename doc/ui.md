@@ -85,6 +85,34 @@ vendor 的 `ui/markdown-it.min.js`（`html: false`，不执行内嵌 HTML）。
   `2026-09-20 19:07:00 (2h23m36s)` —— 时刻与已启动时长都要给全。
 - 已退出的进程不进面板（没有可管理的对象）。面板打开时每秒刷新一次时长。
 
+## 外链（WebView 只是画布，不是浏览器）
+
+点一下链接就把整个 IDE 换成那张网页，是这套架构**最致命**的一类 bug：前端全活在一个文档里
+（标签页、文件树、会话都只是 DOM 状态），文档一换，状态一起没，而且回不去。
+
+病根不是链接本身，是**没人拦导航**：agent 输出走 markdown-it 且开了 `linkify`，裸 URL 会变成真
+`<a href>`；而 WebView2 对普通导航的默认动作就是**在本 WebView 里导航过去**。agent 一句
+"服务已起，访问 `http://localhost:8080`" 就能触发。
+
+所以规矩只有一条：**外链一律交给操作系统浏览器，WebView 只准待在自家文档里。**两层闸门：
+
+| 层 | 位置 | 职责 |
+|:--:|------|------|
+| 兜底 | `src-tauri/src/main.rs::nav_verdict` + 窗口的 `on_navigation` | 任何来源的导航都要过它（`a` 标签 / `location.href` / form / `window.open` / 以后某个忘了拦的角落） |
+| 显式 | `ui/external.js`（捕获阶段点 `click` / `auxclick`） | 在按下那一刻就 `preventDefault`，把"打开链接"变成"交给系统浏览器"，并给拦下的链接一句说明 |
+
+两个后果值得记住：
+
+- **主窗口必须建在 Rust 里**（`build_main_window`），`tauri.conf.json` 的 `app.windows` 因此留空 ——
+  只有 Builder 挂得上 `on_navigation`，配置里生出来的窗口没有闸门。ui-smoke U24 钉住这一点。
+- **判定是"是不是自家文档"**，不是"是不是 localhost"：`localhost` 恰恰是 agent 起的服务所在，
+  放行它就等于没拦。同源但非文档的路径（`tauri.localhost/main.rs` 这类）也拒 —— 导航过去只是白页。
+
+出口 `open_external` 只放行 `http` / `https` / `mailto`，Windows 走 `ShellExecuteW`（系统默认处理程序），
+不走 shell。`file:` / `javascript:` / `data:` 一律拦在"能执行之前"。
+
+可复现证明（真窗口实测，六条路子）：`node scripts/nav-guard-probe.mjs`，用法见脚本头注释。
+
 ## 多语言
 
 |语言|文件|
