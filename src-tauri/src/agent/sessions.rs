@@ -37,6 +37,28 @@ pub struct PlanStepState {
     pub note: String,
 }
 
+/// 一次 `ask_user` 提问的存档快照（v0.8）：问题 / 为什么问 / 选项 / 答案 / 状态。
+///
+/// 跟 `plan` / `verify` / `reflect` 同样的理由：会话跑的是工具循环、**不落 RunRecord**，
+/// 不跟着消息存下来，重开会话就再也看不到"这一轮问过什么、用户怎么回答的"。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AskSnap {
+    pub id: String,
+    pub question: String,
+    /// 这个答案会决定接下来的什么动作（UI 展示给用户的理由）
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// 答到了才是 Some；超时 / 取消 / 无通道 / 开关关闭都为空
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// answered | timeout | no_asker | canceled | failed
+    pub state: String,
+    #[serde(default)]
+    pub ts: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionMsg {
     /// "user" | "assistant" | "system"
@@ -64,6 +86,9 @@ pub struct SessionMsg {
     /// 本轮的复核结论（干净上下文反思）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reflect: Vec<Reflection>,
+    /// 本轮的提问（v0.8：需求歧义问了什么、用户怎么答的）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<AskSnap>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -184,6 +209,7 @@ mod tests {
                     plan: None,
                     verify: vec![],
                     reflect: vec![],
+                    ask: vec![],
                 },
                 SessionMsg {
                     role: "assistant".into(),
@@ -194,6 +220,7 @@ mod tests {
                     plan: None,
                     verify: vec![],
                     reflect: vec![],
+                    ask: vec![],
                 },
             ],
         };
@@ -296,6 +323,15 @@ mod tests {
                     summary: "断言与实现不符".into(),
                     ..Default::default()
                 }],
+                ask: vec![AskSnap {
+                    id: "ask-1".into(),
+                    question: "登哪台机器？".into(),
+                    why: "凭据放哪一侧".into(),
+                    options: vec!["托管的服务器".into(), "用户另一台电脑".into()],
+                    answer: Some("用户另一台电脑".into()),
+                    state: "answered".into(),
+                    ts: "t4".into(),
+                }],
             }],
         };
         save(&s, &root).unwrap();
@@ -317,6 +353,12 @@ mod tests {
         assert_eq!(m.verify[0].verdict, "1 项没通过");
         assert_eq!(m.reflect.len(), 1, "复核结论丢了");
         assert_eq!(m.reflect[0].verdict, "suspect");
+        // v0.8：提问留痕也必须活过往返（同一个坑：结构体不声明就被 serde 抹掉）
+        assert_eq!(m.ask.len(), 1, "提问留痕丢了");
+        assert_eq!(m.ask[0].question, "登哪台机器？");
+        assert_eq!(m.ask[0].state, "answered");
+        assert_eq!(m.ask[0].answer.as_deref(), Some("用户另一台电脑"));
+        assert_eq!(m.ask[0].options.len(), 2, "选项要留着（UI 要能复现问题卡）");
         let _ = std::fs::remove_dir_all(&root);
     }
 

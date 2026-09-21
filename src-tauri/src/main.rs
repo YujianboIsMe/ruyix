@@ -1521,6 +1521,7 @@ fn main() {
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,
             agent::agent_reply,
+            agent::agent_ask_answer,
             agent::agent_stage_preview,
             agent::agent_stage_apply,
             agent::agent_plan,

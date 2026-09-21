@@ -86,6 +86,9 @@ window.ConfigUI = (() => {
         // v0.8 提问（ask_user）：需求歧义只能问委托人 —— "做一个远程登录功能" 登哪台机器？
         // 四原语组合都取不到这个答案。默认开：关掉等于让模型回去猜（猜错的代价是整体返工）。
         // timeout_secs = 0 表示无限等；超时一律 fail-closed（引擎拒绝依赖它的动作，绝不假设同意）。
+        { key: "ask.enabled", kind: "toggle" },
+        { key: "ask.timeout_secs", kind: "number" },
+        { key: "ask.max_per_run", kind: "number" },
       ],
     },
   ];

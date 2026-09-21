@@ -68,6 +68,11 @@
  *                     五环：批解析（两件外衣 / 上限不静默截断 / 控制动作当面拒）+ 不猜命令语义
  *                     （边界画在原语与路径上）+ 结果按声明顺序落位（错位是静默的）+ 回灌 results
  *                     数组逐条带 ok + 父子提示词各自自洽（子那份不许提 plan）
+ *   U26 ask-user      第五个动作（v0.8）：需求歧义只能问委托人 —— 四个效果原语取不到"意图"
+ *                     （read 读磁盘、execute 跑命令、connect 连机器，另一端都不是人），于是模型
+ *                     只剩"猜"或"把问题塞进 final"（而 final 的语义是交付：把未开工记成已完成）。
+ *                     模型侧叫 `ask_user`；引擎内部是控制动作（独占一轮 / 不进批 / 子步骤 Unsupported）；
+ *                     答案以 kind=user 回灌且**不构成授权**；拿不到答案一律 fail-closed
  *   U27 logo-assets   应用图标（RYX 字母标）有唯一真相源：几何只写在 tools/logo/build_logo.py，
  *                     由它同时产出 ui/logo*.svg 与 src-tauri/icons/*。钉四条：四个矢量变体齐
  *                     / logo.svg 与 logo-mark.svg 的轮廓逐字节相同（只改一份就是漂移）
@@ -721,6 +726,105 @@ function runStaticChecks() {
       has(intentRs, "batch_parallel") &&
       has(intentRs, "并发跑"),
     "开关与接受判定没绑在一起：提示词教不教批、引擎收不收批必须同一个开关（不虚报能力）；提示词还要说清「一批并发跑、只有同文件与托管进程保序」");
+
+  // U26 ask-user：第五个动作（v0.8）—— **需求歧义只能问委托人**。
+  // 病根：四个效果原语取不到"意图"（read 读磁盘、execute 跑命令、connect 连机器，
+  // 另一端都不是人），于是模型只剩两条烂路 —— 猜（做错到 final 才发现），或把问题塞进 final
+  // （final 的语义是**交付**：未开工被记成已完成，而且用户答完是全新一轮、游标与覆盖层全丢）。
+  // 口径与纪律：模型侧叫 `ask_user`；引擎内部是控制动作（独占一轮、不进批、子步骤 Unsupported）；
+  // 答案以 `kind=user` 的观察回灌且**不构成授权**；拿不到答案一律 fail-closed（绝不假设同意）。
+  const askRs = read("src-tauri/src/agent/ask.rs");
+  const sessRs = read("src-tauri/src/agent/sessions.rs");
+  check("U26", "ask-user",
+    has(intentRs, "Ask(AskSpec)") &&
+      has(intentRs, '"ask_user" | "ask"') &&
+      has(intentRs, "不许有") &&
+      has(intentRs, "最多 5 个") &&
+      has(intentRs, "越界"),
+    "第五个动作没进动作集：解析要认 ask_user（含 ask 别名），并挡住伪造答案（answer/granted 一律拒）与非法选项");
+  check("U26", "ask-user",
+    has(intentRs, "ask_user 不能放进批里") &&
+      has(intentRs, 'StepAction::Unsupported("ask_user")'),
+    "控制动作纪律没落：ask_user 必须独占一轮（不进批）；子步骤没有交互权（Unsupported 回一条，不整步失败）");
+  check("U26", "ask-user",
+    has(intentRs, "pub trait Asker") &&
+      has(intentRs, "pub struct NoAsker") &&
+      has(intentRs, "pub struct AskSpec") &&
+      has(intentRs, "pub struct AskRecord") &&
+      has(intentRs, "pub async fn run_with_ask(") &&
+      has(intentRs, "fn ask_failed_note(") &&
+      has(intentRs, "fn ask_answer_note("),
+    "提问通道没落地：Asker 契约 + NoAsker（headless 空实现）+ 两条观察文案（答到 / 没答到）");
+  check("U26", "ask-user",
+    has(intentRs, "不构成任何门禁的授权") && has(intentRs, "ask_failed_note"),
+    "回答的语义必须写清：**它不是授权** —— 否则 ask_user 就成了绕过暂存确认（「用户看过改动内容才落盘」）的后门");
+  check("U26", "ask-user",
+    has(askRs, 'emit("agent://ask"') &&
+      has(askRs, "fn deliver(") &&
+      has(askRs, "fn drop_all(") &&
+      has(mainRs, "agent_ask_answer") &&
+      has(sessionJs, '"agent_ask_answer"') &&
+      has(sessionJs, '"agent://ask"'),
+    "宿主通道没接通：事件 agent://ask + 投答案命令 + 取消时清空待答（否则用户取消后循环还挂到超时）");
+  check("U26", "ask-user",
+    has(sessionJs, "function askHtml(") &&
+      has(sessionJs, "function showAskCard(") &&
+      has(sessionJs, "function answerAsk(") &&
+      has(sessionJs, "session-ask-why") &&
+      has(sessionJs, "data-ask-send") &&
+      has(sessionJs, "expired"),
+    "问题卡没落地：question / **why**（为什么问）/ 选项 / 自由输入都要有；失效要照实说，不假装成功");
+  check("U26", "ask-user",
+    has(configRs, "pub struct AskConfig") &&
+      has(configRs, "pub max_per_run: u32") &&
+      has(cfgBridgeRs, "ruyix.code.harness.ask.enabled") &&
+      has(cfgBridgeRs, "ask.max_per_run") &&
+      has(configJs, '"ask.enabled"') &&
+      has(configJs, '"ask.timeout_secs"') &&
+      has(configJs, '"ask.max_per_run"'),
+    "配置三键没贯通（引擎 → 宿主桥 → 表单）：能不能问 / 等多久算没人回答 / 最多问几次都要能一行回退");
+  check("U26", "ask-user",
+    has(sessRs, "pub struct AskSnap") && has(sessRs, "pub ask: Vec<AskSnap>"),
+    "提问留痕没进会话存档：不声明字段会被 agent_session_save 的往返顺手抹掉（与 plan/verify/reflect 同一个坑）");
+
+  // U27 logo-assets：应用图标（RYX 字母标）。
+  //   病根是"图形资产没有真相源"：矢量源和 Tauri 要的那一整套 PNG/ICO 手工各维护一份，
+  //   改一次就要重新导出十几个尺寸 → 必然漂移；而 `tauri.conf.json` 里 `bundle.icon` 整个
+  //   缺失时**图标换了也不生效**（窗口图标取自它，exe 资源也是它）。
+  //   所以这条契约钉四件事：四个矢量变体都在 / 两处字母轮廓必须逐字节相同（防止只手改一份）
+  //   / bundle.icon 非空且每个文件真的在磁盘上 / Windows ico 是多尺寸（单尺寸 ico 在任务栏会糊）。
+  const LOGO_FILES = ["ui/logo.svg", "ui/logo-light.svg", "ui/logo-mark.svg", "ui/logo-mono.svg"];
+  const logoSvg = read("ui/logo.svg");
+  const markSvg = read("ui/logo-mark.svg");
+  // 注意正则要限定 ` d="`：`id="tile"` 里也含 `d="` 子串，宽松匹配会把渐变 id 当成路径。
+  const dOf = (s) => (s.match(/\sd="[^"]+"/g) || []).join("|");
+  check("U27", "logo-assets",
+    LOGO_FILES.every((f) => fs.existsSync(path.join(ROOT, f)) && read(f).length > 200) &&
+      has(logoSvg, 'aria-label="RYX"') && has(logoSvg, 'stroke-linecap="round"') &&
+      (logoSvg.match(/<path d=/g) || []).length === 3,
+    "缺少矢量源：ui/logo{,-light,-mark,-mono}.svg 必须齐（RYX 三笔，圆头描边）");
+  check("U27", "logo-assets",
+    dOf(logoSvg) === dOf(markSvg) && has(markSvg, 'stroke="url(#mark)"'),
+    "logo.svg 与 logo-mark.svg 的字母轮廓必须逐字节相同 —— 各改一份就是漂移的开始");
+  const bundleIcon = (confJson.match(/"icon"\s*:\s*\[([^\]]+)\]/s) || [, ""])[1]
+    .split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
+  check("U27", "logo-assets",
+    bundleIcon.length >= 3 &&
+      bundleIcon.every((p) => fs.existsSync(path.join(ROOT, "src-tauri", p))) &&
+      bundleIcon.some((p) => p.endsWith(".ico")) && bundleIcon.some((p) => p.endsWith(".icns")),
+    `tauri.conf.json 的 bundle.icon 缺失或指向不存在的文件：${JSON.stringify(bundleIcon)}（缺它则窗口与 exe 都用不上这套图）`);
+  const ico = fs.readFileSync(path.join(ROOT, "src-tauri/icons/icon.ico"));
+  check("U27", "logo-assets",
+    ico.readUInt16LE(0) === 0 && ico.readUInt16LE(2) === 1 && ico.readUInt16LE(4) >= 4,
+    `icon.ico 不是合法的多尺寸图标（目录项 ${ico.readUInt16LE(4)} 个）：单尺寸在任务栏会糊`);
+  check("U27", "logo-assets",
+    !fs.existsSync(path.join(ROOT, "src-tauri/icons/ios")) &&
+      !fs.existsSync(path.join(ROOT, "src-tauri/icons/android")) &&
+      fs.existsSync(path.join(ROOT, "tools/logo/build_logo.py")),
+    "本仓库只做桌面端：cargo tauri icon 顺带生成的 ios/ android/ 不该入库；生成器 tools/logo/build_logo.py 必须在");
+  check("U27", "logo-assets",
+    has(html, 'rel="icon"') && has(html, 'href="logo.svg"'),
+    "index.html 没挂 favicon（浏览器直开 UI 时页签上是空白图标）");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌

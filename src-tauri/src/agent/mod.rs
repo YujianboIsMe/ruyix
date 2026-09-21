@@ -10,6 +10,7 @@
 //! `Ok` + 状态字段返回；只有"答不了"才 `Err(String)`。
 
 pub mod apply;
+pub mod ask;
 pub mod config_bridge;
 pub mod connect;
 pub mod env_setup;
@@ -33,12 +34,16 @@ use tauri::{AppHandle, State};
 /// 单用户 IDE，不设计并发多 run；重复 `agent_run` 会重置取消位。
 pub struct AgentState {
     cancel: Arc<AtomicBool>,
+    /// 待答的 `ask_user` 问题（v0.8）表：`agent_ask_answer` 往里投答案、`agent_cancel` 清空。
+    /// 放在 state 而不是 asker 里 —— 两条命令都得摸到同一份表。
+    asks: ask::Pending,
 }
 
 impl AgentState {
     pub fn new() -> Self {
         Self {
             cancel: Arc::new(AtomicBool::new(false)),
+            asks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -146,6 +151,9 @@ pub struct ReplyAgent {
     /// 复核（干净上下文反思）的每一次结论（v0.3）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reflections: Vec<engine::reflect::Reflection>,
+    /// 本轮的提问留痕（v0.8：问了什么、为什么问、用户怎么答的 / 为什么没答到）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<engine::agent::AskRecord>,
     pub usage: engine::llm::Usage,
     pub elapsed_ms: u128,
 }
@@ -194,14 +202,16 @@ pub async fn agent_reply(
     state.cancel.store(false, Ordering::Relaxed);
     let conn =
         connect::RuyixConnector::new(&app, mcp_mgr.inner(), Some(&root), cfg.env.install_enabled);
-    let sink = AgentSink::new(app);
-    let out = engine::agent::run(
+    let sink = AgentSink::new(app.clone());
+    let asker = ask::RuyixAsker::new(app, Arc::clone(&state.asks));
+    let out = engine::agent::run_with_ask(
         &cfg,
         proj,
         &task,
         &history,
         policy,
         &conn,
+        &asker,
         &state.cancel,
         &sink,
     )
@@ -214,6 +224,7 @@ pub async fn agent_reply(
         backup_dir: out.backup_dir,
         verifications: out.verifications,
         reflections: out.reflections,
+        asks: out.asks,
         usage: out.usage,
         elapsed_ms: out.elapsed_ms,
     })
@@ -349,7 +360,27 @@ pub async fn agent_repair(
 /// 取消当前运行。返回置位前的状态（false = 当时没有在跑的 run）。
 #[tauri::command]
 pub fn agent_cancel(state: State<'_, AgentState>) -> bool {
-    state.cancel.swap(true, Ordering::Relaxed)
+    let was = state.cancel.swap(true, Ordering::Relaxed);
+    // 挂起的提问也要一起醒：否则用户按了取消，循环还得挂到超时（v0.8）
+    ask::drop_all(&state.asks);
+    was
+}
+
+/// 用户回答了 `agent://ask` 里的问题（v0.8）。
+///
+/// 返回 `false` = 这次提问已经失效（超时 / 已取消 / 已答过）—— 前端据此提示"已失效"，
+/// **不假装成功**：答案是语义与权限的输入，投错比投丢更糟。
+#[tauri::command]
+pub fn agent_ask_answer(
+    state: State<'_, AgentState>,
+    ask_id: String,
+    text: String,
+    option_index: Option<usize>,
+) -> bool {
+    if text.trim().is_empty() && option_index.is_none() {
+        return false;
+    }
+    ask::deliver(&state.asks, ask_id.trim(), text.trim(), option_index)
 }
 
 // ============================================

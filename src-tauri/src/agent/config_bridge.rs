@@ -70,6 +70,10 @@ pub struct BridgeValues {
     pub proc_enabled: Option<String>,
     pub proc_max: Option<String>,
     pub proc_ready_timeout: Option<String>,
+    // v0.8 提问（ask_user）：需求歧义只能问委托人（第四类不确定性）
+    pub ask_enabled: Option<String>,
+    pub ask_timeout_secs: Option<String>,
+    pub ask_max_per_run: Option<String>,
 }
 
 impl BridgeValues {
@@ -132,6 +136,9 @@ impl BridgeValues {
                 "ruyix.code.harness.proc.ready_timeout_secs",
                 project_root,
             ),
+            ask_enabled: read(mgr, "ruyix.code.harness.ask.enabled", project_root),
+            ask_timeout_secs: read(mgr, "ruyix.code.harness.ask.timeout_secs", project_root),
+            ask_max_per_run: read(mgr, "ruyix.code.harness.ask.max_per_run", project_root),
         }
     }
 }
@@ -342,6 +349,31 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         cfg.proc.ready_timeout_secs = n;
     }
 
+    // v0.8 提问（ask_user）：默认**开**。需求歧义（"做一个远程登录功能" —— 登哪台机器？）
+    // 的答案不在环境里，关掉等于让模型回去猜 —— 猜错的代价常常是整体返工。
+    // 三个键同样是"可解析才生效、非法值保持默认"。
+    if let Some(e) = v.ask_enabled.as_deref() {
+        cfg.ask.enabled = e == "true" || e == "1";
+    }
+    if let Some(n) = v
+        .ask_timeout_secs
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        // 0 = 无限等（桌面场景用户就在旁边）；超时一律 fail-closed
+        cfg.ask.timeout_secs = n;
+    }
+    if let Some(n) = v
+        .ask_max_per_run
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        // 0 会把所有提问都拒掉 = 悄悄关死这个能力，所以按非法值处理（保持默认）
+        if n > 0 {
+            cfg.ask.max_per_run = n;
+        }
+    }
+
     // 运行目录：ruyix 默认 ~/.ruyix/code/agent/runs（D5）
     cfg.workspace_root = v
         .workspace_root
@@ -523,6 +555,43 @@ mod tests {
             },
         );
         assert_eq!(cfg3.discover.ttl_secs, 300);
+    }
+
+    /// v0.8：提问（ask_user）默认开；关掉能回退；非法上限保持默认
+    #[test]
+    fn ask_bridge_defaults_on_and_parses_three_keys() {
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &BridgeValues::default());
+        assert!(cfg.ask.enabled, "提问默认必须是开的");
+        assert_eq!(cfg.ask.timeout_secs, 300);
+        assert_eq!(cfg.ask.max_per_run, 4);
+
+        let mut cfg2 = base();
+        apply_overrides(
+            &mut cfg2,
+            &BridgeValues {
+                ask_enabled: Some("false".into()),
+                ask_timeout_secs: Some("0".into()),
+                ask_max_per_run: Some("9".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!cfg2.ask.enabled, "false 必须能关回去");
+        assert_eq!(cfg2.ask.timeout_secs, 0, "0 = 无限等，是合法值");
+        assert_eq!(cfg2.ask.max_per_run, 9);
+
+        // 非法值保持默认；`max_per_run = 0` 会把所有提问都拒掉（= 悄悄关死能力），按非法处理
+        let mut cfg3 = base();
+        apply_overrides(
+            &mut cfg3,
+            &BridgeValues {
+                ask_timeout_secs: Some("很久".into()),
+                ask_max_per_run: Some("0".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg3.ask.timeout_secs, 300);
+        assert_eq!(cfg3.ask.max_per_run, 4, "0 不是合法上限（会静默关死能力）");
     }
 
     /// v0.5：环境准备（按需安装）默认开，`false` 能关回去

@@ -2929,6 +2929,70 @@ html, body {
   color: var(--text-secondary);
 }
 
+/* 提问卡（v0.8 ask_user）：需要用户拿主意时才出现，所以给足视觉重量 */
+.session-ask-box {
+  border-left-color: #dcdcaa;
+}
+
+.session-ask + .session-ask {
+  margin-top: 8px;
+}
+
+.session-ask-q {
+  color: #e8e8e8;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.session-ask-why {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.session-ask-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.session-ask-free {
+  display: flex;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.session-ask-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--input-bg, #1e1e1e);
+  border: 1px solid var(--border-color);
+  color: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.session-ask-answer {
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.session-ask-ok {
+  color: #4ec9b0;
+}
+
+.session-ask-miss {
+  color: #dcdcaa;
+}
+
+.session-ask-note {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
 .session-gate-row {
   display: flex;
   gap: 6px;

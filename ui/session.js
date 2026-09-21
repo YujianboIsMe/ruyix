@@ -20,6 +20,7 @@
   let busy = false;         // 引擎单任务（与命令桥同一取消位模型）
   let runningPlaceholder = null; // 进行中 run 的助手占位消息（事件流实时刷新）
   let runSession = null;    // 正在跑 run 的会话（agent://plan / agent://step 事件的归属）
+  let runWrap = null;       // 它的聊天 DOM（提问卡要就地重渲染）
 
   function $(id) {
     return document.getElementById(id);
@@ -228,6 +229,27 @@
       fillMsgs(wrap, s);
       persist(s);
     });
+    // 提问卡（v0.8 ask_user）：卡片按钮/输入框由 askHtml 在每次重渲染时重建，
+    // 所以走**事件委托**（绑在容器上），而不是逐个按钮 addEventListener。
+    wrap.addEventListener("click", (e) => {
+      const opt = e.target.closest("[data-ask-opt]");
+      if (opt) {
+        answerAsk(opt.dataset.askId, opt.dataset.askText ?? "", Number(opt.dataset.askOpt));
+        return;
+      }
+      const send = e.target.closest("[data-ask-send]");
+      if (send) {
+        const inp = wrap.querySelector(`[data-ask-input="${send.dataset.askId}"]`);
+        answerAsk(send.dataset.askId, (inp?.value ?? "").trim(), null);
+      }
+    });
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const inp = e.target.closest("[data-ask-input]");
+      if (!inp) return;
+      e.preventDefault();
+      answerAsk(inp.dataset.askInput, inp.value.trim(), null);
+    });
     return wrap;
   }
 
@@ -239,6 +261,95 @@
     }
     el.innerHTML = s.messages.map(msgHtml).join("");
     el.scrollTop = el.scrollHeight;
+  }
+
+  /** 没答到的几种原因（照实显示，不粉饰） */
+  function askStateText(state) {
+    if (state === "timeout") return L("等超时了", "timed out");
+    if (state === "canceled") return L("你取消了这次运行", "run canceled");
+    if (state === "no_asker") return L("当前环境没有提问通道", "no asking channel here");
+    if (state === "expired") return L("回答晚了一步，提问已失效", "answered too late");
+    if (state === "failed") return L("提问失败", "asking failed");
+    return state || L("未知", "unknown");
+  }
+
+  /**
+   * 提问小节（v0.8 `ask_user`）：需求歧义时模型问用户的那一问。
+   *
+   * 展示顺序严格是「问什么 → **为什么问** → 怎么答」：`why`（这个答案会决定什么）不是装饰 ——
+   * 用户凭它判断这一问值不值得答，也是"模型不许把危险动作包装成一个无害问题"的落点。
+   * 已答过的提问在重开会话后照样看得见（跟着消息存档），所以这里既渲染"待答"也渲染"已答"。
+   */
+  function askHtml(m) {
+    const asks = m.ask ?? [];
+    if (!asks.length) return "";
+    const rows = [];
+    for (const a of asks) {
+      const head = `<div class="session-ask-q">❓ ${esc(a.question ?? "")}</div>`;
+      const why = a.why
+        ? `<div class="session-ask-why">${L("为什么问", "Why")}：${esc(a.why)}</div>`
+        : "";
+      let body;
+      if (a.state === "asking") {
+        const opts = (a.options ?? [])
+          .map((o, i) =>
+            `<button class="agent-btn session-ask-opt" data-ask-id="${esc(a.id)}" data-ask-opt="${i}" data-ask-text="${esc(o)}">${esc(o)}</button>`)
+          .join("");
+        const note = a.timeout_secs
+          ? `<div class="session-ask-note">${L(`超过 ${a.timeout_secs} 秒不回答，这一问就作废 —— 引擎不会替你猜`,
+            `Unanswered for ${a.timeout_secs}s and the question expires — the engine will not guess`)}</div>`
+          : "";
+        body =
+          (opts ? `<div class="session-ask-opts">${opts}</div>` : "") +
+          `<div class="session-ask-free">` +
+          `<input class="session-ask-input" data-ask-input="${esc(a.id)}" placeholder="${L("或者直接写下你的答案…", "Or type your answer…")}">` +
+          `<button class="agent-btn agent-btn--run" data-ask-id="${esc(a.id)}" data-ask-send>${L("回答", "Answer")}</button>` +
+          `</div>` + note;
+      } else if (a.state === "answered") {
+        body = `<div class="session-ask-answer">` +
+          `<span class="session-ask-ok">${L("你的回答", "Your answer")}：${esc(a.answer ?? "")}</span></div>`;
+      } else {
+        body = `<div class="session-ask-answer">` +
+          `<span class="session-ask-miss">${L("没有回答", "No answer")}（${esc(askStateText(a.state))}）</span></div>`;
+      }
+      rows.push(`<div class="session-ask">${head}${why}${body}</div>`);
+    }
+    return `<div class="session-gate session-ask-box">${rows.join("")}</div>`;
+  }
+
+  /** `agent://ask`：把问题挂到正在跑的那条助手消息上（重渲染后由 askHtml 画出来） */
+  function showAskCard(p) {
+    const s = runSession;
+    const m = runningPlaceholder;
+    if (!s || !m || !p.id) return;                    // 没有在跑的 run：忽略（残留事件）
+    const list = m.ask ?? [];
+    if (list.some((x) => x.id === p.id)) return;      // 幂等：事件重放不重复插
+    m.ask = [...list, { ...p, state: "asking" }];
+    if (runWrap) fillMsgs(runWrap, s);
+    status(L("Agent 在等你回答一个问题", "The agent is waiting for your answer"));
+  }
+
+  /**
+   * 回答一个提问。失效（超时 / 已取消 / 已答过）时**照实说**，不假装成功 ——
+   * 答案是语义与权限的输入，投错比投丢更糟（后端返回 false 就是判据）。
+   */
+  async function answerAsk(askId, text, optionIndex) {
+    const invoke = getInvoke();
+    if (!invoke) return;
+    let ok = false;
+    try {
+      ok = await invoke("agent_ask_answer", { askId, text, optionIndex });
+    } catch (err) {
+      ok = false;
+    }
+    for (const a of (runningPlaceholder?.ask ?? [])) {
+      if (a.id === askId) {
+        a.state = ok ? "answered" : "expired";
+        a.answer = text;
+      }
+    }
+    if (!ok) status(L("这个提问已经失效（超时 / 已取消）", "This question has expired"), "error");
+    if (runWrap && runSession) fillMsgs(runWrap, runSession);
   }
 
   /**
@@ -337,7 +448,7 @@
       : `<div class="session-bubble session-bubble--md">${mdHtml(m.text)}</div>`;
     return `<div class="session-msg ${mine ? "session-msg--user" : "session-msg--agent"}">` +
       bubble +
-      (mine ? "" : gateHtml(m)) +
+      (mine ? "" : gateHtml(m) + askHtml(m)) +
       (meta.length ? `<div class="session-meta">${meta.join(" ")}</div>` : "") +
       `</div>`;
   }
@@ -756,6 +867,7 @@
     s.messages.push(placeholder);
     runningPlaceholder = placeholder;
     runSession = s;
+    runWrap = wrap;
     fillMsgs(wrap, s);
     let rep = null;
     const mode = currentMode(wrap);
@@ -767,6 +879,8 @@
       // 验证 / 复核结论挂在这条助手消息上（持久化后重开也能看到"这轮验过没有"）
       placeholder.verify = rep.verifications ?? [];
       placeholder.reflect = rep.reflections ?? [];
+      // 提问留痕（v0.8）：跟着消息存档，重开会话仍看得见问过什么、怎么答的
+      placeholder.ask = rep.asks ?? [];
       placeholder.status = gateStatus(placeholder);
     } catch (err) {
       placeholder.status = "failed";
@@ -774,6 +888,7 @@
     } finally {
       runningPlaceholder = null;
       runSession = null;
+      runWrap = null;
       setBusy(false);
       // 计划（含终态）跟着这条消息落盘：工具循环不落 RunRecord，run_id 是空的，
       // 这是重启后恢复大纲区任务列表的唯一来源
@@ -887,6 +1002,8 @@
         // v0.3 质量门禁：验证 / 复核结论实时补进进行中的气泡（不用等 run 结束）
         listen("agent://verify", (ev) => appendGate(ev.payload ?? {}, "verify"));
         listen("agent://reflect", (ev) => appendGate(ev.payload ?? {}, "reflect"));
+        // 提问（v0.8）：模型问需求歧义 → 会话里弹问题卡，等你答完它继续做
+        listen("agent://ask", (ev) => showAskCard(ev.payload ?? {}));
       }
     } catch {
       // 浏览器模式无 Tauri 事件

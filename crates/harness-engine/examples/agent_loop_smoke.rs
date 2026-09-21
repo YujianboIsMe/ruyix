@@ -4,7 +4,7 @@
 //! 格子之间 —— 连接清单有没有进首条用户消息、写完文件有没有立刻跑语法层、交付前是不是
 //! 真的跑了全量验证、验证失败有没有拦住 `final`、复核 agent 的上下文是不是干净的。
 //!
-//! 四臂（每条都真跑子进程：python 语法检查 + unittest）：
+//! 五臂（每条都真跑子进程：python 语法检查 + unittest）：
 //! - **arm 1 正常路径**：四原语全走一遍 + 交付前验证通过 + 干净上下文复核
 //! - **arm 2 验证失败被拦**：写了坏代码 → 全量验证失败 → `final` 被打回 → 改好后放行
 //! - **arm 3 预算用尽**：验证连续失败到预算上限 → 放行，但答复必须写明"未通过"
@@ -16,7 +16,7 @@
 //! 假 LLM 复用 `harness_engine::testllm`（与单测同一份实现，别各写一遍）。
 
 use harness_engine::agent::{
-    self, AgentOutcome, ConnectFuture, ConnectOutcome,
+    self, AgentOutcome, AskAnswer, AskErr, AskFut, AskSpec, Asker, ConnectFuture, ConnectOutcome,
     ConnectRequest, ConnectTarget, Connector, HistoryMsg, WritePolicy,
 };
 use harness_engine::config::AppConfig;
@@ -410,12 +410,162 @@ fn arm_batch_calls(rep: &mut Report) {
 // arm 5：需求歧义 → 问用户（第五个动作 ask_user，v0.8）
 // ============================================
 
+/// 脚本化提问通道：按序给答案；剧本演完一律"没人回答"。
+/// 测试与冒烟里**绝不允许**出现"引擎自己猜了一个答案" —— 那是比不问更糟的失败。
+struct ScriptAsker {
+    answers: Mutex<std::collections::VecDeque<String>>,
+    seen: Mutex<Vec<(String, String, String)>>,
+}
+
+impl Asker for ScriptAsker {
+    fn ask<'a>(&'a self, id: &'a str, spec: &'a AskSpec) -> AskFut<'a> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((id.to_string(), spec.question.clone(), spec.why.clone()));
+        let next = self.answers.lock().unwrap().pop_front();
+        Box::pin(async move {
+            match next {
+                Some(text) => Ok(AskAnswer {
+                    text,
+                    option_index: None,
+                    ts: String::new(),
+                }),
+                None => Err(AskErr::Timeout),
+            }
+        })
+    }
+}
+
+/// 跑一臂（带提问通道）：与 [`run_loop`] 同款，只是走 `run_with_ask` 并把问过什么带回来
+fn run_loop_ask(
+    dir: &Path,
+    task: &str,
+    script: Vec<String>,
+    answer: &str,
+    tweak: impl FnOnce(&mut AppConfig),
+) -> (FakeLlm, AgentOutcome, Vec<(String, String, String)>) {
+    let llm = fake_llm(script);
+    let mut cfg = AppConfig::default();
+    cfg.llm.base_url = llm.base_url.clone();
+    cfg.llm.api_key = "smoke".into();
+    cfg.llm.model = "fake".into();
+    cfg.sandbox.mode = "off".into();
+    cfg.lint.enabled = false;
+    cfg.reflect.enabled = false;
+    tweak(&mut cfg);
+
+    let conn = RecordingConnector {
+        calls: Mutex::new(Vec::new()),
+    };
+    let asker = ScriptAsker {
+        answers: Mutex::new(std::collections::VecDeque::from([answer.to_string()])),
+        seen: Mutex::new(Vec::new()),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let out = rt
+        .block_on(agent::run_with_ask(
+            &cfg,
+            dir,
+            task,
+            &[HistoryMsg {
+                role: "user".into(),
+                text: "你好".into(),
+            }],
+            WritePolicy::Apply,
+            &conn,
+            &asker,
+            &harness_engine::exec::new_cancel_flag(),
+            &PrintSink,
+        ))
+        .expect("工具循环不该失败");
+    let asked = asker.seen.lock().unwrap().clone();
+    (llm, out, asked)
+}
+
+fn arm_ask_user(rep: &mut Report) {
+    println!("\n=== arm 5：需求歧义 → 问用户（ask_user）===");
+    let dir = temp_project("ask");
+    // "做一个远程登录功能" —— 登哪台机器？这个答案**不在环境里**：read 读磁盘、
+    // execute 跑命令、connect 连机器，另一端都不是人。所以只能问。
+    let ask = serde_json::json!({
+        "tool": "ask_user",
+        "args": {
+            "question": "远程登录要连的是哪种机器？",
+            "why": "这决定了凭据放哪一侧、要不要装跳板",
+            "options": ["公司托管的服务器", "用户自己另一台电脑"]
+        }
+    })
+    .to_string();
+    let write = serde_json::json!({
+        "tool": "write",
+        "args": {
+            "path": "login.md",
+            "content": "方案：面向用户自己另一台电脑（点对点）"
+        }
+    })
+    .to_string();
+    let script = vec![
+        ask,
+        write,
+        format!(r#"{{"final":{}}}"#, js("按你选的方案实现好了。")),
+    ];
+
+    let (llm, out, asked) = run_loop_ask(
+        &dir,
+        "做一个远程登录功能",
+        script,
+        "用户自己另一台电脑",
+        |c| {
+            c.gate.full = false; // 只在 markdown 上改动，跑全量验证没意义
+        },
+    );
+
+    rep.check(
+        "模型问了一句（id 从 ask-1 起）",
+        asked.len() == 1 && asked[0].0 == "ask-1",
+    );
+    rep.check(
+        "问的是那一句，并带上「为什么问」（UI 要原样展示给用户）",
+        asked[0].1 == "远程登录要连的是哪种机器？" && asked[0].2.contains("凭据"),
+    );
+    let second = llm.request(1);
+    rep.check(
+        "答案回灌进模型上下文（第 2 轮请求体里能看到）",
+        second.contains("用户自己另一台电脑"),
+    );
+    rep.check(
+        "回灌写明它不是授权（它不是绕过暂存确认的后门）",
+        second.contains("不构成任何门禁的授权"),
+    );
+    rep.check(
+        "run 没有中断：答完之后照样写文件、照常交付",
+        out.answer.contains("实现好了")
+            && std::fs::read_to_string(dir.join("login.md"))
+                .unwrap()
+                .contains("另一台电脑"),
+    );
+    rep.check(
+        "提问留痕进结果（宿主据此写进会话存档，重开会话仍看得见）",
+        out.asks.len() == 1 && out.asks[0].state == "answered" && out.asks[0].options.len() == 2,
+    );
+    rep.check(
+        "只花了 3 轮（问 / 写 / 交付），没有额外的空转",
+        llm.count() == 3,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn main() {
     let mut rep = Report::default();
     arm_happy_path(&mut rep);
     arm_verify_blocks(&mut rep);
     arm_budget_exhausted(&mut rep);
     arm_batch_calls(&mut rep);
+    arm_ask_user(&mut rep);
 
     println!("\n=== 汇总 ===");
     if rep.failed.is_empty() {

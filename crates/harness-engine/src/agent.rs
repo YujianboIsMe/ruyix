@@ -114,6 +114,9 @@ pub struct AgentOutcome {
     /// 反思（干净上下文复核）的每一次结论
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reflections: Vec<Reflection>,
+    /// 本轮的提问留痕（问题 / 为什么问 / 答案 / 没答到的原因）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<AskRecord>,
     pub usage: Usage,
     pub elapsed_ms: u128,
 }
@@ -492,12 +495,51 @@ const BATCH_HINT_HEAD: &str = concat!(
 /// 那段同源（父那份到不了子上下文，子那份也不许广告父的能力）。
 pub(crate) fn batch_hint(max: usize, has_plan: bool) -> String {
     let ctrl = if has_plan {
-        "final / plan 不能放进批里，要单独一轮输出。"
+        "final / plan / ask_user 是控制动作，不能放进批里，要单独一轮输出。"
     } else {
-        // 子步骤没有清单，不许提它（父子提示词各自自洽）
+        // 子步骤没有清单也没有提问权，不许提它们（父子提示词各自自洽）
         "final 不能放进批里，要单独一轮输出。"
     };
     format!("{BATCH_HINT_HEAD}{ctrl}（一批最多 {max} 个调用）")
+}
+
+/// 提问（`ask_user`）的提示词 —— 与 [`batch_hint`] 同一条通道（**首轮 user 消息**），
+/// 且**只给主循环**：步骤子 agent 没有交互权（子步的 `ask_user` 是 `Unsupported`），
+/// 广告一个子步做不到的能力就是虚报能力（与 plan 那条同源）。
+///
+/// 判据必须成对写：只教"可以问"会得到一个什么都问的助手，只教"别问"会得到一个什么都猜的助手。
+pub(crate) fn ask_hint(cfg: &AppConfig) -> String {
+    format!(
+        "提问（需求歧义）：**需求本身含糊时用 ask_user 问用户**，不要猜 —— 猜错的代价常常是整体返工。\n\
+         形状：{shape}\n\
+         什么时候**必须**问：① 目的物 / 环境 / 范围指代不明确，且选错要整体返工（例：\"做一个远程登录功能\" —— 登哪台机器？公司托管的服务器，还是用户自己另一台电脑？）；② 动作不可逆或破坏性，而任务原文没有明确授权。\n\
+         什么时候**不许**问：能从项目里读出来的（自己去 read；命令发现表已经告诉你本机有什么）；只有可回退的差异（命名、默认值、目录结构）—— 那时**声明你的假设继续做**，把差异写进 final 的说明里。\n\
+         纪律：一次 run 最多问 {max} 次，且 ask_user 要单独一轮（不能进批）；超时或无人回答时引擎会**拒绝**依赖它的动作 —— 所以答案没来之前别把工作压在那个假设上。",
+        shape = r#"{"tool":"ask_user","args":{"question":"…","why":"这个答案会决定接下来的什么动作","options":["选项甲","选项乙"],"default_index":0}}"#,
+        max = cfg.ask.max_per_run
+    )
+}
+
+/// 拿到答案的观察：**明确它不是授权** —— 门禁仍走"用户看过改动内容"的暂存确认。
+fn ask_answer_note(id: &str, ans: &AskAnswer, spec: &AskSpec) -> String {
+    let picked = match ans.option_index.and_then(|i| spec.options.get(i)) {
+        Some(o) => format!("\n（他选了：{o}）"),
+        None => String::new(),
+    };
+    format!(
+        "用户（**委托人本人**）回答了 {id}：\"{}\"{picked}\n问的是：{}\n\
+         注意：这是人的回答，只用于消除歧义，**不构成任何门禁的授权** —— 写盘照旧按你看到的模式与确认流程走。",
+        ans.text, spec.question
+    )
+}
+
+/// 没拿到答案的观察：fail-closed —— 拒绝依赖它的动作，并点名它必须去交付 + 写清假设。
+fn ask_failed_note(id: &str, err: &AskErr, _spec: &AskSpec) -> String {
+    format!(
+        "ask_user 没有得到回答（{id}：{}）—— **这不是\"同意\"，也不是\"没人关心\"**；依赖这个答案的动作现在**不许做**。\
+         \n请改为：把不确定的点写进 final 的说明里（你的假设是什么、用户之后要确认什么），或换一条不依赖它的路。",
+        err.reason()
+    )
 }
 
 // ============================================
@@ -517,6 +559,109 @@ enum Action {
     /// 托管进程的句柄操作（status / log / stop）
     Proc(ProcOp, String),
     Connect(ConnectAction),
+    /// **第五个动作**：向委托人提问。
+    ///
+    /// 需求歧义（"做一个远程登录功能" —— 登哪台机器？托管的服务器还是用户另一台电脑？）
+    /// 的答案**不在环境里**，只存在于委托人脑子里：read 读磁盘、execute 跑命令、connect 连机器，
+    /// 三者都只会从"环境"取答案，任何组合都取不到它。它同时是**控制动作**（停下来让出方向盘）
+    /// 与**效果**（取信息），也是唯一"另一端是人"的动作 —— 答案可能永远不来，且能改变任务本身。
+    Ask(AskSpec),
+}
+
+/// 一次提问的规格（模型侧 `ask_user` 的 args）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskSpec {
+    /// 问什么。指代必须明确（"你想要什么"这种废问题会被用户当噪声）
+    pub question: String,
+    /// **这个答案会决定接下来的什么动作** —— UI 原样展示给用户。
+    /// 审计与反社会工程学的硬要求：模型不许把一个危险动作包装成一个无害的问题。
+    pub why: String,
+    /// 2~5 个候选；空 = 自由文本
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// 用户不答 / 超时时采用的默认（**没有默认 = fail-closed 拒绝**依赖它的动作）
+    #[serde(default)]
+    pub default_index: Option<usize>,
+    /// 等多久算"没人回答"（0 = 无限等）。**由引擎按配置填，模型给的会被忽略** ——
+    /// 能不能决定超时，是委托人的权力，不是模型的。
+    #[serde(default)]
+    pub timeout_secs: u64,
+}
+
+/// 用户（委托人）的回答
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskAnswer {
+    pub text: String,
+    #[serde(default)]
+    pub option_index: Option<usize>,
+    #[serde(default)]
+    pub ts: String,
+}
+
+/// 为什么没拿到答案。**每一种都必须是 fail-closed**：绝不假设同意。
+#[derive(Clone, Debug)]
+pub enum AskErr {
+    /// 宿主没接提问通道（headless / eval / 冒烟）
+    NoAsker,
+    Timeout,
+    Canceled,
+    Failed(String),
+}
+
+impl AskErr {
+    pub fn reason(&self) -> String {
+        match self {
+            AskErr::NoAsker => "当前环境没有提问通道（headless 或未接宿主）".into(),
+            AskErr::Timeout => "等超时了，用户没有回答".into(),
+            AskErr::Canceled => "这次 run 被取消了".into(),
+            AskErr::Failed(e) => format!("提问失败：{e}"),
+        }
+    }
+    /// 状态标签（进会话存档，UI 据此显示"未回答 / 超时"）
+    pub fn state(&self) -> &'static str {
+        match self {
+            AskErr::NoAsker => "no_asker",
+            AskErr::Timeout => "timeout",
+            AskErr::Canceled => "canceled",
+            AskErr::Failed(_) => "failed",
+        }
+    }
+}
+
+pub type AskFut<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<AskAnswer, AskErr>> + Send + 'a>>;
+
+/// 提问通道的宿主契约 —— 与 [`Connector`] 同款：引擎只声明能力，宿主兑现。
+///
+/// **等待与超时由实现负责**（引擎没有计时器），而拿不到答案必须返回 `Err`：
+/// 拿一个"猜的答案"回来是这条契约唯一不可接受的事。
+pub trait Asker: Send + Sync {
+    fn ask<'a>(&'a self, id: &'a str, spec: &'a AskSpec) -> AskFut<'a>;
+}
+
+/// 空实现：headless / eval / 冒烟用。一律 fail-closed（与 `NoConnector` 同款纪律）。
+pub struct NoAsker;
+
+impl Asker for NoAsker {
+    fn ask<'a>(&'a self, _id: &'a str, _spec: &'a AskSpec) -> AskFut<'a> {
+        Box::pin(async { Err(AskErr::NoAsker) })
+    }
+}
+
+/// 一次提问的留痕（进 `AgentOutcome.asks` → 宿主写进会话存档 → 重开会话仍看得见）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskRecord {
+    pub id: String,
+    pub question: String,
+    pub why: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub answer: Option<String>,
+    /// answered | timeout | no_asker | canceled | failed
+    pub state: String,
+    #[serde(default)]
+    pub ts: String,
 }
 
 /// `execute` 对托管进程的句柄操作
@@ -612,6 +757,12 @@ fn parse_actions(raw: &str, max: usize, allow_batch: bool) -> Result<Vec<Action>
             Action::Plan(_) => {
                 return Err("plan 不能放进批里：清单要单独发一轮".into());
             }
+            Action::Ask(_) => {
+                return Err(
+                    "ask_user 不能放进批里：提问要单独一轮（同一批里两件事谁先谁后没有合理解释）"
+                        .into(),
+                );
+            }
             other => out.push(other),
         }
     }
@@ -676,6 +827,51 @@ fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
         "execute" | "bash" => parse_execute(&args),
         // 第五个动作：需求歧义只能问委托人。args 里出现 answer / granted 之类一律拒 ——
         // 模型不许自问自答（答案只能从宿主的用户通道进来，与"复核 agent 构造上没有写路径"同款纪律）。
+        "ask_user" | "ask" => {
+            for forged in ["answer", "granted", "approved", "user_says"] {
+                if args.get(forged).is_some() {
+                    return Err(format!(
+                        "ask_user 的 args 里不许有 {forged}（答案只能由用户给）—— 你要问的是问题，不是答案"
+                    ));
+                }
+            }
+            let why = get_str(&args, "why")?;
+            let options: Vec<String> = args
+                .get("options")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if options.len() > 5 {
+                return Err(format!(
+                    "ask_user 的选项最多 5 个（收到 {} 个）：选项太多用户反而答不了",
+                    options.len()
+                ));
+            }
+            let default_index = args
+                .get("default_index")
+                .and_then(|x| x.as_u64())
+                .map(|v| v as usize);
+            let bad_default = default_index.filter(|i| *i >= options.len());
+            if let Some(i) = bad_default {
+                return Err(format!(
+                    "ask_user 的 default_index = {i} 越界（只有 {} 个选项）",
+                    options.len()
+                ));
+            }
+            Ok(Action::Ask(AskSpec {
+                question: get_str(&args, "question")?,
+                why,
+                options,
+                default_index,
+                timeout_secs: 0,
+            }))
+        }
         "plan" => {
             let mut steps: Vec<PlanStep> =
                 serde_json::from_value(args.get("steps").cloned().unwrap_or(serde_json::json!([])))
@@ -692,7 +888,7 @@ fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
             Ok(Action::Plan(steps))
         }
         other => Err(format!(
-            "未知能力 {other:?}（只有 read / write / execute / connect 四种，外加 plan 清单，或输出 final）"
+            "未知能力 {other:?}（原子能力只有 read / write / execute / connect 四种，外加 plan 清单、ask_user 提问，或输出 final）"
         )),
     }
 }
@@ -726,7 +922,8 @@ fn shape_of(a: &Action) -> Shape<'_> {
         Action::Execute(..)
         | Action::Connect(_)
         | Action::Plan(_)
-        | Action::Final(_) => Shape {
+        | Action::Final(_)
+        | Action::Ask(_) => Shape {
             path: None,
             write: false,
             proc: false,
@@ -1010,10 +1207,10 @@ async fn exec_one(
         }
         Action::Connect(ca) => connect_step(conn, ca).await,
         // 控制动作进不了批（parse_actions 已当面拒）；这条分支只为让 match 穷尽
-        Action::Plan(_) | Action::Final(_) => (
+        Action::Plan(_) | Action::Final(_) | Action::Ask(_) => (
             "control".into(),
             "控制动作".into(),
-            Err("plan / final 不能与调用同批执行".into()),
+            Err("plan / final / ask_user 不能与调用同批执行".into()),
         ),
     }
 }
@@ -1077,11 +1274,11 @@ async fn run_wave(
                 conn_futs.push(connect_future(conn, ca.clone()));
             }
             // 控制动作进不了多人波（parse_actions 已拒批里的 plan / final）
-            Action::Plan(_) | Action::Final(_) => {
+            Action::Plan(_) | Action::Final(_) | Action::Ask(_) => {
                 slots[i] = Some((
                     "control".into(),
                     "控制动作".into(),
-                    Err("plan / final 不能与调用同波执行".into()),
+                    Err("plan / final / ask_user 不能与调用同波执行".into()),
                 ));
             }
         }
@@ -1273,6 +1470,7 @@ fn to_step_action(a: Action) -> StepAction {
         Action::Plan(_) => StepAction::Unsupported("plan"),
         Action::Connect(_) => StepAction::Unsupported("connect"),
         // 子步没有交互权：它的 messages 是干净上下文，一问就破了"一轮 = 一步"的派发语义
+        Action::Ask(_) => StepAction::Unsupported("ask_user"),
     }
 }
 
@@ -2496,6 +2694,10 @@ async fn gate_before_final(
 // 八项都是调用方已就绪的事实（配置、项目、任务、历史、策略、连接器、取消位、事件出口）；
 // 打包成结构体只是把参数换个地方列一遍，同一先例见 `verify` 的 `run_check`。
 #[allow(clippy::too_many_arguments)]
+/// 工具循环（**没有提问通道**的形态）：headless / eval / 冒烟 / 管线用。
+///
+/// 没有 `Asker` 时 `ask_user` 一律 fail-closed（拒绝依赖它的动作），**绝不假装有人回答** ——
+/// 与 `NoConnector` 同款纪律。宿主（会话）走 [`run_with_ask`]。
 pub async fn run(
     cfg: &AppConfig,
     proj: &Path,
@@ -2503,6 +2705,25 @@ pub async fn run(
     history: &[HistoryMsg],
     policy: WritePolicy,
     conn: &dyn Connector,
+    cancel: &CancelFlag,
+    sink: &dyn Sink,
+) -> Result<AgentOutcome, String> {
+    run_with_ask(
+        cfg, proj, task, history, policy, conn, &NoAsker, cancel, sink,
+    )
+    .await
+}
+
+/// 工具循环（带提问通道）：宿主把 [`Asker`] 落地（ruyix 走 `agent://ask` + 会话问题卡 + `agent_ask_answer`）。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_ask(
+    cfg: &AppConfig,
+    proj: &Path,
+    task: &str,
+    history: &[HistoryMsg],
+    policy: WritePolicy,
+    conn: &dyn Connector,
+    asker: &dyn Asker,
     cancel: &CancelFlag,
     sink: &dyn Sink,
 ) -> Result<AgentOutcome, String> {
@@ -2531,6 +2752,9 @@ pub async fn run(
     let mut delivered = false;
     let mut out = AgentOutcome::default();
     let mut gate = GateState::default();
+    // 提问计数与留痕：上限是硬闸（`ask` 是稀缺资源），留痕进会话存档
+    let mut ask_n: u32 = 0;
+    let mut asks: Vec<AskRecord> = Vec::new();
     // 这一轮读过哪些文件（依据核对的证据集合，复核员会看到这份清单）
     let mut read_paths: Vec<String> = Vec::new();
     // 连续模型调用失败计数：成功一轮即清零
@@ -2573,6 +2797,10 @@ pub async fn run(
     // 开关关掉就一个字都不提 —— 提示词不许广告一个引擎会拒的形状
     if cfg.agent.batch {
         head.push_str(&format!("\n\n{}", batch_hint(cfg.agent.batch_max, true)));
+    }
+    // 提问：开关关掉时提示词一字不提（与批调用同款：不虚报能力）
+    if cfg.ask.enabled {
+        head.push_str(&format!("\n\n{}", ask_hint(cfg)));
     }
     msgs.push(ChatMessage::user(format!("{head}\n\n用户消息：\n{task}")));
 
@@ -2763,6 +2991,100 @@ pub async fn run(
         };
         msgs.push(ChatMessage::assistant(reply.content.clone()));
 
+        // 第五个动作：向委托人提问。控制动作独占一轮（批里的 ask_user 已被当面拒）。
+        // 上限是硬闸：`ask` 是稀缺资源，超了要求"交付并声明假设"，而不是继续追问。
+        if actions.len() == 1 && matches!(actions[0], Action::Ask(_)) {
+            let Action::Ask(mut spec) = actions.remove(0) else {
+                unreachable!("上面刚判过是 ask")
+            };
+            // 开关关掉：提示词一字不提 + 这里一律拒（不虚报能力，老语义逐字不变）
+            if !cfg.ask.enabled {
+                sink.log(
+                    "warn",
+                    clip(
+                        &format!("[agent] 第 {step} 轮 ask_user 被拒：提问未开启"),
+                        200,
+                    ),
+                );
+                msgs.push(ChatMessage::user(
+                    "ask_user 在当前配置下已关闭。不要再提问：请**交付**，并在说明里写出你的假设与需要用户确认的点。"
+                        .to_string(),
+                ));
+                continue;
+            }
+            if ask_n >= cfg.ask.max_per_run {
+                sink.log(
+                    "warn",
+                    clip(
+                        &format!(
+                            "[agent] 第 {step} 轮 ask_user 被拒：本轮上限 {}",
+                            cfg.ask.max_per_run
+                        ),
+                        200,
+                    ),
+                );
+                msgs.push(ChatMessage::user(format!(
+                    "ask_user 次数已用完（一次 run 最多 {} 次）。不要再提问：请**交付**，并在说明里写出你的假设与需要用户确认的点。",
+                    cfg.ask.max_per_run
+                )));
+                continue;
+            }
+            ask_n += 1;
+            let id = format!("ask-{ask_n}");
+            // 超时由实现负责，但"等多久"由配置定 —— 模型给的 timeout_secs 一律忽略
+            spec.timeout_secs = cfg.ask.timeout_secs;
+            sink.log(
+                "info",
+                clip(
+                    &format!("[agent] 第 {step} 轮 ask_user：{}", spec.question),
+                    240,
+                ),
+            );
+            let rec = match asker.ask(&id, &spec).await {
+                Ok(ans) => {
+                    sink.log(
+                        "ok",
+                        clip(&format!("[agent] 第 {step} 轮 用户回答：{}", ans.text), 200),
+                    );
+                    msgs.push(ChatMessage::user(ask_answer_note(&id, &ans, &spec)));
+                    AskRecord {
+                        id: id.clone(),
+                        question: spec.question.clone(),
+                        why: spec.why.clone(),
+                        options: spec.options.clone(),
+                        answer: Some(ans.text.clone()),
+                        state: "answered".into(),
+                        ts: crate::workspace::now_iso(),
+                    }
+                }
+                Err(e) => {
+                    sink.log(
+                        "warn",
+                        clip(
+                            &format!("[agent] 第 {step} 轮 ask_user 无回答：{}", e.reason()),
+                            200,
+                        ),
+                    );
+                    // fail-closed：拒绝依赖它的动作，明确告诉模型"这不是同意"
+                    msgs.push(ChatMessage::user(ask_failed_note(&id, &e, &spec)));
+                    AskRecord {
+                        id: id.clone(),
+                        question: spec.question.clone(),
+                        why: spec.why.clone(),
+                        options: spec.options.clone(),
+                        answer: None,
+                        state: e.state().into(),
+                        ts: crate::workspace::now_iso(),
+                    }
+                }
+            };
+            asks.push(rec);
+            out.asks = asks.clone();
+            continue;
+        }
+
+        // 交付走门禁：有改动先过全量验证，再过干净上下文的复核。
+        // final 只可能是单动作 —— 批里的 final 已被 parse_actions 当面拒掉
         if actions.len() == 1 && matches!(actions[0], Action::Final(_)) {
             let Action::Final(text) = actions.remove(0) else {
                 unreachable!("上面刚判过是 final")
@@ -3548,6 +3870,350 @@ mod tests {
     /// 门禁单测用的 Sink：不刷屏、不落盘
     struct QuietSink;
     impl Sink for QuietSink {}
+
+    // ============================================
+    // v0.8：第五个动作 ask_user（需求歧义只能问委托人）
+    // ============================================
+
+    /// 脚本化提问通道：按序给答案（`Err` = 拿不到答案，用来验 fail-closed），并留档问过什么。
+    /// 剧本演完一律回"没人回答" —— 测试里绝不允许出现"引擎自己猜了个答案"。
+    struct ScriptAsker {
+        answers: std::sync::Mutex<std::collections::VecDeque<Result<String, AskErr>>>,
+        seen: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl ScriptAsker {
+        fn new(items: Vec<Result<&str, AskErr>>) -> Self {
+            Self {
+                answers: std::sync::Mutex::new(
+                    items
+                        .into_iter()
+                        .map(|r| r.map(|s| s.to_string()))
+                        .collect(),
+                ),
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        /// 问过几次、分别问了什么（id / question / why）
+        fn asked(&self) -> Vec<(String, String, String)> {
+            self.seen.lock().unwrap().clone()
+        }
+        fn count(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+    }
+
+    impl Asker for ScriptAsker {
+        fn ask<'a>(&'a self, id: &'a str, spec: &'a AskSpec) -> AskFut<'a> {
+            self.seen.lock().unwrap().push((
+                id.to_string(),
+                spec.question.clone(),
+                spec.why.clone(),
+            ));
+            let next = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(AskErr::NoAsker));
+            Box::pin(async move {
+                next.map(|text| AskAnswer {
+                    text,
+                    option_index: None,
+                    ts: String::new(),
+                })
+            })
+        }
+    }
+
+    /// 提问类测试的公共配置（关掉与提问无关的层，把轮次压到最少）
+    fn ask_cfg(llm: &crate::testllm::FakeLlm) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+        cfg.step.execute_plan = false;
+        cfg.discover.enabled = false;
+        cfg
+    }
+
+    /// 造一条 `ask_user` 剧本（免去长行 + raw string 转义：这类脚本两个坑都踩过）
+    fn ask_json(q: &str, why: &str, opts: &[&str]) -> String {
+        serde_json::json!({
+            "tool": "ask_user",
+            "args": {"question": q, "why": why, "options": opts}
+        })
+        .to_string()
+    }
+
+    /// 解析：形状认全、别名认、四种坏输入当面拒（含**不许自问自答**）
+    #[test]
+    fn ask_user_parses_and_rejects_forgeries() {
+        let a = parse_one(&serde_json::json!({
+            "tool": "ask_user",
+            "args": {"question": "登哪台机器？", "why": "凭据放哪一侧",
+                     "options": ["甲", "乙"], "default_index": 1}
+        }))
+        .expect("标准形状该能解析");
+        match a {
+            Action::Ask(s) => {
+                assert_eq!(s.question, "登哪台机器？");
+                assert_eq!(s.why, "凭据放哪一侧");
+                assert_eq!(s.options, vec!["甲", "乙"]);
+                assert_eq!(s.default_index, Some(1));
+                // 超时由引擎按配置填：模型给的会被忽略（"等多久"是委托人的权力）
+                assert_eq!(s.timeout_secs, 0);
+            }
+            other => panic!("该是 Ask：{other:?}"),
+        }
+        // 别名 ask 也认
+        assert!(matches!(
+            parse_one(&serde_json::json!({"tool": "ask", "args": {"question": "q", "why": "w"}}))
+                .unwrap(),
+            Action::Ask(_)
+        ));
+        // 缺 why：可以问，但必须说清"这个答案会决定什么"（UI 要原样展示给用户）
+        let e = parse_one(&serde_json::json!({"tool": "ask_user", "args": {"question": "q"}}))
+            .unwrap_err();
+        assert!(e.contains("why"), "{e}");
+        // 自问自答：模型不许自带答案（答案只能从宿主的用户通道进来）
+        let e = parse_one(&serde_json::json!({
+            "tool": "ask_user",
+            "args": {"question": "q", "why": "w", "answer": "当然可以"}
+        }))
+        .unwrap_err();
+        assert!(e.contains("不许有 answer"), "{e}");
+        // 选项太多 / default 越界
+        let e = parse_one(&serde_json::json!({
+            "tool": "ask_user",
+            "args": {"question": "q", "why": "w", "options": ["1", "2", "3", "4", "5", "6"]}
+        }))
+        .unwrap_err();
+        assert!(e.contains("最多 5 个"), "{e}");
+        let e = parse_one(&serde_json::json!({
+            "tool": "ask_user",
+            "args": {"question": "q", "why": "w", "options": ["1"], "default_index": 3}
+        }))
+        .unwrap_err();
+        assert!(e.contains("越界"), "{e}");
+    }
+
+    /// 控制动作的纪律：**不许进批**、**子步骤没有交互权**
+    #[test]
+    fn ask_user_never_enters_a_batch_nor_a_step() {
+        let raw = r#"{"actions":[{"tool":"read","args":{"path":"a.txt"}},{"tool":"ask_user","args":{"question":"q","why":"w"}}]}"#;
+        let e = parse_actions(raw, 8, true).unwrap_err();
+        assert!(e.contains("ask_user 不能放进批里"), "{e}");
+        // 子步骤：收窄成 Unsupported（回一条明确拒绝，不让整步失败）
+        let steps = parse_step_actions(
+            r#"{"tool":"ask_user","args":{"question":"q","why":"w"}}"#,
+            8,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(steps[0], StepAction::Unsupported("ask_user")));
+        // 提示词也要各自自洽：主循环提、子步骤不提（提了它就会去找一个自己没有的能力）
+        assert!(batch_hint(8, true).contains("ask_user"));
+        assert!(!batch_hint(8, false).contains("ask_user"));
+        assert!(ask_hint(&AppConfig::default()).contains("ask_user"));
+    }
+
+    /// 主线：模型问 → 用户答 → run **不中断**，答案以观察回灌，工作继续
+    #[test]
+    fn ask_user_gets_the_answer_and_keeps_working() {
+        let d = TempDir::new("ask-answer");
+        let llm = crate::testllm::fake_llm(vec![
+            ask_json(
+                "远程登录要连的是哪种机器？",
+                "这决定了凭据放哪一侧",
+                &["公司托管服务器", "用户自己另一台电脑"],
+            ),
+            serde_json::json!({
+                "tool": "write",
+                "args": {"path": "login.md", "content": "方案A：用户自己另一台电脑"}
+            })
+            .to_string(),
+            r#"{"final":"已按你的选择实现"}"#.into(),
+        ]);
+        let cfg = ask_cfg(&llm);
+        let asker = ScriptAsker::new(vec![Ok("用户自己另一台电脑")]);
+
+        let out = block_on(run_with_ask(
+            &cfg,
+            &d.0,
+            "做一个远程登录功能",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &asker,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+
+        // 问到的东西：id 从 1 开始、问题与 why 原样带出去
+        assert_eq!(asker.count(), 1, "只该问一次");
+        let (id, q, why) = &asker.asked()[0];
+        assert_eq!(id, "ask-1");
+        assert_eq!(q, "远程登录要连的是哪种机器？");
+        assert_eq!(why, "这决定了凭据放哪一侧");
+        // 留痕进结果（宿主写进会话存档，重开会话仍看得见）
+        assert_eq!(out.asks.len(), 1);
+        assert_eq!(out.asks[0].state, "answered");
+        assert_eq!(out.asks[0].answer.as_deref(), Some("用户自己另一台电脑"));
+        // 答案真的进了模型上下文（第 2 轮请求体里能看到），且标注了"不是授权"
+        let req2 = llm.request(1);
+        assert!(req2.contains("用户自己另一台电脑"), "第 2 轮该看到答案");
+        assert!(
+            req2.contains("不构成任何门禁的授权"),
+            "回灌必须写明它不是授权"
+        );
+        // 工作继续：写下来了、交付了
+        let written = std::fs::read_to_string(d.0.join("login.md")).unwrap();
+        assert!(written.contains("用户自己另一台电脑"), "{written}");
+        assert!(out.answer.contains("已按你的选择实现"), "{}", out.answer);
+        assert_eq!(llm.count(), 3, "问 + 写 + 交付");
+    }
+
+    /// fail-closed：没人回答**不是同意** —— 拒绝依赖它的动作，要求交付并写清假设
+    #[test]
+    fn ask_without_an_answer_is_fail_closed() {
+        let d = TempDir::new("ask-timeout");
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"tool":"ask_user","args":{"question":"登哪台机器？","why":"决定凭据放哪一侧"}}"#
+                .into(),
+            r#"{"final":"我按假设实现（未得到你的回答）"}"#.into(),
+        ]);
+        let cfg = ask_cfg(&llm);
+        let asker = ScriptAsker::new(vec![Err(AskErr::Timeout)]);
+
+        let out = block_on(run_with_ask(
+            &cfg,
+            &d.0,
+            "做一个远程登录功能",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &asker,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("没人回答不该让整个 run 失败");
+
+        assert_eq!(out.asks[0].state, "timeout");
+        assert!(out.asks[0].answer.is_none());
+        // 模型看到的是一条"这不是同意"的观察 —— 而不是沉默（沉默会被当成默许）
+        let req2 = llm.request(1);
+        assert!(
+            req2.contains("没有得到回答"),
+            "{}",
+            &req2[..400.min(req2.len())]
+        );
+        assert!(req2.contains("不许做"), "fail-closed 必须写明依赖动作被拒");
+        assert!(out.answer.contains("未得到你的回答"), "{}", out.answer);
+    }
+
+    /// 无提问通道（headless / eval）：同样 fail-closed，且**不假装有人回答**
+    #[test]
+    fn without_an_asker_the_answer_is_fail_closed() {
+        let d = TempDir::new("ask-noasker");
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"tool":"ask_user","args":{"question":"登哪台机器？","why":"决定凭据放哪一侧"}}"#
+                .into(),
+            r#"{"final":"按假设实现"}"#.into(),
+        ]);
+        let cfg = ask_cfg(&llm);
+        // run（不带通道）＝ headless 形态：内部就是 &NoAsker
+        let out = block_on(run(
+            &cfg,
+            &d.0,
+            "做一个远程登录功能",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+        assert_eq!(out.asks[0].state, "no_asker");
+        assert!(out.asks[0].answer.is_none(), "绝不假装有人回答");
+        assert!(llm.request(1).contains("没有提问通道") || llm.request(1).contains("没有得到回答"));
+    }
+
+    /// 稀缺资源硬闸：一次 run 最多问 N 次，超了直接拒并要求交付 + 声明假设
+    #[test]
+    fn ask_count_is_capped_per_run() {
+        let d = TempDir::new("ask-cap");
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"tool":"ask_user","args":{"question":"问题一？","why":"w1"}}"#.into(),
+            r#"{"tool":"ask_user","args":{"question":"问题二？","why":"w2"}}"#.into(),
+            r#"{"final":"按假设交付"}"#.into(),
+        ]);
+        let mut cfg = ask_cfg(&llm);
+        cfg.ask.max_per_run = 1;
+        let asker = ScriptAsker::new(vec![Ok("答案一")]);
+
+        let out = block_on(run_with_ask(
+            &cfg,
+            &d.0,
+            "任务",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &asker,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(asker.count(), 1, "第二次不许再问出去");
+        assert_eq!(out.asks.len(), 1, "被拒的那次不留问答痕迹（没问到人）");
+        let req3 = llm.request(2);
+        assert!(req3.contains("次数已用完"), "第 3 轮该看到上限提示");
+        assert!(out.answer.contains("按假设交付"), "{}", out.answer);
+    }
+
+    /// 开关关掉：引擎一律拒（提示词那句也一字不提，两处同一个开关）
+    #[test]
+    fn ask_off_means_the_engine_refuses_it() {
+        let d = TempDir::new("ask-off");
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"tool":"ask_user","args":{"question":"登哪台机器？","why":"决定凭据放哪一侧"}}"#
+                .into(),
+            r#"{"final":"按假设交付"}"#.into(),
+        ]);
+        let mut cfg = ask_cfg(&llm);
+        cfg.ask.enabled = false;
+        let asker = ScriptAsker::new(vec![Ok("不该被问到")]);
+
+        let out = block_on(run_with_ask(
+            &cfg,
+            &d.0,
+            "任务",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &asker,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(asker.count(), 0, "关掉后不许把问题递到用户面前");
+        assert!(out.asks.is_empty());
+        assert!(
+            llm.request(1).contains("已关闭"),
+            "该回一条「不许问」的观察"
+        );
+        // 提示词侧：开关关掉时 head 不该出现提问那段
+        assert!(
+            !llm.request(0).contains("需求歧义："),
+            "关掉后提示词一字不提"
+        );
+    }
 
     /// 门禁单测用的配置：不依赖 Docker、不绑 tools/lint、不调模型（复核另测）
     fn apply_cfg() -> AppConfig {
