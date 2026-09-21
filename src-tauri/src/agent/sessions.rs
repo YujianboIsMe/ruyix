@@ -166,13 +166,27 @@ pub fn save(session: &Session, project_root: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("创建会话目录失败: {e}"))?;
     }
     let text = serde_json::to_string_pretty(session).map_err(|e| format!("序列化会话失败: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("写入会话失败: {e}"))
+    // **原子写**：先写同目录临时文件、再 rename 覆盖。
+    //
+    // 会话是用户的对话历史，而 `fs::write` 是截断式写入 —— 在写一半时被打断（关窗口 / 断电 /
+    // 进程被杀）会留下半截 JSON，而 `list()` 会跳过解析失败的条目：**那一段对话就整段消失了**，
+    // 且用户没有任何提示。rename 在同一卷上是原子的：读到的要么是旧全文、要么是新全文。
+    // （临时文件刻意用 `.tmp` 后缀：`list()` 只认 `*.json`，所以残留的临时文件不会被当成会话。）
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text)
+        .map_err(|e| format!("写入会话临时文件失败 {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("替换会话文件失败 {}: {e}", path.display())
+    })
 }
 
+/// 删除会话。**幂等**：文件已经不在（从未落盘的空会话被删、或上个进程被强杀）也算成功 ——
+/// 用户点 ✕ 的意图是"这条没了"，此时报错只会让他以为删失败了。
 pub fn delete(project_root: &str, id: &str) -> Result<(), String> {
     let path = session_path(project_root, id)?;
     if !path.exists() {
-        return Err(format!("会话不存在: {id}"));
+        return Ok(());
     }
     std::fs::remove_file(&path).map_err(|e| format!("删除会话失败: {e}"))
 }
@@ -188,6 +202,118 @@ mod tests {
             std::env::temp_dir().join(format!("ruyix-session-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// 造一个会话（消息条数可控）
+    fn sess(id: &str, title: &str, n: usize) -> Session {
+        Session {
+            id: id.into(),
+            title: title.into(),
+            created_at: "2026-09-19T08:00:00".into(),
+            updated_at: "2026-09-19T08:00:01".into(),
+            messages: (0..n)
+                .map(|i| SessionMsg {
+                    role: if i % 2 == 0 {
+                        "user".into()
+                    } else {
+                        "assistant".into()
+                    },
+                    text: format!("第 {i} 条"),
+                    ts: "t".into(),
+                    run_id: None,
+                    status: None,
+                    plan: None,
+                    verify: vec![],
+                    reflect: vec![],
+                    ask: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    /// **原子写**：写完之后不留临时文件；覆盖是"换整份"而不是"截断再写"。
+    ///
+    /// 为什么这条算不变量：`fs::write` 截断写入一旦被中断（关窗口 / 断电 / 进程被杀），
+    /// 留下半截 JSON；而 `list()` 会跳过解析失败的条目 —— 那一段对话就整段消失了。
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_file() {
+        let root = dir("atomic");
+        let root = root.to_str().unwrap().to_string();
+        let mut s = sess("sess_atomic", "第一版标题", 2);
+        save(&s, &root).unwrap();
+        s.title = "改过的标题".into();
+        s.messages.push(SessionMsg {
+            role: "user".into(),
+            text: "追加一条".into(),
+            ts: "t2".into(),
+            run_id: None,
+            status: None,
+            plan: None,
+            verify: vec![],
+            reflect: vec![],
+            ask: vec![],
+        });
+        save(&s, &root).unwrap();
+
+        let back = load(&root, "sess_atomic").unwrap();
+        assert_eq!(back.title, "改过的标题");
+        assert_eq!(back.messages.len(), 3, "覆盖要落成新全文");
+
+        let files: Vec<String> = std::fs::read_dir(sessions_dir(&root))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            files,
+            vec!["sess_atomic.json".to_string()],
+            "目录里不该有临时文件残留: {files:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **删除幂等**：文件不在也算成功 —— 空会话从未落盘、或上一个进程被强杀过。
+    /// 用户点 ✕ 的意图是"这条没了"，此时报错只会让他以为删失败。
+    #[test]
+    fn delete_is_idempotent() {
+        let root = dir("del");
+        let root = root.to_str().unwrap().to_string();
+        assert!(
+            delete(&root, "sess_missing").is_ok(),
+            "删不存在的会话不该报错"
+        );
+        save(&sess("sess_del", "要删的", 1), &root).unwrap();
+        delete(&root, "sess_del").unwrap();
+        assert!(load(&root, "sess_del").is_err(), "删完就该读不到");
+        assert!(delete(&root, "sess_del").is_ok(), "再删一次也不报错");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **坏文件只影响它自己**：一条解析失败的会话不许把整个列表打空。
+    ///
+    /// 这是"历史全丢"的另一条可能路径：如果 `list()` 用 `collect::<Result<Vec<_>,_>>()`，
+    /// 一条坏文件就能让用户看到"一条会话都没有"（而盘上其实有几十条）。临时文件同理 ——
+    /// `list()` 只认 `*.json`，`.json.tmp` 不能被当成会话。
+    #[test]
+    fn a_corrupt_file_only_drops_itself_from_the_list() {
+        let root = dir("corrupt");
+        let root = root.to_str().unwrap().to_string();
+        save(&sess("sess_good", "好的那条", 2), &root).unwrap();
+        std::fs::write(sessions_dir(&root).join("sess_broken.json"), "{ 半截 JSON").unwrap();
+
+        let listed = list(&root);
+        assert_eq!(
+            listed.len(),
+            1,
+            "好的那条必须还在：{:?}",
+            listed.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(listed[0].id, "sess_good");
+        assert_eq!(listed[0].messages.len(), 2);
+
+        std::fs::write(sessions_dir(&root).join("sess_good.json.tmp"), "{}").unwrap();
+        assert_eq!(list(&root).len(), 1, "临时文件不能被当成会话");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

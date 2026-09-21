@@ -540,16 +540,20 @@ pub fn agent_session_save(
 
 #[tauri::command]
 pub fn agent_session_new(project_root: Option<String>) -> Result<sessions::Session, String> {
-    let root = project_root.ok_or("未打开项目")?;
-    let s = sessions::Session {
+    // 会话跟项目走：没有项目就没有 <root>/.ruyix 可写
+    if project_root.is_none() {
+        return Err("未打开项目".into());
+    }
+    // **不发文件**（空会话不落盘）：`新建会话` 只是签一个 id，真正写盘发生在第一条消息之后。
+    // 否则每点一次新建就留一个 0 条消息的空文件，面板里全是幽灵条目（实测 ai-gateway 里就有
+    // 一个只被创建、从未写入的空会话，躺在盘上一年多；而"历史看不见"的账单最后都算在持久化头上）。
+    Ok(sessions::Session {
         id: sessions::new_session_id(),
         title: String::new(),
         created_at: harness_engine::workspace::now_iso(),
         updated_at: harness_engine::workspace::now_iso(),
         messages: Vec::new(),
-    };
-    sessions::save(&s, &root)?;
-    Ok(s)
+    })
 }
 
 #[tauri::command]

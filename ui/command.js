@@ -1289,6 +1289,9 @@ async function openProject(path) {
 
     // 切换为项目工作区视图
     showProjectWorkspace();
+    // 会话列表跟着项目走：必须在这里触发一次（启动时 attach() 那次往往还没有项目，
+    // 早退之后再没人叫它 —— 这就是"重启 IDE 会话历史全丢"的根因）
+    window.SessionUI?.syncForProject?.(true);
     updateTitlebarTitle();
     if (typeof updateWindowTitle === "function") updateWindowTitle();
     setStatus(I18N.t("open.project.ok", { path: info.path }));

@@ -97,6 +97,29 @@
     }
   }
 
+  /**
+   * 项目打开 / 切换后同步会话列表 —— **这是"重启 IDE 会话历史全丢"的根因所在**。
+   *
+   * `refreshList()` 原先全仓只被调一次（`attach()` 末尾），而那一刻项目往往还没打开 →
+   * `root()` 为空 → 直接早退，之后再没人叫它。于是文件明明躺在
+   * `<root>/.ruyix/code/agent/sessions/`（实测 cloud-shop 里 27 个），面板却永远写着"暂无会话"。
+   * 所以"项目打开"这个收口点必须显式同步一次。
+   *
+   * `autoOpenNewest`：把最近一条**有消息**的会话直接开成 tab（接着上次继续）。空会话
+   * （新建但一句没用过）不占位 —— 免得每次打开项目都弹一个空聊天。
+   */
+  async function syncForProject(autoOpenNewest) {
+    if (!root()) {
+      sessions = [];
+      renderList();
+      return;
+    }
+    await refreshList();
+    if (!autoOpenNewest) return;
+    const newest = sessions.find((s) => (s.messages?.length ?? 0) > 0);
+    if (newest) openSessionById(newest.id);
+  }
+
   async function newSession(autofocus) {
     const invoke = getInvoke();
     let s;
@@ -856,6 +879,8 @@
       .map((m) => ({ role: m.role, text: m.text }));
     s.messages.push({ role: "user", text, ts: nowHms(), run_id: null, status: null });
     fillMsgs(wrap, s);
+    // 先落盘用户这句话：run 跑一半崩了 / 被强杀，也不至于整段对话消失
+    persist(s);
 
     const invoke = getInvoke();
     if (!invoke || !root()) {
@@ -1017,7 +1042,7 @@
     } else {
       renderEnvChips(null);
     }
-    refreshList();
+    syncForProject(true);
   }
 
   function renderEnvChips(env) {
@@ -1057,7 +1082,7 @@
   }
 
   window.SessionUI = {
-    attach, handleCommand, ensureChatEl, projectClosed, refreshList,
+    attach, handleCommand, ensureChatEl, projectClosed, refreshList, syncForProject,
     newSession, openSession, sendMessage, renderOutline,
   };
 })();

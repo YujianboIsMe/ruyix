@@ -73,6 +73,12 @@
  *                     只剩"猜"或"把问题塞进 final"（而 final 的语义是交付：把未开工记成已完成）。
  *                     模型侧叫 `ask_user`；引擎内部是控制动作（独占一轮 / 不进批 / 子步骤 Unsupported）；
  *                     答案以 kind=user 回灌且**不构成授权**；拿不到答案一律 fail-closed
+ *   U28 session-persist 会话历史必须活过重启（v0.9）：文件一直在写（实测某项目里 27 个），
+ *                     病根是**没加载** —— refreshList() 只在 attach() 末尾被调一次，而那一刻项目
+ *                     往往还没打开 → 早退 → 面板永远"暂无会话"。五环：打开项目的收口点显式同步
+ *                     （并把最近一条有消息的会话接上）+ 用户那句话立刻落盘 + 原子写（截断式写入
+ *                     被中断会留半截 JSON，而 list 会跳过它）+ 坏文件只影响自己 + 空会话不落盘 /
+ *                     删除幂等
  *   U27 logo-assets   应用图标（RYX 字母标）有唯一真相源：几何只写在 tools/logo/build_logo.py，
  *                     由它同时产出 ui/logo*.svg 与 src-tauri/icons/*。钉四条：四个矢量变体齐
  *                     / logo.svg 与 logo-mark.svg 的轮廓逐字节相同（只改一份就是漂移）
@@ -825,6 +831,34 @@ function runStaticChecks() {
   check("U27", "logo-assets",
     has(html, 'rel="icon"') && has(html, 'href="logo.svg"'),
     "index.html 没挂 favicon（浏览器直开 UI 时页签上是空白图标）");
+
+  // U28 session-persistence：会话历史必须活过重启（v0.9）。
+  // 病根不是"存不上" —— 文件一直在写（实测 cloud-shop 里 27 个、最新那条就是当天最后一次对话）；
+  // 是**没加载**：`refreshList()` 原先只在 `attach()` 末尾被调一次，而那一刻项目往往还没打开 →
+  // `root()` 为空 → 早退，之后再没人叫它 → 面板永远写着"暂无会话"，用户看到的就是"历史全丢"。
+  // 五环：① 打开项目的收口点显式同步一次（并把最近一条有消息的会话接上）；
+  // ② 用户那句话立刻落盘（run 崩了也不至于整段消失）；③ 原子写（截断式写入被中断会留半截
+  // JSON，而 list 会跳过它 = 那段对话整段消失）；④ 坏文件只影响自己（不许把列表打空）；
+  // ⑤ 空会话不落盘（不留幽灵条目）+ 删除幂等。
+  check("U28", "session-persistence",
+    has(commandJs, "SessionUI?.syncForProject?.(") &&
+      has(sessionJs, "async function syncForProject(") &&
+      has(sessionJs, "openSessionById(newest.id)"),
+    "打开项目时没同步会话列表：启动那次 attach() 早退之后没人再叫它 —— 文件在盘上，面板却永远「暂无会话」");
+  check("U28", "session-persistence",
+    has(sessionJs, "先落盘用户这句话"),
+    "用户那句话没有立刻落盘：run 跑一半崩掉 / 被强杀，整段对话就没了");
+  check("U28", "session-persistence",
+    has(sessRs, "原子写") && has(sessRs, 'with_extension("json.tmp")') && has(sessRs, "fs::rename"),
+    "会话不是原子写：截断式写入被中断会留下半截 JSON，而 list 会跳过它 = 那段历史整段消失");
+  check("U28", "session-persistence",
+    has(sessRs, "坏文件只影响它自己"),
+    "坏文件容错没被钉住：一条坏文件不许把整个列表打空（那是「历史全丢」的另一条可能路径）");
+  check("U28", "session-persistence",
+    has(sessRs, "删除会话。**幂等**") &&
+      !has(sessRs, "会话不存在") &&
+      has(agentModRs, "空会话不落盘"),
+    "空会话与删除：新建不许落空文件（面板里全是幽灵条目）、删除要幂等（文件不在也算成功）");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
