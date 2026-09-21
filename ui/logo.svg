@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="RYX">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#151D2A"/>
+      <stop offset="1" stop-color="#090D14"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="62" y1="322" x2="962" y2="702" gradientUnits="userSpaceOnUse">
+      <stop offset="0.0" stop-color="#8AECFF"/>
+      <stop offset="0.55" stop-color="#3B8BFF"/>
+      <stop offset="1.0" stop-color="#7A6BFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="232" fill="url(#tile)"/>
+  <g fill="none" stroke="url(#mark)" stroke-width="92" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M108 702 L108 322 L261 322 A55 55 0 0 1 316 377 L316 457 A55 55 0 0 1 261 512 L108 512 M261 512 L340 702"/>
+    <path d="M454 322 L528 490 L602 322 M528 490 L528 702"/>
+    <path d="M740 322 L916 702 M916 322 L740 702"/>
+  </g>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="230.5" fill="none" stroke="rgba(255,255,255,.062)" stroke-width="1.5"/>
+</svg>
