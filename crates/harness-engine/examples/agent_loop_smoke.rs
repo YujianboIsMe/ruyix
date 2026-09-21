@@ -4,18 +4,20 @@
 //! 格子之间 —— 连接清单有没有进首条用户消息、写完文件有没有立刻跑语法层、交付前是不是
 //! 真的跑了全量验证、验证失败有没有拦住 `final`、复核 agent 的上下文是不是干净的。
 //!
-//! 三臂（每条都真跑子进程：python 语法检查 + unittest）：
+//! 四臂（每条都真跑子进程：python 语法检查 + unittest）：
 //! - **arm 1 正常路径**：四原语全走一遍 + 交付前验证通过 + 干净上下文复核
 //! - **arm 2 验证失败被拦**：写了坏代码 → 全量验证失败 → `final` 被打回 → 改好后放行
 //! - **arm 3 预算用尽**：验证连续失败到预算上限 → 放行，但答复必须写明"未通过"
+//! - **arm 4 批量调用**：一轮多个调用、引擎并发跑（省轮次的主通道）
+//! - **arm 5 需求歧义问用户**：`ask_user` 问一句 → 用户答 → run 不中断、答案回灌、留痕进结果
 //!
 //! 用法：`cargo run -p harness-engine --example agent_loop_smoke`（无需 API Key）
 //!
 //! 假 LLM 复用 `harness_engine::testllm`（与单测同一份实现，别各写一遍）。
 
 use harness_engine::agent::{
-    self, AgentOutcome, ConnectFuture, ConnectOutcome, ConnectRequest, ConnectTarget, Connector,
-    HistoryMsg, WritePolicy,
+    self, AgentOutcome, ConnectFuture, ConnectOutcome,
+    ConnectRequest, ConnectTarget, Connector, HistoryMsg, WritePolicy,
 };
 use harness_engine::config::AppConfig;
 use harness_engine::pipeline::Sink;
@@ -360,11 +362,60 @@ fn arm_budget_exhausted(rep: &mut Report) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ============================================
+// arm 4：批量调用 —— 一轮多个调用，只读并发（v0.7 省轮次的主通道）
+// ============================================
+
+fn arm_batch_calls(rep: &mut Report) {
+    println!("\n=== arm 4：批量调用（一轮多个只读调用）===");
+    let dir = temp_project("batch");
+    for (name, body) in [("a.txt", "AAA"), ("b.txt", "BBB"), ("c.txt", "CCC")] {
+        std::fs::write(dir.join(name), body).expect("写夹具");
+    }
+    // 模型侧只有这一轮的差别：一个对象换成一串对象
+    let batch = concat!(
+        r#"{"actions":[{"tool":"read","args":{"path":"a.txt"}},"#,
+        r#"{"tool":"read","args":{"path":"b.txt"}},"#,
+        r#"{"tool":"read","args":{"path":"c.txt"}}]}"#
+    )
+    .to_string();
+    let script: Vec<String> = vec![
+        batch,
+        format!(r#"{{"final":{}}}"#, js("三个文件都看过了。")),
+    ];
+    let (llm, _conn, out) = run_loop(&dir, "读三个文件", script, false, |c| {
+        c.gate.full = false; // 没有改动，跑全量验证没意义
+    });
+
+    // 这才是这条特性的全部理由：一次模型往返换回三个文件（改前是三轮，每轮还要重发一遍上下文）
+    rep.check("一批 3 个 read 只花 1 轮（+1 轮 final）", llm.count() == 2);
+    rep.check(
+        "三条调用落在同一轮（省下来的就是这些轮）",
+        out.steps.len() == 3
+            && out
+                .steps
+                .iter()
+                .all(|s| s.step == 1 && s.tool == "read" && s.ok),
+    );
+    let second = llm.request(1);
+    rep.check(
+        "三份内容按声明顺序一起回灌给模型",
+        ["AAA", "BBB", "CCC"].iter().all(|c| second.contains(c)),
+    );
+    rep.check("答复正常交付", out.answer.contains("三个文件都看过了"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ============================================
+// arm 5：需求歧义 → 问用户（第五个动作 ask_user，v0.8）
+// ============================================
+
 fn main() {
     let mut rep = Report::default();
     arm_happy_path(&mut rep);
     arm_verify_blocks(&mut rep);
     arm_budget_exhausted(&mut rep);
+    arm_batch_calls(&mut rep);
 
     println!("\n=== 汇总 ===");
     if rep.failed.is_empty() {

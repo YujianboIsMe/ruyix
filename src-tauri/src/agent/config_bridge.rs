@@ -56,6 +56,10 @@ pub struct BridgeValues {
     pub step_execute_plan: Option<String>,
     pub step_max_steps: Option<String>,
     pub agent_max_elapsed_secs: Option<String>,
+    // v0.7 批量调用：一轮发多个互不依赖的调用（只读并发、其余按序），省轮次
+    pub agent_batch: Option<String>,
+    pub agent_batch_max: Option<String>,
+    pub agent_batch_parallel: Option<String>,
     // v0.5 命令发现：把"本机有什么命令"实测出来喂进上下文
     pub discover_enabled: Option<String>,
     pub discover_ttl_secs: Option<String>,
@@ -108,6 +112,13 @@ impl BridgeValues {
             agent_max_elapsed_secs: read(
                 mgr,
                 "ruyix.code.harness.agent.max_elapsed_secs",
+                project_root,
+            ),
+            agent_batch: read(mgr, "ruyix.code.harness.agent.batch", project_root),
+            agent_batch_max: read(mgr, "ruyix.code.harness.agent.batch_max", project_root),
+            agent_batch_parallel: read(
+                mgr,
+                "ruyix.code.harness.agent.batch_parallel",
                 project_root,
             ),
             discover_enabled: read(mgr, "ruyix.code.harness.discover.enabled", project_root),
@@ -263,6 +274,23 @@ pub fn apply_overrides(cfg: &mut engine::config::AppConfig, v: &BridgeValues) {
         .and_then(|s| s.parse::<u64>().ok())
     {
         cfg.agent.max_elapsed_secs = n;
+    }
+    // v0.7 批量调用：默认**开**。这是省轮次的主通道（一次读 5 个文件从 5 轮降到 1 轮），
+    // 关掉即回到"一轮一个调用"的老协议 —— 提示词与接受判定同时关（不虚报能力）。
+    // `batch_max` 非法（0 / 负数 / 非数字）一律保持默认：0 会把所有批都拒掉，属于把功能关死。
+    if let Some(e) = v.agent_batch.as_deref() {
+        cfg.agent.batch = e == "true" || e == "1";
+    }
+    if let Some(n) = v
+        .agent_batch_max
+        .as_deref()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        cfg.agent.batch_max = n;
+    }
+    if let Some(e) = v.agent_batch_parallel.as_deref() {
+        cfg.agent.batch_parallel = e == "true" || e == "1";
     }
 
     // v0.5 命令发现：默认**开**。实测那次 65 轮空转里有 5~6 轮纯粹在试探 `mvn` / `java`
@@ -584,6 +612,69 @@ mod tests {
         assert!(!cfg.proc.enabled, "runtime scope 的 false 必须被读到");
         assert_eq!(cfg.proc.max, 7);
         assert_eq!(cfg.proc.ready_timeout_secs, 180);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 批调用桥：默认全开（省轮次的主通道），三个键都能一行回退；
+    /// `batch_max` 的非法值**保持默认** —— 0 会把所有批都拒掉，等于把功能悄悄关死。
+    #[test]
+    fn agent_batch_bridge_defaults_on_and_each_knob_can_be_overridden() {
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &BridgeValues::default());
+        assert!(cfg.agent.batch, "默认开：这是省轮次的主通道");
+        assert_eq!(cfg.agent.batch_max, 8);
+        assert!(cfg.agent.batch_parallel, "默认并发跑只读");
+
+        let mut off = base();
+        apply_overrides(
+            &mut off,
+            &BridgeValues {
+                agent_batch: Some("false".into()),
+                agent_batch_max: Some("4".into()),
+                agent_batch_parallel: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!off.agent.batch, "必须能一行回退到一轮一个调用");
+        assert_eq!(off.agent.batch_max, 4);
+        assert!(!off.agent.batch_parallel);
+
+        // 非法值：0 / 负数 / 非数字一律保持默认
+        for bad in ["0", "-3", "很多", ""] {
+            let mut c = base();
+            apply_overrides(
+                &mut c,
+                &BridgeValues {
+                    agent_batch_max: Some(bad.into()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(c.agent.batch_max, 8, "batch_max={bad:?} 该保持默认");
+        }
+    }
+
+    /// 桥的键名一旦写错，三 scope 都会读空 —— 这里钉住它确实读的是 agent.batch* 三键
+    #[test]
+    fn agent_batch_bridge_reads_its_own_keys_from_any_scope() {
+        let dir = std::env::temp_dir().join(format!("ruyix_bridge_batch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut mgr = ConfigManager::new_with_dir(dir.clone());
+
+        for (k, v) in [
+            ("ruyix.code.harness.agent.batch", "false"),
+            ("ruyix.code.harness.agent.batch_max", "3"),
+            ("ruyix.code.harness.agent.batch_parallel", "false"),
+        ] {
+            mgr.config_write(&Scope::Runtime, k, v, None).unwrap();
+        }
+
+        let values = BridgeValues::from_config(&mgr, None);
+        let mut cfg = base();
+        apply_overrides(&mut cfg, &values);
+        assert!(!cfg.agent.batch, "批开关必须从 runtime scope 读到");
+        assert_eq!(cfg.agent.batch_max, 3);
+        assert!(!cfg.agent.batch_parallel);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -76,6 +76,16 @@ window.ConfigUI = (() => {
         { key: "proc.enabled", kind: "toggle" },
         { key: "proc.max", kind: "number" },
         { key: "proc.ready_timeout_secs", kind: "number" },
+        // v0.7 批量调用：一轮发多个互不依赖的调用，引擎把**连续的只读调用并发执行**、
+        // 写入/执行按声明顺序串行，结果一次全回给模型。默认开 —— 这是省轮次的主通道
+        // （一次读 5 个文件从 5 轮降到 1 轮）。batch_max 是单批上限（超了报上限让它拆批，
+        // 不静默截断）；batch_parallel 只关"并发读"本身，用于排查并发相关的问题。
+        { key: "agent.batch", kind: "toggle" },
+        { key: "agent.batch_max", kind: "number" },
+        { key: "agent.batch_parallel", kind: "toggle" },
+        // v0.8 提问（ask_user）：需求歧义只能问委托人 —— "做一个远程登录功能" 登哪台机器？
+        // 四原语组合都取不到这个答案。默认开：关掉等于让模型回去猜（猜错的代价是整体返工）。
+        // timeout_secs = 0 表示无限等；超时一律 fail-closed（引擎拒绝依赖它的动作，绝不假设同意）。
       ],
     },
   ];

@@ -61,6 +61,18 @@
  *                     （放行 / 交给系统浏览器 / 拒掉），**localhost 不是自家页面**；出口 open_external
  *                     只放行 http/https/mailto 并交给系统默认处理程序（不走 shell）；前端捕获阶段另有
  *                     一重拦截，判定表与后端逐条对齐
+ *   U25 batch-calls   一轮多个调用（v0.7）：模型一次发一批互不依赖的调用（{"actions":[…]}），
+ *                     引擎把**一批里的调用并发跑**（只有同一条路径上的写与读、托管进程的起停查按
+ *                     声明顺序排），结果按同一顺序一起回灌 —— 省的是**轮次**（实测一次读 5 个文件
+ *                     从 5 轮降到 1 轮）。
+ *                     五环：批解析（两件外衣 / 上限不静默截断 / 控制动作当面拒）+ 不猜命令语义
+ *                     （边界画在原语与路径上）+ 结果按声明顺序落位（错位是静默的）+ 回灌 results
+ *                     数组逐条带 ok + 父子提示词各自自洽（子那份不许提 plan）
+ *   U27 logo-assets   应用图标（RYX 字母标）有唯一真相源：几何只写在 tools/logo/build_logo.py，
+ *                     由它同时产出 ui/logo*.svg 与 src-tauri/icons/*。钉四条：四个矢量变体齐
+ *                     / logo.svg 与 logo-mark.svg 的轮廓逐字节相同（只改一份就是漂移）
+ *                     / tauri.conf.json 的 bundle.icon 非空且文件真在（**缺它则换了图也不生效**，
+ *                     窗口图标与 exe 资源都取自它）/ icon.ico 多尺寸
  */
 
 "use strict";
@@ -651,6 +663,64 @@ function runStaticChecks() {
       has(configJs, '"proc.ready_timeout_secs"') &&
       has(mainRs, "harness_engine::proc::shutdown_all(false)"),
     "proc 配置没贯通或宿主退出未收尾：引擎 ProcConfig → 配置桥三键 → UI 三字段 → 退出全收");
+
+  // U25 batch-calls：一轮多个调用（v0.7）。病根是"轮次全花在一次一个调用上"——一次模型往返
+  // 只换回一个文件内容，而每轮都要把上下文重发一遍（轮数还近似平方地涨 token）。
+  // 口径：**要并发就一起并发**（读 / 写 / 执行 / 连接都并），只有两种结构性冲突保序：
+  // 同一条路径上的写与读、托管进程的生命周期操作。
+  check("U25", "batch-calls",
+    has(intentRs, "fn parse_actions(") &&
+      has(intentRs, '"actions"') &&
+      has(intentRs, "fn parse_one(") &&
+      has(intentRs, "最多 {max} 个调用"),
+    "批解析没立起来：actions / calls 两件外衣要认、单动作不许被误伤、超上限必须报上限让它拆批（静默截断 = 丢调用）");
+
+  check("U25", "batch-calls",
+    has(intentRs, "fn conflicts(") &&
+      has(intentRs, "fn waves_by(") &&
+      has(intentRs, "fn batch_waves(") &&
+      has(intentRs, "fn shape_of(") &&
+      has(stepRs, "batch_waves_for_step("),
+    "波次模型没立起来：冲突判定与分层必须是同一个内核（父子共用 waves_by），否则父子对「哪条能并发」的判定会分叉");
+
+  check("U25", "batch-calls",
+    has(intentRs, "fn run_wave(") &&
+      has(intentRs, "std::thread::scope") &&
+      has(intentRs, "struct JoinAll") &&
+      has(intentRs, "fn flush_write_disk(") &&
+      has(intentRs, "fn read_group("),
+    "波内并发没落地：只读/写入/执行要各起线程、连接要 join_all；写入落盘只许一个实现（flush_write_disk）");
+
+  check("U25", "batch-calls",
+    has(intentRs, "fn before_of(") &&
+      has(intentRs, "fn record(") &&
+      has(intentRs, "ensure_backup_dir("),
+    "写入拆分不对：磁盘阶段可并发、记账（覆盖层/变更表）必须在主线程按声明顺序补 —— 内存状态只有一份");
+
+  check("U25", "batch-calls",
+    has(configRs, "pub batch: bool") &&
+      has(configRs, "pub batch_max: usize") &&
+      has(configRs, "pub batch_parallel: bool") &&
+      has(cfgBridgeRs, "ruyix.code.harness.agent.batch") &&
+      has(cfgBridgeRs, "agent.batch_max") &&
+      has(configJs, '"agent.batch"') &&
+      has(configJs, '"agent.batch_max"') &&
+      has(configJs, '"agent.batch_parallel"'),
+    "批开关没贯通：引擎 AgentConfig 三字段 → 配置桥三键 → UI 三字段，缺一样用户就没法一行回退");
+
+  check("U25", "batch-calls",
+    has(intentRs, "fn batch_hint(") &&
+      has(intentRs, "has_plan") &&
+      has(intentRs, "一批最多") &&
+      has(stepRs, "batch_hint(cfg.agent.batch_max, false)") &&
+      has(stepRs, "parse_step_actions("),
+    "提示词没教会批协议（模型不会凭空发明 actions 字段）；子步骤那份必须 has_plan=false —— STEP_SYSTEM 里没有清单工具，提了它会去找一个不存在的能力");
+
+  check("U25", "batch-calls",
+    has(intentRs, "cfg.agent.batch_max, cfg.agent.batch") &&
+      has(intentRs, "batch_parallel") &&
+      has(intentRs, "并发跑"),
+    "开关与接受判定没绑在一起：提示词教不教批、引擎收不收批必须同一个开关（不虚报能力）；提示词还要说清「一批并发跑、只有同文件与托管进程保序」");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌

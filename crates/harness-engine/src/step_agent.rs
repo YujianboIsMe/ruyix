@@ -19,13 +19,15 @@
 //! 子步骤自报事件会撞掉父的 index。步骤进度由父循环在派发前/返回后统一发。
 
 use crate::agent::{
-    Ctx, FileChange, LLM_FAIL_LIMIT, StepAction, VerifyOutcome, narrow_verify,
-    parse_failure_feedback, parse_step_action, policy_system_note, proc_op_name,
-    staged_execute_note, tool_exec_bg, tool_execute, tool_proc,
+    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, StepAction, VerifyOutcome, batch_hint,
+    batch_json_result, batch_waves_for_step, flush_write_disk, json_result, narrow_verify,
+    parse_failure_feedback, parse_step_actions, policy_system_note, proc_op_name, read_group,
+    staged_execute_note, tool_exec_bg, tool_execute, tool_proc, write_ok_text,
 };
 use crate::config::AppConfig;
 use crate::discover;
 use crate::exec::{CancelFlag, clip, is_cancelled};
+use crate::generate::safe_rel_path;
 use crate::llm::{self, ChatMessage, Usage};
 use crate::pipeline::Sink;
 use crate::plan::PlanStep;
@@ -235,18 +237,6 @@ fn step_changes(cx: &Ctx<'_>, written: &[String]) -> Vec<FileChange> {
         .collect()
 }
 
-fn json_str(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
-}
-
-/// 工具结果 → 回灌消息（与主循环同一形状，模型不必学两套协议）
-fn json_result(r: Result<String, String>) -> String {
-    match r {
-        Ok(v) => format!("{{\"ok\": true, \"result\": {}}}", json_str(&v)),
-        Err(e) => format!("{{\"ok\": false, \"error\": {}}}", json_str(&e)),
-    }
-}
-
 /// 不支持的能力：明确拒绝 + 给出替代动作，别让模型在那儿反复试
 fn unsupported_reason(name: &str) -> String {
     format!(
@@ -288,6 +278,214 @@ fn error_report(
 /// `cx` 是主循环那一份（共享覆盖层，见模块文档第 2 条）。写盘/暂存策略由 `cx` 决定。
 /// 返回 `Err` 只在"致命模型错误"（Key 无效、余额不足、连续抖动到上限）—— 与主循环
 /// 一致，由父循环决定中断还是记一条失败；其余情况一律是 `Ok(status=error)` 的报告。
+/// 一个步骤动作 → `(tool, brief, result)`。单条路径与并发波**共用同一份实现**。
+async fn step_exec_one(
+    cfg: &AppConfig,
+    cx: &mut Ctx<'_>,
+    action: StepAction,
+) -> (String, String, Result<String, String>) {
+    match action {
+        StepAction::Read(path) => {
+            let brief = format!("read {path}");
+            ("read".into(), brief, cx.tool_read(&path))
+        }
+        StepAction::Write(path, content) => {
+            let brief = format!("write {path}（{} 字节）", content.len());
+            ("write".into(), brief, cx.tool_write(&path, &content))
+        }
+        StepAction::Execute(cmd, t) => {
+            let mut r = tool_execute(cx.project_root(), &cmd, t);
+            // 确认模式 + 本步已有暂存改动：这条命令看不到本次修改，贴一行说明兜住
+            r.push_str(staged_execute_note(cx.policy(), !cx.changes().is_empty()));
+            (
+                "execute".into(),
+                format!("execute {}", clip(&cmd, 80)),
+                Ok(r),
+            )
+        }
+        StepAction::ExecBg(spec) => (
+            "execute".into(),
+            format!("execute bg {}", clip(&spec.cmd, 70)),
+            tool_exec_bg(cx.project_root(), cfg, &spec),
+        ),
+        StepAction::Proc(op, handle) => (
+            "execute".into(),
+            format!("execute {} {handle}", proc_op_name(op)),
+            tool_proc(op, &handle),
+        ),
+        StepAction::Unsupported(name) => (
+            name.to_string(),
+            format!("{name}（本步不支持）"),
+            Err(unsupported_reason(name)),
+        ),
+        StepAction::Final(_) => unreachable!("Final 在上面已经返回"),
+    }
+}
+
+/// 一波（波内互不冲突）的**并发执行**：只读走 [`read_group`]；写入拆"磁盘并行 + 记账按序"
+/// （与主循环同一套 `Ctx::before_of` / `flush_write_disk` / `Ctx::record`）；执行与托管进程各起
+/// 线程。子步骤没有 connect，所以不涉及 [`crate::agent::JoinAll`]。
+/// 参数多：与主循环的 `run_wave` 同款（它要同时知道配置、覆盖层、动作与结果槽位）。
+#[allow(clippy::too_many_arguments)]
+async fn run_step_wave(
+    cfg: &AppConfig,
+    cx: &mut Ctx<'_>,
+    actions: &[StepAction],
+    wave: &[usize],
+    slots: &mut [Option<CallResult>],
+) {
+    // 一行回退：波内也不并发
+    if !cfg.agent.batch_parallel {
+        for &i in wave {
+            slots[i] = Some(step_exec_one(cfg, cx, actions[i].clone()).await);
+        }
+        return;
+    }
+
+    let mut reads: Vec<(usize, String)> = Vec::new();
+    let mut writes: Vec<(usize, String, Option<String>, String)> = Vec::new();
+    let mut execs: Vec<(usize, String, Option<u64>)> = Vec::new();
+    let mut bgs: Vec<(usize, crate::proc::StartSpec)> = Vec::new();
+    let mut procs: Vec<(usize, ProcOp, String)> = Vec::new();
+    let mut errs: Vec<(usize, String, String, String)> = Vec::new(); // (i, tool, brief, err)
+
+    for &i in wave {
+        match &actions[i] {
+            StepAction::Read(p) => reads.push((i, p.clone())),
+            StepAction::Write(p, after) => match safe_rel_path(p) {
+                Ok(rel) => {
+                    let before = cx.before_of(&rel);
+                    writes.push((i, rel, before, after.clone()));
+                }
+                Err(e) => errs.push((i, "write".into(), format!("write {p}"), e)),
+            },
+            StepAction::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
+            StepAction::ExecBg(spec) => bgs.push((i, spec.clone())),
+            StepAction::Proc(op, h) => procs.push((i, *op, h.clone())),
+            // 不支持的能力（计划 / 连接）：与单条路径同样的拒绝文本，不静默
+            StepAction::Unsupported(name) => errs.push((
+                i,
+                name.to_string(),
+                format!("{name}（本步不支持）"),
+                unsupported_reason(name),
+            )),
+            StepAction::Final(_) => unreachable!("Final 在上面已经返回"),
+        }
+    }
+
+    if !reads.is_empty() {
+        let paths: Vec<String> = reads.iter().map(|(_, p)| p.clone()).collect();
+        for ((i, p), r) in reads.iter().zip(read_group(cx, &paths, true)) {
+            slots[*i] = Some(("read".to_string(), format!("read {p}"), r));
+        }
+    }
+    for (i, tool, brief, e) in errs {
+        slots[i] = Some((tool, brief, Err(e)));
+    }
+
+    let bdir = if writes.iter().any(|(_, _, b, _)| b.is_some()) {
+        cx.ensure_backup_dir(true)
+    } else {
+        cx.backup_dir_path()
+    };
+    let text_changes = !cx.changes().is_empty();
+
+    let mut write_out: Vec<(usize, Result<(), String>)> = Vec::new();
+    let mut exec_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    let mut bg_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    let mut proc_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    {
+        let proj = cx.project_root().to_path_buf();
+        std::thread::scope(|s| {
+            let hw: Vec<_> = writes
+                .iter()
+                .map(|(i, rel, before, after)| {
+                    let (i, rel, before, after) = (*i, rel.clone(), before.clone(), after.clone());
+                    let (bdir, proj) = (bdir.clone(), proj.clone());
+                    (
+                        i,
+                        s.spawn(move || {
+                            flush_write_disk(
+                                &proj,
+                                bdir.as_deref(),
+                                &rel,
+                                before.as_deref(),
+                                &after,
+                            )
+                        }),
+                    )
+                })
+                .collect();
+            let he: Vec<_> = execs
+                .iter()
+                .map(|(i, cmd, t)| {
+                    let (i, cmd, t, proj) = (*i, cmd.clone(), *t, proj.clone());
+                    (i, s.spawn(move || tool_execute(&proj, &cmd, t)))
+                })
+                .collect();
+            let hb: Vec<_> = bgs
+                .iter()
+                .map(|(i, spec)| {
+                    let (i, spec, proj) = (*i, spec.clone(), proj.clone());
+                    (i, s.spawn(move || tool_exec_bg(&proj, cfg, &spec)))
+                })
+                .collect();
+            let hp: Vec<_> = procs
+                .iter()
+                .map(|(i, op, handle)| {
+                    let (i, op, handle) = (*i, *op, handle.clone());
+                    (i, s.spawn(move || tool_proc(op, &handle)))
+                })
+                .collect();
+            for (i, h) in hw {
+                write_out.push((i, h.join().unwrap_or_else(|_| Err("写入线程异常".into()))));
+            }
+            for (i, h) in he {
+                exec_out.push((
+                    i,
+                    Ok(h.join().unwrap_or_else(|_| "执行线程异常（未返回）".into())),
+                ));
+            }
+            for (i, h) in hb {
+                bg_out.push((i, h.join().unwrap_or_else(|_| Err("启动线程异常".into()))));
+            }
+            for (i, h) in hp {
+                proc_out.push((i, h.join().unwrap_or_else(|_| Err("句柄线程异常".into()))));
+            }
+        });
+    }
+
+    for ((i, rel, before, after), (_, r)) in writes.iter().zip(write_out) {
+        let brief = format!("write {rel}（{} 字节）", after.len());
+        let res = match r {
+            Ok(()) => {
+                cx.record(rel.clone(), before.clone(), after.clone());
+                Ok(write_ok_text(rel, after.len(), cx.policy()))
+            }
+            Err(e) => Err(e),
+        };
+        slots[*i] = Some(("write".into(), brief, res));
+    }
+    for ((i, cmd, _), (_, r)) in execs.iter().zip(exec_out) {
+        let r = r.map(|txt| format!("{txt}{}", staged_execute_note(cx.policy(), text_changes)));
+        slots[*i] = Some(("execute".into(), format!("execute {}", clip(cmd, 80)), r));
+    }
+    for ((i, spec), (_, r)) in bgs.iter().zip(bg_out) {
+        slots[*i] = Some((
+            "execute".into(),
+            format!("execute bg {}", clip(&spec.cmd, 70)),
+            r,
+        ));
+    }
+    for ((i, op, handle), (_, r)) in procs.iter().zip(proc_out) {
+        slots[*i] = Some((
+            "execute".into(),
+            format!("execute {} {handle}", proc_op_name(*op)),
+            r,
+        ));
+    }
+}
+
 pub async fn run_step(
     cfg: &AppConfig,
     cx: &mut Ctx<'_>,
@@ -325,6 +523,11 @@ pub async fn run_step(
     );
     if let Some(note) = discover::render_note(&tools, false) {
         user.push_str(&format!("\n\n{note}"));
+    }
+    // 批量调用：父子上下文隔离，父的那份到不了这里 —— 不补一遍，每个步骤里还会退化成
+    // "一轮一个调用"（正是本步预算被读文件吃掉的原因）
+    if cfg.agent.batch {
+        user.push_str(&format!("\n\n{}", batch_hint(cfg.agent.batch_max, false)));
     }
     let mut msgs = vec![ChatMessage::system(STEP_SYSTEM), ChatMessage::user(user)];
 
@@ -384,23 +587,28 @@ pub async fn run_step(
         };
         usage.add(&reply.usage);
 
-        let action = match parse_step_action(&reply.content) {
-            Ok(a) => a,
-            Err(e) => {
-                sink.log(
-                    "warn",
-                    format!("[step {}] 第 {round} 轮输出无法解析：{e}", inp.index),
-                );
-                msgs.push(ChatMessage::user(parse_failure_feedback(
-                    &e,
-                    reply.finish_reason.as_deref(),
-                )));
-                continue;
-            }
-        };
+        let mut actions =
+            match parse_step_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch) {
+                Ok(a) => a,
+                Err(e) => {
+                    sink.log(
+                        "warn",
+                        format!("[step {}] 第 {round} 轮输出无法解析：{e}", inp.index),
+                    );
+                    msgs.push(ChatMessage::user(parse_failure_feedback(
+                        &e,
+                        reply.finish_reason.as_deref(),
+                    )));
+                    continue;
+                }
+            };
         msgs.push(ChatMessage::assistant(reply.content.clone()));
 
-        if let StepAction::Final(text) = action {
+        // final 只可能是单动作（批里的 final 已被 parse_actions 当面拒）
+        if actions.len() == 1 && matches!(actions[0], StepAction::Final(_)) {
+            let StepAction::Final(text) = actions.remove(0) else {
+                unreachable!("上面刚判过是 final")
+            };
             let note = step_note(&written, last_verify.as_ref());
             let report = StepReport {
                 status: "done".into(),
@@ -419,67 +627,85 @@ pub async fn run_step(
             return Ok(report);
         }
 
-        let (tool, brief, result): (String, String, Result<String, String>) = match action {
-            StepAction::Final(_) => unreachable!("Final 在上面已经返回"),
-            StepAction::Read(path) => {
-                let brief = format!("read {path}");
-                let r = cx.tool_read(&path);
-                // 读过什么 = 父循环喂给复核员的证据集合（子步骤的 read 不进父上下文，
-                // 这份清单是父唯一能知道"它查过什么"的通道）
-                if r.is_ok() && !read.contains(&path) {
-                    read.push(path.clone());
-                }
-                ("read".into(), brief, r)
+        // ---- 执行本轮动作：按**波次**（波内并发、波间按序）----
+        let n = actions.len();
+        let waves = batch_waves_for_step(&actions);
+        let mut slots: Vec<Option<CallResult>> = (0..n).map(|_| None).collect();
+        for wave in &waves {
+            if wave.len() == 1 {
+                let i = wave[0];
+                slots[i] = Some(step_exec_one(cfg, cx, actions[i].clone()).await);
+            } else {
+                run_step_wave(cfg, cx, &actions, wave, &mut slots).await;
             }
-            StepAction::Write(path, content) => {
-                let brief = format!("write {path}（{} 字节）", content.len());
-                let r = cx.tool_write(&path, &content);
-                if r.is_ok() && !written.contains(&path) {
-                    written.push(path.clone());
-                }
-                ("write".into(), brief, r)
-            }
-            StepAction::Execute(cmd, t) => {
-                let mut r = tool_execute(cx.project_root(), &cmd, t);
-                // 确认模式 + 本步已有暂存改动：这条命令看不到本次修改，贴一行说明兜住
-                r.push_str(staged_execute_note(cx.policy(), !cx.changes().is_empty()));
-                (
-                    "execute".into(),
-                    format!("execute {}", clip(&cmd, 80)),
-                    Ok(r),
-                )
-            }
-            StepAction::ExecBg(spec) => {
-                let r = tool_exec_bg(cx.project_root(), cfg, &spec);
-                (
-                    "execute".into(),
-                    format!("execute bg {}", clip(&spec.cmd, 70)),
-                    r,
-                )
-            }
-            StepAction::Proc(op, handle) => (
-                "execute".into(),
-                format!("execute {} {handle}", proc_op_name(op)),
-                tool_proc(op, &handle),
-            ),
-            StepAction::Unsupported(name) => (
-                name.to_string(),
-                format!("{name}（本步不支持）"),
-                Err(unsupported_reason(name)),
-            ),
-        };
+        }
+        let results: Vec<CallResult> = slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| {
+                o.unwrap_or_else(|| {
+                    (
+                        "call".into(),
+                        format!("第 {} 条调用", i + 1),
+                        Err("未执行".into()),
+                    )
+                })
+            })
+            .collect();
 
-        let ok = result.is_ok();
-        let icon = if ok { "✓" } else { "✗" };
-        trace.push(clip(&format!("{tool} {icon} {brief}"), TRACE_CLIP));
-        sink.log(
-            if ok { "info" } else { "warn" },
-            clip(&format!("[step {}] {tool} {icon} {brief}", inp.index), 400),
-        );
+        // 记账 / 轨迹 / 日志：批里每条一行，轮号相同
+        let mut any_write_ok = false;
+        for (i, (tool, brief, res)) in results.iter().enumerate() {
+            let ok = res.is_ok();
+            if *tool == "write" && ok {
+                any_write_ok = true;
+            }
+            // 读过 / 写过什么：父循环靠这两份清单（复核员的证据集合、进度对账）
+            if ok
+                && let StepAction::Read(p) = &actions[i]
+                && !read.contains(p)
+            {
+                read.push(p.clone());
+            }
+            if ok
+                && let StepAction::Write(p, _) = &actions[i]
+                && !written.contains(p)
+            {
+                written.push(p.clone());
+            }
+            let icon = if ok { "✓" } else { "✗" };
+            trace.push(clip(&format!("{tool} {icon} {brief}"), TRACE_CLIP));
+            let head = if n == 1 {
+                String::new()
+            } else {
+                format!("[{}/{}] ", i + 1, n)
+            };
+            sink.log(
+                if ok { "info" } else { "warn" },
+                clip(
+                    &format!("[step {}] {head}{tool} {icon} {brief}", inp.index),
+                    400,
+                ),
+            );
+        }
+        if n > 1 {
+            let same_wave: usize = waves.iter().filter(|w| w.len() > 1).map(|w| w.len()).sum();
+            sink.log(
+                "info",
+                clip(
+                    &format!(
+                        "[step {}] 一批 {n} 个调用（{} 波，同波并发 {same_wave} 条）",
+                        inp.index,
+                        waves.len()
+                    ),
+                    240,
+                ),
+            );
+        }
 
-        // 机械验证（窄层）：事实触发 —— 本步真的写成了文件。与主循环同一判据、同一实现；
-        // 失败当成"观察"回灌，不打断本步（它是即时反馈，交付判据在父循环的门禁里）。
-        if tool == "write" && ok && cfg.gate.narrow && !is_cancelled(cancel) {
+        // 机械验证（窄层）：事实触发 —— 本步真的写成了文件（批里有写也算）。与主循环同一判据、
+        // 同一实现；失败当成"观察"回灌，不打断本步（它是即时反馈，交付判据在父循环的门禁里）。
+        if any_write_ok && cfg.gate.narrow && !is_cancelled(cancel) {
             let mine = step_changes(cx, &written);
             if !mine.is_empty() {
                 let v = narrow_verify(cfg, &mine).await;
@@ -496,7 +722,13 @@ pub async fn run_step(
             }
         }
 
-        msgs.push(ChatMessage::user(json_result(result)));
+        // 回灌：单动作老形状（模型学过它），批走 results 数组、按声明顺序逐条给
+        if n == 1 {
+            let (_, _, r) = results.into_iter().next().expect("n == 1 时必有结果");
+            msgs.push(ChatMessage::user(json_result(r)));
+        } else {
+            msgs.push(ChatMessage::user(batch_json_result(&results)));
+        }
     }
 
     // 预算用尽：不冒充完成。已产出的文件仍留在覆盖层里，父循环收尾时会照实算。
@@ -1065,5 +1297,61 @@ mod tests {
         ));
         // 格式烂仍然是要重发的错，不该被当成"不支持的能力"
         assert!(parse("随便聊聊").is_err());
+    }
+
+    /// 子步骤也能一批读：3 个 read 只花 1 轮，三份内容一起回来 ——
+    /// 子步的轮次预算同样被"一轮一个调用"吃掉（step.max_steps 24 轮很容易花在读文件上）。
+    #[test]
+    fn a_step_can_read_a_batch_in_one_round() {
+        let dir = temp_project("step-batch");
+        std::fs::write(dir.join("a.txt"), "AAA").unwrap();
+        std::fs::write(dir.join("b.txt"), "BBB").unwrap();
+        std::fs::write(dir.join("c.txt"), "CCC").unwrap();
+        let llm = fake_llm(vec![
+            concat!(
+                r#"{"actions":[{"tool":"read","args":{"path":"a.txt"}},"#,
+                r#"{"tool":"read","args":{"path":"b.txt"}},"#,
+                r#"{"tool":"read","args":{"path":"c.txt"}}]}"#
+            )
+            .into(),
+            r#"{"final":"读完了"}"#.into(),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "读三个文件", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "做点事",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        assert_eq!(llm.count(), 2, "一批 3 个 read = 1 轮（外加 final 那轮）");
+        assert_eq!(rep.status, "done");
+        assert_eq!(
+            rep.read_paths,
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string()
+            ],
+            "读过什么要按声明顺序报给父循环（复核员的证据集合）"
+        );
+        assert_eq!(rep.trace.len(), 3, "三条调用都进轨迹：{:?}", rep.trace);
+        let second = llm.request(1);
+        for content in ["AAA", "BBB", "CCC"] {
+            assert!(second.contains(content), "缺 {content}：{second}");
+        }
     }
 }

@@ -297,18 +297,46 @@ pub struct AgentConfig {
     /// 到时立刻收手并把原因写进答复 —— 宁可"这次没做完"，也不要让一个 run 无声烧下去。
     #[serde(default = "d_agent_max_elapsed_secs")]
     pub max_elapsed_secs: u64,
+    /// 每轮允许模型一次发**一批**互不依赖的调用（`{"actions":[…]}`）。
+    /// 关掉即回到"一轮一个调用"的老协议（一行回滚；提示词也不再教这个形状）。
+    #[serde(default = "d_agent_batch")]
+    pub batch: bool,
+    /// 单批最多几个调用。超了不静默截断（那会丢调用），而是把上限告诉模型让它拆批。
+    #[serde(default = "d_agent_batch_max")]
+    pub batch_max: usize,
+    /// 一批里**连续的只读调用**是否并发执行。关掉仍是一批一个上下文往返，
+    /// 只是读文件改回排队（用于排查"并发读"本身的问题）。
+    #[serde(default = "d_agent_batch_parallel")]
+    pub batch_parallel: bool,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_elapsed_secs: d_agent_max_elapsed_secs(),
+            batch: d_agent_batch(),
+            batch_max: d_agent_batch_max(),
+            batch_parallel: d_agent_batch_parallel(),
         }
     }
 }
 
 fn d_agent_max_elapsed_secs() -> u64 {
     1800
+}
+
+fn d_agent_batch() -> bool {
+    true
+}
+
+/// 上限取 8：一次读 5~8 个文件的场景最常见，再多属于"该先规划"而不是"该并发读"。
+/// 它同时是提示词里给出的数字，模型据此拆批。
+fn d_agent_batch_max() -> usize {
+    8
+}
+
+fn d_agent_batch_parallel() -> bool {
+    true
 }
 
 fn d_python() -> String {
@@ -677,6 +705,49 @@ fn d_proc_ready_timeout() -> u64 {
     60
 }
 
+/// 向委托人提问（`ask_user`，v0.8）的配置面。
+///
+/// 需求歧义（"做一个远程登录功能" —— 登哪台机器？）的答案**不在环境里**：read 读磁盘、
+/// execute 跑命令、connect 连机器，三者都只会从"环境"取答案。所以第五个动作是"问人"，
+/// 而它的三条纪律都落在这一组开关上：能不能问、等多久算没人回答、一次 run 最多问几次。
+///
+/// 默认**开**：关掉等于让模型回到"猜"—— 猜错的代价常常是整体返工，而不是多花几轮。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AskConfig {
+    /// 关掉后 `ask_user` 一律被拒（提示词也一字不提：不虚报能力）
+    #[serde(default = "d_ask_enabled")]
+    pub enabled: bool,
+    /// 等多久算"没人回答"（秒），0 = 无限等。超时一律 fail-closed：
+    /// 引擎会拒绝依赖这个答案的动作，**绝不假设同意**。
+    #[serde(default = "d_ask_timeout")]
+    pub timeout_secs: u64,
+    /// 一次 run 最多问几次（`ask` 是稀缺资源：问多了说明该交付并声明假设）
+    #[serde(default = "d_ask_max")]
+    pub max_per_run: u32,
+}
+
+impl Default for AskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: d_ask_enabled(),
+            timeout_secs: d_ask_timeout(),
+            max_per_run: d_ask_max(),
+        }
+    }
+}
+
+fn d_ask_enabled() -> bool {
+    true
+}
+
+fn d_ask_timeout() -> u64 {
+    300
+}
+
+fn d_ask_max() -> u32 {
+    4
+}
+
 /// 托管进程（永不退出的服务）配置（v0.6）。
 ///
 /// `execute` 原来是"跑完为止"，对 `mvn spring-boot:run` / `java -jar` 这类**永不退出**的服务
@@ -744,6 +815,9 @@ pub struct AppConfig {
     /// 托管进程（永不退出的服务：后台启动 + 就绪判据 + 句柄，v0.6）
     #[serde(default)]
     pub proc: ProcConfig,
+    /// 向委托人提问（需求歧义只能问人，v0.8）
+    #[serde(default)]
+    pub ask: AskConfig,
     #[serde(default = "d_workspace")]
     pub workspace_root: String,
     #[serde(default = "d_max_context")]
@@ -768,6 +842,7 @@ impl Default for AppConfig {
             discover: DiscoverConfig::default(),
             env: EnvConfig::default(),
             proc: ProcConfig::default(),
+            ask: AskConfig::default(),
             workspace_root: d_workspace(),
             max_context_chars: d_max_context(),
         }

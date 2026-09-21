@@ -37,6 +37,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 /// 循环轮次上限（每轮 = 一次模型调用，产出工具调用或最终答复）
@@ -91,6 +92,10 @@ pub struct StepTrace {
     pub brief: String,
     pub ok: bool,
 }
+
+/// 一次调用的回灌信息：`(tool, brief, result)`。单动作路径与批里每条都用它
+/// （免得同一个元组在五处各写一遍）。
+pub(crate) type CallResult = (String, String, Result<String, String>);
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AgentOutcome {
@@ -463,6 +468,38 @@ pub(crate) fn staged_execute_note(policy: WritePolicy, has_changes: bool) -> &'s
     }
 }
 
+/// 批量调用：一轮发多个互不依赖的调用，引擎把只读的那些并发跑、其余按声明顺序串行。
+///
+/// 这是**省轮次的主通道**：一次读 5 个文件原先要 5 轮（每轮一次模型往返，文件内容还要
+/// 全文回灌进上下文），现在 1 轮。提示词里必须给出形状 —— 模型不会凭空发明一个没见过的
+/// 字段名（同 `keep_alive` 的教训：没写进提示词的能力等于不存在）。
+///
+/// 放在**首轮 user 消息**而不是 `AGENT_SYSTEM`：与 connect 清单 / 命令发现 / 写入策略同一条
+/// 通道（那里已有一处 note 的落点），且 `AGENT_SYSTEM` 保持常量不动（测试直接断言其内容）。
+const BATCH_HINT_HEAD: &str = concat!(
+    "批量调用（省轮次）：互不依赖的调用可以一轮发一批 —— ",
+    r#"{"actions":[{"tool":"read","args":{"path":"a.rs"}},{"tool":"read","args":{"path":"b.rs"}}]}"#,
+    "。引擎**把一批里的调用并发跑**（读 / 写 / 执行 / 连接各走各的），结果在同一轮的 results 里按同样顺序一次全给你。",
+    "同一批里**只有两种情况**会被自动按你给的顺序排：对同一个文件的写与读、以及托管进程的起停查；",
+    "其余依赖（先 build 再 test、抢同一个端口、拿上一条的输出当参数）引擎看不出来 —— 有依赖就分两轮发。"
+);
+
+/// 批上限也要写进提示词（数字给模型，它据此拆批）—— 只写"可以批"会让模型发 20 个，
+/// 换来一次拒绝，白烧一轮。
+///
+/// `has_plan` 决定要不要提"清单不能进批"：**步骤子 agent 没有清单工具**（STEP_SYSTEM 只有
+/// 三种能力），提了它反倒会去找一个不存在的能力 —— 父子提示词各自自洽这条纪律，与后台模式
+/// 那段同源（父那份到不了子上下文，子那份也不许广告父的能力）。
+pub(crate) fn batch_hint(max: usize, has_plan: bool) -> String {
+    let ctrl = if has_plan {
+        "final / plan 不能放进批里，要单独一轮输出。"
+    } else {
+        // 子步骤没有清单，不许提它（父子提示词各自自洽）
+        "final 不能放进批里，要单独一轮输出。"
+    };
+    format!("{BATCH_HINT_HEAD}{ctrl}（一批最多 {max} 个调用）")
+}
+
 // ============================================
 // 动作解析（模型输出 → 结构化动作）
 // ============================================
@@ -521,11 +558,68 @@ fn get_str(v: &serde_json::Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("args 缺少字符串字段 {key}"))
 }
 
-/// 模型输出 → 结构化动作（`Action` 只在本模块用，别把内部枚举泄成 pub）
+/// 单动作入口：**不接受**批（老语义）。生产路径走 [`parse_actions`]，
+/// 这条留给测试断言"批关掉时该拒就拒"。（`Action` 只在本模块用，别把内部枚举泄成 pub）
+#[cfg(test)]
 fn parse_action(raw: &str) -> Result<Action, String> {
     let json = llm::extract_json_object(raw);
     let v: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| format!("输出不是合法 JSON: {e}；片段: {}", clip(&json, 200)))?;
+    parse_one(&v)
+}
+
+/// 一轮模型输出 → 动作清单（1 个或多个）。
+///
+/// 多个动作 = **批量调用**：模型把互不依赖的调用一次发出来，引擎并发执行只读的那些、
+/// 按声明顺序执行有副作用的那些，再把结果按同一顺序一起回灌（见 [`group_batch`]）。
+///
+/// `max` 是单批上限：超了**不静默截断**（截断就是丢调用，模型还以为发出去了），
+/// 而是把上限报回去让它拆批。`allow_batch = false` 时批协议整体关闭 —— 一行回滚，
+/// 与提示词里教不教这个形状由同一个开关决定（不虚报能力）。
+fn parse_actions(raw: &str, max: usize, allow_batch: bool) -> Result<Vec<Action>, String> {
+    let json = llm::extract_json_object(raw);
+    let v: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| format!("输出不是合法 JSON: {e}；片段: {}", clip(&json, 200)))?;
+    // 批的两件外衣：actions / calls（模型两种都写过，认全了省一轮）
+    let Some(arr) = v
+        .get("actions")
+        .or_else(|| v.get("calls"))
+        .and_then(|x| x.as_array())
+    else {
+        return Ok(vec![parse_one(&v)?]);
+    };
+    if !allow_batch {
+        return Err("本轮不允许批量调用：请每轮只发一个调用（actions 已关闭）".into());
+    }
+    if arr.is_empty() {
+        return Err("actions 为空".into());
+    }
+    if arr.len() > max {
+        return Err(format!(
+            "一批最多 {max} 个调用，这次给了 {} 个 —— 请拆成多轮，或按依赖关系分成几批",
+            arr.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let a = parse_one(item).map_err(|e| format!("actions 第 {} 个解析失败：{e}", i + 1))?;
+        // final / plan 是控制动作不是调用：和调用混在一批里，"谁先谁后"没有合理解释 →
+        // 当面拒掉（模型照提示词改一次就好），而不是替它猜一个顺序
+        match a {
+            Action::Final(_) => {
+                return Err("final 不能放进批里：完成时单独发一轮 final".into());
+            }
+            Action::Plan(_) => {
+                return Err("plan 不能放进批里：清单要单独发一轮".into());
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+/// 单个动作对象 → `Action`（final 也在这里认）
+fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
     if let Some(f) = v.get("final").and_then(|x| x.as_str()) {
         let text = f.trim().to_string();
         if text.is_empty() {
@@ -580,6 +674,8 @@ fn parse_action(raw: &str) -> Result<Action, String> {
         }
         // execute 是原语名；bash 留作别名 —— 老历史里写着 bash 的模型不该白烧一轮
         "execute" | "bash" => parse_execute(&args),
+        // 第五个动作：需求歧义只能问委托人。args 里出现 answer / granted 之类一律拒 ——
+        // 模型不许自问自答（答案只能从宿主的用户通道进来，与"复核 agent 构造上没有写路径"同款纪律）。
         "plan" => {
             let mut steps: Vec<PlanStep> =
                 serde_json::from_value(args.get("steps").cloned().unwrap_or(serde_json::json!([])))
@@ -598,6 +694,504 @@ fn parse_action(raw: &str) -> Result<Action, String> {
         other => Err(format!(
             "未知能力 {other:?}（只有 read / write / execute / connect 四种，外加 plan 清单，或输出 final）"
         )),
+    }
+}
+
+/// 冲突判定只看三件事：**路径 / 是不是写 / 是不是托管进程操作**。
+/// 父子两种动作（`Action` / `StepAction`）都映射到它 —— 判定内核只有一份。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Shape<'a> {
+    path: Option<&'a str>,
+    write: bool,
+    proc: bool,
+}
+
+fn shape_of(a: &Action) -> Shape<'_> {
+    match a {
+        Action::Read(p) => Shape {
+            path: Some(p),
+            write: false,
+            proc: false,
+        },
+        Action::Write(p, _) => Shape {
+            path: Some(p),
+            write: true,
+            proc: false,
+        },
+        Action::ExecBg(_) | Action::Proc(..) => Shape {
+            path: None,
+            write: false,
+            proc: true,
+        },
+        Action::Execute(..)
+        | Action::Connect(_)
+        | Action::Plan(_)
+        | Action::Final(_) => Shape {
+            path: None,
+            write: false,
+            proc: false,
+        },
+    }
+}
+
+pub(crate) fn shape_of_step(a: &StepAction) -> Shape<'_> {
+    match a {
+        StepAction::Read(p) => Shape {
+            path: Some(p),
+            write: false,
+            proc: false,
+        },
+        StepAction::Write(p, _) => Shape {
+            path: Some(p),
+            write: true,
+            proc: false,
+        },
+        StepAction::ExecBg(_) | StepAction::Proc(..) => Shape {
+            path: None,
+            write: false,
+            proc: true,
+        },
+        StepAction::Execute(..) | StepAction::Final(_) | StepAction::Unsupported(_) => Shape {
+            path: None,
+            write: false,
+            proc: false,
+        },
+    }
+}
+
+/// 两条调用是否**必须保序**（结构性判定 —— 只看原语与路径，**不猜命令语义**）。
+///
+/// 只有两种冲突：
+/// 1. **同一条路径上的写**：`write` 与同路径的 `read`/`write` 必须保序 —— 覆盖层是"写完立刻
+///    读回来"的依据，同文件两次写的先后也是模型表达的意思；
+/// 2. **托管进程的生命周期操作**（`background` 起 / `status`·`log`·`stop`）：那张进程表是引擎
+///    自己持有的共享状态，句柄又由引擎赋值 —— 同批里"起完再查"必须保序。
+///
+/// 其余**一律并发**：`execute` 之间共享什么（构建缓存、锁、端口）引擎不知道，凭命令文本猜就是
+/// app 知识泄漏 —— 这属于**模型的依赖声明**（提示词已写明"同一批并发跑，有依赖就分两轮发"）。
+pub(crate) fn conflicts(a: &Shape<'_>, b: &Shape<'_>) -> bool {
+    if a.proc && b.proc {
+        return true;
+    }
+    match (a.path, b.path) {
+        (Some(x), Some(y)) => x == y && (a.write || b.write),
+        _ => false,
+    }
+}
+
+/// 一批动作 → **执行波次**：波内互不冲突（并发跑），波与波之间按声明顺序。
+///
+/// 贪心分层：每条落在"它所有冲突前驱的下一波"。于是 `[read a, read b, write a, read a]`
+/// → `[[0,1],[2],[3]]`：两次读并发；写 a 等读 a；最后一个读 a 等写 a（于是读到新内容）。
+/// 最常见的批（互不相关的一串读 / 一串命令）**只有一波** —— 那就是"一起并发"。
+pub(crate) fn waves_by(shapes: &[Shape<'_>]) -> Vec<Vec<usize>> {
+    let mut level: Vec<usize> = Vec::with_capacity(shapes.len());
+    for (i, a) in shapes.iter().enumerate() {
+        let mut lv = 0;
+        for (j, b) in shapes.iter().enumerate().take(i) {
+            if conflicts(a, b) {
+                lv = lv.max(level[j] + 1);
+            }
+        }
+        level.push(lv);
+    }
+    let n = level.iter().copied().max().map_or(0, |m| m + 1);
+    let mut waves = vec![Vec::new(); n];
+    for (i, lv) in level.into_iter().enumerate() {
+        waves[lv].push(i);
+    }
+    waves
+}
+
+fn batch_waves(actions: &[Action]) -> Vec<Vec<usize>> {
+    let shapes: Vec<Shape<'_>> = actions.iter().map(shape_of).collect();
+    waves_by(&shapes)
+}
+
+/// 步骤子 agent 的波次（**同一个内核**，父子不分叉）
+pub(crate) fn batch_waves_for_step(actions: &[StepAction]) -> Vec<Vec<usize>> {
+    let shapes: Vec<Shape<'_>> = actions.iter().map(shape_of_step).collect();
+    waves_by(&shapes)
+}
+
+/// 并发跑一组只读调用，结果按**声明顺序**落回各自的槽位。
+///
+/// 顺序错位比慢更糟：模型会拿 B 文件的内容当 A 的依据，而且它没有任何办法察觉。
+///
+/// 用 `std::thread::scope` 而不是 tokio 任务：`Ctx::tool_read` 是同步文件 I/O，起任务也只是
+/// 在同一执行线程上排队；scoped 线程能直接借 `&Ctx`（不必 `'static`、不必克隆覆盖层），
+/// 也不要求 runtime 是多线程 —— 单测跑在 `new_current_thread` 上，那里 `block_in_place` 会直接 panic。
+pub(crate) fn read_group(
+    ctx: &Ctx<'_>,
+    paths: &[String],
+    parallel: bool,
+) -> Vec<Result<String, String>> {
+    if paths.len() == 1 || !parallel {
+        return paths.iter().map(|p| ctx.tool_read(p)).collect();
+    }
+    let mut slots: Vec<Option<Result<String, String>>> = (0..paths.len()).map(|_| None).collect();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = slots
+            .iter_mut()
+            .zip(paths.iter())
+            .map(|(slot, path)| s.spawn(move || *slot = Some(ctx.tool_read(path))))
+            .collect();
+        // 全部 join 掉：线程 panic 时它的槽位留 None（下面统一报"线程异常"），
+        // 不 join 的话 `scope` 结束时会自己再抛一次 "scoped thread panicked"
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+    slots
+        .into_iter()
+        .map(|s| s.unwrap_or_else(|| Err("并发读取未返回（读取线程异常）".into())))
+        .collect()
+}
+
+fn json_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// 单动作结果回灌：`{"ok":…, "result"|"error":…}`（历史里模型学过的形状，保持不动）
+pub(crate) fn json_result(r: Result<String, String>) -> String {
+    match r {
+        Ok(v) => format!("{{\"ok\": true, \"result\": {}}}", json_str(&v)),
+        Err(e) => format!("{{\"ok\": false, \"error\": {}}}", json_str(&e)),
+    }
+}
+
+/// 写入成功的回灌文案。**单动作与批并发两条路径共用**：确认模式必须把"磁盘没变"说清，
+/// 只说"已暂存"模型仍会去 execute 里找它的改动。
+pub(crate) fn write_ok_text(rel: &str, len: usize, policy: WritePolicy) -> String {
+    format!(
+        "已写入 {rel}（{len} 字节）{}",
+        if policy == WritePolicy::Stage {
+            "（已暂存到 .ruyix/stage/，项目磁盘未变，用户确认后才生效）"
+        } else {
+            ""
+        }
+    )
+}
+
+/// 一次写入的**磁盘阶段**：先备份被覆盖的原文件，再写目标。
+///
+/// 纯磁盘操作、只吃 `&Path`，所以能在并发波里跑；"写入怎么落盘"全仓只允许这一个实现
+/// （单动作路径走 [`Ctx::flush_one`]，它委托到这里）。
+pub(crate) fn flush_write_disk(
+    proj: &Path,
+    backup_dir: Option<&Path>,
+    rel: &str,
+    before: Option<&str>,
+    after: &str,
+) -> Result<(), String> {
+    if let (Some(dir), Some(before)) = (backup_dir, before) {
+        let to = dir.join(rel);
+        if let Some(parent) = to.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&to, before).map_err(|e| format!("备份 {rel} 失败：{e}（已中止写入）"))?;
+    }
+    let target = proj.join(rel);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&target, after).map_err(|e| format!("写入 {rel} 失败：{e}"))
+}
+
+/// 最简 `join_all`：在**同一个任务**里并发推进一组 future（引擎不为此引 `futures` 依赖）。
+///
+/// 为什么不是 `tokio::spawn`：这些 future 借的是 `&dyn Connector`，非 `'static`，spawn 装不下；
+/// 也不是 `tokio::join!`：它元数编译期固定，装不下运行时才知道长度的列表。
+struct JoinAll<'a, T> {
+    futs: Vec<ConnectFuture<'a, T>>,
+    out: Vec<Option<Result<T, String>>>,
+}
+
+impl<'a, T> JoinAll<'a, T> {
+    fn new(futs: Vec<ConnectFuture<'a, T>>) -> Self {
+        let out = futs.iter().map(|_| None).collect();
+        Self { futs, out }
+    }
+}
+
+impl<T: Unpin> Future for JoinAll<'_, T> {
+    type Output = Vec<Result<T, String>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // `Pin<Box<dyn Future>>` 与 `Option<..>` 都是 `Unpin`，所以这里能安全拿 `&mut`
+        let this = self.get_mut();
+        let mut pending = 0;
+        for (i, f) in this.futs.iter_mut().enumerate() {
+            if this.out[i].is_some() {
+                continue;
+            }
+            match f.as_mut().poll(cx) {
+                Poll::Ready(r) => this.out[i] = Some(r),
+                Poll::Pending => pending += 1,
+            }
+        }
+        if pending == 0 {
+            Poll::Ready(
+                this.out
+                    .iter_mut()
+                    .map(|o| o.take().unwrap_or_else(|| Err("join 状态丢失".into())))
+                    .collect(),
+            )
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// 一批结果回灌：`results` 数组**按声明顺序**，逐条带调用摘要与自己的 ok。
+///
+/// 顶层 `ok` 只是"全成"的汇总 —— 模型拿它当"这一轮有没有事"会漏掉其中一条失败，
+/// 所以每条都带 `ok`，并在 note 里点明顺序与执行方式（并发/串行）的关系。
+pub(crate) fn batch_json_result(items: &[CallResult]) -> String {
+    let all_ok = items.iter().all(|(_, _, r)| r.is_ok());
+    let results: Vec<serde_json::Value> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (tool, brief, r))| {
+            let mut o = serde_json::json!({
+                "index": i + 1,
+                "tool": tool,
+                "call": brief,
+                "ok": r.is_ok(),
+            });
+            match r {
+                Ok(v) => o["result"] = serde_json::Value::String(v.clone()),
+                Err(e) => o["error"] = serde_json::Value::String(e.clone()),
+            }
+            o
+        })
+        .collect();
+    serde_json::json!({
+        "ok": all_ok,
+        "results": results,
+        "note": "以上是同一轮里的多个调用（一批并发跑；只有同一条路径上的写与读、以及托管进程的起停查会按你给的顺序排），results 按你声明的顺序排列。",
+    })
+    .to_string()
+}
+
+/// 一个动作 → `(tool, brief, result)`。批与单动作走**同一份**实现：
+/// 两条派发路径必然分叉（老代码里解析与执行就分在两处 `match`），这里只留一条。
+async fn exec_one(
+    cfg: &AppConfig,
+    proj: &Path,
+    policy: WritePolicy,
+    conn: &dyn Connector,
+    ctx: &mut Ctx<'_>,
+    action: Action,
+) -> (String, String, Result<String, String>) {
+    match action {
+        Action::Read(path) => {
+            let brief = format!("read {path}");
+            ("read".into(), brief, ctx.tool_read(&path))
+        }
+        Action::Write(path, content) => {
+            let brief = format!("write {path}（{} 字节）", content.len());
+            ("write".into(), brief, ctx.tool_write(&path, &content))
+        }
+        Action::Execute(cmd, t) => {
+            let brief = format!("execute {}", clip(&cmd, 80));
+            let mut r = tool_execute(proj, &cmd, t);
+            // 确认模式 + 已有暂存改动：这条命令必然看不到本次修改，贴一行说明兜住
+            r.push_str(staged_execute_note(policy, !ctx.changes.is_empty()));
+            ("execute".into(), brief, Ok(r))
+        }
+        Action::ExecBg(spec) => {
+            let brief = format!("execute bg {}", clip(&spec.cmd, 70));
+            ("execute".into(), brief, tool_exec_bg(proj, cfg, &spec))
+        }
+        Action::Proc(op, handle) => {
+            let brief = format!("execute {} {handle}", proc_op_name(op));
+            ("execute".into(), brief, tool_proc(op, &handle))
+        }
+        Action::Connect(ca) => connect_step(conn, ca).await,
+        // 控制动作进不了批（parse_actions 已当面拒）；这条分支只为让 match 穷尽
+        Action::Plan(_) | Action::Final(_) => (
+            "control".into(),
+            "控制动作".into(),
+            Err("plan / final 不能与调用同批执行".into()),
+        ),
+    }
+}
+
+/// 一波（波内互不冲突）的**并发执行**，结果按索引写回 `slots`。
+///
+/// 落地方式按原语分：
+/// - 只读：`read_group`（scoped 线程借 `&Ctx`，同步文件 I/O，不占 runtime）
+/// - 写入：**磁盘部分**在 scoped 线程里并行（冲突规则保证同波不同路径），记账回主线程按声明
+///   顺序补 —— `Ctx` 的覆盖层与变更表只有一份内存状态，不能并发改
+/// - 执行 / 托管进程：每个线程自己起进程（`tool_execute` / `tool_exec_bg` / `tool_proc` 都只吃
+///   `&Path` 与 `&AppConfig`，与 `Ctx` 无关）
+/// - 连接：同一任务里 [`JoinAll`]（future 借 `&dyn Connector`，非 `'static`，spawn 装不下）
+///
+/// 波内没有依赖，所以"谁先谁后"无所谓：只读先跑完再起写/执行，纯粹是为了复用同一份并发读实现。
+/// 参数多：这是"把一批调用按波并发跑"的执行口，它本来就要同时知道配置、项目、策略、连接、
+/// 覆盖层与结果槽位（与本模块其它执行函数同款，见 `#[allow(too_many_arguments)]` 的既有用法）。
+#[allow(clippy::too_many_arguments)]
+async fn run_wave(
+    cfg: &AppConfig,
+    proj: &Path,
+    policy: WritePolicy,
+    conn: &dyn Connector,
+    ctx: &mut Ctx<'_>,
+    actions: &[Action],
+    wave: &[usize],
+    slots: &mut [Option<CallResult>],
+) {
+    // 一行回退：波内也不并发（仍是一批一次往返，只是按声明顺序串行）
+    if !cfg.agent.batch_parallel {
+        for &i in wave {
+            slots[i] = Some(exec_one(cfg, proj, policy, conn, &mut *ctx, actions[i].clone()).await);
+        }
+        return;
+    }
+
+    let mut reads: Vec<(usize, String)> = Vec::new();
+    let mut writes: Vec<(usize, String, Option<String>, String)> = Vec::new();
+    let mut execs: Vec<(usize, String, Option<u64>)> = Vec::new();
+    let mut bgs: Vec<(usize, crate::proc::StartSpec)> = Vec::new();
+    let mut procs: Vec<(usize, ProcOp, String)> = Vec::new();
+    let mut conn_briefs: Vec<(usize, String)> = Vec::new();
+    let mut conn_futs: Vec<ConnectFuture<'_, String>> = Vec::new();
+
+    for &i in wave {
+        match &actions[i] {
+            Action::Read(p) => reads.push((i, p.clone())),
+            Action::Write(p, after) => match safe_rel_path(p) {
+                // `before` 在主线程取（覆盖层命中或一次小文件读）—— 线程里只做磁盘
+                Ok(rel) => {
+                    let before = ctx.before_of(&rel);
+                    writes.push((i, rel, before, after.clone()));
+                }
+                Err(e) => slots[i] = Some(("write".into(), format!("write {p}"), Err(e))),
+            },
+            Action::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
+            Action::ExecBg(spec) => bgs.push((i, spec.clone())),
+            Action::Proc(op, h) => procs.push((i, *op, h.clone())),
+            Action::Connect(ca) => {
+                conn_briefs.push((i, connect_brief(ca)));
+                conn_futs.push(connect_future(conn, ca.clone()));
+            }
+            // 控制动作进不了多人波（parse_actions 已拒批里的 plan / final）
+            Action::Plan(_) | Action::Final(_) => {
+                slots[i] = Some((
+                    "control".into(),
+                    "控制动作".into(),
+                    Err("plan / final 不能与调用同波执行".into()),
+                ));
+            }
+        }
+    }
+
+    // 只读：复用同一份并发读（顺序按声明落位）
+    if !reads.is_empty() {
+        let paths: Vec<String> = reads.iter().map(|(_, p)| p.clone()).collect();
+        for ((i, p), r) in reads.iter().zip(read_group(ctx, &paths, true)) {
+            slots[*i] = Some(("read".to_string(), format!("read {p}"), r));
+        }
+    }
+
+    // Apply 模式要覆盖已有文件 → 备份目录在主线程备好（线程里不改 `Ctx`）
+    let bdir = if policy == WritePolicy::Apply && writes.iter().any(|(_, _, b, _)| b.is_some()) {
+        ctx.ensure_backup_dir(true)
+    } else {
+        ctx.backup_dir.clone()
+    };
+    // 贴"暂存改动"横幅用的判据（线程里读 `Ctx` 不方便，提前取）
+    let text_changes = !ctx.changes.is_empty();
+
+    let mut write_out: Vec<(usize, Result<(), String>)> = Vec::new();
+    let mut exec_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    let mut bg_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    let mut proc_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    std::thread::scope(|s| {
+        let hw: Vec<_> = writes
+            .iter()
+            .map(|(i, rel, before, after)| {
+                let (i, rel, before, after) = (*i, rel.clone(), before.clone(), after.clone());
+                let bdir = bdir.clone();
+                (
+                    i,
+                    s.spawn(move || {
+                        flush_write_disk(proj, bdir.as_deref(), &rel, before.as_deref(), &after)
+                    }),
+                )
+            })
+            .collect();
+        let he: Vec<_> = execs
+            .iter()
+            .map(|(i, cmd, t)| {
+                let (i, cmd, t) = (*i, cmd.clone(), *t);
+                (i, s.spawn(move || tool_execute(proj, &cmd, t)))
+            })
+            .collect();
+        let hb: Vec<_> = bgs
+            .iter()
+            .map(|(i, spec)| {
+                let (i, spec) = (*i, spec.clone());
+                (i, s.spawn(move || tool_exec_bg(proj, cfg, &spec)))
+            })
+            .collect();
+        let hp: Vec<_> = procs
+            .iter()
+            .map(|(i, op, handle)| {
+                let (i, op, handle) = (*i, *op, handle.clone());
+                (i, s.spawn(move || tool_proc(op, &handle)))
+            })
+            .collect();
+        for (i, h) in hw {
+            write_out.push((i, h.join().unwrap_or_else(|_| Err("写入线程异常".into()))));
+        }
+        for (i, h) in he {
+            // `tool_execute` 的失败信息是**嵌在文本里**的（不是 Err）：模型需要读到命令的
+            // 实际输出才能改；只有"线程都没回来"才算这一条没结果
+            exec_out.push((
+                i,
+                Ok(h.join().unwrap_or_else(|_| "执行线程异常（未返回）".into())),
+            ));
+        }
+        for (i, h) in hb {
+            bg_out.push((i, h.join().unwrap_or_else(|_| Err("启动线程异常".into()))));
+        }
+        for (i, h) in hp {
+            proc_out.push((i, h.join().unwrap_or_else(|_| Err("句柄线程异常".into()))));
+        }
+    });
+
+    // 写入：磁盘已落 → 这里按**声明顺序**记账（内存状态只有一份）
+    for ((i, rel, before, after), (_, r)) in writes.iter().zip(write_out) {
+        let brief = format!("write {rel}（{} 字节）", after.len());
+        let res = match r {
+            Ok(()) => {
+                ctx.record(rel.clone(), before.clone(), after.clone());
+                Ok(write_ok_text(rel, after.len(), policy))
+            }
+            Err(e) => Err(e),
+        };
+        slots[*i] = Some(("write".into(), brief, res));
+    }
+    for ((i, cmd, _), (_, r)) in execs.iter().zip(exec_out) {
+        // 确认模式 + 已有暂存改动：这条命令看不到本次修改，逐条贴一行说明
+        let r = r.map(|txt| format!("{txt}{}", staged_execute_note(policy, text_changes)));
+        slots[*i] = Some(("execute".into(), format!("execute {}", clip(cmd, 80)), r));
+    }
+    for ((i, spec), (_, r)) in bgs.iter().zip(bg_out) {
+        let brief = format!("execute bg {}", clip(&spec.cmd, 70));
+        slots[*i] = Some(("execute".into(), brief, r));
+    }
+    for ((i, op, handle), (_, r)) in procs.iter().zip(proc_out) {
+        let brief = format!("execute {} {handle}", proc_op_name(*op));
+        slots[*i] = Some(("execute".into(), brief, r));
+    }
+    // 连接：同一任务里并发推进
+    if !conn_futs.is_empty() {
+        for ((i, brief), r) in conn_briefs.iter().zip(JoinAll::new(conn_futs).await) {
+            slots[*i] = Some(("connect".into(), brief.clone(), r));
+        }
     }
 }
 
@@ -668,8 +1262,8 @@ pub(crate) enum StepAction {
 }
 
 /// 主循环动作 → 步骤动作（plan / connect 收窄成「不支持」）
-pub(crate) fn parse_step_action(raw: &str) -> Result<StepAction, String> {
-    Ok(match parse_action(raw)? {
+fn to_step_action(a: Action) -> StepAction {
+    match a {
         Action::Final(t) => StepAction::Final(t),
         Action::Read(p) => StepAction::Read(p),
         Action::Write(p, c) => StepAction::Write(p, c),
@@ -678,7 +1272,28 @@ pub(crate) fn parse_step_action(raw: &str) -> Result<StepAction, String> {
         Action::Proc(op, h) => StepAction::Proc(op, h),
         Action::Plan(_) => StepAction::Unsupported("plan"),
         Action::Connect(_) => StepAction::Unsupported("connect"),
-    })
+        // 子步没有交互权：它的 messages 是干净上下文，一问就破了"一轮 = 一步"的派发语义
+    }
+}
+
+/// 单动作步骤入口（**不接受**批）。生产路径已全部走 [`parse_step_actions`]，
+/// 这条只剩"单动作语义"的测试在用 —— 留着它，是让"老入口不接受批"这条契约可被断言。
+#[cfg(test)]
+pub(crate) fn parse_step_action(raw: &str) -> Result<StepAction, String> {
+    Ok(to_step_action(parse_action(raw)?))
+}
+
+/// 步骤子 agent 的批入口：与主循环**同一套**解析（[`parse_actions`]），只是把动作收窄成
+/// 三种能力。两个入口共用解析 —— 批协议不许在父子两处各长一遍。
+pub(crate) fn parse_step_actions(
+    raw: &str,
+    max: usize,
+    allow_batch: bool,
+) -> Result<Vec<StepAction>, String> {
+    Ok(parse_actions(raw, max, allow_batch)?
+        .into_iter()
+        .map(to_step_action)
+        .collect())
 }
 
 /// 解析失败的回灌消息（JSON 字符串，直接作为 user 消息）。
@@ -791,26 +1406,52 @@ impl<'a> Ctx<'a> {
             return Err("content 为空 —— 不允许静默清空文件".into());
         }
         self.commit(rel.clone(), content.to_string())?;
-        Ok(format!(
-            "已写入 {rel}（{} 字节）{}",
-            content.len(),
-            if self.policy == WritePolicy::Stage {
-                // 说清"磁盘没变"这半句 —— 只说"已暂存"，模型仍会去 execute 里找它的改动
-                "（已暂存到 .ruyix/stage/，项目磁盘未变，用户确认后才生效）"
-            } else {
-                ""
-            }
-        ))
+        Ok(write_ok_text(&rel, content.len(), self.policy))
     }
 
     /// 记录变更 + 更新覆盖层；Apply 策略同步落盘
     fn commit(&mut self, rel: String, after: String) -> Result<(), String> {
-        let before = self
-            .overlay
-            .get(&rel)
+        let before = self.before_of(&rel);
+        if self.policy == WritePolicy::Apply {
+            let bdir = self.ensure_backup_dir(before.is_some());
+            flush_write_disk(self.proj, bdir.as_deref(), &rel, before.as_deref(), &after)?;
+        }
+        self.record(rel, before, after);
+        Ok(())
+    }
+
+    /// 取被覆盖前的原内容（覆盖层优先：同 run 内的二次写以首次记录为准）。
+    /// 只读 `&self` —— 所以并发波的线程里也能取。
+    pub(crate) fn before_of(&self, rel: &str) -> Option<String> {
+        self.overlay
+            .get(rel)
             .cloned()
-            .or_else(|| std::fs::read_to_string(self.proj.join(&rel)).ok());
-        // 同一文件多次写：以首次记录的 before 为准（变更史在轨迹里）
+            .or_else(|| std::fs::read_to_string(self.proj.join(rel)).ok())
+    }
+
+    /// 备份目录（Apply 模式覆盖已有文件时才需要）。`need` 为假则返回当前值。
+    /// 必须在**主线程**调（它改 `Ctx`），线程里只读 [`Ctx::backup_dir`] 的克隆。
+    pub(crate) fn ensure_backup_dir(&mut self, need: bool) -> Option<PathBuf> {
+        if need {
+            let d = self
+                .proj
+                .join(".ruyix")
+                .join("backups")
+                .join(format!("agent-{}", crate::workspace::now_compact()));
+            let _ = std::fs::create_dir_all(&d);
+            self.backup_dir.get_or_insert(d);
+        }
+        self.backup_dir.clone()
+    }
+
+    /// 当前备份目录的只读访问（并发波里要用它落备份，但线程不许改 `Ctx`）
+    pub(crate) fn backup_dir_path(&self) -> Option<PathBuf> {
+        self.backup_dir.clone()
+    }
+
+    /// 写入的**记账阶段**：只动内存（overlay / changes），磁盘已由 [`flush_write_disk`] 落过了。
+    /// 所以并发波里写完磁盘后，可以在主线程按声明顺序补这一步。
+    pub(crate) fn record(&mut self, rel: String, before: Option<String>, after: String) {
         if let Some(existing) = self.changes.iter_mut().find(|c| c.path == rel) {
             existing.after = after.clone();
         } else {
@@ -821,41 +1462,11 @@ impl<'a> Ctx<'a> {
                 } else {
                     "add".into()
                 },
-                before: before.clone(),
+                before,
                 after: after.clone(),
             });
         }
-        if self.policy == WritePolicy::Apply {
-            self.flush_one(&rel, before, &after)?;
-        }
         self.overlay.insert(rel, after);
-        Ok(())
-    }
-
-    /// 落盘一个文件；覆盖既有文件前，把原文备份到 .ruyix/backups/agent-<ts>/<rel>
-    fn flush_one(&mut self, rel: &str, before: Option<String>, after: &str) -> Result<(), String> {
-        let target = self.proj.join(rel);
-        if before.is_some() {
-            let dir = self.backup_dir.get_or_insert_with(|| {
-                let d = self
-                    .proj
-                    .join(".ruyix")
-                    .join("backups")
-                    .join(format!("agent-{}", crate::workspace::now_compact()));
-                let _ = std::fs::create_dir_all(&d);
-                d
-            });
-            let to = dir.join(rel);
-            if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            std::fs::write(&to, before.unwrap_or_default())
-                .map_err(|e| format!("备份 {rel} 失败：{e}（已中止写入）"))?;
-        }
-        if let Some(parent) = target.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(&target, after).map_err(|e| format!("写入 {rel} 失败：{e}"))
     }
 
     /// Stage 策略收尾：把覆盖层写到暂存目录，返回目录路径
@@ -1313,27 +1924,34 @@ pub(crate) fn tool_proc(op: ProcOp, handle: &str) -> Result<String, String> {
 /// 执行一次 connect：看清单 / 调 MCP 工具 / 委托远端 Agent。
 /// "连不上"（目标不存在、服务器起不来）走 Err → 提示词那侧记为失败轮；
 /// 外部系统的业务错误是信息不是故障，包成 Ok 交回模型自己判断。
-async fn connect_step(
-    conn: &dyn Connector,
-    action: ConnectAction,
-) -> (String, String, Result<String, String>) {
-    let tool = "connect".to_string();
+/// connect 的**调用摘要**（不含执行）：并发路径要先把摘要定好，再去 join 那些 future。
+fn connect_brief(a: &ConnectAction) -> String {
+    match a {
+        ConnectAction::List => "connect list".into(),
+        ConnectAction::Call { server, tool, .. } => format!("connect {server}/{tool}"),
+        ConnectAction::Send { agent, text } => {
+            format!("connect {agent}（委托 {} 字）", text.chars().count())
+        }
+    }
+}
+
+/// connect 的**执行**（不含摘要）：单动作与批并发两条路径共用同一个实现。
+fn connect_future<'a>(conn: &'a dyn Connector, action: ConnectAction) -> ConnectFuture<'a, String> {
+    Box::pin(connect_run(conn, action))
+}
+
+async fn connect_run(conn: &dyn Connector, action: ConnectAction) -> Result<String, String> {
     match action {
-        ConnectAction::List => (
-            tool,
-            "connect list".into(),
-            conn.list().await.map(|ts| {
-                connect_note(&ts).unwrap_or_else(|| "（当前没有可连接的外部能力）".into())
-            }),
-        ),
+        ConnectAction::List => conn
+            .list()
+            .await
+            .map(|ts| connect_note(&ts).unwrap_or_else(|| "（当前没有可连接的外部能力）".into())),
         ConnectAction::Call {
             server,
             tool: name,
             arguments,
-        } => (
-            tool,
-            format!("connect {server}/{name}"),
-            conn.call(ConnectRequest {
+        } => conn
+            .call(ConnectRequest {
                 action: "call".into(),
                 server,
                 tool: name,
@@ -1342,11 +1960,8 @@ async fn connect_step(
             })
             .await
             .map(connect_outcome_text),
-        ),
-        ConnectAction::Send { agent, text } => (
-            tool,
-            format!("connect {agent}（委托 {} 字）", text.chars().count()),
-            conn.call(ConnectRequest {
+        ConnectAction::Send { agent, text } => conn
+            .call(ConnectRequest {
                 action: "send".into(),
                 agent,
                 text,
@@ -1354,8 +1969,20 @@ async fn connect_step(
             })
             .await
             .map(connect_outcome_text),
-        ),
     }
+}
+
+/// 单动作路径：摘要 + 执行（与并发路径同一份实现，不许各写一遍）
+async fn connect_step(
+    conn: &dyn Connector,
+    action: ConnectAction,
+) -> (String, String, Result<String, String>) {
+    let brief = connect_brief(&action);
+    (
+        "connect".to_string(),
+        brief,
+        connect_future(conn, action).await,
+    )
 }
 
 fn connect_outcome_text(outcome: ConnectOutcome) -> String {
@@ -1942,6 +2569,11 @@ pub async fn run(
     if let Some(note) = policy_system_note(policy) {
         head.push_str(&format!("\n\n{note}"));
     }
+    // 批量调用：与 connect 清单 / 命令发现 / 写入策略同一条通道（首轮 user 消息），
+    // 开关关掉就一个字都不提 —— 提示词不许广告一个引擎会拒的形状
+    if cfg.agent.batch {
+        head.push_str(&format!("\n\n{}", batch_hint(cfg.agent.batch_max, true)));
+    }
     msgs.push(ChatMessage::user(format!("{head}\n\n用户消息：\n{task}")));
 
     sink.stage(
@@ -2105,7 +2737,8 @@ pub async fn run(
             }
         };
         out.usage.add(&reply.usage);
-        let action = match parse_action(&reply.content) {
+        let mut actions = match parse_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
+        {
             Ok(a) => a,
             Err(e) => {
                 // 解析失败不终止：把错误告诉模型让它重出（消耗轮次预算，防死循环）。
@@ -2130,8 +2763,10 @@ pub async fn run(
         };
         msgs.push(ChatMessage::assistant(reply.content.clone()));
 
-        // 交付走门禁：有改动先过全量验证，再过干净上下文的复核
-        if let Action::Final(text) = action {
+        if actions.len() == 1 && matches!(actions[0], Action::Final(_)) {
+            let Action::Final(text) = actions.remove(0) else {
+                unreachable!("上面刚判过是 final")
+            };
             let blocked = gate_before_final(
                 cfg,
                 proj,
@@ -2171,106 +2806,133 @@ pub async fn run(
             }
         }
 
-        let (tool, brief, result): (String, String, Result<String, String>) = match action {
-            // Final 已在上面处理（这里只是让 match 穷尽）
-            Action::Final(_) => unreachable!("Final 在门禁分支里已经处理"),
-            Action::Plan(steps) => {
-                let is_reset = !plan_steps.is_empty();
-                if cfg.step.execute_plan && is_reset && plan_resets >= MAX_PLAN_RESETS {
-                    // 重排次数用尽：忽略这一次，按现有计划继续 —— 否则
-                    // "失败 → 重排 → 又失败 → 再重排"能把整个轮次预算烧光却什么都不产出
-                    (
-                        "plan".into(),
-                        "重排被忽略（已达上限）".into(),
-                        Ok(format!(
-                            "计划重排次数已达上限（{MAX_PLAN_RESETS} 次），继续按现有计划执行。"
-                        )),
-                    )
-                } else {
-                    plan_steps = steps;
-                    // 新计划 = 从头执行（游标归零）。已完成的步骤事实留在 plan_done 里，
-                    // 子步骤输入包会带上它，模型仍能看到"前面做过什么"。
-                    plan_cursor = 0;
-                    step_states = vec![None; plan_steps.len()];
-                    if is_reset {
-                        plan_resets += 1;
-                    }
-                    let p = plan_to_outline(task, plan_steps.clone());
-                    sink.plan(&p);
-                    (
-                        "plan".into(),
-                        format!("{} 个步骤", plan_steps.len()),
-                        Ok(if cfg.step.execute_plan {
-                            "计划已收到，引擎将按序执行各步骤；全部做完后输出 final。\
-                             若要调整计划，重新输出 plan（注意：会从第 1 步重新执行）。"
-                                .into()
+        // ---- 执行这一轮的动作：按**波次**（波内并发、波间按序）----
+        // 一波内互不冲突（见 conflicts）：一串读、一串命令就是一波 —— 那就是"一起并发"。
+        let n = actions.len();
+        let waves = batch_waves(&actions);
+        let mut slots: Vec<Option<CallResult>> = (0..n).map(|_| None).collect();
+        for wave in &waves {
+            if wave.len() == 1 {
+                let i = wave[0];
+                let one = match &actions[i] {
+                    // plan 是控制动作（parse 拒了批里的 plan，所以只可能是单动作）：
+                    // 就地更新引擎手里的计划与游标，回灌文本与老版本逐字一致
+                    Action::Plan(steps) => {
+                        let is_reset = !plan_steps.is_empty();
+                        if cfg.step.execute_plan && is_reset && plan_resets >= MAX_PLAN_RESETS {
+                            // 重排次数用尽：忽略这一次，按现有计划继续 —— 否则
+                            // "失败 → 重排 → 又失败 → 再重排"能把整个轮次预算烧光却什么都不产出
+                            (
+                                "plan".into(),
+                                "重排被忽略（已达上限）".into(),
+                                Ok(format!(
+                                    "计划重排次数已达上限（{MAX_PLAN_RESETS} 次），继续按现有计划执行。"
+                                )),
+                            )
                         } else {
-                            "任务清单已展示给用户（大纲区），按清单继续。".into()
-                        }),
+                            plan_steps = steps.clone();
+                            // 新计划 = 从头执行（游标归零）。已完成的步骤事实留在 plan_done 里，
+                            // 子步骤输入包会带上它，模型仍能看到"前面做过什么"。
+                            plan_cursor = 0;
+                            step_states = vec![None; plan_steps.len()];
+                            if is_reset {
+                                plan_resets += 1;
+                            }
+                            let p = plan_to_outline(task, plan_steps.clone());
+                            sink.plan(&p);
+                            (
+                                "plan".into(),
+                                format!("{} 个步骤", plan_steps.len()),
+                                Ok(if cfg.step.execute_plan {
+                                    "计划已收到，引擎将按序执行各步骤；全部做完后输出 final。\
+                                     若要调整计划，重新输出 plan（注意：会从第 1 步重新执行）。"
+                                        .into()
+                                } else {
+                                    "任务清单已展示给用户（大纲区），按清单继续。".into()
+                                }),
+                            )
+                        }
+                    }
+                    _ => exec_one(cfg, proj, policy, conn, &mut ctx, actions[i].clone()).await,
+                };
+                slots[i] = Some(one);
+            } else {
+                run_wave(
+                    cfg, proj, policy, conn, &mut ctx, &actions, wave, &mut slots,
+                )
+                .await;
+            }
+        }
+        let results: Vec<CallResult> = slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| {
+                o.unwrap_or_else(|| {
+                    (
+                        "call".into(),
+                        format!("第 {} 条调用", i + 1),
+                        Err("未执行".into()),
                     )
-                }
-            }
-            Action::Read(path) => {
-                let brief = format!("read {path}");
-                let r = ctx.tool_read(&path);
-                // 读过什么 = 依据核对的证据集合（复核员会看到这份清单）
-                if r.is_ok() && !read_paths.contains(&path) {
-                    read_paths.push(path.clone());
-                }
-                ("read".into(), brief, r)
-            }
-            Action::Write(path, content) => {
-                let brief = format!("write {path}（{} 字节）", content.len());
-                let r = ctx.tool_write(&path, &content);
-                ("write".into(), brief, r)
-            }
-            Action::Execute(cmd, t) => {
-                let brief = format!("execute {}", clip(&cmd, 80));
-                let mut r = tool_execute(proj, &cmd, t);
-                // 确认模式 + 已有暂存改动：这条命令必然看不到本次修改，贴一行说明兜住
-                r.push_str(staged_execute_note(policy, !ctx.changes.is_empty()));
-                ("execute".into(), brief, Ok(r))
-            }
-            Action::ExecBg(spec) => {
-                let brief = format!("execute bg {}", clip(&spec.cmd, 70));
-                // 后台启动看到的是真实磁盘（它本就不在覆盖层里），暂存横幅对它没有意义
-                ("execute".into(), brief, tool_exec_bg(proj, cfg, &spec))
-            }
-            Action::Proc(op, handle) => {
-                let brief = format!("execute {} {handle}", proc_op_name(op));
-                let r = tool_proc(op, &handle);
-                // 句柄不存在 = 参数不合法（与解析报错同一类），不该记成一次成功的工具调用
-                ("execute".into(), brief, r)
-            }
-            Action::Connect(ca) => connect_step(conn, ca).await,
-        };
+                })
+            })
+            .collect();
 
-        let ok = result.is_ok();
-        out.steps.push(StepTrace {
-            step,
-            tool: tool.clone(),
-            brief: brief.clone(),
-            ok,
-        });
-        let level = if ok { "info" } else { "warn" };
-        let status_icon = if ok { "✓" } else { "✗" };
-        sink.log(
-            level,
-            clip(
-                &format!("[agent] 第 {step} 轮 {tool} {status_icon} {brief}"),
-                400,
-            ),
-        );
+        // 记账 / 轨迹 / 日志：批里每条都有自己的一行，轮号相同 —— 那正是省下来的轮
+        let mut any_write_ok = false;
+        for (i, (tool, brief, res)) in results.iter().enumerate() {
+            let ok = res.is_ok();
+            if *tool == "write" && ok {
+                any_write_ok = true;
+            }
+            // 读过什么 = 依据核对的证据集合（复核员会看到这份清单）
+            if ok
+                && let Action::Read(p) = &actions[i]
+                && !read_paths.contains(p)
+            {
+                read_paths.push(p.clone());
+            }
+            out.steps.push(StepTrace {
+                step,
+                tool: tool.clone(),
+                brief: brief.clone(),
+                ok,
+            });
+            let head = if n == 1 {
+                format!("第 {step} 轮")
+            } else {
+                format!("第 {step} 轮 [{}/{}]", i + 1, n)
+            };
+            let level = if ok { "info" } else { "warn" };
+            let icon = if ok { "✓" } else { "✗" };
+            sink.log(
+                level,
+                clip(&format!("[agent] {head} {tool} {icon} {brief}"), 400),
+            );
+        }
+        if n > 1 {
+            // 用户读日志时最想知道的就是"这一轮省了几次往返、几条真并发"
+            let same_wave: usize = waves.iter().filter(|w| w.len() > 1).map(|w| w.len()).sum();
+            sink.log(
+                "info",
+                clip(
+                    &format!(
+                        "[agent] 第 {step} 轮 一批 {n} 个调用（{} 波，同波并发 {same_wave} 条）",
+                        waves.len()
+                    ),
+                    200,
+                ),
+            );
+        }
 
         // execute_plan 下步骤状态由派发逻辑报告（引擎知道"这一步跑完了"这个事实，比
         // "声明文件是否落地"的推断准得多），两条通道混用只会互相打架
-        if !cfg.step.execute_plan && !plan_steps.is_empty() && tool == "write" {
+        if !cfg.step.execute_plan && !plan_steps.is_empty() && any_write_ok {
             emit_step_progress(sink, &plan_steps, &ctx.overlay);
         }
 
-        // 机械验证（窄层）：事实触发 —— 这一轮真的写成了文件。失败当成"观察"回灌，
-        // 不打断这一轮（它是即时反馈，不是交付判据；交付判据在 gate_before_final）。
-        if tool == "write" && ok && !ctx.changes.is_empty() {
+        // 机械验证（窄层）：事实触发 —— 这一轮真的写成了文件（批里有写也算一次）。
+        // 失败当成"观察"回灌，不打断这一轮（它是即时反馈，不是交付判据；交付判据在 gate_before_final）。
+        if any_write_ok && !ctx.changes.is_empty() {
             gate.dirty = true;
             if cfg.gate.narrow && !is_cancelled(cancel) {
                 let v = narrow_verify(cfg, &ctx.changes).await;
@@ -2288,17 +2950,13 @@ pub async fn run(
             }
         }
 
-        let result_text = match result {
-            Ok(r) => format!(
-                "{{\"ok\": true, \"result\": {}}}",
-                serde_json::to_string(&r).unwrap_or_else(|_| "\"\"".into())
-            ),
-            Err(e) => format!(
-                "{{\"ok\": false, \"error\": {}}}",
-                serde_json::to_string(&e).unwrap_or_else(|_| "\"\"".into())
-            ),
-        };
-        msgs.push(ChatMessage::user(result_text));
+        // 回灌：单动作保持老形状（模型学过它），批走 results 数组、按声明顺序逐条给
+        if n == 1 {
+            let (_, _, r) = results.into_iter().next().expect("n == 1 时必有结果");
+            msgs.push(ChatMessage::user(json_result(r)));
+        } else {
+            msgs.push(ChatMessage::user(batch_json_result(&results)));
+        }
 
         // 模型已经对失败做出过回应（无论它选了哪个动作），把控制权交回引擎继续派发。
         // 解析失败 / 门禁打回那两条 `continue` 不清它 —— 那种场合模型还没给出有效决定。
@@ -3792,6 +4450,396 @@ mod tests {
                 assert!(t.contains('\n'), "换行要原样保留：{t:?}");
             }
             other => panic!("应当是 final：{other:?}"),
+        }
+    }
+
+    /// 批协议：动作按**声明顺序**解析出来；final / plan 混进批里当面拒
+    #[test]
+    fn a_batch_parses_in_declared_order_and_rejects_control_actions() {
+        let ok = parse_actions(
+            concat!(
+                r#"{"actions":[{"tool":"read","args":{"path":"a.rs"}},"#,
+                r#"{"tool":"read","args":{"path":"b.rs"}},"#,
+                r#"{"tool":"write","args":{"path":"c.rs","content":"x"}}]}"#
+            ),
+            8,
+            true,
+        )
+        .expect("批该被接受");
+        assert_eq!(ok.len(), 3);
+        assert!(matches!(&ok[0], Action::Read(p) if p == "a.rs"));
+        assert!(matches!(&ok[1], Action::Read(p) if p == "b.rs"));
+        assert!(matches!(&ok[2], Action::Write(p, _) if p == "c.rs"));
+        // calls 是同一件东西的另一个外衣（模型两种都写过）
+        assert!(
+            parse_actions(
+                r#"{"calls":[{"tool":"read","args":{"path":"a"}}]}"#,
+                8,
+                true
+            )
+            .is_ok()
+        );
+        // 单动作照旧
+        let one = parse_actions(r#"{"tool":"read","args":{"path":"a"}}"#, 8, true).unwrap();
+        assert!(matches!(one.as_slice(), [Action::Read(_)]));
+        // 控制动作不许混进批：谁先谁后没有合理解释，宁可当面拒
+        let err = parse_actions(
+            r#"{"actions":[{"tool":"read","args":{"path":"a"}},{"final":"完了"}]}"#,
+            8,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("final"), "{err}");
+        let err = parse_actions(
+            r#"{"actions":[{"tool":"plan","args":{"steps":[{"title":"x"}]}}]}"#,
+            8,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("plan"), "{err}");
+        // 批里坏的那条要点名是第几个，否则模型不知道该改哪条
+        let err = parse_actions(
+            r#"{"actions":[{"tool":"read","args":{"path":"a"}},{"tool":"fly"}]}"#,
+            8,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("第 2 个") && err.contains("fly"), "{err}");
+    }
+
+    /// 批上限：超了**不静默截断**（截断就是丢调用，模型还以为发出去了），把上限报回去
+    #[test]
+    fn an_oversized_batch_is_refused_with_the_cap() {
+        let three = concat!(
+            r#"{"actions":[{"tool":"read","args":{"path":"a"}},"#,
+            r#"{"tool":"read","args":{"path":"b"}},"#,
+            r#"{"tool":"read","args":{"path":"c"}}]}"#
+        );
+        assert!(parse_actions(three, 3, true).is_ok(), "刚好到上限该放行");
+        let err = parse_actions(three, 2, true).unwrap_err();
+        assert!(err.contains("最多 2 个") && err.contains("3 个"), "{err}");
+        assert!(
+            parse_actions(r#"{"actions":[]}"#, 8, true).is_err(),
+            "空批该拒"
+        );
+    }
+
+    /// 一行回滚：批关掉后该拒就拒（提示词也不再教这个形状）
+    #[test]
+    fn a_batch_is_refused_when_the_switch_is_off() {
+        let b = r#"{"actions":[{"tool":"read","args":{"path":"a"}}]}"#;
+        let err = parse_actions(b, 8, false).unwrap_err();
+        assert!(err.contains("批量"), "{err}");
+        assert!(parse_action(b).is_err(), "老入口（单动作语义）同样拒批");
+        assert!(
+            parse_action(r#"{"tool":"read","args":{"path":"a"}}"#).is_ok(),
+            "关掉批不该影响单动作"
+        );
+    }
+
+    /// 分组：只有**连续只读**成组并发；写入/执行/连接一律按序各成一组
+    #[test]
+    fn waves_parallelize_everything_except_conflicts() {
+        let a = |tool: &str| {
+            parse_one(&serde_json::json!({"tool": tool, "args": {"path": "x", "cmd": "c"}}))
+                .unwrap_or_else(|e| panic!("{tool} 该能解析：{e}"))
+        };
+        let mk = |tool: &str, path: &str| {
+            parse_one(&serde_json::json!({"tool": tool, "args": {"path": path, "cmd": "c"}}))
+                .unwrap_or_else(|e| panic!("{tool} 该能解析：{e}"))
+        };
+        // 口径：**要并发就一起并发** —— 读/写/执行/连接只要互不冲突就都在同一波
+        assert_eq!(
+            batch_waves(&[
+                a("read"),
+                a("read"),
+                a("execute"),
+                a("connect"),
+                a("execute")
+            ]),
+            vec![vec![0, 1, 2, 3, 4]]
+        );
+        // 不同路径的两次写：也可以并发
+        assert_eq!(
+            batch_waves(&[mk("write", "a.rs"), mk("write", "b.rs"), mk("read", "c.rs")]),
+            vec![vec![0, 1, 2]]
+        );
+        // 唯一的保序之一：同一条路径上的写与读（覆盖层是"写完立刻读回来"的依据）。
+        // 注意 execute 与它们都不冲突，所以并进第一波；写 x 独占第二波；写之后的读 x 在第三波。
+        assert_eq!(
+            batch_waves(&[a("read"), a("write"), a("read"), a("execute")]),
+            vec![vec![0, 3], vec![1], vec![2]]
+        );
+        // 唯一之二的保序：托管进程的生命周期操作（引擎自己持有那张表，句柄又由引擎赋值）
+        let bg = parse_one(&serde_json::json!({
+            "tool": "execute",
+            "args": {"cmd": "srv", "background": true}
+        }))
+        .expect("bg 该能解析");
+        let st = parse_one(&serde_json::json!({
+            "tool": "execute",
+            "args": {"op": "status", "handle": "p1"}
+        }))
+        .expect("status 该能解析");
+        assert_eq!(
+            batch_waves(&[bg.clone(), st.clone()]),
+            vec![vec![0], vec![1]]
+        );
+        // 单条也是一波（单波单条 = 老路径）
+        assert_eq!(batch_waves(&[a("read")]), vec![vec![0]]);
+    }
+
+    /// 并发读：结果按声明顺序落位，一条失败不挪动别人的位置
+    #[test]
+    fn parallel_reads_land_in_declared_order() {
+        let d = TempDir::new("batch-read");
+        d.write("a.txt", "AAA");
+        d.write("b.txt", "BBB");
+        d.write("c.txt", "CCC");
+        let ctx = Ctx {
+            proj: &d.0,
+            overlay: BTreeMap::new(),
+            changes: Vec::new(),
+            policy: WritePolicy::Stage,
+            backup_dir: None,
+        };
+        let paths: Vec<String> = ["a.txt", "ghost.txt", "c.txt", "b.txt"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for parallel in [true, false] {
+            let rs = read_group(&ctx, &paths, parallel);
+            assert_eq!(rs.len(), 4);
+            assert!(
+                rs[0].as_ref().unwrap().contains("AAA"),
+                "槽位错位：{:?}",
+                rs[0]
+            );
+            assert!(rs[1].is_err(), "不存在的文件该在自己那一格报错");
+            assert!(
+                rs[2].as_ref().unwrap().contains("CCC"),
+                "槽位错位：{:?}",
+                rs[2]
+            );
+            assert!(
+                rs[3].as_ref().unwrap().contains("BBB"),
+                "槽位错位：{:?}",
+                rs[3]
+            );
+        }
+    }
+
+    /// **省轮次的核心断言**：一批 3 个 read 只花 1 轮（改前是 3 轮），结果一次全回给模型
+    #[test]
+    fn a_read_batch_costs_one_round_and_returns_every_result() {
+        let d = TempDir::new("batch-e2e");
+        d.write("a.txt", "AAA");
+        d.write("b.txt", "BBB");
+        d.write("c.txt", "CCC");
+        let llm = crate::testllm::fake_llm(vec![
+            concat!(
+                r#"{"actions":[{"tool":"read","args":{"path":"a.txt"}},"#,
+                r#"{"tool":"read","args":{"path":"b.txt"}},"#,
+                r#"{"tool":"read","args":{"path":"c.txt"}}]}"#
+            )
+            .into(),
+            r#"{"final":"三个文件都看过了"}"#.into(),
+        ]);
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+        cfg.step.execute_plan = false;
+
+        let out = block_on(run(
+            &cfg,
+            &d.0,
+            "看看这三个文件",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(llm.count(), 2, "一批 3 个 read = 1 轮（外加 final 那轮）");
+        let second = llm.request(1);
+        for content in ["AAA", "BBB", "CCC"] {
+            assert!(
+                second.contains(content),
+                "第二轮该看到全部结果（缺 {content}）"
+            );
+        }
+        assert!(
+            second.contains("results"),
+            "批结果走 results 数组：{second}"
+        );
+        // 三次调用都进轨迹，且都属于**同一轮**
+        assert_eq!(out.steps.len(), 3);
+        assert!(
+            out.steps
+                .iter()
+                .all(|s| s.step == 1 && s.tool == "read" && s.ok),
+            "{:?}",
+            out.steps
+        );
+        assert_eq!(out.answer, "三个文件都看过了");
+    }
+
+    /// 同一批里的顺序语义：write 之后紧跟的 read 必须看到**刚写的内容**（覆盖层），
+    /// 所以写与读之间不许并发 —— 分组按"连续的只读区间"切，正是为了这条。
+    #[test]
+    fn a_write_followed_by_a_read_in_one_batch_keeps_order() {
+        let d = TempDir::new("batch-order");
+        d.write("a.txt", "OLD");
+        let llm = crate::testllm::fake_llm(vec![
+            concat!(
+                r#"{"actions":[{"tool":"write","args":{"path":"a.txt","content":"NEW"}},"#,
+                r#"{"tool":"read","args":{"path":"a.txt"}}]}"#
+            )
+            .into(),
+            r#"{"final":"改完了"}"#.into(),
+        ]);
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+        cfg.step.execute_plan = false;
+
+        let out = block_on(run(
+            &cfg,
+            &d.0,
+            "把 a.txt 改掉",
+            &[],
+            WritePolicy::Stage,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(llm.count(), 2, "写 + 读同批，只花 1 轮");
+        let second = llm.request(1);
+        assert!(
+            second.contains("本会话已暂存的修改"),
+            "同批里的 read 必须看到刚写的暂存内容：{second}"
+        );
+        assert!(
+            out.steps.iter().any(|s| s.tool == "write" && s.ok),
+            "{:?}",
+            out.steps
+        );
+        // Stage 策略：项目磁盘不动（读到的新内容来自覆盖层）
+        assert_eq!(std::fs::read_to_string(d.0.join("a.txt")).unwrap(), "OLD");
+    }
+
+    /// **并发是真的**（不是"看起来像"）：同样两条 2 秒命令，一轮发一条（串行）vs 一批发两条
+    /// （并发）。用**对照臂比时间**而不是拿绝对秒数赌机器负载 —— 相对判据在慢机器、以及全套测试
+    /// 并跑抢 CPU 时同样成立（两条臂被一起拉长）。谁把 execute 挪回串行，这条立刻变红。
+    #[test]
+    fn two_commands_in_one_batch_really_run_in_parallel() {
+        let d = TempDir::new("batch-par");
+        // Windows 没有 sleep，用 ping 的次数间隔当"2 秒的活"
+        let nap = if cfg!(windows) {
+            "ping -n 3 127.0.0.1 > nul"
+        } else {
+            "sleep 2"
+        };
+        let one = format!(r#"{{"tool":"execute","args":{{"cmd":"{nap}"}}}}"#);
+        let two = format!(r#"{{"actions":[{one},{one}]}}"#);
+
+        let timed = |script: Vec<String>| -> (Duration, usize) {
+            let llm = crate::testllm::fake_llm(script);
+            let mut cfg = AppConfig::default();
+            cfg.llm.base_url = llm.base_url.clone();
+            cfg.llm.api_key = "smoke".into();
+            cfg.llm.model = "fake".into();
+            cfg.gate.narrow = false;
+            cfg.gate.full = false;
+            cfg.reflect.enabled = false;
+            cfg.step.execute_plan = false;
+            // 命令发现要探一遍本机工具（git/python 各一次调用），会把计时搅浑 —— 这条不测它
+            cfg.discover.enabled = false;
+            let t0 = Instant::now();
+            let out = block_on(run(
+                &cfg,
+                &d.0,
+                "跑两条命令",
+                &[],
+                WritePolicy::Apply,
+                &NoConnector,
+                &crate::exec::new_cancel_flag(),
+                &QuietSink,
+            ))
+            .expect("run 不该失败");
+            let el = t0.elapsed();
+            assert_eq!(out.steps.len(), 2, "{:?}", out.steps);
+            (el, llm.count())
+        };
+
+        let (serial, serial_calls) = timed(vec![one.clone(), one, r#"{"final":"跑完了"}"#.into()]);
+        let (parallel, parallel_calls) = timed(vec![two, r#"{"final":"跑完了"}"#.into()]);
+        assert_eq!(serial_calls, 3, "串行臂：两条命令各占一轮 + final");
+        assert_eq!(parallel_calls, 2, "并发臂：两条命令同批一轮 + final");
+        // 串行 ≈ 4 秒、并发 ≈ 2 秒；给足余量（3×并发 < 2×串行 ≈ 并发 < 0.67×串行）
+        assert!(
+            parallel * 3 < serial * 2,
+            "同一条批里的两条命令必须并发跑：并发 {parallel:?} vs 串行 {serial:?}"
+        );
+    }
+
+    /// 批协议教不教，与引擎收不收由**同一个开关**决定（不虚报能力）
+    #[test]
+    fn the_batch_hint_follows_the_switch() {
+        let hint = batch_hint(8, true);
+        // 子步骤那份**不许出现 plan**：STEP_SYSTEM 里没有这个能力，提了模型会去找它
+        let step_hint = batch_hint(8, false);
+        assert!(hint.contains("plan"), "主循环要把清单不能进批说清：{hint}");
+        assert!(
+            !step_hint.contains("plan"),
+            "子步骤那份不该提 plan：{step_hint}"
+        );
+        assert!(
+            hint.contains("actions") && hint.contains("最多 8"),
+            "{hint}"
+        );
+        assert!(hint.contains("并发"), "得说清只读会并发、其余按序：{hint}");
+
+        let d = TempDir::new("batch-hint");
+        for batch in [true, false] {
+            let llm = crate::testllm::fake_llm(vec![r#"{"final":"好的"}"#.into()]);
+            let mut cfg = AppConfig::default();
+            cfg.llm.base_url = llm.base_url.clone();
+            cfg.llm.api_key = "smoke".into();
+            cfg.llm.model = "fake".into();
+            cfg.agent.batch = batch;
+            cfg.gate.full = false;
+            cfg.reflect.enabled = false;
+            cfg.step.execute_plan = false;
+            block_on(run(
+                &cfg,
+                &d.0,
+                "随便说点什么",
+                &[],
+                WritePolicy::Apply,
+                &NoConnector,
+                &crate::exec::new_cancel_flag(),
+                &QuietSink,
+            ))
+            .expect("run 不该失败");
+            let first = llm.request(0);
+            assert_eq!(
+                first.contains("批量调用"),
+                batch,
+                "batch={batch} 时提示词提不提批协议：{first}"
+            );
         }
     }
 }
