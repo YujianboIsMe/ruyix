@@ -370,5 +370,18 @@
   "service.empty": "No running services",
   "service.th_pid": "PID",
   "service.th_started": "Started at",
-  "service.th_cmd": "Full command line"
+  "service.th_cmd": "Full command line",
+  "service.btn_output": "Output",
+  "service.log_usage": "Usage: service log <pid> (pid is shown in the service panel)",
+  "service.log_missing": "No managed process with pid={pid} (it may have exited already)",
+  "proc_log.title": "Output",
+  "proc_log.follow": "Jump to latest",
+  "proc_log.clear": "Clear",
+  "proc_log.copy": "Copy all",
+  "proc_log.copied": "Output copied to clipboard",
+  "proc_log.copy_fail": "Copy failed: clipboard unavailable",
+  "proc_log.truncated": "(Skipped the first {n} bytes — showing recent output only)",
+  "proc_log.closed": "(Process stopped — log reading ended)",
+  "proc_log.ended": "(Process exited — no further output)",
+  "proc_log.no_tauri": "(Backend unavailable: managed process logs are not readable in a plain browser)"
 }

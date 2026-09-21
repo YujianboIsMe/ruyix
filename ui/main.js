@@ -52,6 +52,7 @@ async function initApp() {
   window.SkillsUI?.attach();
   window.ConfigUI?.attach();
   window.ServiceUI?.attach();
+  window.ProcLogUI?.attach();
   // 外链闸门（前端这一重）：agent 回的链接一律交给系统浏览器，绝不让 WebView 自己导航过去
   window.ExternalLinks?.install();
   setupCapabilityMenu();
@@ -265,6 +266,9 @@ function refreshI18nUI() {
     window.ServiceUI?.render(serviceTab);
   }
 
+  // 输出标签页：标签页名 + 面板内的固定文案（回到最新/清屏/复制全部）
+  if (state.tabs.some((t) => t._isProcLog)) window.ProcLogUI?.relabel();
+
   // 编辑器空状态
   const emptyEl = document.querySelector("#editor-empty p");
   if (emptyEl) emptyEl.textContent = I18N.t("editor.empty");
@@ -457,6 +461,7 @@ function tabIcon(t) {
   if (t._isSession) return "🤖";
   if (t._isTerminal) return "🖥️";
   if (t._isService) return "🔌";
+  if (t._isProcLog) return "📜";
   return fileIcon(t.name);
 }
 
@@ -511,8 +516,11 @@ function switchTab(tabId) {
   hideImageView();
   hideConfigView();
   hideServiceView();
+  hideProcLogView();
   // 服务面板的秒级刷新随面板走：切走了就别再问后端
   window.ServiceUI?.close();
+  // 输出标签页的增量轮询同理（pane 留着，切回来内容还在）
+  window.ProcLogUI?.blur();
   if (tab._isConfig) {
     // 配置标签页 — 表单视图（扫描配置项 → 表单 + 保存/应用/取消）
     hideEditorView();
@@ -552,6 +560,13 @@ function switchTab(tabId) {
     hideEditorView();
     showServiceView();
     window.ServiceUI?.render(tab);
+    return;
+  }
+  if (tab._isProcLog) {
+    // 输出标签页 — 托管进程日志的实时跟随（自己增量读日志，content 恒为空）
+    hideEditorView();
+    showProcLogView();
+    window.ProcLogUI?.render(tab);
     return;
   }
   if (tab._isTerminal) {
@@ -602,6 +617,9 @@ function closeTab(tabId) {
 
   // 服务面板：停掉秒级刷新（否则关了标签页还在后台问后端）
   if (tab._isService) window.ServiceUI?.close();
+
+  // 输出标签页：停轮询 + 释放终端 + 摘掉面板
+  if (tab._isProcLog) window.ProcLogUI?.close(tab);
 
   // PTY 终端清理
   if (tab._isTerminal) {
@@ -657,6 +675,8 @@ function hideEditor() {
   document.getElementById("session-view").style.display = "none";
   const serviceView = document.getElementById("service-view");
   if (serviceView) serviceView.style.display = "none";
+  const procLogView = document.getElementById("proc-log-view");
+  if (procLogView) procLogView.style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
   document.getElementById("editor-code-backdrop").innerHTML = "";
   document.getElementById("editor-textarea").value = "";
@@ -2861,6 +2881,17 @@ function showServiceView() {
 
 function hideServiceView() {
   const el = document.getElementById("service-view");
+  if (el) el.style.display = "none";
+}
+
+function showProcLogView() {
+  document.getElementById("editor-empty").style.display = "none";
+  document.getElementById("editor-view").style.display = "none";
+  document.getElementById("proc-log-view").style.display = "";
+}
+
+function hideProcLogView() {
+  const el = document.getElementById("proc-log-view");
   if (el) el.style.display = "none";
 }
 

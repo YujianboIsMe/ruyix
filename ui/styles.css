@@ -3382,10 +3382,17 @@ html, body {
   white-space: pre-wrap;
 }
 
-/* "停止"不是三字段之一，挂在命令行单元格右侧，不占列 */
-.service-stop {
+/* "输出" / "停止" 不是三字段之一，挂在命令行单元格右侧，不占列。
+   float 只加在外层容器上 —— 多个 float:right 在 DOM 里是反序排的，靠它排按钮顺序靠不住。 */
+.service-actions {
   float: right;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   margin-left: 10px;
+}
+
+.service-act {
   padding: 2px 10px;
   font-size: 12px;
   color: var(--text-primary);
@@ -3395,13 +3402,119 @@ html, body {
   cursor: pointer;
 }
 
-.service-stop:hover:not(:disabled) {
+.service-act:hover:not(:disabled) {
   background: var(--hover-bg);
 }
 
-.service-stop:disabled {
+.service-act:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.service-stop {
+  float: none;
+}
+
+/* ============================================
+   输出（托管进程日志的实时跟随）
+   ============================================ */
+.proc-log-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #1e1e1e; /* 与终端同色：周围一圈亮色会把终端衬得很小 */
+}
+
+.proc-log-panes,
+.proc-log-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.proc-log-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #d4d4d4;
+  background: #252526;
+  border-bottom: 1px solid #37373d;
+}
+
+.proc-log-pid {
+  flex: none;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: #9cdcfe;
+}
+
+.proc-log-state {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: #333333;
+  color: #ce9178;
+}
+
+.proc-log-state--dead {
+  background: #4b1f1f;
+  color: #f48771;
+}
+
+.proc-log-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: #808080;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proc-log-btn {
+  flex: none;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: #d4d4d4;
+  background: #333333;
+  border: 1px solid #3f3f3f;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.proc-log-btn:hover {
+  background: #3f3f3f;
+}
+
+.proc-log-term {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 0 0 8px;
+}
+
+.proc-log-term .xterm {
+  height: 100%;
+}
+
+/* 没有 xterm 时的降级（浏览器直开 UI）—— 总比一片空白强 */
+.proc-log-plain {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* ============================================

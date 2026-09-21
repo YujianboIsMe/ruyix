@@ -609,6 +609,25 @@ async fn proc_stop(pid: u32) -> Result<harness_engine::proc::ProcInfo, String> {
         .map_err(|e| format!("停止任务失败：{e}"))?
 }
 
+/// **增量**读一段托管进程的日志 —— 面板的"输出"标签页靠它做 `tail -f`。
+///
+/// `offset = None` 是首读（只回看尾部 128KB）；之后带上一轮返回的 `next_offset` 续读。
+/// 切分点只落在换行上，理由见 `harness_engine::proc::read_log_chunk`。
+///
+/// 读文件是微秒级的事（不像 `proc_stop` 要等进程退），不必 `spawn_blocking`。
+#[tauri::command]
+fn proc_log_read(
+    pid: u32,
+    offset: Option<u64>,
+    max_bytes: Option<usize>,
+) -> Result<harness_engine::proc::LogChunk, String> {
+    harness_engine::proc::read_log_chunk(
+        pid,
+        offset,
+        max_bytes.unwrap_or(harness_engine::proc::LOG_CHUNK_MAX),
+    )
+}
+
 #[derive(serde::Serialize, Clone)]
 struct RunOutput {
     exit_code: Option<i32>,
@@ -1505,6 +1524,7 @@ fn main() {
             run_target,
             proc_list,
             proc_stop,
+            proc_log_read,
             open_external,
             spawn_terminal,
             pty_spawn,

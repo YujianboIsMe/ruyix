@@ -58,6 +58,11 @@ pub const LOG_TAIL_LINES: usize = 40;
 const LOG_TAIL_CHARS: usize = 4_000;
 /// 读日志时最多回看多少字节（服务跑久了日志会很大）
 const LOG_TAIL_BYTES: usize = 64 * 1024;
+/// 面板首读回看的字节数。日志可能几百兆（服务跑一天），**不能从头读** ——
+/// 首屏给最近这一段，往前的内容用 `truncated_head` 如实告诉用户"被跳过了"。
+const PANEL_TAIL_BYTES: u64 = 128 * 1024;
+/// 面板单次下发的字节上限。前端要把它丢进终端渲染，一次几十兆会卡死界面。
+pub const LOG_CHUNK_MAX: usize = 256 * 1024;
 
 /// 起一个托管进程要什么。
 #[derive(Clone, Debug)]
@@ -366,6 +371,165 @@ pub fn read_log_tail(path: &Path, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     clip_tail(&all[start..].join("\n"), LOG_TAIL_CHARS)
+}
+
+/// 一次**增量**读日志的结果。宿主面板的"输出"标签页靠它做 `tail -f`。
+///
+/// 与 [`read_log_tail`] 的分工要分清：那个是给**模型**的（40 行 / 4000 字符封顶，
+/// 目的是别撑爆上下文），这个是给**人**的（要多少给多少，只有字节上限）。
+/// 两者共用同一份磁盘事实，不各说各话。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LogChunk {
+    /// 已解码的正文。**保证以换行结尾**（除非是进程结束后的最后一段尾巴）。
+    pub text: String,
+    /// 这段正文在文件里的起始字节。
+    pub start: u64,
+    /// 下次从这个字节继续读。**永远落在换行之后**（或 EOF）。
+    pub next_offset: u64,
+    /// 文件当前字节长度 —— 前端拿它和 `next_offset` 比，就能发现"日志文件被重建了"。
+    pub size: u64,
+    /// 首读跳过了前面（本次只给最近一段）。
+    pub truncated_head: bool,
+    /// 单次上限之外还有没读完的（前端该立刻再读一次，别等到下一个 tick）。
+    ///
+    /// 判据是"**读到缓冲里了没有**"，不是"文件里还剩没剩" —— 被故意扣下的半行
+    /// 不算"还有得读"，否则前端会拿着不动如山的 `next_offset` 空转。
+    pub more: bool,
+    /// 进程当前状态 `running` / `ready` / `exited(码)` / `stopped`。
+    /// 面板靠它决定"还继续轮询吗"，也靠它显示退出码 —— 少一次 round trip。
+    pub state: String,
+}
+
+/// 把读指针推进到**下一个换行之后**。返回新位置（找不到换行就是文件末尾）。
+///
+/// 为什么非做不可：日志是按**字节**落的，解码走 [`exec::decode_output`] ——
+/// 严格 UTF-8 解不通就**整体**回退活动代码页。所以"切在半个中文字符中间"不是局部花屏，
+/// 而是整段乱码（`from_utf8` 一旦失败，本该按 UTF-8 解的字节全按 GBK 解）。
+fn skip_to_line_start(f: &mut File, from: u64, size: u64) -> Result<u64, String> {
+    f.seek(SeekFrom::Start(from))
+        .map_err(|e| format!("定位日志失败：{e}"))?;
+    let mut buf = [0u8; 8192];
+    let mut pos = from;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("读日志失败：{e}"))?;
+        if n == 0 {
+            return Ok(size);
+        }
+        if let Some(i) = buf[..n].iter().position(|b| *b == b'\n') {
+            return Ok(pos + i as u64 + 1);
+        }
+        pos += n as u64;
+    }
+}
+
+/// 往前退到"不在多字节字符中间"的切点。只在下限兜底时用（见 [`read_chunk`] 的注释）。
+fn floor_char_boundary_bytes(buf: &[u8], i: usize) -> usize {
+    let mut i = i.min(buf.len());
+    let mut steps = 0;
+    while i > 0 && steps < 3 && (buf[i - 1] & 0b1100_0000) == 0b1000_0000 {
+        i -= 1;
+        steps += 1;
+    }
+    i
+}
+
+/// 从 `offset` 起读一段。**切分点只落在换行上**，三条规矩：
+///
+/// 1. **起点对齐行首**：`offset` 落在任意字节上时（首读的"回看尾部"就是），
+///    推进到下一个 `\n` 之后 —— 丢掉被切掉的前半行，好过吐半行。
+/// 2. **终点回退到最后一个 `\n`**：读满上限后往回找换行，只发它前面的内容。
+/// 3. **末尾半行不发**：文件还在被写，最后一行写没写完不知道，留着下次 ——
+///    这同时免费换来 `tail -f` 的行为（不会"写一半闪一下再改写"）。
+///    **例外**：进程已经结束（`state` 是 `exited`/`stopped`）时文件不再变，
+///    尾巴就是完整的，照发 —— 不然"启动失败、最后一行还没换行"就永远看不到。
+///
+/// `offset = None` 是首读：只回看尾部 [`PANEL_TAIL_BYTES`] 并置 `truncated_head`；
+/// 若带回来的 offset 已越过文件末尾（日志被清空 / 重建），也当首读重来 ——
+/// 否则会一直读在一片空洞里，界面永远不更新。
+fn read_chunk(
+    path: &Path,
+    offset: Option<u64>,
+    max_bytes: usize,
+    state: &str,
+) -> Result<LogChunk, String> {
+    let alive = !is_dead(state);
+    let mut f = File::open(path).map_err(|e| format!("打开日志失败（{}）：{e}", path.display()))?;
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let max_bytes = max_bytes.clamp(1024, LOG_CHUNK_MAX);
+
+    let (start0, first) = match offset {
+        Some(o) if o <= size => (o, false),
+        _ => (size.saturating_sub(PANEL_TAIL_BYTES), true),
+    };
+    let mut start = start0;
+    if first && start > 0 {
+        start = skip_to_line_start(&mut f, start, size)?;
+    }
+
+    let end = size.min(start.saturating_add(max_bytes as u64));
+    let want = (end - start) as usize;
+    let mut buf = vec![0u8; want];
+    let mut filled = 0usize;
+    f.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("定位日志失败：{e}"))?;
+    while filled < want {
+        match f.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(format!("读日志失败：{e}")),
+        }
+    }
+    buf.truncate(filled);
+
+    // 切点：优先落在换行之后；进程结束且已读到末尾 → 整段（文件不再变）；
+    // 还有没读完却整段没有换行（超长单行 / 只有 \r 的进度条）→ 退到字符边界兜底，
+    // 否则这一段的窗口永远挪不动，界面会卡死在"没有输出"上。
+    let at_eof = end >= size;
+    let cut = match buf.iter().rposition(|b| *b == b'\n') {
+        Some(i) => i + 1,
+        None if at_eof && !alive => filled,
+        None if !at_eof => floor_char_boundary_bytes(&buf, filled),
+        None => 0,
+    };
+
+    let text = if cut == 0 {
+        String::new()
+    } else {
+        exec::decode_output(&buf[..cut])
+    };
+    let next_offset = start + cut as u64;
+    Ok(LogChunk {
+        text,
+        start,
+        next_offset,
+        size,
+        truncated_head: first && start0 > 0,
+        more: start + (filled as u64) < size,
+        state: state.to_string(),
+    })
+}
+
+/// 增量读某个托管进程的日志。宿主面板的"输出"标签页用它。
+///
+/// **按 pid 定位**，与进程表主键一致 —— 面板手里只有 pid，不该再翻译一次。
+/// 进程已退出但条目还在表里（`exited(码)`）时照样读得到：那正是"启动失败要看输出"
+/// 的场景。被 `stop_pid` 收掉的条目已从表里移除，此时读不到，前端据此收尾。
+pub fn read_log_chunk(pid: u32, offset: Option<u64>, max_bytes: usize) -> Result<LogChunk, String> {
+    let (path, state) = {
+        let mut t = lock()?;
+        refresh_all(&mut t);
+        match t.get(&pid) {
+            Some(m) => (m.log.clone(), m.state.clone()),
+            None => {
+                let live: Vec<ProcInfo> = live_of(&t).iter().map(|m| m.info()).collect();
+                return Err(format!(
+                    "没有 pid={pid} 这个托管进程。当前：{}",
+                    render_listing(&live)
+                ));
+            }
+        }
+    };
+    read_chunk(&path, offset, max_bytes, &state)
 }
 
 fn info_of(handle: &str) -> Result<ProcInfo, String> {
@@ -776,12 +940,18 @@ mod tests {
         return "echo boom-proc; exit 7".into();
     }
 
-    /// 标记文件在不在 —— 由"本次启动"写出来，所以启动前必定不命中
+    /// 标记文件在不在 —— 由"本次启动"写出来，所以启动前必定不命中。
+    ///
+    /// **判据必须要求"内容也在"**，不能只看文件的存不存在：标记是
+    /// `echo started > 文件` 写出来的，而 `>` 是**先创建（截断）再写入** —— 中间有一个
+    /// "文件在、内容还空"的窗口。早先这里用 `type 文件`（空文件也返回 0），
+    /// 谓词恰好轮询到这个窗口就会拿到一次**假命中**（证据只有 `exit=0`，没有那行内容），
+    /// 表现为这条测试偶发失败。`findstr` / `grep` 在内容没匹配上时返回非 0，天然没有这个洞。
     fn predicate_marker() -> String {
         #[cfg(target_os = "windows")]
-        return format!("type {MARKER}");
+        return format!("findstr /C:\"started\" {MARKER}");
         #[cfg(not(target_os = "windows"))]
-        return format!("cat {MARKER}");
+        return format!("grep -q started {MARKER}");
     }
 
     fn predicate_never() -> String {
@@ -1036,7 +1206,204 @@ mod tests {
                 "GBK 日志要解得开"
             );
         }
-        assert_eq!(read_log_tail(&proj.join("nope.log"), 10), "");
+    }
+
+    #[test]
+    fn incremental_reads_rebuild_the_log_byte_for_byte() {
+        let proj = tmp_proj("chunkjoin");
+        let p = proj.join("j.log");
+        let mut bytes = Vec::new();
+        for i in 1..=800 {
+            bytes.extend_from_slice(format!("line-{i}\n").as_bytes());
+        }
+        std::fs::write(&p, &bytes).unwrap();
+
+        // 首读 + 一路续读，拼起来必须**逐字节**等于原文件（不重不漏）
+        let mut off = None;
+        let mut joined = String::new();
+        let mut rounds = 0;
+        loop {
+            let c = read_chunk(&p, off, 1024, "running").expect("读得到");
+            joined.push_str(&c.text);
+            off = Some(c.next_offset);
+            rounds += 1;
+            if !c.more {
+                break;
+            }
+            assert!(rounds < 100, "续读没有推进（next_offset 卡住了）");
+        }
+        assert!(
+            rounds > 1,
+            "1024 字节上限下应当分多次读完，实际 {rounds} 次"
+        );
+        assert_eq!(joined, String::from_utf8(bytes).unwrap());
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// 最要命的一条：切点落在半个中文字符上，会让**整段**按 GBK 解（不是局部花屏）。
+    #[test]
+    fn the_cut_never_lands_inside_a_character() {
+        let proj = tmp_proj("chunkmb");
+        let p = proj.join("m.log");
+        // 前缀 131072 字节（正好等于回看窗口），之后是带换行的中文行。
+        // 这样首读的起点 = size - 131072 会**落在某个汉字的第 2 个字节上**。
+        let mut bytes = b"A\n".repeat(65536);
+        let run = "中文测试\n".as_bytes().repeat(30000);
+        bytes.extend_from_slice(&run);
+        std::fs::write(&p, &bytes).unwrap();
+
+        let c = read_chunk(&p, None, LOG_CHUNK_MAX, "running").expect("读得到");
+        assert!(c.truncated_head, "首读跳过了前面，要如实标记");
+        assert!(
+            !c.text.contains('\u{FFFD}'),
+            "出现替换字符 = 切在多字节字符中间了（整段会被按 GBK 解）"
+        );
+        assert!(
+            c.text.starts_with("中文测试\n"),
+            "起点没对齐到行首: {:?}",
+            &c.text[..c.text.len().min(24)]
+        );
+        assert!(c.text.ends_with('\n'), "活着的时候只发完整行");
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// 末行只写了一半时不能发 —— 否则界面会"写一半闪一下再改写"。
+    #[test]
+    fn a_half_written_last_line_waits_for_its_newline() {
+        let proj = tmp_proj("chunkhalf");
+        let p = proj.join("h.log");
+        std::fs::write(&p, b"done-1\npartial").unwrap();
+
+        let c = read_chunk(&p, None, LOG_CHUNK_MAX, "running").expect("读得到");
+        assert_eq!(c.text, "done-1\n", "半行不该出现");
+        assert!(!c.more);
+
+        // 补上换行 → 立刻能拿到
+        std::fs::write(&p, b"done-1\npartial done\n").unwrap();
+        let c2 = read_chunk(&p, Some(c.next_offset), LOG_CHUNK_MAX, "running").expect("读得到");
+        assert_eq!(c2.text, "partial done\n");
+        assert_eq!(c2.next_offset, 20, "续读的位置要落在换行之后");
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// 进程结束了，文件不再变 —— 没有换行的尾巴也要发，否则"启动失败"的输出看不到。
+    #[test]
+    fn a_dead_process_flushes_its_unterminated_tail() {
+        let proj = tmp_proj("chunkdead");
+        let p = proj.join("d.log");
+        std::fs::write(&p, b"boom").unwrap();
+        let alive = read_chunk(&p, None, LOG_CHUNK_MAX, "running").expect("读得到");
+        assert_eq!(alive.text, "", "活着时半行不发");
+
+        let dead = read_chunk(&p, None, LOG_CHUNK_MAX, "exited(7)").expect("读得到");
+        assert_eq!(dead.text, "boom", "结束后尾巴就是完整的: {:?}", dead.text);
+        assert_eq!(dead.next_offset, 4);
+        assert!(!dead.more);
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// 日志被清空 / 重建（或前端带了个越界的 offset）时，当作首读重来 ——
+    /// 不然会一直读在一片空洞里，界面永远不更新。
+    #[test]
+    fn an_offset_past_the_end_starts_over_instead_of_stalling() {
+        let proj = tmp_proj("chunkreset");
+        let p = proj.join("r.log");
+        std::fs::write(&p, b"hello\n").unwrap();
+        let c = read_chunk(&p, Some(9999), LOG_CHUNK_MAX, "running").expect("读得到");
+        assert_eq!(c.text, "hello\n");
+        assert_eq!(c.start, 0);
+        assert_eq!(c.next_offset, 6);
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// 超长单行 / 只有 `\r` 的进度条：整段没有换行也必须能前进，
+    /// 否则窗口永远挪不动 = 界面卡死在"没有输出"上。
+    #[test]
+    fn a_giant_line_without_newlines_still_makes_progress() {
+        let proj = tmp_proj("chunkrev");
+        let p = proj.join("v.log");
+        std::fs::write(&p, vec![b'x'; 4000]).unwrap();
+        let c = read_chunk(&p, None, 1024, "running").expect("读得到");
+        assert!(
+            !c.text.is_empty(),
+            "读满上限却没换行时也要吐一段，不能原地卡住"
+        );
+        assert!(c.next_offset > 0);
+        assert!(c.more, "后面还有");
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// 面板走的那条路：按 pid 读。进程退出后条目还在表里 → 输出仍然读得到（
+    /// 这正是"启动失败要看输出"的场景）。
+    #[test]
+    fn read_log_chunk_by_pid_works_even_after_the_process_exits() {
+        let _g = table_lock();
+        let proj = tmp_proj("chunkpid");
+        let out = start(
+            &proj,
+            &spec(print_and_die(), Some(predicate_never()), false),
+            4,
+            5,
+        )
+        .expect("启动本身成功");
+        let pid = out.info.pid;
+
+        let mut off = None;
+        let mut seen = String::new();
+        loop {
+            let c = read_log_chunk(pid, off, LOG_CHUNK_MAX).expect("按 pid 读得到");
+            seen.push_str(&c.text);
+            off = Some(c.next_offset);
+            if c.state.starts_with("exited") {
+                assert!(!c.more, "进程已结束且已读到末尾");
+                break;
+            }
+        }
+        assert!(seen.contains("boom-proc"), "要能看到它打印的那行: {seen:?}");
+        assert!(
+            read_log_chunk(999_999, None, LOG_CHUNK_MAX).is_err(),
+            "不存在的 pid 要报错（前端据此收尾）"
+        );
+        cleanup(&proj);
+    }
+
+    /// 端到端的"看得见"：真起一个后台进程，它在**还活着的时候**日志就已经可读。
+    ///
+    /// 这条断言的就是需求本身（"服务跑着，我能看到它的终端输出吗"）—— 别的测试都只证明零件对，
+    /// 只有这条证明"spawn → 重定向到文件 → 增量读"整条链是通的。
+    #[test]
+    fn a_running_service_is_readable_before_it_exits() {
+        let _g = table_lock();
+        let proj = tmp_proj("live");
+        #[cfg(target_os = "windows")]
+        let cmd = "echo first-line & ping -n 8 127.0.0.1 >nul".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let cmd = "echo first-line; sleep 8".to_string();
+
+        let out = start(&proj, &spec(cmd, None, false), 4, 5).expect("应当起来");
+        let pid = out.info.pid;
+
+        let mut last = String::new();
+        let mut alive = false;
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            let c = read_log_chunk(pid, None, LOG_CHUNK_MAX).expect("读得到");
+            last = c.text.clone();
+            if is_dead(&c.state) {
+                break;
+            }
+            if last.contains("first-line") {
+                // 关键：这一轮它**还活着**（上面的 is_dead 已经排除了退出），输出却已经在了
+                alive = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        let _ = stop_pid(pid);
+        assert!(
+            alive,
+            "进程还活着的时候日志就该可读（否则'看得见服务输出'无从谈起）；实际读到: {last:?}"
+        );
         cleanup(&proj);
     }
 }

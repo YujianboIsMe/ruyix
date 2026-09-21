@@ -879,6 +879,51 @@ function runStaticChecks() {
     !/^[ \t]*persist\(s\);[ \t]*\r?$/m.test(sessionJs),
     "有落盘调用没 await：同一会话两次落盘共用同一个 .json.tmp，并发时必有一次 rename 失败（用户看到「会话保存失败」，盘上留下的是旧内容）");
 
+  // U30 proc-log：托管进程的**输出**要看得到（服务面板的第二只眼）。
+  //   病根不是"没记日志"（`proc::start` 一 spawn 就把 stdout+stderr 重定向进
+  //   `.ruyix/proc/pN.log`，`ProcInfo.log` 连绝对路径都带回来了）—— 缺的是"读它"的入口。
+  //   三条硬约束：
+  //     · 切分点只落在换行上：日志按字节存、解码走"严格 UTF-8 失败整体回退活动代码页"，
+  //       切在半个中文字符中间 = **整段**乱码（不是局部花屏）；
+  //     · 末行没写完不发（`tail -f` 的行为），但进程已结束就照发 —— 否则"启动失败、
+  //       最后一行没换行"永远看不到；
+  //     · xterm 的 `convertEol` 必须有：日志是 LF，而 xterm 里 `\n` 只下移不回列首，
+  //       不转换整屏输出会斜成阶梯。
+  const procLogJs = read("ui/proc-log.js");
+  const zhJson = JSON.parse(read("ui/lang/zh-CN.json"));
+  const enJson = JSON.parse(read("ui/lang/en.json"));
+  check("U30", "proc-log",
+    has(managedRs, "pub struct LogChunk") && has(managedRs, "pub fn read_log_chunk") &&
+      has(managedRs, "next_offset") && has(managedRs, "truncated_head") &&
+      has(managedRs, "fn skip_to_line_start"),
+    "proc.rs 缺增量读日志的入口（LogChunk / read_log_chunk / 行首对齐）");
+  check("U30", "proc-log",
+    /fn proc_log_read\(/.test(mainRs) && has(mainRs, "proc_log_read,"),
+    "main.rs 没注册 proc_log_read —— 前端拿不到日志");
+  check("U30", "proc-log",
+    ["menu-service", "service-view", "proc-log-view", "proc-log-panes"]
+      .every((id) => has(html, `id="${id}"`)) && has(html, 'src="proc-log.js"'),
+    "index.html 缺少输出视图容器（proc-log-view / proc-log-panes）或没挂 proc-log.js");
+  check("U30", "proc-log",
+    has(procLogJs, "convertEol") && has(procLogJs, '"proc_log_read"') &&
+      has(procLogJs, "offset: tab._offset") && !has(procLogJs, "terminal-container"),
+    "输出面板：convertEol 没开（LF 会让输出斜成阶梯）/ 增量读没带 offset / 复用了 PTY 的终端容器");
+  check("U30", "proc-log",
+    has(mainJs, "tab._isProcLog") && has(mainJs, "showProcLogView") &&
+      has(mainJs, "ProcLogUI?.blur") && has(mainJs, "ProcLogUI?.close(tab)") &&
+      /_isProcLog\)\s*return/.test(mainJs),
+    "main.js 缺输出标签页分支：切走不停轮询 / 关标签页不 dispose（后台会一直问后端）");
+  check("U30", "proc-log",
+    has(read("ui/service.js"), "data-output") && has(read("ui/service.js"), "openLog") &&
+      has(commandJs, '"log"') && has(commandJs, "ServiceUI?.openLog"),
+    "服务表缺「输出」入口，或命令栏没有 `service log <pid>`");
+  check("U30", "proc-log",
+    has(zhJson["proc_log.truncated"] || "", "{n}") &&
+      has(enJson["proc_log.truncated"] || "", "{n}") &&
+      !!zhJson["service.btn_output"] && !!enJson["service.btn_output"] &&
+      !!zhJson["proc_log.ended"] && !!enJson["proc_log.ended"],
+    "输出面板的文案没进语言包（中英都要，且「跳过前 {n} 字节」要带占位符）");
+
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌
   // → 预算上限（不许无限修）；前端还要把结论显示出来，否则用户看不到"这轮验没验"。
@@ -1565,6 +1610,245 @@ async function runServiceChecks() {
 }
 
 /**
+ * U30 proc-log-replay：输出面板回放 —— 真加载 ui/service.js + ui/proc-log.js，配上假 xterm
+ * 与假后端，走一遍"服务表点输出 → 增量跟随 → 进程退出收尾"。
+ *
+ * 断言的是**喂进终端的文字**与**带回去的 offset**，不是"有没有调用某个函数"：
+ * 增量读这件事，错了就错在"重读 / 漏读 / 乱码"上，只有看文字才看得出来。
+ */
+async function runProcLogChecks() {
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const i18n = {
+    getLang: () => "zh-CN",
+    t: (k, params) => {
+      let s = zh[k] ?? k;
+      for (const [pk, pv] of Object.entries(params || {})) s = s.split(`{${pk}}`).join(pv);
+      return s;
+    },
+  };
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  // 假 xterm：只记事（构造参数 + 写进去的文字）。真要断言的正是"喂了什么进去"。
+  const termOpts = [];
+  let lastTerm = null;
+  class FakeTerm {
+    constructor(opts) {
+      termOpts.push(opts);
+      this.opts = opts;
+      this.cols = 80;
+      this.rows = 24;
+      this.disposed = false;
+      this.buffer = {
+        active: {
+          length: 2,
+          baseY: 1,
+          viewportY: 1,
+          getLine: (i) => ({
+            translateToString: () =>
+              i === 0 ? "Started AdminApplication in 1.168 seconds" : "Tomcat started on port 8083",
+          }),
+        },
+      };
+      lastTerm = this;
+    }
+    open() {}
+    write(t) {
+      this.written = (this.written || "") + t;
+    }
+    scrollToBottom() {}
+    clear() {
+      this.written = "";
+    }
+    focus() {}
+    dispose() {
+      this.disposed = true;
+    }
+    onScroll() {}
+    resize(c, r) {
+      this.cols = c;
+      this.rows = r;
+    }
+  }
+
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+  const panesRoot = el("proc-log-panes");
+  panesRoot.insertAdjacentHTML = (where, html) => {
+    panesRoot.innerHTML += html;
+  };
+
+  const appState = { tabs: [], activeTabId: null, currentProject: null };
+  const calls = [];
+  const timers = { started: 0, cleared: 0 };
+  const procs = [
+    {
+      handle: "p1", pid: 38420, cmd: "mvn spring-boot:run", log: "p1.log",
+      ready_cmd: null, state: "ready", keep_alive: false,
+      elapsed_ms: 1000, started_at_ms: Date.parse("2026-09-20T19:07:00"),
+    },
+  ];
+  // 后端剧本（按调用次序发）：首读带 truncated_head → 空手 → more=true（一次没读完）→
+  // 正常一段 → **退出那一刻还留着没读完的尾巴** → 尾段。最后两条专门守着一个真实的坑：
+  // 服务退出前会把缓冲一次性冲出来，若"看到 exited 就收尾"，死因那几行恰好会被丢掉。
+  const script = [
+    { text: "Started AdminApplication in 1.168 seconds\n", start: 1024, next_offset: 1063,
+      size: 1063, truncated_head: true, more: false, state: "ready" },
+    { text: "", start: 1063, next_offset: 1063, size: 1063, truncated_head: false, more: false,
+      state: "ready" },
+    { text: "line-A\n", start: 1063, next_offset: 1070, size: 1200, truncated_head: false,
+      more: true, state: "ready" },
+    { text: "line-B\n", start: 1070, next_offset: 1077, size: 1077, truncated_head: false,
+      more: false, state: "running" },
+    { text: "boom\n", start: 1077, next_offset: 1082, size: 2000, truncated_head: false,
+      more: true, state: "exited(7)" },
+    { text: "Caused by: port 8083 already in use\n", start: 1082, next_offset: 1119,
+      size: 1119, truncated_head: false, more: false, state: "exited(7)" },
+  ];
+  let seat = 0;
+  let throwOnRead = false;
+
+  const sandbox = {
+    I18N: i18n,
+    window: { I18N: i18n, Terminal: FakeTerm, state: appState, ServiceUI: null, ProcLogUI: null },
+    document: {
+      getElementById: el,
+      createElement: (tag) => makeEl("<" + tag + ">"),
+      querySelector: () => null,
+    },
+    state: appState,
+    renderTabs() {},
+    switchTab(id) {
+      appState.activeTabId = id;
+    },
+    setStatus() {},
+    getTauriInvoke: () => async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "proc_list") return procs;
+      if (cmd === "proc_log_read") {
+        if (throwOnRead) throw new Error("没有 pid=999 这个托管进程");
+        return script[Math.min(seat++, script.length - 1)];
+      }
+      return null;
+    },
+    setInterval() {
+      timers.started += 1;
+      return 1;
+    },
+    clearInterval() {
+      timers.cleared += 1;
+    },
+  };
+
+  const saved = ["window", "document", "state", "setInterval", "clearInterval", "I18N"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/service.js"))();
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/proc-log.js"))();
+    const ProcLogUI = sandbox.window.ProcLogUI;
+    const ServiceUI = sandbox.window.ServiceUI;
+    check("U30", "proc-log-replay", !!ProcLogUI && typeof ProcLogUI.open === "function",
+      "proc-log.js 未暴露 ProcLogUI.open");
+
+    // 入口 = 服务面板的 `service log <pid>`（pid 是用户手里唯一的一手证据）
+    const opened = await ServiceUI.openLog(38420);
+    const tab = appState.tabs.find((t) => t._isProcLog);
+    check("U30", "proc-log-replay",
+      !!opened && !!tab && appState.activeTabId === tab.id && tab.content === "",
+      `service log <pid> 没打开输出标签页（或往 content 里塞了东西）: ${JSON.stringify(tab)}`);
+
+    ProcLogUI.render(tab);
+    await flush();
+    const reads = calls.filter((c) => c.cmd === "proc_log_read");
+    check("U30", "proc-log-replay",
+      reads.length >= 1 && reads[0].args.pid === 38420 && reads[0].args.offset === null,
+      `首读必须不带 offset（后端据此只回看尾部 128KB）: ${JSON.stringify(reads[0] || null)}`);
+    check("U30", "proc-log-replay",
+      termOpts.length === 1 && termOpts[0].convertEol === true && termOpts[0].disableStdin === true,
+      `xterm 必须以 convertEol 打开（否则 LF 会让输出斜成阶梯）、并且是只读的: ${JSON.stringify(termOpts[0] || null)}`);
+    const w1 = (lastTerm && lastTerm.written) || "";
+    check("U30", "proc-log-replay",
+      w1.includes("Started AdminApplication in 1.168 seconds") &&
+        w1.includes("已跳过前面 1024 字节"),
+      `首屏没把后端给的那段写进终端、或没提示"前面被跳过了": ${JSON.stringify(w1)}`);
+    check("U30", "proc-log-replay",
+      tab._offset === 1063,
+      `offset 没跟着后端的 next_offset 走（下一轮会重读整段）: ${tab._offset}`);
+
+    // 续读：带着上一轮的 next_offset —— 增量，不重读
+    await ProcLogUI.poll(tab);
+    const reads2 = calls.filter((c) => c.cmd === "proc_log_read");
+    check("U30", "proc-log-replay",
+      reads2.length === 2 && reads2[1].args.offset === 1063,
+      `续读要带上一轮的 next_offset（不是 null、也不是 0）: ${JSON.stringify(reads2.map((r) => r.args.offset))}`);
+    check("U30", "proc-log-replay",
+      !!lastTerm && lastTerm.written === w1,
+      "后端返回空 text 时不该往终端里写任何东西");
+
+    // more=true：一轮没读完就接着读，别等下一个 tick
+    await ProcLogUI.poll(tab);
+    const reads3 = calls.filter((c) => c.cmd === "proc_log_read");
+    check("U30", "proc-log-replay",
+      reads3.length === 4 && reads3[2].args.offset === 1063 && reads3[3].args.offset === 1070,
+      `more=true 要**立刻**接着读（否则大数据量要等好几个 tick）: ${JSON.stringify(reads3.map((r) => r.args.offset))}`);
+    check("U30", "proc-log-replay",
+      !!lastTerm && lastTerm.written.includes("line-A\nline-B\n"),
+      `两段续读的文字要按序落进终端: ${JSON.stringify(lastTerm && lastTerm.written)}`);
+
+    // 进程退出：**先把没读完的读干净再收尾**（退出那一刻的尾巴往往正是死因），
+    // 收尾之后不再问后端
+    await ProcLogUI.poll(tab);
+    const before = calls.length;
+    const wEnd = (lastTerm && lastTerm.written) || "";
+    check("U30", "proc-log-replay",
+      timers.cleared >= 1 && /进程已退出/.test(wEnd),
+      `进程退出后要停掉轮询并说明"不会再有新输出": ${JSON.stringify({ timers, w: wEnd })}`);
+    check("U30", "proc-log-replay",
+      wEnd.includes("boom\n") && wEnd.includes("Caused by: port 8083 already in use\n"),
+      `退出那一刻还没读完的尾巴不许丢（那正是死因）: ${JSON.stringify(wEnd)}`);
+    await ProcLogUI.poll(tab);
+    check("U30", "proc-log-replay", calls.length === before,
+      "进程已经结束了还在问后端（`_ended` 之后不该再发请求）");
+
+    // 读不到 = 被停止（条目已从进程表移除）：这不是故障，是终态
+    throwOnRead = true;
+    const tab2 = ProcLogUI.open({ pid: 999, cmd: "java -jar gone.jar", state: "running" });
+    ProcLogUI.render(tab2);
+    await flush();
+    check("U30", "proc-log-replay",
+      /日志读取结束/.test((lastTerm && lastTerm.written) || ""),
+      `读不到日志时要收尾并说明原因: ${JSON.stringify(lastTerm && lastTerm.written)}`);
+
+    // 生命周期：切走停轮询、关标签页 dispose
+    const startedBefore = timers.started;
+    ProcLogUI.render(appState.tabs.find((t) => t._isProcLog));
+    ProcLogUI.blur();
+    check("U30", "proc-log-replay", timers.cleared >= 2,
+      "切走到别的标签页必须停掉输出轮询（否则后台一直问后端）");
+    const paneSel = `[data-pane="${tab2.id}"]`;
+    const pane2 = panesRoot.querySelector(paneSel);
+    let removed = 0;
+    if (pane2) pane2.remove = () => { removed += 1; };
+    ProcLogUI.close(tab2);
+    check("U30", "proc-log-replay",
+      !!lastTerm && lastTerm.disposed === true && removed === 1,
+      "关标签页要 dispose 终端并摘掉面板（不然每开一次就漏一个 xterm 实例）");
+    check("U30", "proc-log-replay", startedBefore >= 1,
+      "render 没起轮询定时器（那就只剩首读，后面不会有新内容）");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
+/**
  * U24 external-link-replay：外链闸门回放 —— 真加载 ui/external.js，喂几条链接按下"点击"，
  * 断言：点下去既不导航 WebView（preventDefault）也不静默吃掉，而是走命令系统交给系统浏览器；
  * 白名单之外的 scheme 与自家文档里的非文档路径被拦下并给出说明；锚点与自家文档放行。
@@ -1683,6 +1967,7 @@ async function main() {
     ["U9", "config-replay", runConfigChecks],
     ["U22", "help-replay", runHelpChecks],
     ["U23", "service-replay", runServiceChecks],
+    ["U30", "proc-log-replay", runProcLogChecks],
     ["U24", "external-link-replay", runExternalLinkChecks],
   ];
   for (const [id, name, fn] of scenarios) {

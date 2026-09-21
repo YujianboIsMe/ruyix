@@ -317,6 +317,10 @@
             <div id="terminal-view" class="terminal-view" style="display:none">
               <div id="terminal-container" class="terminal-container"></div>
             </div>
+            <!-- 托管进程的输出（每个标签页一个 pane，切回来内容还在） -->
+            <div id="proc-log-view" class="proc-log-view" style="display:none">
+              <div id="proc-log-panes" class="proc-log-panes"></div>
+            </div>
             <div id="session-view" class="terminal-view" style="display:none">
               <div id="session-container" class="session-container"></div>
             </div>
@@ -462,6 +466,7 @@
   <script src="capability.js"></script>
   <script src="config.js"></script>
   <script src="service.js"></script>
+  <script src="proc-log.js"></script>
   <script src="external.js"></script>
   <script src="main.js"></script>
 </body>

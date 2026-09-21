@@ -16,6 +16,9 @@
  *    所以"停止"直接按 pid 发，不需要先翻译成引擎自造的 handle。
  * 3. **时间给全**：年月日时分秒 + 括号里的"已启动多久"。只有时刻能算出"几点起的"，
  *    只有时长能回答"跑了多久了" —— 少一个，用户就得自己拿当前时间去减。
+ * 4. **能停，也要能看**。行尾两个入口：`输出` 开一个实时跟随日志的标签页（`proc-log.js`），
+ *    `停止` 按 pid 连子进程树一起收。只列不停 = 还是管不了；只停不看 = 起不来的时候
+ *    只能去文件管理器翻 `.ruyix/proc/`。
  *
  * 表格是**学术三线表**：只有顶线、表头下线、底线三条横线，没有竖线、没有内部行线。
  */
@@ -78,8 +81,10 @@ window.ServiceUI = (() => {
   }
 
   function rowHtml(p) {
-    // 停止按钮放在命令行单元格里（右侧浮动）：表格的**字段**仍然只有三个
-    // （PID / 启动时间 / 完整命令行），操作不是字段，不该占一列。
+    // 操作按钮（输出 / 停止）放在命令行单元格里右侧浮动：表格的**字段**仍然只有三个
+    // （PID / 启动时间 / 完整命令行），操作不是字段，不该占列。
+    // 用一层 flex 容器兜住，是因为 float:right 的多个元素在 DOM 里是**反序**排的，
+    // 靠它排"输出在前、停止在后"纯属碰运气。
     return (
       `<tr data-pid="${p.pid}">` +
       `<td class="service-col-pid">${p.pid}</td>` +
@@ -89,8 +94,13 @@ window.ServiceUI = (() => {
       `(${esc(fmtElapsed(p.elapsed_ms))})</span>` +
       `</td>` +
       `<td class="service-col-cmd">` +
+      `<span class="service-actions">` +
+      `<button class="service-act" data-output="${p.pid}" ` +
+      `data-i18n="service.btn_output">输出</button>` +
+      `<button class="service-act service-stop" data-stop="${p.pid}" ` +
+      `data-i18n="service.btn_stop">停止</button>` +
+      `</span>` +
       `<span class="service-cmd" title="${esc(p.cmd)}">${esc(p.cmd)}</span>` +
-      `<button class="service-stop" data-stop="${p.pid}" data-i18n="service.btn_stop">停止</button>` +
       `</td>` +
       `</tr>`
     );
@@ -177,6 +187,10 @@ window.ServiceUI = (() => {
     body.querySelectorAll("[data-stop]").forEach((btn) => {
       btn.addEventListener("click", () => stop(Number(btn.dataset.stop)));
     });
+    // 「输出」→ 开一个实时跟随日志的标签页（见 proc-log.js）
+    body.querySelectorAll("[data-output]").forEach((btn) => {
+      btn.addEventListener("click", () => openLog(btn.dataset.output));
+    });
   }
 
   /** 面板内的 data-i18n 文案（表头、按钮）—— 切语言后要跟着走 */
@@ -251,6 +265,36 @@ window.ServiceUI = (() => {
     switchTab(tab.id);
   }
 
+  /**
+   * 按 pid 打开输出标签页。命令栏 `service log <pid>` 走这条：pid 是用户手里唯一的
+   * 一手证据，所以入口就该是 pid，不该让人先去表格里找行。
+   *
+   * 先从 `proc_list` 取回这一行 —— 输出的头部要显示命令与状态，而且**只认表里的进程**：
+   * 拿一个来路不明的 pid 去开终端，等于把"表里没有"这件事藏起来。
+   */
+  async function openLog(pidArg) {
+    const pid = Number(pidArg);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      if (typeof setStatus === "function") setStatus(T("service.log_usage"), "error");
+      return null;
+    }
+    const inv = invoke();
+    if (!inv) return null;
+
+    let proc = null;
+    try {
+      const all = (await inv("proc_list")) || [];
+      proc = all.find((p) => p.pid === pid) || null;
+    } catch {
+      /* 下面按"找不到"统一报 */
+    }
+    if (!proc) {
+      if (typeof setStatus === "function") setStatus(T("service.log_missing", { pid }), "error");
+      return null;
+    }
+    return window.ProcLogUI?.open(proc) || null;
+  }
+
   function attach() {
     document.getElementById("service-btn-refresh")?.addEventListener("click", () => {
       lastPids = [];
@@ -258,5 +302,5 @@ window.ServiceUI = (() => {
     });
   }
 
-  return { attach, open, render, pull, stop, close };
+  return { attach, open, openLog, render, pull, stop, close };
 })();

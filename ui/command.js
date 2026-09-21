@@ -79,9 +79,16 @@ async function handleCommand(raw, _fromAi = false) {
       openHelp();
       break;
     case "service":
-    case "services":
-      window.ServiceUI?.open();
+    case "services": {
+      // `service` 开服务面板；`service log <pid>` 直接开某个进程的输出标签页
+      const sub = (parts[1] || "").toLowerCase();
+      if (sub === "log" || sub === "output") {
+        await window.ServiceUI?.openLog(parts[2]);
+      } else {
+        window.ServiceUI?.open();
+      }
       break;
+    }
     case "agent":
       if (!state.currentProject) {
         setStatus(I18N.t("cmd.agent.no_project"), "error");

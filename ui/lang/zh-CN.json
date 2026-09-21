@@ -370,5 +370,18 @@
   "service.empty": "当前没有运行中的服务",
   "service.th_pid": "PID",
   "service.th_started": "启动时间",
-  "service.th_cmd": "完整命令行"
+  "service.th_cmd": "完整命令行",
+  "service.btn_output": "输出",
+  "service.log_usage": "用法：service log <pid>（pid 从服务面板里看）",
+  "service.log_missing": "服务面板里没有 pid={pid} 这个进程（可能已经退出了）",
+  "proc_log.title": "输出",
+  "proc_log.follow": "回到最新",
+  "proc_log.clear": "清屏",
+  "proc_log.copy": "复制全部",
+  "proc_log.copied": "输出已复制到剪贴板",
+  "proc_log.copy_fail": "复制失败：剪贴板不可用",
+  "proc_log.truncated": "（已跳过前面 {n} 字节，只显示最近一段输出）",
+  "proc_log.closed": "（进程已停止，日志读取结束）",
+  "proc_log.ended": "（进程已退出，不会再有新输出）",
+  "proc_log.no_tauri": "（后端不可用：浏览器直开时读不到托管进程的日志）"
 }
