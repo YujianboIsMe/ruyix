@@ -1300,7 +1300,7 @@ mod tests {
     }
 
     /// 子步骤也能一批读：3 个 read 只花 1 轮，三份内容一起回来 ——
-    /// 子步的轮次预算同样被"一轮一个调用"吃掉（step.max_steps 24 轮很容易花在读文件上）。
+    /// 子步的轮次预算同样被"一轮一个调用"吃掉（预算再宽也经不住一轮只读一个文件）。
     #[test]
     fn a_step_can_read_a_batch_in_one_round() {
         let dir = temp_project("step-batch");

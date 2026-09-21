@@ -241,7 +241,7 @@
       input.value = "";
       sendMessage(s, wrap, text);
     });
-    wrap.querySelector("[data-cancel]").addEventListener("click", () => {
+    wrap.querySelector("[data-cancel]").addEventListener("click", async () => {
       const invoke = getInvoke();
       if (invoke) invoke("agent_cancel").catch(() => {});
       setBusy(false);
@@ -250,7 +250,7 @@
         run_id: null, status: "canceled",
       });
       fillMsgs(wrap, s);
-      persist(s);
+      await persist(s);
     });
     // 提问卡（v0.8 ask_user）：卡片按钮/输入框由 askHtml 在每次重渲染时重建，
     // 所以走**事件委托**（绑在容器上），而不是逐个按钮 addEventListener。
@@ -879,8 +879,9 @@
       .map((m) => ({ role: m.role, text: m.text }));
     s.messages.push({ role: "user", text, ts: nowHms(), run_id: null, status: null });
     fillMsgs(wrap, s);
-    // 先落盘用户这句话：run 跑一半崩了 / 被强杀，也不至于整段对话消失
-    persist(s);
+    // 先落盘用户这句话：run 跑一半崩了 / 被强杀，也不至于整段对话消失。
+    // **必须 await**：同一会话两次落盘共用同一个 `.json.tmp`，并发时会有一次 rename 失败。
+    await persist(s);
 
     const invoke = getInvoke();
     if (!invoke || !root()) {
@@ -921,7 +922,7 @@
       if (snap) placeholder.plan = snap;
       fillMsgs(wrap, s);
       renderList();
-      persist(s);
+      await persist(s);
     }
     // 写回结果在消息流定稿后再处理（面板会被 fillMsgs 的重渲染冲掉）
     if (!rep) return;
@@ -935,7 +936,7 @@
         ? `${L("备份", "backup")}：${rep.backup_dir}`
         : L("没有被覆盖的文件，无需备份", "nothing overwritten");
       sysMsg(s, wrap, `✅ ${L("已直接写入", "written")} ${rep.changes.length} ${L("个文件", "files")} · ${tail}`);
-      persist(s);
+      await persist(s);
     }
   }
 
@@ -952,7 +953,18 @@
         sessionJson: JSON.stringify(s),
         projectRoot: root(),
       });
-      Object.assign(s, saved);
+      // 后端回显的是**请求发出那一刻**的快照 —— 只同步元数据，绝不整体 assign。
+      //
+      // `Object.assign(s, saved)` 会把 `messages` 一起盖回来：请求发出之后才 push 的消息
+      // （运行中的助手气泡就是）不在后端那份快照里，于是被从 `s.messages` 里**抹掉**。
+      // 真凶现场：2026-09-21 20:13 那轮「飞机大战」（sess_2026-09-21T1733068908168000800.json）
+      // 盘上只剩 [用户任务, 写回回执] 两条，助手回复连同它的计划快照一起消失 ——
+      // 于是重启后大纲区的 ❌ 与失败原因再也回看不了（`_plan` 活在内存里，当场看着还是好的）。
+      // 会话内容的事实源永远是内存里这份 `s`；后端是持久化通道，不是权威。
+      if (saved?.id) s.id = saved.id;
+      if (saved?.title != null) s.title = saved.title;
+      if (saved?.created_at) s.created_at = saved.created_at;
+      if (saved?.updated_at) s.updated_at = saved.updated_at;
       const idx = sessions.findIndex((x) => x.id === s.id);
       if (idx >= 0) {
         sessions[idx] = s;

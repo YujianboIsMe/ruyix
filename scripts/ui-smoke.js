@@ -79,6 +79,13 @@
  *                     （并把最近一条有消息的会话接上）+ 用户那句话立刻落盘 + 原子写（截断式写入
  *                     被中断会留半截 JSON，而 list 会跳过它）+ 坏文件只影响自己 + 空会话不落盘 /
  *                     删除幂等
+ *   U29 persist-no-clobber 落盘不许**弄丢**会话内容（v0.10）：`persist()` 的回显同步只准同步
+ *                     元数据（id/title/时间），绝不许 `Object.assign(s, saved)` —— 后端回显是
+ *                     「请求发出那一刻」的快照，整体 assign 会把之后新 push 的消息从 `s.messages`
+ *                     里抹掉。真凶现场：2026-09-21 20:13 那轮「飞机大战」盘上只剩
+ *                     [用户任务, 写回回执]，助手回复连同计划快照一起没了 → 重启后大纲区的 ❌
+ *                     与失败原因无从回看。另钉：每处落盘都要 await（同一会话共用同一个
+ *                     `.json.tmp`，并发保存必有一次 rename 失败）
  *   U27 logo-assets   应用图标（RYX 字母标）有唯一真相源：几何只写在 tools/logo/build_logo.py，
  *                     由它同时产出 ui/logo*.svg 与 src-tauri/icons/*。钉四条：四个矢量变体齐
  *                     / logo.svg 与 logo-mark.svg 的轮廓逐字节相同（只改一份就是漂移）
@@ -859,6 +866,18 @@ function runStaticChecks() {
       !has(sessRs, "会话不存在") &&
       has(agentModRs, "空会话不落盘"),
     "空会话与删除：新建不许落空文件（面板里全是幽灵条目）、删除要幂等（文件不在也算成功）");
+
+  // U29 persist-no-clobber：落盘不许**弄丢**会话内容（v0.10）。
+  // `persist()` 里那句 `Object.assign(s, saved)` 看着无害（"让内存跟上后端"），实则把
+  // **请求发出那一刻**的快照盖回活对象：请求之后才 push 的消息不在那份快照里，于是被抹掉。
+  // 会话内容的事实源是内存里那份 `s`，后端只是持久化通道 —— 回显只准同步元数据。
+  check("U29", "persist-no-clobber",
+    has(sessionJs, "s.updated_at = saved.updated_at") &&
+      !/^[ \t]*Object\.assign\(s, saved\);[ \t]*\r?$/m.test(sessionJs),
+    "persist 把后端回显整体 assign 回了会话对象：回显是「请求发出那一刻」的快照，会把之后新 push 的消息（运行中的助手回复）从 s.messages 里抹掉 —— 2026-09-21 那轮「飞机大战」的回复连同计划快照就是这么没的");
+  check("U29", "persist-no-clobber",
+    !/^[ \t]*persist\(s\);[ \t]*\r?$/m.test(sessionJs),
+    "有落盘调用没 await：同一会话两次落盘共用同一个 .json.tmp，并发时必有一次 rename 失败（用户看到「会话保存失败」，盘上留下的是旧内容）");
 
   // U17 verify-gate：机械验证门禁（v0.3）——"有改动 → 交付前必有验证结论；未通过不放行"。
   // 四环缺一不可：窄层（暂存内容语法检查）→ 全量层（复用 verify::run）→ 失败分支拒绝交付并回灌

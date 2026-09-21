@@ -465,7 +465,10 @@ mod tests {
             cfg.step.execute_plan,
             "默认必须开：关着的时候进度只能靠推断，实测会大面积误判"
         );
-        assert_eq!(cfg.step.max_steps, 24);
+        assert_eq!(
+            cfg.step.max_steps, 96,
+            "子步预算默认与父循环 MAX_STEPS 对齐"
+        );
         assert_eq!(cfg.agent.max_elapsed_secs, 1800);
 
         // 一行回退：配 false 就回到"plan 只给用户看"的旧行为
@@ -502,7 +505,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(cfg2.step.max_steps, 24);
+        assert_eq!(cfg2.step.max_steps, 96, "非法值回落默认（96）");
         assert_eq!(cfg2.agent.max_elapsed_secs, 1800);
     }
 

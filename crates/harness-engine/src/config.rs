@@ -252,7 +252,8 @@ impl Default for ReflectConfig {
 /// 变成"最多多少个步骤/干预轮"——步骤内部的轮次不再计入父预算，这是它独立的预算。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StepAgentConfig {
-    /// 单个步骤内部自己的工具轮次上限（与主循环的 `MAX_STEPS` 相互独立）
+    /// 单个步骤内部自己的工具轮次上限（与主循环的 `MAX_STEPS` 相互独立；默认 96，
+    /// 与父预算对齐的理由见 `d_step_max_steps`）
     #[serde(default = "d_step_max_steps")]
     pub max_steps: usize,
     /// **计划即执行**：模型调 `plan` 之后由引擎按序把每个步骤派发给步骤执行体。
@@ -278,8 +279,20 @@ impl Default for StepAgentConfig {
     }
 }
 
+/// 子步骤自己的轮次上限：**96**，与父循环 [`crate::agent::MAX_STEPS`] 对齐（v0.10，原为 24）。
+///
+/// 24 是 v0.4 定下的值，当时没人算过一笔账。子步执行体写的是**整文件**（引擎没有外科手术式
+/// `edit`，Write 就是交出全文），而"改一个页面"这种步骤光前期 `read` 就可能要 3~4 个文件
+/// （现有页面 / 路由 / 样式 / 入口），再叠加写完触发窄层语法检查失败后的重写 ——
+/// 24 轮会在"本步还没交付"时就用尽，而**父预算 `MAX_STEPS=96` 还剩一大半**。
+/// 子预算比父预算更紧，唯一的后果是把一次 run 拆成"失败 → 干预轮 →（可能重规划）"：
+/// 步骤没做完这个事实不变，父预算反而多烧一轮。
+///
+/// 放开之后的上界不靠轮数兜底，靠 `ruyix.code.harness.agent.max_elapsed_secs`
+/// （默认 1800s）那道**墙钟**闸 —— 主循环与子步骤都看它，所以真卡住的步骤不会因为
+/// 轮数变多而无限跑下去。
 fn d_step_max_steps() -> usize {
-    24
+    96
 }
 
 fn d_step_execute_plan() -> bool {
