@@ -715,6 +715,18 @@ pub fn shutdown_all(honor_keep_alive: bool) -> (Vec<ProcInfo>, Vec<ProcInfo>) {
     shutdown_where(|_| true, honor_keep_alive)
 }
 
+/// 进程表的**测试期互斥**：表是进程级全局的，测试并行跑会互相踩 —— 一个测试的 shutdown
+/// 会收掉另一个的进程，`clear_table` 会把别人的条目直接抹掉（连进程都不杀）。
+/// 因此凡是动这份表的测试都要先拿这把锁，**包括别的模块里真起后台进程的测试**
+/// （如 agent 的交付对账回归：它得等进程活过 run 结束，被别人 clear 掉就成了假失败）。
+#[cfg(test)]
+pub(crate) fn table_lock() -> std::sync::MutexGuard<'static, ()> {
+    static G: OnceLock<Mutex<()>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// 清空进程表（单测隔离用）。**不杀进程** —— 要杀用 [`shutdown_all`]。
 #[cfg(test)]
 fn clear_table() {
@@ -727,12 +739,8 @@ fn clear_table() {
 mod tests {
     use super::*;
 
-    /// 进程表是**进程级全局**的，测试并行跑会互相踩（一个的 shutdown 会收掉另一个的进程、
-    /// max 计数也会串）。全部串行化，且每个测试自己收尾。
-    fn serial() -> MutexGuard<'static, ()> {
-        static G: Mutex<()> = Mutex::new(());
-        G.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    // 进程表的测试期互斥统一用上层那个 [`table_lock`]（模块级那份），这里不再自带一把锁 ——
+    // 两把锁各锁各的等于没锁：别的模块真起进程的测试会因为「持的是另一把」而互相踩。
 
     fn tmp_proj(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ruyix-proc-{tag}-{}", std::process::id()));
@@ -800,7 +808,7 @@ mod tests {
 
     #[test]
     fn ready_predicate_hits_and_reports_the_matching_line() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("ready");
         let out = start(
             &proj,
@@ -834,7 +842,7 @@ mod tests {
     /// 必须能直接查、直接停，不能先翻译成自造编号。
     #[test]
     fn the_table_is_keyed_by_pid_and_carries_a_wall_clock_start() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("pidkey");
         let out = start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("应当起来");
         let pid = out.info.pid;
@@ -855,7 +863,7 @@ mod tests {
 
     #[test]
     fn without_a_predicate_it_returns_as_soon_as_started() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("noready");
         let out = start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("应当起来");
         assert!(matches!(out.kind, StartKind::Started));
@@ -866,7 +874,7 @@ mod tests {
 
     #[test]
     fn a_process_that_dies_reports_code_and_log_tail() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("dies");
         let out = start(
             &proj,
@@ -892,7 +900,7 @@ mod tests {
 
     #[test]
     fn not_ready_when_the_predicate_never_hits_but_the_process_lives() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("notready");
         let mut s = spec(sleeper().into(), Some(predicate_never()), false);
         s.ready_timeout_secs = Some(1);
@@ -914,7 +922,7 @@ mod tests {
 
     #[test]
     fn a_predicate_that_already_hits_is_refused_before_anything_starts() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("prehit");
         let first = start(
             &proj,
@@ -945,7 +953,7 @@ mod tests {
 
     #[test]
     fn max_is_enforced_with_an_evidence_carrying_message() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("max");
         let a = start(&proj, &spec(sleeper().into(), None, false), 1, 5).expect("第一个应当起来");
         let err =
@@ -957,7 +965,7 @@ mod tests {
 
     #[test]
     fn stopped_handles_disappear_and_unknown_ones_name_the_live_set() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("stophandle");
         let a = start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("应当起来");
         let stopped = stop(&a.info.handle).expect("停得掉");
@@ -971,7 +979,7 @@ mod tests {
 
     #[test]
     fn shutdown_takes_everything_down() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("shutdown");
         start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("起 1");
         start(&proj, &spec(sleeper().into(), None, true), 4, 5).expect("起 2");
@@ -1002,7 +1010,7 @@ mod tests {
 
     #[test]
     fn log_tail_keeps_the_end_and_decodes_the_active_codepage() {
-        let _g = serial();
+        let _g = table_lock();
         let proj = tmp_proj("tail");
         let p = proj.join("x.log");
         let mut bytes = Vec::new();

@@ -397,9 +397,10 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - write   写文件：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}} —— 新建或整文件重写。改已有文件前先 read 拿到现状，交回的必须是整份内容，不许用省略号或"其余不变"敷衍。
 - execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化、git 都走它。
   永不退出的服务（spring-boot:run / java -jar / npm run dev / vite）**必须**用后台模式，不要用 start、Start-Process、往 %TEMP% 写 bat/ps1 那类花招（它们拿不到输出，进程还会脱离掌控）：
-  {"tool":"execute","args":{"cmd":"mvn spring-boot:run","background":true,"ready_cmd":"netstat -ano | findstr :8083","ready_timeout_secs":90}}
+  {"tool":"execute","args":{"cmd":"mvn spring-boot:run","background":true,"ready_cmd":"netstat -ano | findstr :8083","ready_timeout_secs":90,"keep_alive":true}}
   background 起完不等它；ready_cmd 是**一条命令**，退出码 0 即就绪（不写就等于不等、起完即返）。返回 handle、pid 与日志**文件路径**，输出全部落在那个文件里（路径由引擎给，别自己写重定向）。
-  之后用 execute {"op":"status","handle":"p1"} 查状态、op=log 读日志尾、op=stop 停掉（连子进程树一起杀）。重启同一个服务前先 status / stop：端口被上一次的进程占着时，"起不来"是假的。
+  **keep_alive 决定它活不活得过本次 run**：不写就是 false —— 本次 run 一结束，引擎就把它收掉（连子进程树）。用户要的是“把服务跑起来”（让我访问 / 留着跑 / 等会儿用）→ **必须**写 "keep_alive":true：它会留在引擎进程表里，用户在【服务】面板能看到、能按 pid 停掉，IDE 退出时一并收。只是验证它起不起得来、随后就停 → 别写，并在 final 里说明“本次结束已自动收掉”。**报“已启动”时它必须还活着**：不带 keep_alive 却报“服务已启动”，用户 netstat 一看就是空的 —— 那是谎报，不是措辞问题。
+  之后用 execute {"op":"status","handle":"p1"} 查状态（它会告诉你这个进程有没有声明 keep_alive）、op=log 读日志尾、op=stop 停掉（连子进程树一起杀）。重启同一个服务前先 status / stop：端口被上一次的进程占着时，"起不来"是假的。
 - connect 连外部能力：{"tool":"connect","args":{"action":"list"}} 先看有哪些可连；调 MCP 工具用 {"tool":"connect","args":{"action":"call","server":"服务器名","tool":"工具名","arguments":{}}}；把任务委托给远端 Agent 用 {"tool":"connect","args":{"action":"send","agent":"名字","text":"任务描述"}}。可用清单在提示词里给过，没有的就别硬猜名字。
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 {"tool":"plan","args":{"steps":[{"title":"短标题","detail":"做什么","files":["相对路径"]}]}}，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
@@ -1190,10 +1191,15 @@ fn render_start(proj: &Path, out: &crate::proc::StartOutcome) -> String {
     ));
     if i.keep_alive {
         s.push_str(
-            "\n（已声明 keep_alive：本次 run 结束**不**收它，宿主面板可见可停；IDE 退出时一并收。）",
+            "\n（已声明 keep_alive：本次 run 结束**不**收它 —— 用户在【服务】面板能看到、能按 pid 停掉；IDE 退出时一并收。）",
         );
     } else {
-        s.push_str("\n（引擎持有：本次 run 结束会自动收掉它，不会留孤儿。）");
+        s.push_str(&format!(
+            "\n（**未声明 keep_alive**：本次 run 一结束引擎就会把它收掉。用户要的是“服务跑着”、而不是“验证一下”时，\
+             现在就 execute {{\"op\":\"stop\",\"handle\":\"{}\"}} 停掉、再带 \"keep_alive\":true 重启；\
+             否则你 final 里的“已启动”在用户看到时已经是空的。）",
+            i.handle
+        ));
     }
 
     let others: Vec<crate::proc::ProcInfo> = crate::proc::listing_for(proj)
@@ -1591,6 +1597,8 @@ struct GateState {
     reflect_rounds: u32,
     /// 要写进最终答复的补充说明（跳过原因 / 预算用尽 / 复核未完成）
     notes: Vec<String>,
+    /// 交付前对账（未声明 keep_alive 的托管进程）提醒过了没有 —— 只提醒一次，不循环
+    proc_warned: bool,
 }
 
 /// 窄验证：对**这一轮的改动内容**做单文件语法检查。
@@ -1722,6 +1730,32 @@ fn lint_item(o: &lint::LintOutcome) -> Option<CheckItem> {
     Some(item("failed", first))
 }
 
+/// 交付前对账：本项目里**这次 run 结束时会被收掉**的托管进程（未声明 `keep_alive`）。
+///
+/// 为什么非说不可：模型用后台模式起了服务、看到就绪，于是 final 写「服务已启动」—— 而 run 一结束
+/// 引擎就把它收掉，用户 netstat 一看是空的。实测 run `agent-20260921-0950`（cloud-shop-admin）：
+/// `p1.log` 里 09:51:18 `Tomcat started on port 8087`、09:51:21 还真接了模型那次 curl，
+/// 日志随后**戛然而止**（没有优雅关闭 = 被杀的），而模型已经在 final 里写
+/// 「服务已在本机 8087 端口成功启动并验证可访问」。引擎手里有这份事实，就该在放行答复之前说一次，
+/// 让模型自己选：重启成 keep_alive，或者把话说准。
+fn reap_warning(live: &[crate::proc::ProcInfo]) -> Option<String> {
+    let doomed: Vec<&crate::proc::ProcInfo> = live.iter().filter(|p| !p.keep_alive).collect();
+    if doomed.is_empty() {
+        return None;
+    }
+    let list = doomed
+        .iter()
+        .map(|p| format!("{}（pid {}，{}）", p.handle, p.pid, clip(&p.cmd, 60)))
+        .collect::<Vec<_>>()
+        .join("、");
+    Some(format!(
+        "[交付前对账·托管进程] 本项目还有 {} 个后台进程**没声明 keep_alive**，本次 run 一结束引擎就会收掉：{list}。\
+         如果答复里写「服务已启动 / 正在运行」，那句话在用户看到时就是假的（netstat 是空的）。二选一：\
+         ① 用户要的是「服务跑着」 → 先 execute {{\"op\":\"stop\",\"handle\":\"<上面的 handle>\"}} 停掉，再用 {{\"cmd\":\"<原命令>\",\"background\":true,\"ready_cmd\":\"<原判据>\",\"keep_alive\":true}} 重启，然后 final；\
+         ② 只是验证一下 → 明说「本次验证完已自动收掉」，别写成「正在运行」。",
+        doomed.len()
+    ))
+}
 /// 交付门禁：**有改动 → 全量验证；然后 → 反思**。返回 `Some(观察)` 表示打回让模型继续修。
 ///
 /// 三条不变量：
@@ -1741,6 +1775,19 @@ async fn gate_before_final(
     cancel: &CancelFlag,
     sink: &dyn Sink,
 ) -> Option<String> {
+    // ⓪ 交付前对账：会被本次 run 结束收掉的托管进程，先说一次（只提醒一次，不循环）
+    if !gate.proc_warned {
+        let live = crate::proc::listing_for(proj);
+        if let Some(board) = reap_warning(&live) {
+            gate.proc_warned = true;
+            sink.log(
+                "warn",
+                format!("[agent] 交付被打回（托管进程对账）：{}", clip(&board, 240)),
+            );
+            return Some(board);
+        }
+    }
+
     let has_changes = !ctx.changes.is_empty();
 
     // ① 机械验证（全量）：只在"有改动且改动还没被验证过"时跑
@@ -2276,7 +2323,8 @@ pub async fn run(
         let mut note = Vec::new();
         if !stopped_procs.is_empty() {
             note.push(format!(
-                "本次 run 收掉了 {} 个托管进程：{}",
+                "> ⚠️ 本次 run 结束时收掉了 {} 个托管进程（未声明 keep_alive）：{}\n\
+                 > 如果本意是让服务持续运行，请让我带上 \"keep_alive\":true 重跑一次 —— 那样的服务会留在【服务】面板里，可见可停。",
                 stopped_procs.len(),
                 crate::proc::render_listing(&stopped_procs)
             ));
@@ -2288,6 +2336,7 @@ pub async fn run(
                 crate::proc::render_listing(&kept_procs)
             ));
         }
+        sink.log("warn", clip(&note.join(" / "), 300));
         gate.notes.push(note.join("\n"));
     }
 
@@ -3581,5 +3630,168 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert_eq!(t[0].text, "b");
         assert_eq!(t[1].text, "c");
+    }
+
+    // ---- 托管进程的交付对账（用户报的那个「服务没启动起来」）----
+
+    /// 交付前对账：只有**会被本次 run 收掉**的托管进程才该被点名。
+    #[test]
+    fn reap_warning_flags_only_the_processes_that_will_die() {
+        let p = |handle: &str, keep: bool| crate::proc::ProcInfo {
+            handle: handle.into(),
+            pid: 34192,
+            cmd: "mvn -pl cloud-shop-admin spring-boot:run".into(),
+            log: "p1.log".into(),
+            ready_cmd: None,
+            state: "ready".into(),
+            keep_alive: keep,
+            elapsed_ms: 1234,
+            started_at_ms: 1_700_000_000_000,
+        };
+        assert!(
+            reap_warning(&[p("p1", true)]).is_none(),
+            "声明了 keep_alive 的不会被收，没什么可对账的"
+        );
+        let w = reap_warning(&[p("p1", true), p("p2", false)]).expect("有一个会被收掉就该说话");
+        assert!(w.contains("p2"), "{w}");
+        assert!(w.contains("keep_alive"), "{w}");
+        assert!(w.contains("34192"), "证据要带 pid：{w}");
+        assert!(!w.contains("p1（pid"), "不会被收的那个不该被点名：{w}");
+    }
+
+    /// 提示词必须教会模型 keep_alive：run agent-20260921-0950 的病灶就是模型照提示词起服务、
+    /// 看到就绪就报「已启动」，而提示词里根本没有 keep_alive 这个词，run 一结束服务就被收掉了。
+    #[test]
+    fn the_prompt_teaches_keep_alive_and_its_consequence() {
+        for k in ["keep_alive", "活不活得过本次 run", "谎报"] {
+            assert!(
+                AGENT_SYSTEM.contains(k),
+                "提示词缺 {k} —— 模型没有表达「活过本次 run」的词汇"
+            );
+        }
+        assert!(
+            AGENT_SYSTEM.contains(r#""keep_alive":true"#),
+            "示例里必须带 keep_alive:true —— 那是模型最常抄的一行"
+        );
+    }
+
+    /// start 的返回告示：**未声明**时要把后果说透（不能只说「不会留孤儿」这种好话），
+    /// 声明了才说「留着了，面板可停」。
+    #[test]
+    fn the_start_note_says_what_happens_at_run_end() {
+        // 真起后台进程 → 拿住进程表的测试期锁（表的全局性见 proc::table_lock）
+        let _g = crate::proc::table_lock();
+        let cmd = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let cfg = AppConfig::default();
+        let d = TempDir::new("start-note");
+        let spec = |keep: bool| crate::proc::StartSpec {
+            cmd: cmd.into(),
+            ready_cmd: None,
+            ready_timeout_secs: None,
+            keep_alive: keep,
+        };
+
+        let plain = tool_exec_bg(&d.0, &cfg, &spec(false)).expect("应当起得来");
+        assert!(plain.contains("未声明 keep_alive"), "{plain}");
+        assert!(plain.contains("收掉"), "必须说清 run 结束会收掉它：{plain}");
+
+        let kept = tool_exec_bg(&d.0, &cfg, &spec(true)).expect("应当起得来");
+        assert!(kept.contains("已声明 keep_alive"), "{kept}");
+        assert!(
+            kept.contains("服务】面板"),
+            "要告诉模型用户在哪能看见它：{kept}"
+        );
+
+        let (stopped, _) = crate::proc::shutdown_for(&d.0, false);
+        assert_eq!(stopped.len(), 2, "收尾：两个都收掉，测试不留孤儿");
+    }
+
+    /// **端到端回归**（用户报的 bug 原样复刻）：模型后台起了服务、没声明 keep_alive，
+    /// 看到就绪就 final 报「服务已启动」—— 而 run 一结束引擎就把它收掉，用户 netstat 一看是空的。
+    /// 现在：交付前对账打回一次；模型带 keep_alive 重启后，那个服务必须**活过 run 结束**。
+    #[test]
+    fn a_service_reported_as_running_must_survive_the_run() {
+        // 这条要真起服务、还要它活过 run 结束 —— 全程拿住进程表的测试期锁，
+        // 否则并跑的 proc 测试一个 clear_table() 就把条目抹了（进程还在，断言却空了）
+        let _g = crate::proc::table_lock();
+        let d = TempDir::new("reap-e2e");
+        let sleeper = if cfg!(windows) {
+            "ping -n 60 127.0.0.1"
+        } else {
+            "sleep 60"
+        };
+        let bg = |keep: bool| {
+            let extra = if keep { r#","keep_alive":true"# } else { "" };
+            let mut s = String::from(r#"{"tool":"execute","args":{"cmd":"#);
+            s.push_str(&serde_json::to_string(sleeper).unwrap());
+            s.push_str(r#","background":true"#);
+            s.push_str(extra);
+            s.push_str("}}");
+            s
+        };
+        let llm = crate::testllm::fake_llm(vec![
+            bg(false),
+            r#"{"final":"服务已启动，端口 8087"}"#.into(),
+            bg(true),
+            r#"{"final":"服务已启动（已声明 keep_alive，可在【服务】面板停掉）"}"#.into(),
+        ]);
+
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.gate.narrow = false;
+        cfg.gate.full = false;
+        cfg.reflect.enabled = false;
+        cfg.step.execute_plan = false;
+
+        let out = block_on(run(
+            &cfg,
+            &d.0,
+            "启动后台服务",
+            &[],
+            WritePolicy::Apply,
+            &NoConnector,
+            &crate::exec::new_cancel_flag(),
+            &QuietSink,
+        ))
+        .expect("run 不该失败");
+
+        assert_eq!(llm.count(), 4, "起服务 / 报已启动 / 被打回后重启 / 再报");
+        assert!(
+            llm.request(2).contains("keep_alive"),
+            "交付前对账必须把话递给模型：{}",
+            llm.request(2)
+        );
+        assert!(out.answer.contains("keep_alive"), "{}", out.answer);
+
+        let live = crate::proc::listing_for(&d.0);
+        assert_eq!(
+            live.len(),
+            1,
+            "声明 keep_alive 的服务必须活过 run 结束：{live:?}"
+        );
+        assert!(live[0].keep_alive, "留下的那个就是声明过 keep_alive 的");
+
+        let (stopped, _) = crate::proc::shutdown_for(&d.0, false);
+        assert_eq!(stopped.len(), 1, "测试自己收尾，不留孤儿");
+    }
+
+    /// 多行 final 不该让整轮作废：模型在 JSON 字符串里写真换行是常见写法，
+    /// 实测 run agent-20260921-0950 第 13 轮就死在这上面（control character ... while parsing a string）。
+    #[test]
+    fn a_multiline_final_with_raw_newlines_is_still_a_final() {
+        let raw = "{\"final\":\"## 结论\n\n服务已启动\n- 端口 8087\"}";
+        match parse_action(raw).expect("真换行不该让整轮作废") {
+            Action::Final(t) => {
+                assert!(t.contains("服务已启动"), "{t}");
+                assert!(t.contains('\n'), "换行要原样保留：{t:?}");
+            }
+            other => panic!("应当是 final：{other:?}"),
+        }
     }
 }

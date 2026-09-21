@@ -626,6 +626,22 @@ function runStaticChecks() {
       has(stepRs, "ready_cmd") && has(stepRs, "handle"),
     "两份提示词都要写后台模式：父子上下文隔离，缺一份每个步骤都会各自重新用 start 去绕");
 
+  // keep_alive 的诚实性（run agent-20260921-0950）：模型照提示词起了服务、看到就绪就报"已启动"，
+  // 而提示词里**根本没有 keep_alive 这个词**，run 一结束引擎就把它收掉了 ——
+  // 用户 netstat 一看是空的，session 存档末尾只多了一行"本次 run 收掉了 1 个托管进程"。
+  // 三处一起管：提示词教会 + start 告示说透后果 + 交付前把 final 打回一次（只一次）。
+  check("U23", "proc-lifecycle",
+    has(intentRs, "keep_alive") && has(intentRs, "活不活得过本次 run") &&
+      has(intentRs, "谎报"),
+    "提示词必须教会 keep_alive 及其后果（不带就活不过本次 run，报「已启动」是谎报）");
+  check("U23", "proc-lifecycle",
+    has(intentRs, "fn reap_warning") && has(intentRs, "proc_warned") &&
+      has(intentRs, "本次 run 结束时收掉了"),
+    "缺交付前对账：未声明 keep_alive 的托管进程会在 run 结束被收掉，必须先把 final 打回一次并说清后果");
+  check("U23", "proc-lifecycle",
+    has(intentRs, "在用户看到时已经是空的") && has(intentRs, "服务】面板"),
+    "start 告示没把后果说透：未声明时要讲清「run 一结束就收掉、报已启动是空的」，声明了要讲面板可停");
+
   check("U23", "proc-lifecycle",
     has(configRs, "pub struct ProcConfig") &&
       has(configRs, "pub proc: ProcConfig") &&

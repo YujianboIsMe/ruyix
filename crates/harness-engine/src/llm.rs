@@ -92,9 +92,60 @@ struct MsgBody {
     content: String,
 }
 
-/// 从模型回复里把一个 JSON 对象抠出来。
-/// 处理三种常见脏输出：整体就是 JSON / ```json 围栏 / 前后带解释文字。
+/// 从模型回复里把一个 JSON 对象抠出来，**并修掉字符串里的裸控制字符**。
+///
+/// 两件事分开：抠（`extract_json_object_inner`）+ 修（`escape_raw_controls`）。
+/// 为什么必须修：模型被要求在 `{"final":"…Markdown…"}` 里塞多行说明，而它经常直接写真换行、
+/// 而不是转义写法（一个反斜杠加 n）—— 于是 serde_json 报
+/// `control character found while parsing a string`，**整轮输出作废**
+/// （实测 run `agent-20260921-0950`：第 13 轮的 final 就死在这儿，白烧一轮，模型只能重发一遍）。
+/// 这不是把解析放松成猜：合法 JSON 的字符串里不可能出现裸控制字符，所以这个转换只可能把
+/// 「不合法」修成「模型想说的」，动不了任何已经合法的输入。
 pub fn extract_json_object(raw: &str) -> String {
+    escape_raw_controls(&extract_json_object_inner(raw))
+}
+
+/// 把**字符串字面量内部**的裸控制字符转义掉（换行 / 回车 / 制表符，其余 < 0x20 走 `u00XX` 形式）。
+/// 字符串外一个字符都不动 —— 那里的空白本来就是 JSON 的合法分隔符。
+pub fn escape_raw_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut in_str = false;
+    let mut esc = false;
+    for c in s.chars() {
+        if !in_str {
+            if c == '"' {
+                in_str = true;
+            }
+            out.push(c);
+            continue;
+        }
+        if esc {
+            esc = false;
+            out.push(c);
+            continue;
+        }
+        match c {
+            '\\' => {
+                esc = true;
+                out.push(c);
+            }
+            '"' => {
+                in_str = false;
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// 从模型回复里把一个 JSON 对象抠出来（不做控制字符修复，见 [`extract_json_object`]）。
+/// 处理三种常见脏输出：整体就是 JSON / 围栏 / 前后带解释文字。
+fn extract_json_object_inner(raw: &str) -> String {
     let mut s = raw.trim();
 
     // 去掉 markdown 代码围栏
@@ -431,5 +482,36 @@ mod tests {
         });
         assert_eq!(a.total_tokens, 18);
         assert_eq!(a.completion_tokens, 7);
+    }
+
+    /// 模型把 Markdown 的多行说明直接塞进 JSON 字符串（写真换行，而不是转义写法）时，
+    /// 抠出来的必须是**能解析**的 JSON，而不是把整轮输出作废 ——
+    /// 实测 run agent-20260921-0950 第 13 轮就死在这儿。
+    #[test]
+    fn raw_newlines_inside_a_model_string_are_repaired() {
+        let raw = "prefix {\"final\":\"## 结论\n\n服务已启动\n- 端口 8087\"} suffix";
+        let json = extract_json_object(raw);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("修好之后应当可解析");
+        let f = v["final"].as_str().expect("final 应当是字符串");
+        assert!(f.contains("服务已启动"), "{f:?}");
+        assert_eq!(f.matches('\n').count(), 3, "换行要原样保留：{f:?}");
+    }
+
+    /// 修复器只动字符串内部的裸控制字符：合法的 JSON 一个字都不改，字符串外的空白也不许动。
+    #[test]
+    fn control_repair_leaves_valid_json_alone() {
+        // 合法 JSON：字符串外是真空白，字符串里是「反斜杠+n」这种**转义写法**
+        let good = "{\n  \"a\": \"b\\n\\n\"\n}";
+        assert_eq!(
+            escape_raw_controls(good),
+            good,
+            "合法 JSON 一个字都不该被改"
+        );
+        let spaced = "{  \"a\": 1 }";
+        assert_eq!(
+            escape_raw_controls(spaced),
+            spaced,
+            "字符串外的空白是分隔符，不许动"
+        );
     }
 }
