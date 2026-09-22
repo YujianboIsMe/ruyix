@@ -58,6 +58,7 @@ async function initApp() {
   setupCapabilityMenu();
   setupOutlineTabs();
   setupTextareaSync();
+  setupEditorVirtualScroll();
   setupTerminalList();
   setupKeyboardShortcuts();
   setupHelpMenu();
@@ -665,6 +666,11 @@ function showEditor() {
   if (editorBody) editorBody.style.display = "";
   document.getElementById("editor-empty").style.display = "none";
   document.getElementById("editor-view").style.display = "";
+  // 编辑区刚重新可见：视口高度可能和上次不同，强制重画一次窗口
+  if (editorModel) {
+    editorModel.paintedStart = -1;
+    paintEditorWindow();
+  }
 }
 
 function hideEditor() {
@@ -679,7 +685,246 @@ function hideEditor() {
   if (procLogView) procLogView.style.display = "none";
   document.getElementById("editor-gutter").innerHTML = "";
   document.getElementById("editor-code-backdrop").innerHTML = "";
-  document.getElementById("editor-textarea").value = "";
+  const ta = document.getElementById("editor-textarea");
+  if (ta) {
+    ta.value = "";
+    // 清掉显式高度：下一次装载会重新给。留着旧文件的高度 = 空编辑器也撑出长滚动条
+    ta.style.height = "";
+  }
+  editorModel = null;
+}
+
+// ============================================
+// 编辑器渲染：虚拟化（只画可视窗口）
+// ============================================
+// 症状：5000 行的文件一打开就卡死。
+// 原因：gutter + backdrop 按**全文件行数**建 DOM（每行 1 个 gutter-line + 1 个
+//   code-line + 若干 span，5000 行 ≈ 1.9 万节点），重建一次的布局就要 200ms 以上，
+//   而这条路径挂在自动保存上 —— 打字停顿 1 秒就跑一遍（见 setupTextareaSync）。
+// 做法：只渲染「可视窗口 + 上下各 EDITOR_OVERSCAN 行缓冲」，窗口外用两条零内容
+//   spacer 撑出与原来**逐像素相同**的滚动高度。
+//
+// 三条实测得来的硬约束（动之前先看 doc/ui.md 的「编辑器渲染」一节）：
+//   1) backdrop 必须绝对定位 —— 理由写在 styles.css 那段注释里（不做 = 每次重绘 110ms）；
+//   2) textarea 必须由我们给显式高度 —— 全文高度原本是 backdrop 撑出来的，
+//      backdrop 移出流后没人撑它，不设就只有 2 行高，点击可视区下半部分点不到它；
+//   3) 水平滚动宽度完全由 backdrop 决定，窗口里必须留一条「最宽行」的零高占位。
+
+/** 行高，与 .code-line / .editor-textarea 的 line-height 同步（门禁 U31 钉住） */
+const EDITOR_LINE_H = 20;
+/** .editor-textarea 上下 padding 之和（门禁 U31 钉住） */
+const EDITOR_VPAD = 16;
+/** 窗口上下各多渲染的行数：快速滚动时不露空白 */
+const EDITOR_OVERSCAN = 24;
+/** 量不到视口高度时（测试桩 / 元素处于 display:none）按这个算 */
+const EDITOR_FALLBACK_VH = 600;
+
+/** 当前编辑器内容的渲染模型；null = 无内容 */
+let editorModel = null;
+/** 滚动重绘的 rAF 句柄（0 = 没排队） */
+let editorScrollRaf = 0;
+
+/** 从真实元素上量行高与上下 padding；量不到就退回与 CSS 一致的常量 */
+function editorMetrics() {
+  let lineH = EDITOR_LINE_H;
+  let vpad = EDITOR_VPAD;
+  try {
+    const ta = document.getElementById("editor-textarea");
+    if (ta && typeof getComputedStyle === "function") {
+      const cs = getComputedStyle(ta);
+      const lh = parseFloat(cs.lineHeight);
+      if (isFinite(lh) && lh > 0) lineH = lh;
+      const pt = parseFloat(cs.paddingTop);
+      const pb = parseFloat(cs.paddingBottom);
+      if (isFinite(pt) && isFinite(pb)) vpad = pt + pb;
+    }
+  } catch {
+    /* 量不到就用常量 */
+  }
+  return { lineH: lineH, vpad: vpad };
+}
+
+/** 一行占多少「列」：ASCII 1 列，全角/emoji 2 列，tab 走到下一个 tab 位（4） */
+function editorVisualCols(s) {
+  let col = 0;
+  for (const ch of s) {
+    if (ch === "\t") {
+      col = Math.floor(col / 4) * 4 + 4;
+      continue;
+    }
+    const c = ch.codePointAt(0);
+    const wide =
+      (c >= 0x1100 && c <= 0x115f) ||
+      (c >= 0x2e80 && c <= 0xa4cf) ||
+      (c >= 0xac00 && c <= 0xd7a3) ||
+      (c >= 0xf900 && c <= 0xfaff) ||
+      (c >= 0xfe30 && c <= 0xfe6f) ||
+      (c >= 0xff00 && c <= 0xff60) ||
+      (c >= 0xffe0 && c <= 0xffe6) ||
+      (c >= 0x1f300 && c <= 0x1faff);
+    col += wide ? 2 : 1;
+  }
+  return col;
+}
+
+/**
+ * 全局最宽的那一行文本。
+ * 编辑器字体链（Cascadia / Fira / JetBrains / Consolas / monospace）全是等宽字体，
+ * 所以「列数最大」= 像素最宽，不需要真去量像素。
+ */
+function editorWidestText(texts) {
+  let best = "";
+  let bestCols = -1;
+  for (const t of texts) {
+    const c = editorVisualCols(t);
+    if (c > bestCols) {
+      bestCols = c;
+      best = t;
+    }
+  }
+  return best;
+}
+
+/** 窗口一次渲染多少行（可视行数 + 上下 overscan） */
+function editorWindowRows(lineH) {
+  const view = document.getElementById("editor-view");
+  const vh = (view && Math.round(view.clientHeight || 0)) || EDITOR_FALLBACK_VH;
+  return Math.max(1, Math.ceil(vh / lineH) + 1 + EDITOR_OVERSCAN * 2);
+}
+
+/** 一行 → .code-line 的内层 HTML（有高亮片段就按片段切） */
+function editorLineHtml(m, i) {
+  const text = m.texts[i];
+  if (!text) return " ";
+  const spans = m.spans && m.spans[i];
+  if (!spans || !spans.length) return escapeHtml(text);
+  let html = "";
+  let pos = 0;
+  for (const span of spans) {
+    if (span.start_col > pos) html += escapeHtml(text.slice(pos, span.start_col));
+    html +=
+      '<span class="tok-' + span.tag + '">' +
+      escapeHtml(text.slice(span.start_col, span.end_col)) +
+      "</span>";
+    pos = span.end_col;
+  }
+  if (pos < text.length) html += escapeHtml(text.slice(pos));
+  return html || " ";
+}
+
+/** 只画可视窗口。窗口没变就直接返回 —— 滚动事件连发几十次，重画是白做 */
+function paintEditorWindow() {
+  const m = editorModel;
+  if (!m) return;
+  const view = document.getElementById("editor-view");
+  const gutter = document.getElementById("editor-gutter");
+  const backdrop = document.getElementById("editor-code-backdrop");
+  if (!view || !gutter || !backdrop) return;
+
+  const total = m.total;
+  if (total <= 0) {
+    gutter.innerHTML = "";
+    backdrop.innerHTML = "";
+    return;
+  }
+
+  const lineH = m.lineH;
+  const win = editorWindowRows(lineH);
+  let start = Math.max(0, Math.floor((view.scrollTop || 0) / lineH) - EDITOR_OVERSCAN);
+  if (start + win > total) start = Math.max(0, total - win);
+  const end = Math.min(total, start + win);
+  if (start === m.paintedStart && end === m.paintedEnd) return;
+  m.paintedStart = start;
+  m.paintedEnd = end;
+
+  // 两条 spacer 的高度 + 窗口行高 = 总行数 × 行高：滚动高度与虚拟化前逐像素一致
+  const topPad = start * lineH;
+  const botPad = Math.max(0, (total - end) * lineH);
+  const pad = (h) => '<div class="editor-virt-pad" style="height:' + h + 'px"></div>';
+
+  let gutterHtml = pad(topPad);
+  let codeHtml =
+    pad(topPad) +
+    (m.keeper ? '<div class="code-line editor-virt-keeper">' + escapeHtml(m.keeper) + "</div>" : "");
+  const cls = m.lineClass ? " " + m.lineClass : "";
+  for (let i = start; i < end; i++) {
+    gutterHtml += '<div class="gutter-line">' + (i + 1) + "</div>";
+    codeHtml += '<div class="code-line' + cls + '">' + editorLineHtml(m, i) + "</div>";
+  }
+  gutterHtml += pad(botPad);
+  codeHtml += pad(botPad);
+
+  gutter.innerHTML = gutterHtml;
+  backdrop.innerHTML = codeHtml;
+}
+
+/**
+ * 装载一份内容并首绘。三个渲染入口（高亮 / 纯文本 / 终端输出）**都走这里** ——
+ * 「textarea 显式高度」和「窗口渲染」必须成套出现，只做一半编辑器就不可用。
+ *
+ * texts      每行文本
+ * spans      每行的高亮片段（与 texts 等长）；null = 纯文本
+ * text       写进 textarea 的完整文本
+ * lineClass  附加到 .code-line 的类（终端输出用 terminal-line）
+ * readOnly   textarea 是否只读
+ */
+function setEditorContent(opts) {
+  const texts = opts.texts || [];
+  const { lineH, vpad } = editorMetrics();
+  const rows = editorWindowRows(lineH);
+  editorModel = {
+    texts: texts,
+    spans: opts.spans || null,
+    lineClass: opts.lineClass || "",
+    total: texts.length,
+    lineH: lineH,
+    // 只有真会开虚拟化（行数超出窗口）才需要宽度占位，小文件白算一遍没必要
+    keeper: texts.length > rows ? editorWidestText(texts) : "",
+    paintedStart: -1,
+    paintedEnd: -1,
+  };
+
+  const ta = document.getElementById("editor-textarea");
+  if (ta) {
+    ta.value = opts.text;
+    ta.readOnly = !!opts.readOnly;
+    // 显式高度 = 全文高度：textarea 是唯一留在流内的元素，滚动高度由它给出
+    ta.style.height = texts.length * lineH + vpad + "px";
+  }
+  paintEditorWindow();
+}
+
+/** 滚动时按 rAF 节流重绘（滚动会连发事件，直接重画等于白做几十次） */
+function setupEditorVirtualScroll() {
+  const view = document.getElementById("editor-view");
+  if (!view) return;
+  view.addEventListener(
+    "scroll",
+    () => {
+      if (!editorModel || editorScrollRaf) return;
+      const raf =
+        typeof requestAnimationFrame === "function"
+          ? requestAnimationFrame
+          : (fn) => setTimeout(fn, 16);
+      editorScrollRaf = raf(() => {
+        editorScrollRaf = 0;
+        paintEditorWindow();
+      });
+    },
+    { passive: true }
+  );
+  // 视口尺寸变了（窗口缩放 / 面板收放）窗口行数要跟着变，否则会留一条空白带
+  if (typeof ResizeObserver === "function") {
+    try {
+      new ResizeObserver(() => {
+        if (!editorModel) return;
+        editorModel.paintedStart = -1;
+        paintEditorWindow();
+      }).observe(view);
+    } catch {
+      /* 观察不了就算了：下一次滚动仍会重画 */
+    }
+  }
 }
 
 async function highlightAndRender(tab, language) {
@@ -711,63 +956,19 @@ function renderHighlightedCode(tab) {
     return;
   }
 
-  const gutter = document.getElementById("editor-gutter");
-  const backdrop = document.getElementById("editor-code-backdrop");
-  const textarea = document.getElementById("editor-textarea");
-
-  let gutterHtml = "";
-  let codeHtml = "";
-  let rawLines = [];
-
-  for (const line of lines) {
-    const n = line.line_number;
-    gutterHtml += `<div class="gutter-line">${n}</div>`;
-
-    let lineHtml = "";
-    let pos = 0;
-    for (const span of line.spans) {
-      if (span.start_col > pos) {
-        lineHtml += escapeHtml(line.text.slice(pos, span.start_col));
-      }
-      lineHtml +=
-        `<span class="tok-${span.tag}">` +
-        escapeHtml(line.text.slice(span.start_col, span.end_col)) +
-        "</span>";
-      pos = span.end_col;
-    }
-    if (pos < line.text.length) {
-      lineHtml += escapeHtml(line.text.slice(pos));
-    }
-
-    codeHtml += `<div class="code-line">${lineHtml || " "}</div>`;
-    rawLines.push(line.text);
+  // 只在这里摊平成两个等长数组，DOM 交给 paintEditorWindow 按窗口建
+  const texts = new Array(lines.length);
+  const spans = new Array(lines.length);
+  for (let i = 0; i < lines.length; i++) {
+    texts[i] = lines[i].text;
+    spans[i] = lines[i].spans;
   }
-
-  gutter.innerHTML = gutterHtml;
-  backdrop.innerHTML = codeHtml;
-  textarea.value = rawLines.join("\n");
-  textarea.readOnly = false;
+  setEditorContent({ texts: texts, spans: spans, text: texts.join("\n"), readOnly: false });
 }
 
 function renderPlainCode(tab) {
-  const lines = tab.content.split("\n");
-
-  const gutter = document.getElementById("editor-gutter");
-  const backdrop = document.getElementById("editor-code-backdrop");
-  const textarea = document.getElementById("editor-textarea");
-
-  let gutterHtml = "";
-  let codeHtml = "";
-
-  for (let i = 0; i < lines.length; i++) {
-    gutterHtml += `<div class="gutter-line">${i + 1}</div>`;
-    codeHtml += `<div class="code-line">${escapeHtml(lines[i]) || " "}</div>`;
-  }
-
-  gutter.innerHTML = gutterHtml;
-  backdrop.innerHTML = codeHtml;
-  textarea.value = tab.content;
-  textarea.readOnly = false;
+  const content = tab.content == null ? "" : String(tab.content);
+  setEditorContent({ texts: content.split("\n"), spans: null, text: content, readOnly: false });
 }
 
 function escapeHtml(s) {
@@ -2666,22 +2867,14 @@ async function runTargetCmd(name, cmd, bind) {
  * 渲染终端输出到标签页
  */
 function renderTerminalOutput(tab, text) {
-  const backdrop = document.getElementById("editor-code-backdrop");
-  const textarea = document.getElementById("editor-textarea");
-  const gutter = document.getElementById("editor-gutter");
-
-  const lines = text.split("\n");
-  let gutterHtml = "";
-  let codeHtml = "";
-  for (let i = 0; i < lines.length; i++) {
-    gutterHtml += `<div class="gutter-line">${i + 1}</div>`;
-    codeHtml += `<div class="code-line terminal-line">${escapeHtml(lines[i]) || " "}</div>`;
-  }
-
-  gutter.innerHTML = gutterHtml;
-  backdrop.innerHTML = codeHtml;
-  textarea.value = text;
-  textarea.readOnly = true;
+  // 与代码渲染同一个入口：长输出（几千行）同样只画窗口
+  setEditorContent({
+    texts: text.split("\n"),
+    spans: null,
+    text: text,
+    lineClass: "terminal-line",
+    readOnly: true,
+  });
   tab.content = text; // 同步更新 tab 内容，确保切换标签页后输出不丢失
 }
 

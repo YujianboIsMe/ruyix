@@ -91,6 +91,16 @@
  *                     / logo.svg 与 logo-mark.svg 的轮廓逐字节相同（只改一份就是漂移）
  *                     / tauri.conf.json 的 bundle.icon 非空且文件真在（**缺它则换了图也不生效**，
  *                     窗口图标与 exe 资源都取自它）/ icon.ico 多尺寸
+ *   U31 editor-virtual-render 编辑器只画可视窗口（v0.11）：5000 行的文件一打开就卡死 ——
+ *                     gutter/backdrop 按**全文件行数**建 DOM（每行 ≈ 3.8 个节点，5000 行 1.9 万），
+ *                     重建一次 200ms+，而它挂在自动保存上（打字停顿 1 秒跑一遍）。改法是只渲染
+ *                     「可视窗口 + 上下各 24 行」，窗口外用两条零内容 spacer 撑出与原来
+ *                     **逐像素相同**的滚动高度。三条不变量：占位高度之和 == 总行数×行高 /
+ *                     textarea 必须拿到显式全文高度（backdrop 移出流后没人撑它）/ 水平滚动宽度
+ *                     不许缩（textarea 对 scrollWidth 贡献恒为 0，靠一条零高「最宽行」占位撑住）。
+ *                     另钉两条**静默退化**的样式契约：backdrop 必须绝对定位（回到 grid 叠加会让
+ *                     layout 每次重问 textarea 的内在高度 → 25000 行重绘 1.4ms 变 110ms）、
+ *                     textarea 必须 wrap="off"（软换行会让光标与高亮从折行处起错开）
  */
 
 "use strict";
@@ -966,6 +976,38 @@ function runStaticChecks() {
   check("U18", "reflect-clean-context",
     has(reflectRs, "select_rubric") && has(reflectRs, "degraded(") && has(intentRs, "suspect()"),
     "反思缺判据选择（有无改动 → rubric）或降级路径（复核失败不许把 run 判死）");
+
+  // U31 editor-virtual-render（样式侧）：这两处**静默退化**——改了不报错，只会悄悄变慢/错位。
+  check("U31", "editor-virtual-render",
+    /\.editor-code-backdrop\s*\{[^}]*position:\s*absolute/.test(stylesCss),
+    "backdrop 不再是绝对定位：它和 textarea 同处一个 grid 单元时，backdrop 一变 layout 就要重新" +
+      "问 textarea 的「内在高度」→ 把全文每行重排一遍（实测 25000 行每次窗口重绘 110ms，绝对定位后 1.4ms）");
+  check("U31", "editor-virtual-render",
+    /\.editor-code-container\s*\{[^}]*position:\s*relative/.test(stylesCss) &&
+      !/\.editor-code-container\s*\{[^}]*display:\s*grid/.test(stylesCss),
+    "代码区容器丢了 position:relative 或退回了 grid：backdrop 的定位基准与「移出尺寸计算」都靠这两条");
+  check("U31", "editor-virtual-render",
+    has(html, 'wrap="off"'),
+    'textarea 缺 wrap="off"：它默认软换行，长行会在内部折成两行而 backdrop 按一行画，光标与高亮从折行处起错开');
+  check("U31", "editor-virtual-render",
+    has(mainJs, "EDITOR_LINE_H = 20") && has(mainJs, "EDITOR_VPAD = 16") &&
+      /\.code-line\s*\{[^}]*height:\s*20px/.test(stylesCss) &&
+      /\.editor-textarea\s*\{[^}]*padding:\s*8px 16px/.test(stylesCss),
+    "虚拟化的行高/内边距常量与 CSS 脱节：占位高度会整体偏移（滚动条长度与行号位置全错）");
+  // 三个渲染入口必须**都**走 setEditorContent：漏一个就会出现「textarea 有显式高度
+  // 但 overlay 没虚拟化」或反过来的半吊子状态（编辑器塌成 2 行 / 回车滚不动）。
+  const editorBodyOf = (name) => {
+    const i = mainJs.indexOf("function " + name + "(");
+    if (i < 0) return "";
+    const j = mainJs.indexOf("\nfunction ", i + 1);
+    return mainJs.slice(i, j < 0 ? mainJs.length : j);
+  };
+  const entryPoints = ["renderHighlightedCode", "renderPlainCode", "renderTerminalOutput"];
+  check("U31", "editor-virtual-render",
+    entryPoints.every((n) => editorBodyOf(n).includes("setEditorContent(")),
+    "渲染入口没走 setEditorContent：" +
+      entryPoints.filter((n) => !editorBodyOf(n).includes("setEditorContent(")).join(" / ") +
+      "（三者必须都走，它俩才是「显式高度 + 窗口渲染」成套出现的地方）");
 }
 
 // ============================================
@@ -1660,6 +1702,139 @@ async function runServiceChecks() {
 }
 
 /**
+ * U31 editor-virtual-render：编辑器虚拟化 —— 真加载 ui/main.js，喂一个 5000 行的 tab，
+ * 断言「只画了可视窗口」并且「几何不变量没破」。
+ *
+ * 为什么断言这三样：
+ *   · 窗口行数 —— 这是这次改动**唯一的目的**（原来 N 行就建 N 行 DOM，5000 行 1.9 万节点，
+ *     重建一次 200ms+，而它挂在自动保存上，打字停顿 1 秒跑一遍）；
+ *   · 占位高度守恒 —— topPad + 窗口行 + botPad 必须恒等于「总行数 × 行高」。破了就是
+ *     滚动条长度/位置漂移，用户一眼能看出来；
+ *   · textarea 拿到显式高度 —— backdrop 移出流之后没人给它撑高（原来靠 grid 行高被拉伸），
+ *     不设就只剩 2 行高，点击可视区下半部分点不到它。
+ * 另外两条样式契约（backdrop 绝对定位、textarea 不软换行）在 runStaticChecks 里钉住，
+ * 因为它们**退化时不会报错**，只会悄悄把重绘成本抬回 110ms / 让光标与高亮错位。
+ */
+async function runEditorChecks() {
+  const N = 5000; // 卡死就是从这量级开始的
+  const big = [];
+  for (let i = 0; i < N; i++) big.push("    let value_" + i + " = compute(" + i + ") * 2;");
+  const bigText = big.join("\n");
+
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+
+  const sandbox = {
+    window: {},
+    document: {
+      getElementById: el,
+      createElement: (tag) => makeEl("<" + tag + ">"),
+      querySelector: () => null,
+      addEventListener() {},
+      // main.js 尾部按 readyState 决定「立刻 initApp」还是「等 DOMContentLoaded」。
+      // 报 loading 就会只挂监听不执行 —— 我们只要那批函数声明，不要跑整个应用初始化。
+      readyState: "loading",
+    },
+    setTimeout,
+    clearTimeout,
+    // 故意不给 getComputedStyle / requestAnimationFrame / ResizeObserver：
+    // main.js 必须能在"量不到任何尺寸"的环境里退化运行（真机上窗口被隐藏时也是这个分支）
+    I18N: { t: (k) => k, init: async () => {}, getLang: () => "zh-CN" },
+  };
+  const saved = ["window", "document", "setTimeout", "clearTimeout", "I18N", "state", "getComputedStyle"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  delete globalThis.getComputedStyle;
+  try {
+    // 往源码尾部追加导出：main.js 的函数在 new Function 作用域里，外面拿不到
+    const src =
+      read("ui/main.js") +
+      "\nwindow.__ed = { renderPlainCode: renderPlainCode, renderHighlightedCode: renderHighlightedCode," +
+      " setupEditorVirtualScroll: setupEditorVirtualScroll, model: () => editorModel };\n";
+    // eslint-disable-next-line no-new-func
+    new Function(src)();
+
+    const api = sandbox.window.__ed;
+    check("U31", "editor-virtual-render",
+      !!api && typeof api.renderPlainCode === "function" && typeof api.setupEditorVirtualScroll === "function",
+      "main.js 没暴露编辑器渲染入口（renderPlainCode / setupEditorVirtualScroll 改名了？）");
+    if (!api) return;
+
+    const view = el("editor-view");
+    const gutter = el("editor-gutter");
+    const backdrop = el("editor-code-backdrop");
+    const ta = el("editor-textarea");
+    const rowsIn = (html) => (html.match(/class="gutter-line">/g) || []).length;
+    const padsIn = (html) =>
+      [...html.matchAll(/class="editor-virt-pad" style="height:(\d+)px"/g)].map((m) => +m[1]);
+
+    // ---- 大文件：只画窗口 ----
+    api.renderPlainCode({ id: "t1", name: "big.rs", content: bigText });
+    const rows = rowsIn(gutter.innerHTML);
+    const pad = padsIn(backdrop.innerHTML);
+    check("U31", "editor-virtual-render",
+      rows > 0 && rows < 200,
+      `5000 行的文件应该只渲染几十行，实际 ${rows} 行（虚拟化没生效）`);
+    check("U31", "editor-virtual-render",
+      pad.length === 2 && pad[0] + rows * 20 + pad[1] === N * 20,
+      `占位高度不守恒（滚动高度会漂）: top=${pad[0] ?? "无"} 窗口=${rows}行 bot=${pad[1] ?? "无"}，` +
+        `应等于 ${N * 20}`);
+    check("U31", "editor-virtual-render",
+      ta.style.height === N * 20 + 16 + "px",
+      `textarea 没拿到显式全文高度 —— backdrop 移出流后没人撑高，编辑器会塌成 2 行、下半区点不动: ${ta.style.height}`);
+    check("U31", "editor-virtual-render",
+      ta.value === bigText,
+      "textarea 里必须仍然是**全文**（它才是编辑的真身，只有 backdrop/gutter 是虚拟的）");
+    check("U31", "editor-virtual-render",
+      backdrop.innerHTML.includes("editor-virt-keeper"),
+      "宽度占位行没进窗口：宽行不在窗口里时水平滚动条会缩掉、scrollLeft 被钳住（实测缩 55~1370px）");
+
+    // ---- 滚动：窗口跟着走，且几何不变量仍成立 ----
+    api.setupEditorVirtualScroll();
+    const scrolls = view.listeners.scroll || [];
+    view.scrollTop = Math.floor(N / 2) * 20;
+    if (scrolls.length) scrolls[scrolls.length - 1]();
+    await new Promise((r) => setTimeout(r, 40)); // rAF 在 Node 里退化成 setTimeout
+    const rows2 = rowsIn(gutter.innerHTML);
+    const pad2 = padsIn(backdrop.innerHTML);
+    const firstNo = +((gutter.innerHTML.match(/class="gutter-line">(\d+)</) || [])[1] || 0);
+    check("U31", "editor-virtual-render",
+      scrolls.length > 0,
+      "没给 #editor-view 挂 scroll 监听：滚下去窗口不会跟着换，下面全是空白");
+    check("U31", "editor-virtual-render",
+      firstNo > 1 && rows2 === rows && pad2.length === 2 && pad2[0] + rows2 * 20 + pad2[1] === N * 20,
+      `滚动后窗口没换或占位不守恒: 首行号=${firstNo} 行数=${rows2} top=${pad2[0]} bot=${pad2[1]}`);
+
+    // ---- 小文件：不该白算宽度占位 ----
+    api.renderPlainCode({ id: "t2", name: "small.rs", content: "a\nbb\nccc" });
+    check("U31", "editor-virtual-render",
+      !backdrop.innerHTML.includes("editor-virt-keeper") && rowsIn(gutter.innerHTML) === 3 &&
+        ta.style.height === 3 * 20 + 16 + "px",
+      "3 行的小文件不该留宽度占位（会白算一遍全文列宽），高度仍要对");
+
+    // ---- 高亮路径：片段要切成 tok-* ----
+    api.renderHighlightedCode({
+      id: "t3",
+      name: "x.rs",
+      _highlighted: [
+        { line_number: 1, text: "let a = 1;", spans: [{ start_col: 0, end_col: 3, tag: "keyword" }] },
+      ],
+    });
+    check("U31", "editor-virtual-render",
+      backdrop.innerHTML.includes('class="tok-keyword">let</span>'),
+      "高亮片段没切成 tok-* span（渲染入口改道时把高亮丢了）");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
+/**
  * U30 proc-log-replay：输出面板回放 —— 真加载 ui/service.js + ui/proc-log.js，配上假 xterm
  * 与假后端，走一遍"服务表点输出 → 增量跟随 → 进程退出收尾"。
  *
@@ -2016,6 +2191,7 @@ async function main() {
     ["U6", "session-replay", runSessionChecks],
     ["U9", "config-replay", runConfigChecks],
     ["U22", "help-replay", runHelpChecks],
+    ["U31", "editor-virtual-render", runEditorChecks],
     ["U23", "service-replay", runServiceChecks],
     ["U30", "proc-log-replay", runProcLogChecks],
     ["U24", "external-link-replay", runExternalLinkChecks],

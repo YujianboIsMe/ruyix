@@ -278,7 +278,10 @@
               <div id="editor-gutter" class="editor-gutter"></div>
               <div id="editor-code-container" class="editor-code-container">
                 <div id="editor-code-backdrop" class="editor-code-backdrop"></div>
-                <textarea id="editor-textarea" class="editor-textarea" spellcheck="false"></textarea>
+                <!-- wrap="off" 必须有：textarea 默认软换行，长行会在它内部折成两行，
+                     而 backdrop 按「一行」画 —— 光标就会和高亮文字错开。
+                     关掉之后 textarea 的可视行数恒等于逻辑行数。 -->
+                <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" wrap="off"></textarea>
               </div>
             </div>
             <div id="service-view" class="service-view" style="display:none">

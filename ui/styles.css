@@ -956,18 +956,28 @@ html, body {
   opacity: 0.6;
 }
 
-/* --- 代码区：背景高亮 + 透明 textarea 叠加（CSS Grid） --- */
+/* --- 代码区：背景高亮 + 透明 textarea 叠加 ---
+ *
+ * ⚠️ 这里刻意**不用** CSS Grid 叠加（历史写法是 grid-area 1/1 让两者同格），改成
+ * 「backdrop 绝对定位 + textarea 留在流内撑高」。原因是实测出来的：
+ * 两者同处一个 grid 单元时，backdrop 的内容一变，layout 就必须重新去问 textarea 的
+ * **内在高度**，于是它把全文每一行重新排版一遍 —— 25000 行时每次窗口重绘 110ms，
+ * 而 backdrop 移出流后只要 1.4ms（16~90 倍）。改回 grid 会让编辑器重新卡死。
+ *
+ * 代价：全文高度不能靠 backdrop 撑了，必须由 JS 给 textarea 显式高度
+ * （见 main.js 的 setEditorContent）。门禁 U31 钉住这两半必须成套出现。
+ */
 
 .editor-code-container {
   flex: 1;
-  display: grid;
+  display: block;
   min-height: 0;
+  /* backdrop 的定位基准 */
+  position: relative;
 }
 
-/* Grid 叠加：backdrop 和 textarea 占据同一网格单元 */
 .editor-code-backdrop,
 .editor-textarea {
-  grid-area: 1 / 1;
   /* 水平 padding 保持一致：光标与高亮文字对齐的关键 */
   padding: 8px 16px;
   font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
@@ -979,13 +989,22 @@ html, body {
   overflow: visible;
 }
 
+/* 绝对定位：内容高度由虚拟化的 spacer 给出，不再参与 textarea 的尺寸计算 */
 .editor-code-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
   z-index: 1;
   color: var(--text-primary);
   pointer-events: none;
 }
 
+/* 在流内 + 显式高度（全文高度）= .editor-view 的滚动高度来源 */
 .editor-textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
   z-index: 2;
   border: none;
   outline: none;
@@ -1000,6 +1019,28 @@ html, body {
   line-height: 20px;
   padding: 0;
   white-space: pre;
+}
+
+/* --- 虚拟化的两支辅助元素（窗口外的行不建 DOM） ---
+   见 main.js 的 paintEditorWindow：topPad + 窗口行 + botPad，三者高度之和
+   必须恒等于「总行数 × 行高」，这样滚动高度与虚拟化之前逐像素一致。 */
+
+/* 撑高度的空 spacer：不产生任何内容与宽度 */
+.editor-virt-pad {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* 宽度占位：零高、不可见，但把「全局最宽那一行」的宽度留在窗口里。
+   textarea 对 scrollWidth 的贡献恒为 0（它内部自己换行，实测），所以水平滚动
+   宽度完全由 backdrop 决定；不留占位，滚到宽行不在窗口的位置时水平滚动条会缩掉、
+   scrollLeft 被钳住（实测 5000 行最多缩 55px）。 */
+.editor-virt-keeper {
+  height: 0;
+  line-height: 0;
+  visibility: hidden;
+  overflow: visible;
 }
 
 /* 终端行 */
