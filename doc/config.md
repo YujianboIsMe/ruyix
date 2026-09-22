@@ -125,6 +125,60 @@ ruyix.code.ai.api_url
 ruyix.code.ai.model
 ruyix.code.ai.alias 如果没有指定，则取ruyix.code.ai.model
 
+### 引擎（Agent / harness）
+
+ruyix 集成的 agent 引擎（`crates/harness-engine`）**没有自己的配置文件**，
+它的所有旋钮都走上面的四级配置系统，section 固定为 `harness`：
+
+| 作用域 | 文件 |
+|---|---|
+| global | `~/.ruyix/code/harness.toml` |
+| project | `<项目>/.ruyix/code/harness.toml` |
+| runtime | 内存（不落盘） |
+
+**键集是单源的**：哪些键、什么类型、默认值多少，**只有引擎自己知道** ——
+由 `harness-engine/src/config.rs::schema()` 从 `AppConfig::default()` 推导出来。
+宿主桥（`src-tauri/src/agent/config_bridge.rs`）和配置表单（`ui/config.js`）
+都从 `schema()` 派生，所以引擎新增一个字段 = 表单里自动多一行、桥自动能读到，
+**不存在"引擎加了键、宿主忘了同步"这种漂移**（这正是旧设计的病根）。
+
+配置键在 TOML 里写成**引号化的含点键**：
+
+```toml
+[harness]
+"kb.enabled" = "true"
+"kb.top_k" = "4"
+"verify.python_bin" = "python"
+max_context_chars = "24000"
+```
+
+> ⚠️ 含点键**必须带引号**。读键的规则是：section = 首个点号之前，key = 其余全部。
+> 写成不带引号的 `kb.top_k = "4"` 会被 TOML 解析成嵌套表 `[harness.kb]`，
+> 键名就不再是 `kb.top_k`，于是"文件里配了、界面里不生效"。
+> 门禁 `every_schema_key_is_readable_from_any_scope` 会走一遍真文件把这个钉住。
+
+值的约定（由 `apply_flat` 统一执行）：
+
+- 一律以**字符串**存；读取时按 schema 声明的类型 coerce（`bool` / `int` / `float` / `text` / `list`）。
+- 转不过去（比如 `agent.batch = "ture"`）→ **丢弃该键、保持默认**，不会让整批配置一起失效。
+- **空串 = 未设置**（与表单"清空 = 删键"一致），回落到回退链或引擎默认。
+- 枚举键（只有 `sandbox.mode`：`require` / `prefer` / `off`）只认白名单，
+  写错不静默换档 —— 否则 `yolo` 被当成未知档回落，用户会以为隔离开着。
+
+LLM 端点 / 密钥 / 模型**不在这里**，见上一节 `ruyix.code.ai.*`；
+引擎的 `llm.base_url` / `llm.api_key` / `llm.model` 三键在表单里被**隐藏**，
+避免同一件事摆两处。
+
+环境变量覆盖（`DEEPSEEK_API_KEY` 等）在配置之后生效，脚本 / CI 与 GUI 读同一套来源
+（`config::apply_env_overrides`）。
+
+**旧入口已废弃**：引擎原先自己读 `%APPDATA%\darkhorse-harness\config.toml`，
+那是第二个真相源 —— IDE 里改的是 ruyix 配置、引擎读的是另一个文件，
+同一个键要配两次；日志脱敏还会**从错的文件取 api_key**（密钥根本没脱敏，已修）。
+该文件已归档为 `config.toml.migrated-<日期>`，引擎**不再读它**；
+其中与引擎默认值不同的项已迁进 `~/.ruyix/code/harness.toml`。
+（知识库索引数据仍在 `%APPDATA%\darkhorse-harness\kb\`，位置不变。）
+
 ### RAG（智搜）
 RAG 配置不走四层配置系统，独立存放于两个 rag.toml：
 
@@ -199,5 +253,7 @@ files_count = 312
 `config_form_load(scope, project_root?)` → `ScopeEntriesDump`
 `config_form_save(scope, entries, project_root?)` → `ScopeSaveReport`
 `config_form_apply(scope, entries, project_root?)` → `ScopeSaveReport`
+`config_schema()` → `Vec<KeySpec>`（引擎的键 schema；表单据此渲染 `harness.*` 分组下的行）
 
-实现见 `src-tauri/src/config.rs`，前端见 `ui/config.js`。
+实现见 `src-tauri/src/config.rs`（通用读写）与 `src-tauri/src/agent/config_bridge.rs`（引擎桥），
+前端见 `ui/config.js`。
