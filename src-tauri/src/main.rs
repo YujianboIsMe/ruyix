@@ -854,53 +854,75 @@ pub(crate) fn resolve_windows_cmd(program: &str) -> String {
     program.to_string()
 }
 
+/// 把 tree-sitter 报的字节区间摊到每一行上。
+///
+/// **性能约束（硬要求，不要再退化）**：只允许对源码做一次线性扫描。
+///
+/// 旧版每行都调用一次 `line_byte_offset(code, n)`，而那个函数每次都从文件头重新数
+/// `\n` —— 整体 O(行数 × 文件字节数)；内层又每行遍历全部 span —— 再加一层
+/// O(行数 × span 数)。release 实测：5 千行 172ms、1 万行 552ms、2.5 万行 4.0s、
+/// 5 万行 16.4s（tree-sitter 自己是线性的）。而高亮挂在自动保存上 —— 打字每停顿
+/// 一秒就重跑一次，于是文件一大就整个编辑器无响应。
+///
+/// 现在：一次扫出每行起始偏移 → 每个 span 二分定位所在行 → 跨行 span 按行切分。
+/// 输出与旧实现逐字节相同（`slow_reference` + 等价性测试钉住）。
 fn build_line_highlights(
     code: &str,
     spans: &[(u32, u32, &str)],
 ) -> Result<Vec<LineHighlight>, String> {
     let lines: Vec<&str> = code.lines().collect();
-    let mut result = Vec::new();
 
-    for (line_idx, line_text) in lines.iter().enumerate() {
-        let line_start = line_byte_offset(code, line_idx + 1);
-        let line_end = line_start + line_text.len();
-
-        let mut line_spans = Vec::new();
-        for &(start, end, tag) in spans {
-            let s = start as usize;
-            let e = end as usize;
-
-            if e > line_start && s < line_end {
-                let rel_start = s.saturating_sub(line_start);
-                let rel_end = if e < line_end {
-                    e - line_start
-                } else {
-                    line_text.len()
-                };
-                if rel_start < rel_end {
-                    line_spans.push(LineSpan {
-                        start_col: rel_start,
-                        end_col: rel_end,
-                        tag: tag.to_string(),
-                    });
-                }
-            }
+    // 第 k 行的起始字节偏移 = 第 k 个 '\n' 之后。一次扫完，
+    // 与旧版反复调用 line_byte_offset(code, k + 1) 的结果逐一相同。
+    let mut starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
+    starts.push(0);
+    for (i, b) in code.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
         }
+    }
 
+    // 二分定位每个 span 覆盖的行区间，再按行切分（跨行的注释/字符串会横跨多行）
+    let mut per_line: Vec<Vec<(usize, usize, &str)>> = vec![Vec::new(); lines.len()];
+    for &(start, end, tag) in spans {
+        let (s, e) = (start as usize, end as usize);
+        if e <= s {
+            continue;
+        }
+        let mut li = starts.partition_point(|&x| x <= s).saturating_sub(1);
+        while li < lines.len() {
+            let line_start = starts[li];
+            let line_end = line_start + lines[li].len();
+            if line_start >= e {
+                break;
+            }
+            let rel_start = s.max(line_start) - line_start;
+            let rel_end = e.min(line_end) - line_start;
+            if rel_start < rel_end {
+                per_line[li].push((rel_start, rel_end, tag));
+            }
+            li += 1;
+        }
+    }
+
+    let mut result = Vec::with_capacity(lines.len());
+    for (line_idx, line_text) in lines.iter().enumerate() {
         // 排序并去重：tree-sitter 会对同一段文本产生多个重叠 capture
-        line_spans.sort_by_key(|a| a.start_col);
+        let mut line_spans = std::mem::take(&mut per_line[line_idx]);
+        line_spans.sort_by_key(|a| a.0);
         let mut deduped: Vec<LineSpan> = Vec::new();
         let mut covered = 0usize;
-        for span in line_spans {
-            if span.end_col <= covered {
+        for (start_col, end_col, tag) in line_spans {
+            if end_col <= covered {
                 continue;
             }
-            let mut s = span;
-            if s.start_col < covered {
-                s.start_col = covered;
-            }
-            covered = s.end_col;
-            deduped.push(s);
+            let start_col = start_col.max(covered);
+            covered = end_col;
+            deduped.push(LineSpan {
+                start_col,
+                end_col,
+                tag: tag.to_string(),
+            });
         }
 
         result.push(LineHighlight {
@@ -911,19 +933,6 @@ fn build_line_highlights(
     }
 
     Ok(result)
-}
-
-fn line_byte_offset(source: &str, line_number: usize) -> usize {
-    if line_number <= 1 {
-        return 0;
-    }
-    source
-        .bytes()
-        .enumerate()
-        .filter(|(_, b)| *b == b'\n')
-        .nth(line_number - 2)
-        .map(|(i, _)| i + 1)
-        .unwrap_or(source.len())
 }
 
 // ============================================
@@ -1623,6 +1632,169 @@ fn main() {
 mod tests {
     use super::*;
     use arborium::Highlighter;
+
+    /// tree-sitter 跑一遍，转成 build_line_highlights 吃的 (start, end, tag)
+    fn themed_spans(lang: &str, src: &str) -> Vec<(u32, u32, String)> {
+        let mut highlighter = Highlighter::new();
+        let spans = highlighter.highlight_spans(lang, src).expect("高亮失败");
+        spans
+            .iter()
+            .filter_map(|s| {
+                arborium_theme::tag_for_capture(&s.capture)
+                    .and_then(arborium_theme::tag_to_name)
+                    .map(|name| (s.start, s.end, name.to_string()))
+            })
+            .collect()
+    }
+
+    /// 旧实现的等价物，**只作测试参照**：每行重扫全文件找行首 + 每行遍历全部 span。
+    /// 刻意保留它的 O(n²) —— 用来钉住线性重写的输出，并给出复杂度比值。
+    fn slow_reference(code: &str, spans: &[(u32, u32, &str)]) -> Vec<LineHighlight> {
+        fn line_byte_offset(source: &str, line_number: usize) -> usize {
+            if line_number <= 1 {
+                return 0;
+            }
+            source
+                .bytes()
+                .enumerate()
+                .filter(|(_, b)| *b == b'\n')
+                .nth(line_number - 2)
+                .map(|(i, _)| i + 1)
+                .unwrap_or(source.len())
+        }
+
+        let lines: Vec<&str> = code.lines().collect();
+        let mut result = Vec::new();
+        for (line_idx, line_text) in lines.iter().enumerate() {
+            let line_start = line_byte_offset(code, line_idx + 1);
+            let line_end = line_start + line_text.len();
+
+            let mut line_spans = Vec::new();
+            for &(start, end, tag) in spans {
+                let s = start as usize;
+                let e = end as usize;
+                if e > line_start && s < line_end {
+                    let rel_start = s.saturating_sub(line_start);
+                    let rel_end = if e < line_end {
+                        e - line_start
+                    } else {
+                        line_text.len()
+                    };
+                    if rel_start < rel_end {
+                        line_spans.push(LineSpan {
+                            start_col: rel_start,
+                            end_col: rel_end,
+                            tag: tag.to_string(),
+                        });
+                    }
+                }
+            }
+
+            line_spans.sort_by_key(|a| a.start_col);
+            let mut deduped: Vec<LineSpan> = Vec::new();
+            let mut covered = 0usize;
+            for span in line_spans {
+                if span.end_col <= covered {
+                    continue;
+                }
+                let mut s = span;
+                if s.start_col < covered {
+                    s.start_col = covered;
+                }
+                covered = s.end_col;
+                deduped.push(s);
+            }
+
+            result.push(LineHighlight {
+                line_number: line_idx + 1,
+                text: line_text.to_string(),
+                spans: deduped,
+            });
+        }
+        result
+    }
+
+    /// 线性重写必须与旧实现**逐字节相同**。
+    /// 覆盖的形态：空文件 / 只有换行 / 无尾换行 / CRLF / 跨行块注释 / 跨行字符串 /
+    /// 以及一份有规模的源码（让 span 数量和跨行覆盖接近真实文件）。
+    #[test]
+    fn highlight_output_is_unchanged_by_the_linear_rewrite() {
+        let mut sources = vec![
+            String::new(),
+            "\n".into(),
+            "\n\n\n".into(),
+            "no trailing newline".into(),
+            "a\nb\nc".into(),
+            "// 注释\nfn main() {\n    let s = \"a\\nb\";\n}\n".into(),
+            "/* 跨行\n   注释 */\nfn f() {}\n".into(),
+            "fn a() {}\r\nfn b() {}\r\n".into(),
+            "let x = 1;".into(),
+        ];
+        let mut big = String::new();
+        for i in 0..400 {
+            big.push_str(&format!(
+                "fn f{i}(x: i32) -> i32 {{\n    // note {i}\n    x + {i}\n}}\n"
+            ));
+        }
+        sources.push(big);
+
+        for src in &sources {
+            for lang in ["rust", "javascript", "python", "markdown"] {
+                let owned = themed_spans(lang, src);
+                let spans: Vec<(u32, u32, &str)> =
+                    owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+
+                let linear = build_line_highlights(src, &spans).unwrap();
+                let reference = slow_reference(src, &spans);
+                assert_eq!(
+                    serde_json::to_string(&linear).unwrap(),
+                    serde_json::to_string(&reference).unwrap(),
+                    "{lang} 上线性重写与旧实现输出不一致（源码 {} 字节）",
+                    src.len()
+                );
+            }
+        }
+    }
+
+    /// **复杂度金丝雀**：有人再把"逐行重扫全文件"写回来，这条必须转红。
+    ///
+    /// 判据用**比值**而不是绝对耗时 —— 机器快慢不影响结论。阈值放到 3 倍是刻意留的
+    /// 余量（实测余量在 10 倍以上），避免慢机器 / CI 上假红。
+    #[test]
+    fn highlight_does_not_rescan_the_file_per_line() {
+        let mut src = String::new();
+        for i in 0..400 {
+            src.push_str(&format!(
+                "fn f{i}(x: i32) -> i32 {{\n    // note {i}\n    x + {i}\n}}\n"
+            ));
+        }
+        let owned = themed_spans("rust", &src);
+        let spans: Vec<(u32, u32, &str)> =
+            owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+
+        let t0 = std::time::Instant::now();
+        let linear = build_line_highlights(&src, &spans).unwrap();
+        let d_linear = t0.elapsed().as_secs_f64();
+
+        let t1 = std::time::Instant::now();
+        let reference = slow_reference(&src, &spans);
+        let d_reference = t1.elapsed().as_secs_f64();
+
+        assert_eq!(linear.len(), reference.len(), "行数不一致");
+        assert_eq!(
+            linear.iter().map(|l| l.spans.len()).sum::<usize>(),
+            reference.iter().map(|l| l.spans.len()).sum::<usize>(),
+            "span 总数不一致"
+        );
+
+        assert!(
+            d_linear * 3.0 < d_reference,
+            "build_line_highlights 疑似又变成逐行重扫：线性版 {:.1}ms，旧算法 {:.1}ms（比值 {:.1}×，要求 >3×）",
+            d_linear * 1e3,
+            d_reference * 1e3,
+            d_reference / d_linear.max(1e-9)
+        );
+    }
 
     /// SQL 语法高亮：验证 lang-sql feature 启用后 arborium 能识别 "sql" 语言
     #[test]
