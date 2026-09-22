@@ -37,9 +37,13 @@ pub const REFLECT_SYSTEM: &str = r#"你是 ruyix 的复核员：**独立于**干
 
 怎么复核（按给你的"本轮判据"选一套）：
 - 【产物评审】任务要求是否条条落地？边界与错误路径考虑了吗？会不会破坏既有行为（看调用方）？测试是否真的证明了要证明的行为（而不是自证）？
-- 【依据核对】答复里每一条断言，是否都能追到「读过的文件 + **本轮命令取证** + 机械验证报告」里的证据？追不到的必须标出来。
+- 【依据核对】答复里每一条断言，是否都能追到「读过的文件 + **本轮命令取证** + **服务端联网检索** + 机械验证报告」里的证据？追不到的必须标出来。
   关键是别把"证据池里没有"当成"主循环没做"：日期、端口、进程、环境变量这类事实本来就只有命令能给，
   它们已经列在【本轮取证】里 —— 有就核对值对不对，**不许因为你自己不掌握别的来源就要求它再取一次证**。
+  联网检索同理：模型开着服务端联网，检索由**服务端**执行、结果直接进上下文，标题与链接不回传给你，
+  你只看得到它检索时用的查询词（【本轮取证】里标着"联网检索（服务端执行）"的那条）。
+  看到查询词与目标问题对得上，就当作**已取证**，转而核对值本身合不合理；
+  **不许因为没有 URL 就判 unsupported，也不许要求它把网页抓下来再答一遍。**
 
 可用工具（只有这一个）：
 - read 读项目文件：{"tool":"read","args":{"path":"相对路径"}} —— 判断"是否破坏调用方"这类问题必须自己去读，不许凭空推测。
@@ -720,6 +724,46 @@ mod tests {
     ///
     /// 这里断言两件事：① 复核员**真收到**了命令输出（不是代码里存着就算）；
     /// ② 有输出可核对时它判 ok，不再打回。
+    #[test]
+    fn evidence_rubric_accepts_server_side_web_search() {
+        // 服务端联网是**黑盒注入**：结果直接进上下文，标题与链接都不回传，复核员只看得到
+        // 查询词。它若不知道有这条路，就会把"模型知道最近的事"判成 unsupported，
+        // 于是主循环被反复打回 —— 这就是刚修好的那个死锁换个入口重演。
+        // 钉的是**契约串本身**：agent.rs 记取证时用的就是这个标记，提示词里少一个字
+        // 复核员就认不出那条是联网（只写"联网检索"四个字会被别处的同一词组骗过去）
+        assert!(
+            REFLECT_SYSTEM.contains(crate::agent::WEB_SEARCH_PROBE_LABEL),
+            "提示词里必须出现取证用的那个标记串 {:?}，否则复核员认不出联网那条",
+            crate::agent::WEB_SEARCH_PROBE_LABEL
+        );
+        assert!(
+            REFLECT_SYSTEM.contains("不许因为没有 URL 就判 unsupported"),
+            "光列出来不够：必须明说查询词对得上就算已取证"
+        );
+        // 联网取证走的是同一条 probes 通道，主循环把查询词当一条取证记进来即可
+        let probes = vec![probe(
+            "联网检索（服务端执行）",
+            "- 2026年9月18日 上证指数 收盘点位",
+        )];
+        let inp = ReflectInput {
+            task: "2026年9月18日上证指数收盘点位是多少",
+            rubric: Rubric::Evidence,
+            project_root: Path::new("."),
+            changes: &[],
+            read_paths: &[],
+            probes: &probes,
+            answer: Some("3911.87 点"),
+            verifications: &[],
+            gate_note: None,
+        };
+        let ev = build_user_prompt(&inp);
+        assert!(
+            ev.contains(crate::agent::WEB_SEARCH_PROBE_LABEL),
+            "取证通道与提示词共用同一个标记串，这里对不上就是漂移：{ev}"
+        );
+        assert!(ev.contains("上证指数"), "{ev}");
+    }
+
     #[test]
     fn evidence_carries_command_probes_to_the_reviewer() {
         struct Quiet;

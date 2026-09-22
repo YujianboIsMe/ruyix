@@ -512,6 +512,29 @@ const BATCH_HINT_HEAD: &str = concat!(
 /// `has_plan` 决定要不要提"清单不能进批"：**步骤子 agent 没有清单工具**（STEP_SYSTEM 只有
 /// 三种能力），提了它反倒会去找一个不存在的能力 —— 父子提示词各自自洽这条纪律，与后台模式
 /// 那段同源（父那份到不了子上下文，子那份也不许广告父的能力）。
+/// 联网检索的提示词 —— 与 [`batch_hint`] 同一条通道（**首轮 user 消息**）。
+///
+/// 为什么非写不可：服务端联网是"随时可用"的能力，但模型**不知道自己能联网就不会发起检索**
+/// （同 `keep_alive` 的教训）。实测对照：同一道"某日上证收盘点位"，提示词里没提联网时
+/// 模型答"该日期在未来，我无法获取"；提了之后它自行检索并答出准确数值。
+///
+/// 判据必须成对写，理由与 `ask_hint` 同源：只教"可以搜"会得到一个什么都搜的助手，
+/// 只教"别搜"会得到一个什么都按训练数据猜的助手。
+/// 联网取证在【本轮取证】里的标记串。
+///
+/// **agent 与复核提示词共用这一个常量**：两边各写一份字面量就会漂移 —— 复核员认不出
+/// 那条取证是联网检索，于是把"模型知道最近的事"判成 unsupported，死锁换个入口重演。
+pub(crate) const WEB_SEARCH_PROBE_LABEL: &str = "联网检索（服务端执行）";
+
+pub(crate) const WEB_SEARCH_HINT: &str = "\
+联网检索（本次会话已开启）：你**可以**检索互联网，涉及最新事实的问题该查就查 —— \
+服务端替你检索、把结果直接放进上下文，你不需要自己发命令抓网页，也不用声明工具。\n\
+- **该查**：知识有截止日期的那些事 —— 现在的版本号 / 行情 / 新闻 / 文档更新 / 报错的最新解法。\
+  不查就是猜，猜了就会给出一个自信而过期的值。\n\
+- **别查**：项目里读得出来的（read / 命令取证），本地证据比检索结果硬；\
+  也不需要为一个纯代码问题去联网。\n\
+- 答复里说明哪些结论来自联网（用户有权知道依据），但**不许把检索原文整段贴进 final**。";
+
 pub(crate) fn batch_hint(max: usize, has_plan: bool) -> String {
     let ctrl = if has_plan {
         "final / plan / ask_user 是控制动作，不能放进批里，要单独一轮输出。"
@@ -2839,6 +2862,11 @@ pub async fn run_with_ask(
     if cfg.ask.enabled {
         head.push_str(&format!("\n\n{}", ask_hint(cfg)));
     }
+    // 联网检索：开关关掉时一字不提（同上）。写的理由是"能力没进提示词 = 模型不会用"：
+    // 服务端联网随时可用，但模型不知道自己能联网，就压根不会发起检索。
+    if llm::web_search_on(&cfg.llm) {
+        head.push_str(&format!("\n\n{WEB_SEARCH_HINT}"));
+    }
     msgs.push(ChatMessage::user(format!("{head}\n\n用户消息：\n{task}")));
 
     sink.stage(
@@ -3002,6 +3030,25 @@ pub async fn run_with_ask(
             }
         };
         out.usage.add(&reply.usage);
+        // 服务端联网是**黑盒注入**：检索结果直接进了上下文，标题与链接都不回传，
+        // 引擎只拿得到查询词。把查询词当作一条取证记下来 —— 否则复核员眼里
+        // 模型"凭空知道"最近的事，就会按"证据无处可查"打回，重演上一个死锁。
+        if !reply.web_queries.is_empty() {
+            let listed = reply
+                .web_queries
+                .iter()
+                .map(|q| format!("- {q}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ctx.note_probe(WEB_SEARCH_PROBE_LABEL, &listed);
+            sink.log(
+                "info",
+                format!(
+                    "[agent] 第 {step} 轮服务端联网检索 {} 次",
+                    reply.web_queries.len()
+                ),
+            );
+        }
         let mut actions = match parse_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
         {
             Ok(a) => a,

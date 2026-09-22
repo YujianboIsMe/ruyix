@@ -25,6 +25,9 @@ fn d_max_tokens() -> u32 {
 fn d_llm_timeout() -> u64 {
     300
 }
+fn d_web_search() -> String {
+    "auto".to_string()
+}
 fn d_bin(name: &str) -> String {
     name.to_string()
 }
@@ -61,6 +64,14 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     #[serde(default = "d_llm_timeout")]
     pub timeout_secs: u64,
+    /// 服务端联网搜索：`off` / `auto` / `on`（见 `llm::web_search_on`）。
+    ///
+    /// 联网搜索是**服务端能力**：请求里带上 `tools:[{"type":"web_search"}]`，由服务端
+    /// 自己检索、把结果灌进上下文，引擎看不到标题与链接（只在响应里拿得到查询词）。
+    /// 它**只在 `/responses` 端点上成立** —— 往 `/chat/completions` 塞会被拒
+    /// （实测 422 `unknown variant \`web_search\`, expected \`function\``）。
+    #[serde(default = "d_web_search")]
+    pub web_search: String,
 }
 
 impl Default for LlmConfig {
@@ -72,6 +83,7 @@ impl Default for LlmConfig {
             temperature: d_temperature(),
             max_tokens: d_max_tokens(),
             timeout_secs: d_llm_timeout(),
+            web_search: d_web_search(),
         }
     }
 }
@@ -961,7 +973,11 @@ pub struct KeySpec {
 /// 取值有穷的键（键 → 合法值）。**声明在引擎里**是因为只有引擎知道
 /// `sandbox.mode` 有哪三档、写错会静默落到哪一档。宿主桥的校验与表单的下拉
 /// 都从 `schema()` 读它，所以全局只有这一份。
-const ENUM_KEYS: &[(&str, &[&str])] = &[("sandbox.mode", &["require", "prefer", "off"])];
+const ENUM_KEYS: &[(&str, &[&str])] = &[
+    ("sandbox.mode", &["require", "prefer", "off"]),
+    // `auto` = 只对认这个参数的端点开（DeepSeek 官方），配了别的端点也不会被 422 打回。
+    ("llm.web_search", &["off", "auto", "on"]),
+];
 
 /// 不进配置表单的键（**前缀匹配**：写 `entropy` 就盖住整段）。
 ///

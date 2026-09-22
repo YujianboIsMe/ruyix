@@ -162,12 +162,36 @@ max_context_chars = "24000"
 - 一律以**字符串**存；读取时按 schema 声明的类型 coerce（`bool` / `int` / `float` / `text` / `list`）。
 - 转不过去（比如 `agent.batch = "ture"`）→ **丢弃该键、保持默认**，不会让整批配置一起失效。
 - **空串 = 未设置**（与表单"清空 = 删键"一致），回落到回退链或引擎默认。
-- 枚举键（只有 `sandbox.mode`：`require` / `prefer` / `off`）只认白名单，
-  写错不静默换档 —— 否则 `yolo` 被当成未知档回落，用户会以为隔离开着。
+- 枚举键（`sandbox.mode`：`require` / `prefer` / `off`；`llm.web_search`：
+  `off` / `auto` / `on`）只认白名单，写错不静默换档 —— 否则 `yolo` 被当成未知档回落，
+  用户会以为隔离开着。
 
 LLM 端点 / 密钥 / 模型**不在这里**，见上一节 `ruyix.code.ai.*`；
 引擎的 `llm.base_url` / `llm.api_key` / `llm.model` 三键在表单里被**隐藏**，
 避免同一件事摆两处。
+
+### `llm.web_search`：服务端联网搜索（`off` / `auto` / `on`，默认 `auto`）
+
+联网检索由**服务端**执行 —— 请求里带 `tools:[{"type":"web_search"}]`，服务端自己检索、
+把结果灌进上下文，引擎只看得到它发起的查询词（标题与链接都不回传）。
+
+- **`auto`（默认）**：只对 DeepSeek 官方端点（`api.deepseek.com` 及其子域）开。
+  换端点自动退回 `/chat/completions` —— 往不认这个参数的端点塞它会被打回
+  （实测 422 `unknown variant \`web_search\`, expected \`function\``）。
+- **`off`**：永不开。**出问题时的回滚开关**：改这一行即回到改动前的链路，不用退代码。
+- **`on`**：强行开，给自建的兼容端点用。
+
+两点须知：
+
+1. **开了联网会换端点** —— 从 `/chat/completions` 换成 `/responses`（服务端检索只在
+   `/responses` 上成立）。两条路共用同一套重试与错误分类，只是请求体与解析不同。
+2. **token 会涨**：检索结果算进输入。实测同一个问题从 140 涨到约 3000 `input_tokens`。
+
+自测（要真 key、要联网）：
+
+```bash
+DEEPSEEK_API_KEY=sk-xxx cargo test -p harness-engine --test web_search_live -- --ignored --nocapture
+```
 
 环境变量覆盖（`DEEPSEEK_API_KEY` 等）在配置之后生效，脚本 / CI 与 GUI 读同一套来源
 （`config::apply_env_overrides`）。

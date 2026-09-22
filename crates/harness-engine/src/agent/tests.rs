@@ -2144,6 +2144,27 @@ fn two_commands_in_one_batch_really_run_in_parallel() {
     );
 }
 
+/// 联网是"随时可用"的能力，但**没写进提示词就等于不存在** —— 实测对照：同一道
+/// "某日上证收盘点位"，提示词里没提联网时模型答"该日期在未来，我无法获取"；
+/// 提了之后它自行检索并答出准确数值。判据必须成对（该查 / 别查），否则不是
+/// 什么都搜就是什么都按训练数据猜。
+#[test]
+fn the_web_search_hint_states_both_when_to_search_and_when_not() {
+    let h = WEB_SEARCH_HINT;
+    assert!(
+        h.contains("该查"),
+        "不教'该查'就得到一个什么都猜的助手：{h}"
+    );
+    assert!(
+        h.contains("别查"),
+        "不教'别查'就得到一个什么都搜的助手：{h}"
+    );
+    assert!(
+        h.contains("不许把检索原文整段贴进 final"),
+        "与规则 6 一致：final 是给用户看的，贴原文会把手写 JSON 撑到转义出错：{h}"
+    );
+}
+
 /// 批协议教不教，与引擎收不收由**同一个开关**决定（不虚报能力）
 #[test]
 fn the_batch_hint_follows_the_switch() {

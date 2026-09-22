@@ -66,6 +66,12 @@ pub struct ChatOutcome {
     /// 区分"格式烂"和"没写完"，两种病的纠偏指令完全不同。
     pub finish_reason: Option<String>,
     pub elapsed_ms: u128,
+    /// 服务端联网检索**发起过**的查询词（没开联网或模型没检索时为空）。
+    ///
+    /// 这是引擎能从"黑盒注入"里捞到的唯一痕迹：服务端把检索结果直接灌进上下文，
+    /// 标题与链接都不回传。但**有查询词就够了** —— 复核员据此知道模型真去查过，
+    /// 不会再把"证据池里没有"当成"主循环没做"（那是上一个死锁的成因）。
+    pub web_queries: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +82,54 @@ struct ApiResp {
     usage: Option<Usage>,
     #[serde(default)]
     model: Option<String>,
+}
+
+// ---- Responses 协议（`/responses`）：服务端联网搜索只在它上面成立 ----
+
+#[derive(Deserialize, Default)]
+struct RespApi {
+    #[serde(default)]
+    output: Vec<RespItem>,
+    #[serde(default)]
+    usage: Option<RespUsage>,
+    #[serde(default)]
+    model: Option<String>,
+    /// `completed` / `incomplete` / `failed`
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RespItem {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    content: Vec<RespContent>,
+    /// 仅 `web_search_call` 有：本次检索的查询词
+    #[serde(default)]
+    action: Option<RespAction>,
+}
+
+#[derive(Deserialize, Default)]
+struct RespContent {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RespAction {
+    #[serde(default)]
+    queries: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RespUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -207,18 +261,60 @@ fn extract_json_object_inner(raw: &str) -> String {
     s.to_string()
 }
 
-/// 带重试的一次对话调用。
-pub async fn chat(
+/// 一次对话的解析结果 —— 两种协议（`/chat/completions` 与 `/responses`）的形状在这里抹平，
+/// 重试循环因此只有一份。
+struct RawReply {
+    content: String,
+    usage: Usage,
+    model: Option<String>,
+    finish_reason: Option<String>,
+    web_queries: Vec<String>,
+}
+
+/// 端点是不是 DeepSeek 官方（`api.deepseek.com` 及其子域）。
+///
+/// 联网搜索是**服务端能力**，只有 DeepSeek 自家端点认。往 OpenAI / 其它兼容端点塞
+/// `tools:[{"type":"web_search"}]` 会被打回 —— 实测 422
+/// `unknown variant \`web_search\`, expected \`function\``。
+pub fn is_deepseek_endpoint(cfg: &LlmConfig) -> bool {
+    let after_scheme = cfg
+        .base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(cfg.base_url.as_str());
+    let host = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    host == "api.deepseek.com" || host.ends_with(".deepseek.com")
+}
+
+/// 本次调用要不要挂服务端联网搜索（配置键 `llm.web_search`）。
+///
+/// - `off`：永不开（联网出问题时**这就是回滚开关**，一行配置即退回老链路）；
+/// - `auto`（默认）：只对 DeepSeek 官方端点开，换了端点自动退回 `/chat/completions`；
+/// - `on`：强行开（自建兼容端点自己认这个参数时才用）。
+pub fn web_search_on(cfg: &LlmConfig) -> bool {
+    match cfg.web_search.trim().to_ascii_lowercase().as_str() {
+        "on" => true,
+        "auto" => is_deepseek_endpoint(cfg),
+        _ => false,
+    }
+}
+
+fn chat_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
-) -> Result<ChatOutcome, String> {
-    if cfg.api_key.trim().is_empty() {
-        return Err(
-            "尚未配置 DeepSeek API Key（设置面板里填，或设环境变量 DEEPSEEK_API_KEY）".into(),
-        );
-    }
-
+) -> (String, serde_json::Value) {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({
         "model": cfg.model,
@@ -230,6 +326,142 @@ pub async fn chat(
     if json_mode {
         body["response_format"] = serde_json::json!({ "type": "json_object" });
     }
+    (url, body)
+}
+
+/// `/responses` 的请求体。**只有这条路上服务端联网搜索成立**。
+fn responses_parts(
+    cfg: &LlmConfig,
+    messages: &[ChatMessage],
+    json_mode: bool,
+) -> (String, serde_json::Value) {
+    let url = format!("{}/responses", cfg.base_url.trim_end_matches('/'));
+    let input: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({ "type": "message", "role": m.role, "content": m.content }))
+        .collect();
+    let mut body = serde_json::json!({
+        "model": cfg.model,
+        "input": input,
+        "temperature": cfg.temperature,
+        "max_output_tokens": cfg.max_tokens,
+        "stream": false,
+        "tools": [{ "type": "web_search" }],
+    });
+    if json_mode {
+        body["text"] = serde_json::json!({ "format": { "type": "json_object" } });
+    }
+    (url, body)
+}
+
+/// 一种协议的全部差异：端点、请求体、以及把响应解析成 [`RawReply`] 的函数。
+/// 抽成别名不只是为了可读性 —— 内联这个元组会被 clippy 判 `very_complex_type`。
+type Protocol = (
+    String,
+    serde_json::Value,
+    fn(&str) -> Result<RawReply, String>,
+);
+
+fn extract_chat(text: &str) -> Result<RawReply, String> {
+    let parsed: ApiResp = serde_json::from_str(text).map_err(|e| {
+        format!(
+            "解析接口响应失败: {e}；原文片段: {}",
+            crate::exec::clip(text, 500)
+        )
+    })?;
+    let finish_reason = parsed.choices.first().and_then(|c| c.finish_reason.clone());
+    let content = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.as_ref())
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    Ok(RawReply {
+        content,
+        usage: parsed.usage.unwrap_or_default(),
+        model: parsed.model,
+        finish_reason,
+        web_queries: Vec::new(),
+    })
+}
+
+fn extract_responses(text: &str) -> Result<RawReply, String> {
+    let parsed: RespApi = serde_json::from_str(text).map_err(|e| {
+        format!(
+            "解析接口响应失败: {e}；原文片段: {}",
+            crate::exec::clip(text, 500)
+        )
+    })?;
+    let mut web_queries = Vec::new();
+    for it in &parsed.output {
+        if it.kind != "web_search_call" {
+            continue;
+        }
+        if let Some(a) = &it.action {
+            // 服务端会在查询词里塞一条 `ws_call_id=...` 的内部标记，那不是查询词
+            web_queries.extend(
+                a.queries
+                    .iter()
+                    .filter(|q| !q.starts_with("ws_call_id="))
+                    .cloned(),
+            );
+        }
+    }
+    // 正文只在 `message` 项里（`reasoning` 项的 reasoning_text 是模型的思考，不是回答）
+    let content = parsed
+        .output
+        .iter()
+        .filter(|i| i.kind == "message")
+        .flat_map(|i| i.content.iter())
+        .filter(|c| c.kind != "reasoning_text")
+        .map(|c| c.text.as_str())
+        .collect::<String>();
+    let finish_reason = match parsed.status.as_deref() {
+        Some("completed") => Some("stop".to_string()),
+        Some("incomplete") => Some("length".to_string()),
+        Some("failed") => Some("failed".to_string()),
+        _ => None,
+    };
+    let usage = parsed
+        .usage
+        .map(|u| Usage {
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.input_tokens + u.output_tokens,
+        })
+        .unwrap_or_default();
+    Ok(RawReply {
+        content,
+        usage,
+        model: parsed.model,
+        finish_reason,
+        web_queries,
+    })
+}
+
+/// 带重试的一次对话调用。
+///
+/// 走哪套协议由 `web_search_on` 决定：开了联网就走 `/responses`（服务端检索），
+/// 否则走原来的 `/chat/completions`。**两条路共用同一套重试与错误分类** ——
+/// 分叉只在请求体与解析函数上，不在重试语义上。
+pub async fn chat(
+    cfg: &LlmConfig,
+    messages: &[ChatMessage],
+    json_mode: bool,
+) -> Result<ChatOutcome, String> {
+    if cfg.api_key.trim().is_empty() {
+        return Err(
+            "尚未配置 DeepSeek API Key（设置面板里填，或设环境变量 DEEPSEEK_API_KEY）".into(),
+        );
+    }
+
+    let (url, body, extract): Protocol = if web_search_on(cfg) {
+        let (u, b) = responses_parts(cfg, messages, json_mode);
+        (u, b, extract_responses)
+    } else {
+        let (u, b) = chat_parts(cfg, messages, json_mode);
+        (u, b, extract_chat)
+    };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(cfg.timeout_secs))
@@ -254,23 +486,10 @@ pub async fn chat(
                 let status = r.status();
                 let text = r.text().await.unwrap_or_default();
                 if status.is_success() {
-                    let parsed: ApiResp = serde_json::from_str(&text).map_err(|e| {
-                        format!(
-                            "解析接口响应失败: {e}；原文片段: {}",
-                            crate::exec::clip(&text, 500)
-                        )
-                    })?;
-                    let finish_reason =
-                        parsed.choices.first().and_then(|c| c.finish_reason.clone());
-                    let content = parsed
-                        .choices
-                        .first()
-                        .and_then(|c| c.message.as_ref())
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
-                    if content.trim().is_empty() {
+                    let raw = extract(&text)?;
+                    if raw.content.trim().is_empty() {
                         // 空内容多是模型波动或被 max_tokens 截断：按可重试错误走重试循环
-                        last_err = if finish_reason.as_deref() == Some("length") {
+                        last_err = if raw.finish_reason.as_deref() == Some("length") {
                             "模型返回了空内容（finish_reason=length，疑似被 max_tokens 截断，可在设置里调大）".to_string()
                         } else {
                             "模型返回了空内容".to_string()
@@ -278,11 +497,12 @@ pub async fn chat(
                         observe_llm_fail(cfg, messages, attempt, &last_err, started_ms);
                     } else {
                         let out = ChatOutcome {
-                            content,
-                            usage: parsed.usage.unwrap_or_default(),
-                            model: parsed.model.unwrap_or_else(|| cfg.model.clone()),
-                            finish_reason,
+                            content: raw.content,
+                            usage: raw.usage,
+                            model: raw.model.unwrap_or_else(|| cfg.model.clone()),
+                            finish_reason: raw.finish_reason,
                             elapsed_ms: started.elapsed().as_millis(),
+                            web_queries: raw.web_queries,
                         };
                         // 记一次 LLM 调用：**这是"模型输出错了"唯一能复盘的地方**
                         observe_llm(cfg, messages, &out, attempt, "ok", None, started_ms);
@@ -300,8 +520,10 @@ pub async fn chat(
                     if status.as_u16() == 402 {
                         return Err(format!("DeepSeek 账户余额/额度问题(HTTP 402): {detail}"));
                     }
-                    if status.as_u16() == 400 {
-                        return Err(format!("DeepSeek 请求被拒绝(HTTP 400): {detail}"));
+                    // 400：请求格式错；422：请求体能解析但字段不合法（例如往
+                    // /chat/completions 塞了 web_search 工具）—— 都是"重试也一样错"
+                    if status.as_u16() == 400 || status.as_u16() == 422 {
+                        return Err(format!("DeepSeek 请求被拒绝(HTTP {status}): {detail}"));
                     }
                     last_err = format!("HTTP {status}: {detail}");
                 }
@@ -447,6 +669,125 @@ pub async fn probe(cfg: &LlmConfig) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg_at(url: &str, web_search: &str) -> LlmConfig {
+        LlmConfig {
+            base_url: url.to_string(),
+            web_search: web_search.to_string(),
+            ..LlmConfig::default()
+        }
+    }
+
+    #[test]
+    fn web_search_defaults_to_auto_and_only_fires_on_deepseek_endpoints() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.web_search, "auto", "默认要开，否则联网等于没做");
+        assert!(is_deepseek_endpoint(&cfg));
+        assert!(web_search_on(&cfg));
+        // 带路径与结尾斜杠的写法也要认（用户常配成 https://api.deepseek.com/v1/）
+        assert!(is_deepseek_endpoint(&cfg_at(
+            "https://api.deepseek.com/v1/",
+            "auto"
+        )));
+
+        // 换了端点必须自动关掉：往非 DeepSeek 端点塞 web_search 会被 422 打回
+        // （实测 `unknown variant \`web_search\`, expected \`function\``）
+        assert!(!is_deepseek_endpoint(&cfg_at(
+            "https://api.openai.com/v1",
+            "auto"
+        )));
+        assert!(!web_search_on(&cfg_at("https://api.openai.com/v1", "auto")));
+        assert!(!is_deepseek_endpoint(&cfg_at(
+            "http://127.0.0.1:11434/v1",
+            "auto"
+        )));
+
+        // off 是回滚开关；on 是用户知情后强行开
+        assert!(!web_search_on(&cfg_at("https://api.deepseek.com", "off")));
+        assert!(web_search_on(&cfg_at("https://api.openai.com/v1", "on")));
+        // 大小写不敏感（配置值宽容无害）："Auto" 与 "auto" 同义
+        assert!(web_search_on(&cfg_at("https://api.deepseek.com", "Auto")));
+        // 认不出的档位按 off 处理：宁可不联网，也不要发一个服务端不认的请求
+        assert!(!web_search_on(&cfg_at(
+            "https://api.deepseek.com",
+            "sometimes"
+        )));
+        assert!(!web_search_on(&cfg_at("https://api.deepseek.com", "")));
+    }
+
+    #[test]
+    fn the_switch_picks_a_whole_protocol_not_just_one_extra_field() {
+        let cfg = cfg_at("https://api.deepseek.com", "auto");
+        let msgs = vec![
+            ChatMessage::system("你是 A"),
+            ChatMessage::user("最近的消息"),
+        ];
+
+        let (url, body) = responses_parts(&cfg, &msgs, true);
+        assert!(url.ends_with("/responses"));
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["text"]["format"]["type"], "json_object");
+        assert_eq!(body["input"][0]["role"], "system");
+        assert_eq!(body["input"][1]["content"], "最近的消息");
+        assert!(
+            body.get("messages").is_none(),
+            "Responses 协议不带 messages，混着发服务端不认"
+        );
+
+        // 关掉就退回原链路：路径、字段、json 模式全都回到 /chat/completions 那一套
+        let (url2, body2) = chat_parts(&cfg_at("https://api.deepseek.com", "off"), &msgs, true);
+        assert!(url2.ends_with("/chat/completions"));
+        assert!(body2["messages"].is_array());
+        assert_eq!(body2["response_format"]["type"], "json_object");
+        assert!(body2.get("tools").is_none(), "没开联网就不许带 tools");
+    }
+
+    /// 语料是**真抓回来**的一次 `/responses` 应答（开联网问上证收盘点位那次），不是编的。
+    #[test]
+    fn a_real_responses_reply_yields_text_usage_and_the_queries_it_searched() {
+        let raw = r#"{
+          "id":"ef6960fc","object":"response","status":"completed","model":"deepseek-v4-pro",
+          "output":[
+            {"type":"reasoning","id":"r1","content":[{"type":"reasoning_text","text":"用户想知道2026年9月18日上证指数的收盘点位。"}]},
+            {"type":"web_search_call","id":"call_00_x","status":"completed",
+             "action":{"type":"search","queries":["2026年9月18日 上证指数 收盘点位","ws_call_id=call_00_x"]}},
+            {"type":"message","id":"m1","status":"completed",
+             "content":[{"type":"output_text","annotations":[],"text":"{\"answer\":\"3911.87\"}"}]}
+          ],
+          "usage":{"input_tokens":3069,"output_tokens":176,"total_tokens":3245}
+        }"#;
+        let r = extract_responses(raw).unwrap();
+        assert_eq!(r.content, "{\"answer\":\"3911.87\"}");
+        assert!(
+            !r.content.contains("用户想知道"),
+            "reasoning 是模型的思考，不是回答 —— 混进正文会被当成模型说的话"
+        );
+        assert_eq!(
+            r.web_queries,
+            vec!["2026年9月18日 上证指数 收盘点位".to_string()],
+            "`ws_call_id=...` 是服务端的内部标记，不是查询词"
+        );
+        assert_eq!(r.usage.prompt_tokens, 3069);
+        assert_eq!(r.usage.completion_tokens, 176);
+        assert_eq!(r.usage.total_tokens, 3245);
+        assert_eq!(r.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(r.model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn an_incomplete_responses_reply_looks_like_truncation() {
+        let raw = r#"{"status":"incomplete","model":"m",
+            "output":[{"type":"message","content":[{"type":"output_text","text":""}]}],
+            "usage":{"input_tokens":10,"output_tokens":800}}"#;
+        let r = extract_responses(raw).unwrap();
+        assert_eq!(
+            r.finish_reason.as_deref(),
+            Some("length"),
+            "incomplete 要映射成 length，否则主循环分不清'格式烂'和'没写完'"
+        );
+        assert!(r.content.is_empty());
+        assert!(r.web_queries.is_empty());
+    }
 
     #[test]
     fn extract_plain_json() {
