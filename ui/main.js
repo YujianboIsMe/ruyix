@@ -869,6 +869,10 @@ function paintEditorWindow() {
 
   gutter.innerHTML = gutterHtml;
   backdrop.innerHTML = codeHtml;
+  // 宽度要在**内容/视口变化**后同步一次（不变量：容器宽 == 最宽行宽）。
+  // 已经在本次内容上同步过就直接返回 —— 滚动路径不能重量宽，更不能改宽
+  // （改宽 = textarea 全文重排，正是 P0/P2 花力气消掉的那笔开销）。
+  syncCodeWidth();
 }
 
 /**
@@ -898,6 +902,8 @@ function setEditorContent(opts) {
     keeper: texts.length > rows ? editorWidestText(texts) : "",
     paintedStart: -1,
     paintedEnd: -1,
+    // 宽度是否已按本次内容同步过（paintEditorWindow 里用，避免滚动路径重量宽）
+    widthSynced: false,
   };
 
   const ta = document.getElementById("editor-textarea");
@@ -908,6 +914,60 @@ function setEditorContent(opts) {
     ta.style.height = texts.length * lineH + vpad + "px";
   }
   paintEditorWindow();
+}
+
+/**
+ * 代码区宽度 = 「最宽那一行」的宽度。
+ *
+ * 为什么必须显式给：backdrop 改成绝对定位后没人再撑宽容器，容器就只剩 `flex:1`
+ * （= 视口宽度）。于是正文比格子宽时，**textarea 会自己长出滚动条**（它天生是滚动
+ * 容器，Chromium 把作者写的 overflow:visible 当 auto），而且它会为了"露出光标"
+ * 内部滚动 —— 光标跑到框右边、与背板字形错开。实测（agent.rs 5511 行，光标放最长行末尾）：
+ *   容器 = 视口宽 512px → textarea.scrollLeft = 2883（自己滚），外层不动，双滚动条；
+ *   容器 = 内容宽 3412px → textarea.scrollLeft = 0，外层滚到 2900（与 P2 之前逐像素一致）。
+ *
+ * ⚠️ 只在**内容或视口变化**后同步一次（`widthSynced` 标志），滚动路径直接返回：
+ * 改宽度会让 textarea 把全文重排一遍（就是 P0/P2 花力气消掉的那 110ms）。
+ * 量的是最宽行的**文本**宽度（Range）而不是 scrollWidth —— 后者在容器够宽之后
+ * 就等于容器宽，会"量一次长一点"，16px 一次地无限自增。
+ */
+function syncCodeWidth() {
+  const container = document.getElementById("editor-code-container");
+  if (!container) return;
+  const m = editorModel;
+  if (m && m.widthSynced) return;
+  if (m) m.widthSynced = true;
+
+  const keeper = document.querySelector("#editor-code-backdrop .editor-virt-keeper");
+  if (!keeper) {
+    // 小文件（没虚拟化 → 没有宽度占位）：让 flex 自己撑满，别留一个旧文件的大宽度
+    if (container.style.minWidth) container.style.minWidth = "";
+    return;
+  }
+
+  let textW = 0;
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(keeper);
+    textW = range.getBoundingClientRect().width;
+  } catch {
+    // 量不出来（老引擎）就退回 scrollWidth：最坏是宽度偏一点，不影响正确性
+    textW = keeper.scrollWidth || 0;
+  }
+  if (!(textW > 0)) return;
+
+  // 容器宽 = 文本宽 + 左右 padding（与 backdrop / textarea 的 padding 一致）
+  const ta = document.getElementById("editor-textarea");
+  const box = ta || document.getElementById("editor-code-backdrop");
+  let padX = 32;
+  if (box && typeof getComputedStyle === "function") {
+    const cs = getComputedStyle(box);
+    const l = parseFloat(cs.paddingLeft);
+    const r = parseFloat(cs.paddingRight);
+    if (isFinite(l) && isFinite(r)) padX = l + r;
+  }
+  const want = Math.ceil(textW + padX) + "px";
+  if (container.style.minWidth !== want) container.style.minWidth = want;
 }
 
 /** 滚动时按 rAF 节流重绘（滚动会连发事件，直接重画等于白做几十次） */
@@ -935,6 +995,8 @@ function setupEditorVirtualScroll() {
       new ResizeObserver(() => {
         if (!editorModel) return;
         editorModel.paintedStart = -1;
+        // 视口变了 → 窗口行数跟着变，"要不要虚拟化/要不要宽度占位"可能翻转，重算一次宽度
+        editorModel.widthSynced = false;
         paintEditorWindow();
       }).observe(view);
     } catch {

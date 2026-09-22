@@ -974,6 +974,12 @@ html, body {
   min-height: 0;
   /* backdrop 的定位基准 */
   position: relative;
+  /* ⚠️ min-width 由 JS 给（= 最宽那一行的宽度，见 main.js 的 syncCodeWidth）。
+     它必须**恰好等于内容宽度**，否则 textarea 的正文装不下自己那一格，就会：
+     ① 自己长出一对滚动条（Chromium 对 textarea 强制 overflow:auto，CSS 里的
+        visible 不生效）→ 编辑器里出现"水平和垂直都双滚动条"；
+     ② 为了露出光标而内部滚动 → 光标落在框边、与背板字形错开。
+     P2 之前这是 in-flow 背板自然撑出来的，背板改绝对定位后必须补回来。 */
 }
 
 .editor-code-backdrop,
@@ -985,12 +991,12 @@ html, body {
   line-height: 20px;
   white-space: pre;
   tab-size: 4;
-  /* 不裁剪内容、不产生独立滚动条，由父级 .editor-view 统一滚动 */
-  overflow: visible;
 }
 
-/* 绝对定位：内容高度由虚拟化的 spacer 给出，不再参与 textarea 的尺寸计算 */
+/* 绝对定位：内容高度由虚拟化的 spacer 给出，不再参与 textarea 的尺寸计算；
+   溢出交给父级 .editor-view 统一滚（容器的 min-width 已经是内容宽度） */
 .editor-code-backdrop {
+  overflow: visible;
   position: absolute;
   top: 0;
   left: 0;
@@ -1012,6 +1018,11 @@ html, body {
   background: transparent;
   color: transparent;
   caret-color: #fff;
+  /* ⚠️ 必须 hidden，不能靠默认的 auto：
+     textarea 天生是滚动容器，Chromium 会把作者写的 `overflow: visible` 当作 auto，
+     于是"正文比格子宽"时它自己长出一对滚动条（与 .editor-view 的那对叠成双滚动条）。
+     配合同一处的 min-width（内容宽度），正文恰好装得下 = 永远没有可滚的余量。 */
+  overflow: hidden;
 }
 
 .code-line {

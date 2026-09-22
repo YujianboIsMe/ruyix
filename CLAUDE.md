@@ -14,12 +14,17 @@ follows Google JS / HTML / CSS / JSON style guides. Full rules: `doc/编码规�
 cargo fmt --check                  # Rust 格式（rustfmt.toml: max_width 100 等）
 node scripts/check-style.js        # JS/HTML/CSS/JSON 风格（零依赖，0 error 才算过）
 node scripts/ui-smoke.js           # UI 冒烟：契约静态断言 + agent 面板演示回放（零依赖）
+node scripts/editor-layout.js      # 编辑器真实布局（无头 Edge；找不到浏览器时自行 SKIP）
 cargo clippy --all-targets         # 静态检查，必须 0 warning
 cargo test                         # 单元测试（引擎 256+8 ignored / ruyix 96+3 ignored）
 ```
 
 Notes: `ui/xterm.js` / `ui/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
 no npm/bundler, so never add npm tooling — `scripts/check-style.js` is the style gate.
+`scripts/editor-layout.js` is the one exception to "Node-only gates": it drives the real
+`index.html` + `styles.css` + `main.js` in headless Edge/Chrome because scrollbar/geometry bugs
+(double scrollbars, caret vs. backdrop misalignment) do not exist in a DOM stub — ui-smoke U32
+calls it (and skips loudly when no browser is installed).
 
 ## Project Vision
 

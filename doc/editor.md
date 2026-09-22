@@ -26,14 +26,45 @@
 2. **textarea 必须拿到显式高度**（`setEditorContent` 里设）。全文高度原本是 backdrop
    撑出来的（grid 行高把两者一起拉伸）；backdrop 移出流后没人撑它，不设就只剩 2 行高，
    点击可视区下半部分点不到 textarea（光标不跟手）。
-3. **水平滚动宽度完全由 backdrop 决定。** textarea 对 `scrollWidth` 的贡献**恒为 0**
-   （它内部自己换行，实测），所以窗口里必须留一条「全局最宽行」的零高占位行
-   （`.editor-virt-keeper`）。不留的话，滚到宽行不在窗口的位置时水平滚动条会缩掉、
-   `scrollLeft` 被钳住（实测 5000 行缩 55px、含超长行的文件缩 1370px）。
-   最宽行的判定用 `editorVisualCols()`（等宽字体下「列数最大」= 像素最宽，已与
-   canvas `measureText` 交叉验证一致）。
+3. **水平滚动宽度由「最宽行」给出**，并且**容器的宽度必须等于它**（`syncCodeWidth`）。
+   这两件事缺一不可，理由见下面那节 —— 少一半就是"水平和垂直都出现双滚动条"。
 4. **textarea 必须 `wrap="off"`。** 它默认软换行，长行会在它内部折成两行，而 backdrop
    按「一行」画 —— 光标与高亮从折行处起整体错开。
+
+### 宽度不变量：容器宽 = 最宽行宽（否则双滚动条）
+
+P2 把 backdrop 改成绝对定位后，容器**失去了"被内容撑开"的能力**（原来靠 in-flow 背板的
+max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽：
+
+- `<textarea>` 自己长出滚动条 —— 它天生是滚动容器，**Chromium 把作者写的
+  `overflow: visible` 当成 `auto`**，CSS 里写 visible 没用。它那对与 `.editor-view`
+  那对叠在一起，就是"水平和垂直都双滚动条"；
+- 而且它为了**露出光标**会内部滚动（实测 `scrollLeft = 2883`），光标因此停在框边、
+  与背板字形错开 —— 用户看到的是"字在这儿、光标在那儿"。
+
+所以 `setEditorContent` 之后要调一次 `syncCodeWidth()`：用 `Range` 量出最宽行的**文本**
+宽度，给容器 `min-width = 文本宽 + 左右 padding`。实测（agent.rs 5511 行，光标放最长行末尾）：
+
+| 容器宽 | textarea 内部滚动 | 外层滚动 | 谁画了滚动条 |
+|---|---|---|---|
+| 512（= 视口） | scrollLeft **2883** | 0 | `.editor-view` **+ textarea** |
+| 3412（= 内容，P2 之前的自然行为） | scrollLeft **0** | 2900 | 只有 `.editor-view` |
+
+两条容易踩的坑：
+
+- 量的是**文本宽**（`Range.getBoundingClientRect()`），不是 `scrollWidth` —— 后者在容器
+  够宽之后就等于容器宽，于是"量一次长一点"，16px 一次地无限自增。
+- 只在**内容 / 视口变化**后同步一次（`editorModel.widthSynced` 短路），**滚动路径不许改宽**：
+  改宽度会让 textarea 把全文重排一遍，正是 P0/P2 花力气消掉的那 110ms。
+  （实测滚动重绘 1.9ms 未回归。）
+- `.editor-textarea` 另外显式写了 `overflow: hidden` 兜底：即使子像素舍入让正文多出
+  零点几像素，也不会再冒出一对滚动条。
+
+> 这一条**只有真浏览器能量到**（Node 的 DOM 桩没有布局引擎），所以门禁是
+> `node scripts/editor-layout.js` —— 用真实 `index.html` + `styles.css` + `main.js`
+> 在无头 Edge 里开一页、喂 5000 行合成源码（长行故意放在可视窗口外），逐元素量
+> `offset - client`（**只有真画出来的滚动条才占这几像素**）。`ui-smoke` 的 U32 内置
+> 三条静态契约 + 转调这个脚本，找不到 Edge 时它自己 SKIP 并在报告里显式说明。
 
 窗口：`可视行数 + 上下各 24 行`（`EDITOR_OVERSCAN`）。窗口外用两条零内容 spacer 撑高度，
 **占位之和必须恒等于「总行数 × 行高」** —— 这样滚动条长度、位置，以及大纲区
@@ -49,10 +80,11 @@
 | 10,000 | 78 | 161 | 3.8ms | 6.3ms |
 | 25,000 | 78 | 161 | 9.1ms | 13.0ms |
 
-> 改动位置：`ui/main.js` 的 `setEditorContent` / `paintEditorWindow` /
+> 改动位置：`ui/main.js` 的 `setEditorContent` / `paintEditorWindow` / `syncCodeWidth` /
 > `setupEditorVirtualScroll`（三个渲染入口 `renderHighlightedCode`、`renderPlainCode`、
 > `renderTerminalOutput` **都必须**走 `setEditorContent`）。
-> 门禁 `node scripts/ui-smoke.js` 的 U31 覆盖行为与样式两侧，并已反向验证会转红。
+> 门禁 `node scripts/ui-smoke.js` 的 U31 覆盖行为与样式两侧，U32 覆盖"真实布局"（滚动条 /
+> 宽度不变量），两者都已反向验证会转红。
 
 ## 语法高亮
 语法高亮架构选型：tree-sitter+ arborium

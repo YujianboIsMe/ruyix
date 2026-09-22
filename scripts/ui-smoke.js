@@ -105,12 +105,22 @@
  *                     三元组），且**行由前端按 tab.content 自己切** —— 后端 code.lines() 会吃掉
  *                     末尾空行，用后端的行拼 textarea 的值就会把文件末尾的换行弄丢（见下面那条
  *                     "末尾换行" 检查）
+ *   U32 editor-layout-real  编辑器**真实布局**（v0.11）：整棵树里只能有一个滚动容器 ——
+ *                     textarea 天生是滚动容器（Chromium 把作者写的 overflow:visible 当 auto），
+ *                     正文一旦装不下自己那一格，它就会长出自己的滚动条，并与 .editor-view
+ *                     那对叠成"水平和垂直都双滚动条"；同时它为了露出光标会**内部滚动**，
+ *                     光标因此与背板字形错开。这个类别在 Node 的微型 DOM 桩里量不到
+ *                     （没有布局引擎），所以挂一张真浏览器探针：scripts/editor-layout.js
+ *                     用真实 index.html + styles.css + main.js 在无头 Edge 里开一页，
+ *                     逐元素量 offset-client（只有真画出来的滚动条才占这几像素）。
+ *                     本机没有 Edge/Chrome 时该脚本自行 SKIP。
  */
 
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
+const { spawnSync } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
@@ -1025,6 +1035,26 @@ function runStaticChecks() {
       editorBodyOf("editorLineHtml").includes("m.tags"),
     "editorLineHtml 没按「扁平三元组 + 名表」渲染：退回逐 span 建对象（5000 行上万次分配），" +
       "或名表没接上（tag 会渲染成 undefined）");
+  // U32：滚动条契约。编辑区**只能有 .editor-view 一个**滚动容器。
+  // textarea 天生是滚动容器（Chromium 把作者写的 overflow: visible 当 auto），它的正文
+  // 一旦装不下自己那一格，就会①长出自己的滚动条（与 .editor-view 叠成双滚动条）
+  // ②为了露出光标而内部滚动（光标落在框边、与背板字形错开）。
+  check("U32", "editor-layout-real",
+    /\.editor-textarea\s*\{[^}]*overflow:\s*hidden/.test(stylesCss),
+    "textarea 没关掉自己的滚动条（.editor-textarea { overflow: hidden }）：它天生是滚动容器，" +
+      "正文比格子宽时会与 .editor-view 叠成双滚动条");
+  check("U32", "editor-layout-real",
+    editorBodyOf("paintEditorWindow").includes("syncCodeWidth(") &&
+      editorBodyOf("setEditorContent").includes("widthSynced: false"),
+    "没把「代码区宽度 = 最宽行宽度」这套接上（paintEditorWindow 里调 syncCodeWidth、" +
+      "setEditorContent 里给 widthSynced 初值）：backdrop 绝对定位后没人再撑宽容器，" +
+      "容器只剩视口宽 → textarea 的正文装不下 → 双滚动条 + 光标错位");
+  check("U32", "editor-layout-real",
+    editorBodyOf("syncCodeWidth").includes("widthSynced") &&
+      editorBodyOf("setupEditorVirtualScroll").includes("widthSynced = false"),
+    "syncCodeWidth 少了「本次内容已同步」的短路标志，或视口变化（ResizeObserver）时没重置它：" +
+      "前者会让滚动路径每帧都量一次宽度（甚至改宽 → textarea 全文重排），" +
+      "后者会在窗口行数变化后留着一个过时的宽度");
 }
 
 // ============================================
@@ -1894,6 +1924,32 @@ async function runEditorChecks() {
 }
 
 /**
+ * U32 editor-layout-real：编辑器**真实布局**——交给 scripts/editor-layout.js 在无头
+ * Edge/Chrome 里量（Node 的 DOM 桩没有布局引擎，滚动条 / textarea 内部滚动这类问题
+ * 在桩里根本不存在，所以只能交给真浏览器）。
+ *
+ * 那个脚本找不到浏览器时会打印 SKIP 并以 0 退出；本项据此记一条"跳过"并**显式说出来**
+ * —— "没跑"与"通过"必须能分辨。
+ */
+function runEditorLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "editor-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U32 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|editor-layout|滚动条)/.test(l))
+    .join(" ⏐ ");
+  check("U32", "editor-layout-real",
+    r.status === 0,
+    "真浏览器布局探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
+/**
  * U30 proc-log-replay：输出面板回放 —— 真加载 ui/service.js + ui/proc-log.js，配上假 xterm
  * 与假后端，走一遍"服务表点输出 → 增量跟随 → 进程退出收尾"。
  *
@@ -2251,6 +2307,7 @@ async function main() {
     ["U9", "config-replay", runConfigChecks],
     ["U22", "help-replay", runHelpChecks],
     ["U31", "editor-virtual-render", runEditorChecks],
+    ["U32", "editor-layout-real", runEditorLayoutProbe],
     ["U23", "service-replay", runServiceChecks],
     ["U30", "proc-log-replay", runProcLogChecks],
     ["U24", "external-link-replay", runExternalLinkChecks],
