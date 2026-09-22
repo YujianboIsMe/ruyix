@@ -216,6 +216,7 @@
       `<option value="write" title="${L("Agent 改动直接写入项目（覆盖前备份到 .ruyix/backups）", "Agent writes land directly (backed up to .ruyix/backups first)")}">✍️ ${L("写入模式", "Write")}</option>` +
       `<option value="auto" title="${L("同写入模式：改动直接落盘并自行动验证", "Same as write mode: changes land directly and the agent verifies itself")}">🚀 ${L("自主模式", "Autonomous")}</option>` +
       `</select>` +
+      `<button class="agent-btn session-web" data-web title="${L("服务端联网检索（按模型能力决定可用与否）", "Server-side web search (availability depends on the model)")}">🌏</button>` +
       `<button class="agent-btn agent-btn--run session-send" data-send>▶</button>` +
       `<button class="agent-btn agent-btn--cancel session-cancel" data-cancel disabled>✕</button>` +
       `</div></div>`;
@@ -234,6 +235,66 @@
     modeSel.addEventListener("change", () => {
       s._mode = modeSel.value;
     });
+    // 🌏 服务端联网检索：开关写在 **runtime 作用域**（本次会话生效、不落盘）。
+    //
+    // 能不能用取决于**模型能力**（矩阵在引擎 `llm::model_caps` 里，宿主不抄一份）——
+    // 实测只有 v4-pro 在 /responses 上真检索，flash 一次都不检索。所以模型不支持时
+    // 直接禁用并说清原因：**不给一个按下去没反应的按钮**。
+    const webBtn = wrap.querySelector("[data-web]");
+    wrap._webCaps = null;
+    const paintWeb = () => {
+      const caps = wrap._webCaps;
+      if (!caps) {
+        webBtn.disabled = true;
+        webBtn.title = L("联网能力未知（未取到模型能力）", "Web capability unknown");
+        return;
+      }
+      if (!caps.web_search) {
+        webBtn.disabled = true;
+        webBtn.title = L(
+          `当前模型 ${caps.model} 不支持服务端联网检索`,
+          `Model ${caps.model} has no server-side web search`
+        );
+        return;
+      }
+      const on = s._webSearch === undefined ? true : s._webSearch;
+      webBtn.disabled = false;
+      webBtn.classList.toggle("session-web--on", !!on);
+      webBtn.title = on
+        ? L("服务端联网检索：已开启（点此关闭）", "Web search: on (click to disable)")
+        : L("服务端联网检索：已关闭（点此开启）", "Web search: off (click to enable)");
+    };
+    webBtn.addEventListener("click", async () => {
+      const on = !(s._webSearch === undefined ? true : s._webSearch);
+      s._webSearch = on;
+      const invoke = getInvoke();
+      if (invoke) {
+        try {
+          await invoke("config_form_apply", {
+            scope: "runtime",
+            projectRoot: root(),
+            entries: [
+              { section: "harness", key: "llm.web_search", value: on ? "auto" : "off" },
+            ],
+          });
+        } catch (e) {
+          status(String(e), "error");
+        }
+      }
+      paintWeb();
+    });
+    (async () => {
+      const invoke = getInvoke();
+      if (!invoke) return;
+      try {
+        wrap._webCaps = await invoke("ai_model_caps", { model: null, projectRoot: root() });
+      } catch {
+        wrap._webCaps = null;
+      }
+      paintWeb();
+    })();
+    paintWeb();
+
     wrap.querySelector("[data-send]").addEventListener("click", () => {
       const text = input.value.trim();
       if (!text) return;

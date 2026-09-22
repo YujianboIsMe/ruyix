@@ -656,15 +656,6 @@ fn delete_project(
     cfg.delete_project(&path)
 }
 
-/// 迁移旧版项目配置（纯路径列表 → name/path/lang 条目），返回迁移数量
-#[tauri::command]
-fn migrate_projects(
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<usize, String> {
-    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
-    cfg.migrate_projects()
-}
-
 #[tauri::command]
 fn get_run_targets(
     project_root: Option<String>,
@@ -1115,6 +1106,57 @@ async fn ai_translate(
     project_root: Option<String>,
 ) -> Result<String, String> {
     ai::translate(&config_mgr, project_root.as_deref(), &input).await
+}
+
+/// 厂商模型列表（GET /models）—— 配置表单的模型下拉框用它。
+///
+/// 拿不到（没配 Key / 网络不通）就返回错误让前端降级成文本框，**不虚构一个列表**；
+/// 让用户以为有得选、结果选了一个跑不通的模型，比没有下拉框更糟。
+#[tauri::command]
+async fn ai_list_models(
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    project_root: Option<String>,
+) -> Result<Vec<String>, String> {
+    let cfg = {
+        let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+        agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
+    };
+    harness_engine::llm::probe(&cfg.llm).await
+}
+
+/// 某个模型具备哪些服务端能力（联网 / 多模态）。
+///
+/// 能力表在引擎里（`llm::model_caps`），宿主不抄一份 —— 否则加一个模型要改两处，
+/// 而两处不一致的表现就是"配置里选得到、跑起来没反应"。
+/// `model` 省略时查当前配置的模型。
+#[tauri::command]
+fn ai_model_caps(
+    model: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    project_root: Option<String>,
+) -> Result<ModelCapsDto, String> {
+    let name = match model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+            agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
+                .llm
+                .model
+        }
+    };
+    let c = harness_engine::llm::model_caps(&name);
+    Ok(ModelCapsDto {
+        model: name,
+        web_search: c.web_search,
+        multimodal: c.multimodal,
+    })
+}
+
+#[derive(serde::Serialize)]
+struct ModelCapsDto {
+    model: String,
+    web_search: bool,
+    multimodal: bool,
 }
 
 // ============================================
@@ -1706,7 +1748,6 @@ fn main() {
             set_project_lang,
             update_project,
             delete_project,
-            migrate_projects,
             get_run_targets,
             run_target,
             proc_list,
@@ -1726,6 +1767,8 @@ fn main() {
             config_form_apply,
             config_schema,
             ai_translate,
+            ai_list_models,
+            ai_model_caps,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,
             agent::agent_reply,

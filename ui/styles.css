@@ -3290,6 +3290,26 @@ html, body {
   border-color: var(--accent);
 }
 
+/* 🌏 服务端联网检索开关：开了才有底色（关着与相邻按钮无差别，一眼看得出状态）。
+   禁用态 = 当前模型没这个能力（矩阵见引擎 llm::model_caps）—— 半透明 + 禁点，
+   别给一个按下去没反应的按钮。 */
+.session-web {
+  padding: 4px 10px;
+  opacity: 0.45;
+}
+
+.session-web--on {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.session-web:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
 /* ============================================
    外链标记
    ============================================ */

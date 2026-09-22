@@ -85,7 +85,7 @@ lang = 'unknown'
 current = 'C:\Users\yujia\PycharmProjects\tmf'
 list = ['C:\Users\yujia\PycharmProjects\rag', 'C:\Users\yujia\PycharmProjects\tmf']
 ```
-读取时兼容旧版（自动补默认 name/lang），通过菜单【项目→迁移配置】或命令 `project migrate` 显式迁移为新格式。
+读取时兼容旧版（自动补默认 name/lang）。
 
 ### 运行
 运行目标通过配置来持久化
@@ -175,11 +175,32 @@ LLM 端点 / 密钥 / 模型**不在这里**，见上一节 `ruyix.code.ai.*`；
 联网检索由**服务端**执行 —— 请求里带 `tools:[{"type":"web_search"}]`，服务端自己检索、
 把结果灌进上下文，引擎只看得到它发起的查询词（标题与链接都不回传）。
 
-- **`auto`（默认）**：只对 DeepSeek 官方端点（`api.deepseek.com` 及其子域）开。
+- **`auto`（默认）**：**端点与模型能力两个条件都满足**才开 ——
+  DeepSeek 官方端点（`api.deepseek.com` 及其子域）**且**该模型真有联网能力。
   换端点自动退回 `/chat/completions` —— 往不认这个参数的端点塞它会被打回
   （实测 422 `unknown variant \`web_search\`, expected \`function\``）。
 - **`off`**：永不开。**出问题时的回滚开关**：改这一行即回到改动前的链路，不用退代码。
-- **`on`**：强行开，给自建的兼容端点用。
+- **`on`**：强行开（不看能力表），给自建的兼容端点用。
+
+#### 联网是**逐模型**的（能力矩阵）
+
+厂商 `/models` 只给模型 id、不声明能力，所以引擎里先硬编码一张表
+（`llm::model_caps`，宿主与前端都不抄一份）：
+
+| 模型 | 联网检索 | 多模态 |
+|---|---|---|
+| `deepseek-v4-pro` | ✅ | — |
+| `deepseek-flash` / `deepseek-v4-flash` | — | ✅ |
+| `deepseek-v4-flash-vision-exp` | — | ✅ |
+
+表里没有的模型一律按"都没这能力"处理（宁可不开，也不为一条不存在的能力换协议）。
+
+实测依据：`deepseek-v4-pro` 在 `/responses` 上每次都真检索；`deepseek-v4-flash`
+一次都不检索，模型自己明说"本次会话中我没有可用的联网检索工具"。
+**不查能力就换协议 = 白走一条新路径却什么也没多拿到** —— `auto` 档那道闸就是为此。
+
+界面上的 🌏 按钮（会话工具栏）按这张表决定可不可用：模型不支持时禁用并说明原因，
+不给一个按下去没反应的按钮。点了写的是 **runtime 作用域**（本次会话生效、不落盘）。
 
 两点须知：
 

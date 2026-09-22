@@ -329,6 +329,41 @@ function runStaticChecks() {
     /if \(tab\._language && !tab\._highlighted\)/.test(ctxMainJs),
     "refreshEditorChrome 得先判断高亮是否过期 —— 没过期就别再跑一趟 IPC");
 
+  // U35 web-search-toggle：🌏 联网是**逐模型**的能力（引擎 llm::model_caps，
+  // 实测 v4-pro 真检索、v4-flash 一次都不检索）。三条不许退：
+  // ① 按钮存在且走 runtime 作用域写 llm.web_search（本次会话生效、不落盘）；
+  // ② 模型没这能力时必须禁用 —— 不给一个按下去没反应的按钮；
+  // ③ 模型下拉框只在真拿到厂商列表时才升级成 select。
+  const sessJs = read("ui/session.js");
+  check("U35", "web-search-toggle", /data-web/.test(sessJs),
+    "session.js 工具栏里没有 🌏 联网按钮（data-web）");
+  const webStart = sessJs.indexOf('wrap.querySelector("[data-web]")');
+  const webEnd = webStart >= 0 ? sessJs.indexOf("data-send]", webStart) : -1;
+  const webBody = webStart >= 0 && webEnd > webStart ? sessJs.slice(webStart, webEnd) : "";
+  check("U35", "web-search-toggle", webStart >= 0 && webEnd > webStart,
+    "session.js 里定位不到 🌏 的处理块（切片锚点失效）");
+  check("U35", "web-search-toggle",
+    webBody.includes('"config_form_apply"') && webBody.includes('scope: "runtime"') &&
+      webBody.includes('key: "llm.web_search"'),
+    "🌏 要把 llm.web_search 写进 runtime 作用域 —— 落盘会让一次试探变成长期配置");
+  check("U35", "web-search-toggle",
+    /if \(!caps\.web_search\)/.test(webBody) && /webBtn\.disabled = true/.test(webBody),
+    "模型没有联网能力时必须禁用按钮（模型能力矩阵在引擎里，前端不抄一份）");
+  check("U35", "web-search-toggle", webBody.includes("ai_model_caps"),
+    "按钮状态要问后端 ai_model_caps，不许前端自己猜模型能不能联网");
+  check("U35", "web-search-toggle",
+    /session-web--on/.test(sessJs) && /session-web--on/.test(read("ui/styles.css")),
+    "开/关要有可见区别（session-web--on 的 class 与样式都要有）");
+  const cfgJs2 = read("ui/config.js");
+  check("U35", "web-search-toggle",
+    /key: "model".*dynamic: "models"/.test(cfgJs2),
+    "ai.model 要标成动态选项（选项来自厂商 /models）");
+  check("U35", "web-search-toggle",
+    /f\.dynamic === "models" && modelChoices && modelChoices\.length/.test(cfgJs2),
+    "只有真拿到厂商列表才升级成下拉框 —— 拿不到就退回文本框，别给一份可能跑不通的清单");
+  check("U35", "web-search-toggle", /ai_list_models/.test(cfgJs2),
+    "模型列表要从后端 ai_list_models 取，不许前端硬编码");
+
   // U9 config-form：配置表单的 DOM 锚点 / 脚本 / config 子动词路由
   const configJs = read("ui/config.js");
   const cfgAnchors = [

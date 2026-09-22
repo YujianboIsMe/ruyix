@@ -70,6 +70,8 @@ pub struct LlmConfig {
     /// 自己检索、把结果灌进上下文，引擎看不到标题与链接（只在响应里拿得到查询词）。
     /// 它**只在 `/responses` 端点上成立** —— 往 `/chat/completions` 塞会被拒
     /// （实测 422 `unknown variant \`web_search\`, expected \`function\``）。
+    /// 而且它是**逐模型**的（见 `llm::model_caps`）：`auto` 档要端点与模型能力
+    /// 两个条件都满足才开。
     #[serde(default = "d_web_search")]
     pub web_search: String,
 }

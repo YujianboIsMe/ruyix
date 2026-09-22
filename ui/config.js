@@ -35,7 +35,9 @@ window.ConfigUI = (() => {
       fields: [
         { key: "api_url", kind: "text" },
         { key: "api_key", kind: "password" },
-        { key: "model", kind: "text" },
+        // 模型：优先渲染成下拉框，选项来自厂商 `/models`（见 loadModelChoices）。
+        // 取不到就退回文本框 —— 让用户手填，也不要给一份可能跑不通的清单。
+        { key: "model", kind: "text", dynamic: "models" },
         { key: "alias", kind: "text" },
       ],
     },
@@ -50,6 +52,9 @@ window.ConfigUI = (() => {
 
   /** 引擎声明的 harness 字段（运行时拉一次；拉不到就只剩 ai/ui，表单仍可用） */
   let harnessFields = null;
+
+  /** 厂商模型列表（运行时拉一次；拉不到为 null，模型那行退回文本框） */
+  let modelChoices = null;
 
   /** 引擎的 kind → 控件类型 */
   function kindOf(kind) {
@@ -91,6 +96,25 @@ window.ConfigUI = (() => {
       status(String(err), "error");
       return null;
     }
+  }
+
+  /**
+   * 拉厂商模型列表（`ai_list_models` → GET /models）。
+   *
+   * 失败是**常态**（没配 Key / 断网），所以这里不报错、也不缓存失败结果：
+   * 返回 null 让模型那行退回文本框，用户手填照样能用。
+   */
+  async function loadModelChoices() {
+    if (modelChoices) return modelChoices;
+    const invoke = getInvoke();
+    if (!invoke) return null;
+    try {
+      const ids = await invoke("ai_list_models", { projectRoot: root() });
+      if (Array.isArray(ids) && ids.length) modelChoices = ids.slice();
+    } catch {
+      modelChoices = null;
+    }
+    return modelChoices;
   }
 
   const NUMERIC = /^-?\d+(\.\d+)?$/;
@@ -165,7 +189,17 @@ window.ConfigUI = (() => {
       });
     };
 
-    for (const s of SCHEMA) for (const f of s.fields) push(s.section, f.key, f, null);
+    for (const s of SCHEMA) {
+      for (const f of s.fields) {
+        // 动态选项：只有真拿到了厂商列表才升级成下拉框（`renderControl` 会顺带
+        // 把枚举外的既有值补进选项，不会把用户已配的模型吞掉）
+        const known =
+          f.dynamic === "models" && modelChoices && modelChoices.length
+            ? { ...f, kind: "select", options: modelChoices }
+            : f;
+        push(s.section, f.key, known, null);
+      }
+    }
     // 引擎声明的 harness 字段：section 恒为 `harness`（落盘键 = section + key），
     // group 取 path 第一段，只影响渲染出来的子段标题。
     for (const f of harnessFields || []) push("harness", f.key, f, f.group);
@@ -379,7 +413,11 @@ window.ConfigUI = (() => {
     }
     tab = window.state.tabs.find((t) => t._isConfig && t.configScope === scope) || null;
     // 表单数据与引擎 schema 并行取：schema 拿不到只影响 harness 段（ai/ui 照常）
-    const [dump] = await Promise.all([load(scope), loadHarnessFields()]);
+    const [dump] = await Promise.all([
+      load(scope),
+      loadHarnessFields(),
+      loadModelChoices(),
+    ]);
     if (!dump) return;
 
     // 已开着的标签保留未保存的编辑值（从菜单重开不该吞掉它）

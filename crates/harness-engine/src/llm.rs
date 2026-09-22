@@ -297,15 +297,85 @@ pub fn is_deepseek_endpoint(cfg: &LlmConfig) -> bool {
     host == "api.deepseek.com" || host.ends_with(".deepseek.com")
 }
 
+/// 一个模型具备哪几种"服务端能力"。
+///
+/// 为什么要有这张表：能力是**逐模型**的，而厂商 `/models` 只给 id、不声明能力。
+/// 实测联网检索就是这样 —— `deepseek-v4-pro` 在 `/responses` 上每次都真检索，
+/// 而 `deepseek-v4-flash` 一次都不检索（模型自己明说"我没有可用的联网检索工具"）。
+/// 不查能力就换协议 = 白白走一条新路径却什么也没多拿到。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelCaps {
+    /// 服务端联网检索（`/responses` + `tools:[{type:web_search}]`）
+    pub web_search: bool,
+    /// 能读图（视觉输入）
+    pub multimodal: bool,
+}
+
+/// 能力矩阵。**暂时硬编码**（厂商没有能力接口），随模型换代手工维护。
+///
+/// 表里没有的模型一律按"都没这能力"处理 —— 宁可不开，也不要为一条不存在的
+/// 能力换协议。用户仍可用 `llm.web_search = "on"` 强行开。
+const MODEL_CAPS: &[(&str, ModelCaps)] = &[
+    (
+        "deepseek-v4-pro",
+        ModelCaps {
+            web_search: true,
+            multimodal: false,
+        },
+    ),
+    // 注意 `deepseek-flash` 是官方推荐名，`deepseek-v4-flash` 是仍被接受的旧名
+    // —— 两个名字指向同一个模型，能力要一致，否则改名就等于悄悄丢能力。
+    (
+        "deepseek-flash",
+        ModelCaps {
+            web_search: false,
+            multimodal: true,
+        },
+    ),
+    (
+        "deepseek-v4-flash",
+        ModelCaps {
+            web_search: false,
+            multimodal: true,
+        },
+    ),
+    (
+        "deepseek-v4-flash-vision-exp",
+        ModelCaps {
+            web_search: false,
+            multimodal: true,
+        },
+    ),
+];
+
+/// 查模型能力（大小写不敏感）；表里没有的返回"都没有"。
+pub fn model_caps(model: &str) -> ModelCaps {
+    let m = model.trim().to_ascii_lowercase();
+    MODEL_CAPS
+        .iter()
+        .find(|(k, _)| *k == m)
+        .map(|(_, c)| *c)
+        .unwrap_or(ModelCaps {
+            web_search: false,
+            multimodal: false,
+        })
+}
+
+/// 本端点上**全部已知模型**及其能力（给宿主做下拉框与能力提示）。
+pub fn known_models() -> &'static [(&'static str, ModelCaps)] {
+    MODEL_CAPS
+}
+
 /// 本次调用要不要挂服务端联网搜索（配置键 `llm.web_search`）。
 ///
 /// - `off`：永不开（联网出问题时**这就是回滚开关**，一行配置即退回老链路）；
-/// - `auto`（默认）：只对 DeepSeek 官方端点开，换了端点自动退回 `/chat/completions`；
-/// - `on`：强行开（自建兼容端点自己认这个参数时才用）。
+/// - `auto`（默认）：DeepSeek 官方端点 **且** 该模型真有联网能力 —— 两个条件缺一不可，
+///   否则就是换了协议却搜不了（flash 实测如此）；
+/// - `on`：强行开（自建兼容端点自己认这个参数时用，**不看能力表**）。
 pub fn web_search_on(cfg: &LlmConfig) -> bool {
     match cfg.web_search.trim().to_ascii_lowercase().as_str() {
         "on" => true,
-        "auto" => is_deepseek_endpoint(cfg),
+        "auto" => is_deepseek_endpoint(cfg) && model_caps(&cfg.model).web_search,
         _ => false,
     }
 }
@@ -713,6 +783,46 @@ mod tests {
             "sometimes"
         )));
         assert!(!web_search_on(&cfg_at("https://api.deepseek.com", "")));
+    }
+
+    /// 能力是**逐模型**的：flash 实测一次都不检索（模型自己说没有这个工具）。
+    /// 不查能力就换协议，等于白走一条新路径却什么也没多拿到 —— 这条钉的正是那道闸。
+    #[test]
+    fn auto_also_requires_the_model_to_actually_have_web_search() {
+        let pro = cfg_at("https://api.deepseek.com", "auto");
+        assert_eq!(pro.model, "deepseek-v4-pro");
+        assert!(model_caps("deepseek-v4-pro").web_search);
+        assert!(web_search_on(&pro));
+
+        // 同样在 DeepSeek 端点上，换 flash 就必须自动关掉
+        let mut flash = cfg_at("https://api.deepseek.com", "auto");
+        flash.model = "deepseek-v4-flash".into();
+        assert!(!model_caps("deepseek-v4-flash").web_search);
+        assert!(!web_search_on(&flash), "flash 搜不了，不该为它换协议");
+
+        // 官方推荐名与旧名必须同能力（改名不该悄悄丢能力）
+        assert_eq!(
+            model_caps("deepseek-flash"),
+            model_caps("deepseek-v4-flash")
+        );
+        assert!(model_caps("deepseek-v4-flash").multimodal);
+        assert!(!model_caps("deepseek-v4-pro").multimodal);
+
+        // 表里没有的模型按"都没能力"处理（宁可不开，也不为不存在的能力换协议）
+        assert_eq!(
+            model_caps("deepseek-v5-ultra"),
+            ModelCaps {
+                web_search: false,
+                multimodal: false
+            }
+        );
+
+        // on = 用户知情后强行开，不看能力表
+        let mut forced = cfg_at("https://api.deepseek.com", "on");
+        forced.model = "deepseek-v4-flash".into();
+        assert!(web_search_on(&forced));
+
+        assert!(!known_models().is_empty());
     }
 
     #[test]
