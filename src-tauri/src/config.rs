@@ -748,29 +748,6 @@ impl ConfigManager {
         self.save_projects(&cfg)
     }
 
-    /// 迁移旧版配置：把 projects.list 里的纯路径字符串转换为带 name/lang 的条目，
-    /// 并写回新格式。返回迁移的旧条目数量（0 = 无需迁移）。
-    pub fn migrate_projects(&self) -> Result<usize, String> {
-        let content = match fs::read_to_string(self.projects_path()) {
-            Ok(s) => s,
-            Err(_) => return Ok(0), // 文件不存在，无需迁移
-        };
-        // 检查 list 中是否还有纯字符串条目
-        let legacy_count = toml::from_str::<toml::Value>(&content)
-            .ok()
-            .and_then(|v| {
-                let list = v.get("projects")?.get("list")?.as_array()?;
-                Some(list.iter().filter(|x| x.is_str()).count())
-            })
-            .unwrap_or(0);
-        if legacy_count == 0 {
-            return Ok(0); // 已是新格式
-        }
-        let cfg = self.load_projects(); // load_projects 会把旧字符串转成新条目
-        self.save_projects(&cfg)?;
-        Ok(legacy_count)
-    }
-
     // ============================================
     // 运行目标
     // ============================================
@@ -1357,9 +1334,9 @@ path = 'C:\baz\qux'
         assert_eq!(PROJECT_LANGS[0], "unknown");
     }
 
-    /// migrate_projects：旧版纯路径列表 → 新格式，返回迁移数量；再次迁移返回 0
+    /// set_project_lang：设置语言并持久化；非法语言被拒绝
     #[test]
-    fn migrate_projects_rewrites_legacy_file() {
+    fn set_project_lang_persists_and_validates() {
         let dir = std::env::temp_dir().join(format!("dhc-config-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1368,18 +1345,6 @@ path = 'C:\baz\qux'
         fs::write(dir.join("projects.toml"), legacy).unwrap();
 
         let mgr = ConfigManager::new_with_dir(dir.clone());
-        // 第一次迁移：2 个旧条目
-        assert_eq!(mgr.migrate_projects().unwrap(), 2);
-
-        let cfg = mgr.load_projects();
-        assert_eq!(cfg.list.len(), 2);
-        assert_eq!(cfg.list[0].name, "bar");
-        assert_eq!(cfg.list[0].lang, "unknown");
-        assert_eq!(cfg.list[1].name, "qux");
-        assert_eq!(cfg.current.as_deref(), Some(PATH_A));
-
-        // 已是新格式：无需迁移
-        assert_eq!(mgr.migrate_projects().unwrap(), 0);
 
         // 设置语言并持久化
         mgr.set_project_lang(PATH_B, "python").unwrap();

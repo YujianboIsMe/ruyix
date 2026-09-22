@@ -1,6 +1,6 @@
 <img src="ui/logo.svg" width="112" alt="RYX — Darkhorse Code" />
 
-# darkhorse-code
+# ruyix
 
 ## 来源说明
 

@@ -29,7 +29,6 @@
 | `project lang <语言> <项目路径>` | 设置项目语言 |
 | `project edit "<路径>" "<名称>" <语言>` | 修改项目名称与图标 |
 | `project delete <项目路径>` | 从项目列表删除（不删文件夹） |
-| `project migrate` | 迁移旧版项目配置 |
 | `help` | 打开本帮助 |
 
 ## 快捷键

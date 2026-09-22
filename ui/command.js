@@ -309,7 +309,6 @@ async function handleRunCommand(raw) {
  *   project lang <语言> <项目路径>                设置项目语言（路径取 lang 之后的剩余部分）
  *   project edit "<项目路径>" "<名称>" <语言>     修改项目名称与图标（路径不可修改）
  *   project delete <项目路径>                     从项目列表删除（路径取剩余部分，可含空格）
- *   project migrate                              迁移旧版项目配置（纯路径列表 → name/path/lang 条目）
  */
 async function handleProjectCommand(raw) {
   const invoke = getTauriInvoke();
@@ -375,22 +374,6 @@ async function handleProjectCommand(raw) {
       if (typeof loadProjectList === "function") await loadProjectList();
     } catch (err) {
       setStatus(I18N.t("project.delete.fail", { err }), "error");
-    }
-    return;
-  }
-
-  // project migrate
-  if (/^migrate$/i.test(rest)) {
-    try {
-      const count = await invoke("migrate_projects");
-      if (count > 0) {
-        setStatus(I18N.t("project.migrate.ok", { count }));
-      } else {
-        setStatus(I18N.t("project.migrate.none"));
-      }
-      if (typeof loadProjectList === "function") await loadProjectList();
-    } catch (err) {
-      setStatus(I18N.t("project.migrate.fail", { err }), "error");
     }
     return;
   }

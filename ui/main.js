@@ -130,8 +130,6 @@ function setupMenuBar() {
         } else if (action === "new-project") {
           const path = await pickFolder(I18N.t("project.pick_folder"));
           if (path) await handleCommand("open project " + path);
-        } else if (action === "migrate-config") {
-          await handleCommand("project migrate");
         }
       });
     });

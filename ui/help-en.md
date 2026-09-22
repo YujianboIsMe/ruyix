@@ -30,7 +30,6 @@ the AI translator, which rewrites it into a standard command.
 | `project lang <lang> <project path>` | Set project language |
 | `project edit "<path>" "<name>" <lang>` | Edit project name and icon |
 | `project delete <project path>` | Remove from project list (folder untouched) |
-| `project migrate` | Migrate legacy project config |
 | `help` | Open this help |
 
 ## Shortcuts

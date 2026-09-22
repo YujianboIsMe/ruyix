@@ -220,7 +220,7 @@ The command system is the **one and only bridge** between frontend GUI and Rust 
 | `rename\|mv` | `handleRenameCommand` | `rename <old> <new>`, validates illegal chars, checks target exists |
 | `refresh [<path>]` | `handleRefreshCommand` | No arg = whole tree; arg = targeted folder refresh (`refreshTreeNode`), keeps expansion state |
 | `run <name>=<cmd>` | `handleRunCommand` | Shortcut: two `config add -p` calls, index = max(existing)+1 |
-| `project lang\|edit\|delete\|migrate` | `handleProjectCommand` | `project lang <lang> <path>` sets language (path = remainder, may contain spaces); `project edit "<path>" "<name>" <lang>` updates name+icon (quote-aware, path read-only); `project delete <path>` removes from list (remainder path; does NOT delete the folder); `project migrate` migrates legacy path-only project config |
+| `project lang\|edit\|delete` | `handleProjectCommand` | `project lang <lang> <path>` sets language (path = remainder, may contain spaces); `project edit "<path>" "<name>" <lang>` updates name+icon (quote-aware, path read-only); `project delete <path>` removes from list (remainder path; does NOT delete the folder) |
 | `agent [task]` | `window.SessionUI` | Session chat: no arg = new session tab; with task = new session + send (project required) |
 | `mcp [list\|call <server> <tool> {json}]` | `window.McpUI` | MCP servers; no arg = `list` |
 | `a2a [list\|send <name> <text>]` | `window.A2aUI` | Remote A2A agents; no arg = `list` |
@@ -314,7 +314,6 @@ Known config keys:
 | `set_project_lang` | `(path, lang)` → `()` | Validates lang against PROJECT_LANGS |
 | `update_project` | `(path, name, lang)` → `()` | Updates name+lang (path immutable); rejects empty name / invalid lang |
 | `delete_project` | `(path)` → `()` | Removes entry from list (folder untouched); clears `current` if it matches |
-| `migrate_projects` | `()` → `usize` | Converts legacy path-string `projects.list` entries to `ProjectEntry` (name = folder basename, lang = unknown), rewrites projects.toml; returns migrated count |
 | `get_run_targets` | `(project_root?)` → `Vec<RunTarget>` | |
 | `list_dir` | `(path)` → `Vec<DirEntry>` | |
 | `read_file` | `(path)` → `FileContent` | |

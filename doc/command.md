@@ -176,7 +176,6 @@ run rm 测试
 - lang 设置项目语言
 - edit 修改项目名称与图标（路径不可修改）
 - delete 从项目列表删除项目
-- migrate 迁移旧版项目配置
 
 ### project lang
 ```
@@ -200,11 +199,3 @@ project delete <项目路径>
 从项目列表移除条目（不删除项目文件夹）。
 路径取 delete 之后的剩余部分，可含空格，外层引号会自动去除。
 项目条目上的 🗑️ 按钮经确认弹窗后执行此命令。
-
-### project migrate
-```
-project migrate
-```
-把旧版项目配置（纯路径列表）迁移为新格式（name/path/lang），
-旧项目语言全部默认 unknown。
-等价于菜单【项目→迁移配置】。
