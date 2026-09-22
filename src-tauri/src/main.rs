@@ -175,6 +175,7 @@ struct HighlightPayload {
     /// 每行一串扁平三元组 `[start, end, tag_idx, start, end, tag_idx, ...]`；
     /// 下标就是行号（0 基），空行是 `[]`。行数与 `code.lines().count()` 一致，
     /// 可能比前端的 `split("\n")` **少一行**（末行换行）—— 前端按不足处理即可。
+    /// `start`/`end` 是**行内 UTF-16 码元**偏移（不是字节），前端直接 `text.slice()` 即可。
     lines: Vec<Vec<u32>>,
 }
 
@@ -945,6 +946,49 @@ pub(crate) fn resolve_windows_cmd(program: &str) -> String {
     program.to_string()
 }
 
+/// 行内「字节偏移 → UTF-16 码元偏移」查表，长度 `line.len() + 1`。
+///
+/// **为什么需要这一步**：tree-sitter 报的是字节区间，而前端用 `String.prototype.slice()`
+/// 切片段 —— JS 的字符串下标是 UTF-16 码元。纯 ASCII 行里两者相等，但中文一个字 3 字节 /
+/// 1 码元、emoji 4 字节 / 2 码元，**只要行里出现过非 ASCII，从那里往后就整体错位**，
+/// 表现为"中文注释的着色起点跑了、顺带把后面的标点也染上"。单位必须在后端统一成
+/// 前端真正在用的那个，别让前端去猜。
+///
+/// 表按行建一次、之后 O(1) 查；多字节字符内部的字节位置向前取整到该字符之前。
+/// 调用方对纯 ASCII 行直接恒等映射，连表都不建。
+fn unit_table(line: &str) -> Vec<u32> {
+    let mut table = vec![0u32; line.len() + 1];
+    let mut units = 0u32;
+    for (byte_idx, ch) in line.char_indices() {
+        for slot in &mut table[byte_idx..byte_idx + ch.len_utf8()] {
+            *slot = units;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    table[line.len()] = units;
+    table
+}
+
+/// 不经查表、逐字符数一遍的等价实现。
+///
+/// 生产路径**不能**用它：它在每个片段上重走一遍整行，单行超长的压缩文件会退化成
+/// O(片段数 × 行长)。保留它是给 `slow_reference`（本来就是刻意写慢的参照）和测试用的
+/// —— 两份实现互相独立，单位一旦搞错，等价性测试就会红。所以只在测试构建里编译。
+#[cfg(test)]
+fn utf16_offset(line: &str, byte_off: usize) -> usize {
+    if line.is_ascii() {
+        return byte_off;
+    }
+    let mut units = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if byte_idx >= byte_off {
+            break;
+        }
+        units += ch.len_utf16();
+    }
+    units
+}
+
 /// 把 tree-sitter 报的字节区间摊到每一行上。
 ///
 /// **性能约束（硬要求，不要再退化）**：只允许对源码做一次线性扫描。
@@ -956,8 +1000,9 @@ pub(crate) fn resolve_windows_cmd(program: &str) -> String {
 /// 一秒就重跑一次，于是文件一大就整个编辑器无响应。
 ///
 /// 现在：一次扫出每行起始偏移 → 每个 span 二分定位所在行 → 跨行 span 按行切分。
-/// 片段语义（切点、排序、去重）与旧实现逐字节相同（`slow_reference` + 等价性测试钉住），
-/// 只是输出换成了紧凑载荷（见 `HighlightPayload`）。
+/// 片段语义（切点、排序、去重）与旧实现相同（`slow_reference` + 等价性测试钉住），
+/// 但有两处**刻意不同**：输出换成紧凑载荷（见 `HighlightPayload`），
+/// 偏移单位从**字节**换成 **UTF-16 码元**（见 `unit_table`，前端 `slice()` 的单位）。
 fn build_line_highlights(
     code: &str,
     spans: &[(u32, u32, &str)],
@@ -1003,11 +1048,29 @@ fn build_line_highlights(
 
     let mut tags: Vec<&'static str> = Vec::new();
     let mut out_lines: Vec<Vec<u32>> = Vec::with_capacity(per_line.len());
-    // 直接消费 per_line：每行取走自己的片段，免得再用下标索引一遍
-    for mut line_spans in per_line {
+    // 直接消费 per_line：每行取走自己的片段，免得再用下标索引一遍。
+    // 单位换算放在这里而不是定位那一步：**每行只出现一次**，且能按行建一次表 ——
+    // 若在片段循环里逐片段换算，单行超长的压缩文件会退化成 O(片段数 × 行长)。
+    for (line_idx, mut line_spans) in per_line.into_iter().enumerate() {
         // 排序并去重：tree-sitter 会对同一段文本产生多个重叠 capture
         line_spans.sort_by_key(|a| a.0);
         let mut flat: Vec<u32> = Vec::new();
+        if line_spans.is_empty() {
+            out_lines.push(flat); // 空行也要占一行（行号 = 下标）
+            continue;
+        }
+        // 字节 → UTF-16 码元（前端 `slice()` 的单位）。纯 ASCII 行恒等，不建表。
+        let line_text = lines[line_idx];
+        let table = if line_text.is_ascii() {
+            None
+        } else {
+            Some(unit_table(line_text))
+        };
+        let to_units = |byte_off: usize| -> usize {
+            table.as_ref().map_or(byte_off, |t| t[byte_off] as usize)
+        };
+        // 去重仍在**字节**上做（片段边界是字节给的，比较自然在同一单位里），
+        // 换算只作用于最终留下的那对切点：换算在字符边界上是单调且单射的，结果一致。
         let mut covered = 0usize;
         for (start_col, end_col, tok) in line_spans {
             if end_col <= covered {
@@ -1015,6 +1078,11 @@ fn build_line_highlights(
             }
             let start_col = start_col.max(covered);
             covered = end_col;
+            let (unit_start, unit_end) = (to_units(start_col), to_units(end_col));
+            // 换算只可能变小（多字节字符吃掉字节），所以仍落在 u32 里
+            if unit_start >= unit_end {
+                continue; // 防御：切点落在同一个字符内部，退化成空片段
+            }
             // 名表按首次出现顺序收集；重复出现的只留下来一次
             let idx = match tags.iter().position(|t| *t == tok.name()) {
                 Some(i) => i,
@@ -1023,8 +1091,8 @@ fn build_line_highlights(
                     tags.len() - 1
                 }
             };
-            flat.push(start_col as u32);
-            flat.push(end_col as u32);
+            flat.push(unit_start as u32);
+            flat.push(unit_end as u32);
             flat.push(idx as u32);
         }
         out_lines.push(flat);
@@ -1751,7 +1819,8 @@ mod tests {
     /// 旧实现的等价物，**只作测试参照**：每行重扫全文件找行首 + 每行遍历全部 span。
     /// 刻意保留它的 O(n²) —— 用来钉住线性重写的输出，并给出复杂度比值。
     /// 片段语义（切点 / 排序 / 去重）与生产实现各自独立写一遍，两边都错成同一个样子
-    /// 才会通过，所以它同时也是"没把语义顺手改歪"的参照。
+    /// 才会通过，所以它同时也是"没把语义顺手改歪"的参照。偏移换算同理：这里用逐字符
+    /// 数一遍的朴素写法，生产路径用按行建一次的查表版。
     fn slow_reference(code: &str, spans: &[(u32, u32, &str)]) -> HighlightPayload {
         fn line_byte_offset(source: &str, line_number: usize) -> usize {
             if line_number <= 1 {
@@ -1802,6 +1871,13 @@ mod tests {
                 }
                 let start_col = start_col.max(covered);
                 covered = end_col;
+                // 字节 → UTF-16 码元。这里用"逐字符数一遍"的朴素写法（与生产路径的查表
+                // 实现相互独立）—— 两者不一致就是等价性测试该抓的东西。
+                let unit_start = utf16_offset(line_text, start_col);
+                let unit_end = utf16_offset(line_text, end_col);
+                if unit_start >= unit_end {
+                    continue;
+                }
                 let idx = match tags.iter().position(|t| *t == tok.name()) {
                     Some(i) => i,
                     None => {
@@ -1809,8 +1885,8 @@ mod tests {
                         tags.len() - 1
                     }
                 };
-                flat.push(start_col as u32);
-                flat.push(end_col as u32);
+                flat.push(unit_start as u32);
+                flat.push(unit_end as u32);
                 flat.push(idx as u32);
             }
             out_lines.push(flat);
@@ -1860,6 +1936,111 @@ mod tests {
                     src.len()
                 );
             }
+        }
+    }
+
+    /// **单位门禁**：片段偏移必须是 UTF-16 码元，而不是字节。
+    ///
+    /// 前端拿它直接 `String.prototype.slice()` —— JS 的下标是 UTF-16 码元；而 tree-sitter
+    /// 报的是字节。中文一个字 3 字节 / 1 码元，**含非 ASCII 的行从那里往后就整体错位**，
+    /// 表现为"中文注释的着色起点跑了、顺带把后面的标点也染上"。
+    ///
+    /// 判据用**包含性**而不是逐字相等：去重会按 `covered` 裁剪片段，而裁出来的片段一定是
+    /// 原捕获的子集（`max(start, covered) ≥ start` 且 `end` 不变），所以"落在同 tag 的原始
+    /// 捕获内"对正确输出恒成立；单位写错时切出来的字节范围会**越出**原捕获 ——
+    /// 修前的 `;` 就是这样（报 13..14，按码元解释切出来是 `/`，落进旁边的捕获）。
+    #[test]
+    fn span_offsets_are_utf16_units() {
+        // 中文（3 字节 / 1 码元）+ emoji（4 字节 / 2 码元、且在补充平面）：
+        // "按字节当码元"与"按 char 个数当码元"两种错法各覆盖一次
+        let src = "let s = \"中文\"; // 注释\nlet t = \"a\"; // 🚀 起飞\nfn f() {}\n";
+        let owned = themed_spans("rust", src);
+        let raw: Vec<(u32, u32, &str)> =
+            owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+        let payload = build_line_highlights(src, &raw).unwrap();
+        let lines: Vec<&str> = src.lines().collect();
+
+        let mut line_starts = vec![0usize];
+        for (i, b) in src.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+
+        // 行内 UTF-16 码元偏移 → 行内字节偏移（= JS `slice()` 选中哪些字符、占哪些字节）
+        fn byte_of_unit(line: &str, unit_off: usize) -> usize {
+            let mut unit = 0usize;
+            for (byte_idx, ch) in line.char_indices() {
+                if unit == unit_off {
+                    return byte_idx;
+                }
+                unit += ch.len_utf16();
+            }
+            line.len()
+        }
+
+        let mut checked = 0usize;
+        let mut differentiated = 0usize;
+        for (li, flat) in payload.lines.iter().enumerate() {
+            let line = lines[li];
+            let line_start = line_starts[li];
+            for t in flat.chunks(3) {
+                let (us, ue) = (t[0] as usize, t[1] as usize);
+                let tag = payload.tags[t[2] as usize];
+                assert!(us < ue, "第 {li} 行出现空片段 {us}..{ue}");
+                let (bs, be) = (byte_of_unit(line, us), byte_of_unit(line, ue));
+                assert!(
+                    bs < be,
+                    "第 {li} 行片段 {us}..{ue} 的码元偏移不在字符边界上，翻不回字节区间"
+                );
+                assert!(
+                    raw.iter().any(|&(s, e, t)| t == tag
+                        && (s as usize) <= line_start + bs
+                        && line_start + be <= (e as usize)),
+                    "第 {li} 行片段 {us}..{ue}（tag={tag}）切出来是 {:?}，越出了同 tag 的原始捕获 \
+                     —— 偏移单位错了（大概率报了**字节**，而前端按 **UTF-16 码元**切）",
+                    &line[bs..be]
+                );
+                // 正控：把同一对数字**当字节**解释（= 修前的行为）切出的文本不一样，
+                // 说明这份语料真能分辨两种单位。一处都分不出来，这条测试就是空转。
+                let as_bytes = line
+                    .as_bytes()
+                    .get(us..ue)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                if line.get(bs..be) != Some(as_bytes.as_str()) {
+                    differentiated += 1;
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "语料没产出任何高亮片段，测试空转");
+        assert!(
+            differentiated > 0,
+            "语料对偏移单位不敏感（{checked} 个片段里没有一个能区分字节与码元）—— \
+             换成含中文/emoji 的行，否则这条门禁抓不到「把单位改回字节」的改动"
+        );
+
+        // 定点核对：含中文 / emoji 的那两行，必须正好切出源码里的那几段字符
+        let texts_on = |li: usize| -> Vec<String> {
+            let line = lines[li];
+            payload.lines[li]
+                .chunks(3)
+                .map(|t| {
+                    let (bs, be) = (
+                        byte_of_unit(line, t[0] as usize),
+                        byte_of_unit(line, t[1] as usize),
+                    );
+                    line[bs..be].to_string()
+                })
+                .collect()
+        };
+        for (li, needle) in [(0usize, "\"中文\""), (1usize, "// 🚀 起飞")] {
+            let texts = texts_on(li);
+            assert!(
+                texts.iter().any(|t| t.contains(needle)),
+                "第 {li} 行没切出 {needle:?}（实际切出 {texts:?}）—— 含非 ASCII 的行偏移错位"
+            );
         }
     }
 

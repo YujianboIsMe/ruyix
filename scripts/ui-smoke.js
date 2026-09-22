@@ -1844,6 +1844,26 @@ async function runEditorChecks() {
         backdrop.innerHTML.includes('class="tok-number">1</span>'),
       "高亮片段没按「名表 + 扁平三元组」切成 tok-* span（渲染入口改道时把高亮丢了）");
 
+    // ---- 含非 ASCII 的行：片段偏移是 **UTF-16 码元**（后端已换算），不是字节 ----
+    // `let s = "中文"; // 注释` 的码元下标：`"中文"` = 8..12、`// 注释` = 14..19。
+    // 同一组数字若按「字节」报，字符串就是 8..16、注释是 18..27 → 切出来的东西整体跑偏
+    // （着色起点前移、顺带把旁边字染上）。这条钉住"后端换算 + 前端直接 slice"这对单位约定。
+    const cjk = 'let s = "中文"; // 注释';
+    api.renderHighlightedCode({
+      id: "t5",
+      name: "c.rs",
+      content: cjk,
+      _highlighted: {
+        tags: ["keyword", "string", "comment"],
+        lines: [[0, 3, 0, 8, 12, 1, 14, 19, 2]],
+      },
+    });
+    check("U31", "editor-virtual-render",
+      backdrop.innerHTML.includes('class="tok-string">"中文"</span>') &&
+        backdrop.innerHTML.includes('class="tok-comment">// 注释</span>'),
+      "含非 ASCII 的行按 UTF-16 码元切不准（偏移被当成字节了？）。实际渲染：" +
+        backdrop.innerHTML);
+
     // ---- 末尾换行：textarea 的值必须与 tab.content 逐字节相同 ----
     // 后端用 code.lines() 收行、**吃掉末尾空行**（这里只回 1 行），前端必须自己按
     // tab.content 切出 2 行。用后端的行去拼 textarea 的值 = 少一个末尾 \n，

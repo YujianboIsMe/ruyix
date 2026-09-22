@@ -798,6 +798,10 @@ function editorWindowRows(lineH) {
  * 片段是**扁平三元组** `[start, end, tagIdx, ...]`（后端 `HighlightPayload.lines`），
  * 这里直接按下标读、不建对象 —— 5000 行的文件有上万个片段，逐个 `{start_col, end_col, tag}`
  * 建出来就是上万次分配。`m.tags` 是 tag 名表，第三个数是在它里面的下标。
+ *
+ * ⚠️ `start`/`end` 是**行内 UTF-16 码元**偏移（后端已经把 tree-sitter 的字节偏移换算过），
+ * 也就是 `String.prototype.slice()` 的单位 —— 直接切即可，**不要**再用 `TextEncoder`、
+ * `codePointAt` 之类换单位，否则含中文/emoji 的行会整体错位（着色起点跑了、顺带染上标点）。
  */
 function editorLineHtml(m, i) {
   const text = m.texts[i];
