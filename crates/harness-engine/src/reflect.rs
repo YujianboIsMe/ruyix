@@ -30,12 +30,16 @@ const CHANGE_CLIP: usize = 4_000;
 const BEFORE_CLIP: usize = 1_500;
 /// 提示词里最多逐字列出几个改动文件的完整内容（其余让它自己 read）
 const MAX_INLINE_FILES: usize = 6;
+/// 【本轮取证】最多列几条命令（复核的上下文也得省着用）
+const MAX_PROBES: usize = 8;
 
 pub const REFLECT_SYSTEM: &str = r#"你是 ruyix 的复核员：**独立于**干活的 Agent，只负责挑毛病。你看到的是产物、验证报告与改过的文件，看不到它的推理过程 —— 这是刻意的。
 
 怎么复核（按给你的"本轮判据"选一套）：
 - 【产物评审】任务要求是否条条落地？边界与错误路径考虑了吗？会不会破坏既有行为（看调用方）？测试是否真的证明了要证明的行为（而不是自证）？
-- 【依据核对】答复里每一条断言，是否都能追到「读过的文件清单 + 文件内容 + 机械验证报告」里的证据？追不到的必须标出来。
+- 【依据核对】答复里每一条断言，是否都能追到「读过的文件 + **本轮命令取证** + 机械验证报告」里的证据？追不到的必须标出来。
+  关键是别把"证据池里没有"当成"主循环没做"：日期、端口、进程、环境变量这类事实本来就只有命令能给，
+  它们已经列在【本轮取证】里 —— 有就核对值对不对，**不许因为你自己不掌握别的来源就要求它再取一次证**。
 
 可用工具（只有这一个）：
 - read 读项目文件：{"tool":"read","args":{"path":"相对路径"}} —— 判断"是否破坏调用方"这类问题必须自己去读，不许凭空推测。
@@ -148,7 +152,13 @@ impl Reflection {
             s.push_str(&format!("复核总结：{}\n", self.summary.trim()));
         }
         s.push_str(
-            "（若你认为复核判断有误：先 read 相关文件核对，确认无误后再交付，并在最终答复里说明为何不采纳。）",
+            "（若你认为复核判断有误：先 read 相关文件核对，确认无误后再交付，并在最终答复里说明为何不采纳。）\n",
+        );
+        // 被打回时最自然的反应是"把原始输出整段贴进 final 自证" —— 那正好把 JSON 撑到
+        // 手写转义出错，白丢一轮（实测过）。明确说：证据查你的调用记录，答复里只引用。
+        s.push_str(
+            "别用「把命令输出 / 日志整段抄进 final」来证明自己 —— 那些在你的调用结果里，\
+             用户也能在面板看到；贴进去只会把 JSON 撑坏。要举证就摘那一行事实。",
         );
         s
     }
@@ -163,6 +173,11 @@ pub struct ReflectInput<'a> {
     pub changes: &'a [FileChange],
     /// 主循环这一轮读过哪些文件（依据核对的"证据集合"）
     pub read_paths: &'a [String],
+    /// 主循环这一轮跑过哪些命令、各自输出了什么（**依据核对的另一半证据集合**）
+    ///
+    /// 没有它，"今天星期几""端口谁占着""进程还在不在"这类**只能靠命令取证**的答复，
+    /// 断言会被逐条判"无处可查" —— 而主循环再跑十条命令也仍然喂不进这里，成了死循环。
+    pub probes: &'a [crate::agent::Probe],
     /// 主循环准备交付的答复（无改动场景用它做依据核对）
     pub answer: Option<&'a str>,
     pub verifications: &'a [VerifyOutcome],
@@ -207,13 +222,27 @@ pub fn build_user_prompt(inp: &ReflectInput<'_>) -> String {
             s.push_str("\n\n");
             s.push_str("【它这一轮读过的文件】\n");
             if inp.read_paths.is_empty() {
-                s.push_str("（一个都没读 —— 那么答复里关于项目内容的具体断言都缺依据）\n");
+                s.push_str("（一个都没读）\n");
             } else {
                 for p in inp.read_paths {
                     s.push_str(&format!("- {p}\n"));
                 }
             }
             s.push('\n');
+            // 命令取证：日期 / 端口 / 进程 / 环境变量这类事实只有这条路能给。
+            // 漏掉它 = 复核员只能判"证据无处可查"（见 ReflectInput::probes）
+            s.push_str("【本轮取证（跑过的命令与实际输出）】\n");
+            if inp.probes.is_empty() {
+                s.push_str("（一条命令都没跑）\n");
+            } else {
+                let skip = inp.probes.len().saturating_sub(MAX_PROBES);
+                if skip > 0 {
+                    s.push_str(&format!("（前面 {skip} 条已略去，只列最近的）\n"));
+                }
+                for p in inp.probes.iter().skip(skip) {
+                    s.push_str(&format!("$ {}\n{}\n\n", p.cmd, indent(&p.output)));
+                }
+            }
         }
     }
 
@@ -569,6 +598,7 @@ mod tests {
             project_root: proj,
             changes: &changes,
             read_paths: &[],
+            probes: &[],
             answer: None,
             verifications: &ver,
             gate_note: None,
@@ -578,12 +608,14 @@ mod tests {
         assert!(artifact.contains("未通过：1 项失败"), "{artifact}");
 
         let reads = vec!["src/main.rs".to_string()];
+        let probes = vec![probe("date /t", "2026/09/22 周二")];
         let evidence = build_user_prompt(&ReflectInput {
             task: "这个项目用什么框架",
             rubric: Rubric::Evidence,
             project_root: proj,
             changes: &[],
             read_paths: &reads,
+            probes: &probes,
             answer: Some("用的是 Axum"),
             verifications: &[],
             gate_note: None,
@@ -592,11 +624,16 @@ mod tests {
         assert!(evidence.contains("用的是 Axum"), "{evidence}");
         assert!(evidence.contains("src/main.rs"), "{evidence}");
         assert!(evidence.contains("（本轮没有跑验证）"), "{evidence}");
+        // 取证必须看得见 —— 这正是之前死锁的那条通道
+        assert!(evidence.contains("【本轮取证"), "{evidence}");
+        assert!(evidence.contains("$ date /t"), "{evidence}");
+        assert!(evidence.contains("2026/09/22 周二"), "{evidence}");
     }
 
+    /// 测试用的 runtime。`enable_all`：复核要连假 LLM（`testllm` 是台真 HTTP 服务器）
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .unwrap()
             .block_on(f)
@@ -629,6 +666,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            probes: &[],
             answer: None,
             verifications: &[],
             gate_note: None,
@@ -655,6 +693,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            probes: &[],
             answer: Some("答案"),
             verifications: &[],
             gate_note: None,
@@ -665,6 +704,92 @@ mod tests {
             out.reflection.note.as_deref().unwrap().contains("取消"),
             "{:?}",
             out.reflection.note
+        );
+    }
+
+    fn probe(cmd: &str, output: &str) -> crate::agent::Probe {
+        crate::agent::Probe {
+            cmd: cmd.into(),
+            output: output.into(),
+        }
+    }
+
+    /// **那条死锁的正门**（原来是必须先修的 bug）：靠命令取证的任务（今天星期几 / 端口 /
+    /// 进程在不在），答复里的断言以前必然被判"无处可查" —— 复核员的证据池里只有读过的
+    /// 文件，命令输出用完即弃，主循环再跑十条命令也喂不进来。
+    ///
+    /// 这里断言两件事：① 复核员**真收到**了命令输出（不是代码里存着就算）；
+    /// ② 有输出可核对时它判 ok，不再打回。
+    #[test]
+    fn evidence_carries_command_probes_to_the_reviewer() {
+        struct Quiet;
+        impl crate::pipeline::Sink for Quiet {}
+
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"verdict":"ok","summary":"输出可核对","findings":[]}"#.into(),
+        ]);
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.reflect.max_steps = 1;
+
+        let probes = vec![probe("date /t", "2026/09/22 周二")];
+        let inp = ReflectInput {
+            task: "今天星期几",
+            rubric: Rubric::Evidence,
+            project_root: Path::new("."),
+            changes: &[],
+            read_paths: &[],
+            probes: &probes,
+            answer: Some("今天是星期二（2026-09-22）"),
+            verifications: &[],
+            gate_note: None,
+        };
+        let out = block_on(run(&cfg, &inp, &crate::exec::new_cancel_flag(), &Quiet));
+
+        // ① 复核员打开的那份输入里必须有这条命令的实际输出
+        let req = llm.request(0);
+        assert!(req.contains("$ date /t"), "复核员没看到命令：{req}");
+        assert!(req.contains("2026/09/22 周二"), "复核员没看到输出：{req}");
+        // ② 看得到就该放行，不再打回
+        assert!(!out.reflection.suspect(), "{:?}", out.reflection);
+        assert_eq!(llm.count(), 1, "一次复核只该问一次");
+    }
+
+    /// 反证：证据池里**没有**命令输出时，"输出无处可查"是复核员唯一诚实的结论
+    /// （这条存在的意义是提醒：别把上面的通道再删掉）
+    #[test]
+    fn without_probes_the_answer_looks_unsupported() {
+        struct Quiet;
+        impl crate::pipeline::Sink for Quiet {}
+
+        let llm = crate::testllm::fake_llm(vec![
+            r#"{"verdict":"suspect","summary":"查不到","findings":[{"severity":"medium","claim":"2026/09/22 周二 在本次记录中无处可查","evidence":"unknown","verdict":"unsupported","suggest":"再取证"}]}"#
+                .into(),
+        ]);
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.reflect.max_steps = 1;
+
+        let inp = ReflectInput {
+            task: "今天星期几",
+            rubric: Rubric::Evidence,
+            project_root: Path::new("."),
+            changes: &[],
+            read_paths: &[],
+            probes: &[],
+            answer: Some("今天是星期二（2026-09-22）"),
+            verifications: &[],
+            gate_note: None,
+        };
+        let out = block_on(run(&cfg, &inp, &crate::exec::new_cancel_flag(), &Quiet));
+        assert!(!llm.request(0).contains("$ date"), "没跑命令就不该有取证段");
+        assert!(
+            out.reflection.suspect(),
+            "证据池里没有就该报疑，这才是诚实的"
         );
     }
 }

@@ -56,9 +56,11 @@ fn cpu_brand() -> Option<String> {
     None
 }
 
-/// 每轮 agent run 注入的环境说明（两三行）。结果缓存：首次调用做全部探测，
-/// 之后直接复用 —— GPU 子进程探测不该每条消息都跑一遍。
-pub fn note() -> String {
+/// 机器那一半（`运行环境：…` / `GPU：…` / `命令执行：…`）。
+///
+/// **时间不在这里**：这段的前提是"机器配置在应用生命周期内不变"，所以整段缓存
+/// （GPU 要跑子进程，不该每条消息探一遍）。塞进去就成了"永远停在第一次调用那一刻"。
+fn machine_note() -> &'static str {
     static NOTE: OnceLock<String> = OnceLock::new();
     NOTE.get_or_init(|| {
         let cores = std::thread::available_parallelism()
@@ -72,7 +74,20 @@ pub fn note() -> String {
             gpu_desc().as_deref(),
         )
     })
-    .clone()
+    .as_str()
+}
+
+/// 每轮 run 注入的环境说明 = **实时时间** + 缓存的机器那一半。
+///
+/// 时间不用 `date /t` / `Get-Date` 去探：它们的输出随机器区域设置变（中文环境给
+/// `2026/09/22 周二`，英文环境给 `Tue 09/22/2026`），模型先猜命令再猜格式，
+/// 光是"今天星期几"就能烧掉五六轮。引擎手里本来就有这个事实 —— 直接说。
+pub fn note() -> String {
+    format!(
+        "当前时间：{}\n{}",
+        engine::workspace::now_human(),
+        machine_note()
+    )
 }
 
 /// 跑一条探测命令：退出码 0、未超时、stdout 非空才算数。
@@ -261,7 +276,20 @@ mod tests {
         assert!(n.contains(std::env::consts::OS));
         assert!(n.contains(std::env::consts::ARCH));
         assert!(n.contains(if cfg!(windows) { "cmd /C" } else { "sh -c" }));
-        // 缓存生效：第二次调用拿到同一份
-        assert_eq!(n, note());
+
+        // 时间那一行：必须有，且是实时取（不能被缓存压成"首次调用那一刻"）
+        let now_line = n.lines().next().unwrap();
+        assert!(
+            now_line.starts_with("当前时间："),
+            "首行应是时间：{now_line}"
+        );
+        assert!(now_line.contains("星期"), "要给出星期几才行：{now_line}");
+
+        // 机器那半仍走缓存（GPU 子进程不该每条消息跑一遍）：两次调用的这部分必须一致
+        let strip_now = |s: String| s.lines().skip(1).collect::<Vec<_>>().join("\n");
+        let a = note();
+        let b = note();
+        assert_eq!(strip_now(a), strip_now(b), "机器说明没走缓存");
+        assert_eq!(strip_now(n.clone()), machine_note());
     }
 }

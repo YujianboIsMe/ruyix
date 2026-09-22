@@ -37,15 +37,25 @@
 1. 文件夹
 2. 文件
 
+两项对文件和文件夹都出现：
+1. 复制路径/Copy Path —— 复制**相对项目根**的路径（项目根本身复制成 `.`）
+2. 复制绝对路径/Copy Full Path —— 复制完整磁盘路径
+
 文件夹右键菜单内容：
-1. 删除/Delete
-2. 重命名/Rename
-3. 创建文件/New File
-4. 创建文件夹/New Folder
+1. 复制路径/Copy Path
+2. 复制绝对路径/Copy Full Path
+3. 删除/Delete
+4. 重命名/Rename
+5. 创建文件/New File
+6. 创建文件夹/New Folder
 
 文件右键菜单内容：
-1. 删除
-2. 重命名
+1. 复制路径/Copy Path
+2. 复制绝对路径/Copy Full Path
+3. 运行/Run（已识别的可执行文件才出现）
+4. 试跑/Try Run（未识别的后缀才出现）
+5. 删除
+6. 重命名
 
 ### 终端资源
 用无序列表显示以下条目：

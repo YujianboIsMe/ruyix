@@ -114,6 +114,17 @@
  *                     用真实 index.html + styles.css + main.js 在无头 Edge 里开一页，
  *                     逐元素量 offset-client（只有真画出来的滚动条才占这几像素）。
  *                     本机没有 Edge/Chrome 时该脚本自行 SKIP。
+ *   U33 ctx-copy-path   文件树右键的【复制路径 / 复制绝对路径】（v0.11）：相对路径相对**项目根**，
+ *                     不是相对当前目录；项目根本身复制成 "." 而不是空串（复制出空串 = 剪贴板
+ *                     被写成空、状态栏却报"已复制"，是最难发现的那种错）。两项必须对文件和
+ *                     文件夹都出现 —— 挂上 file-only / folder-only 就等于在另一半节点上消失。
+ *                     回放直接执行 main.js 里真实的 toRelativePath / copyToClipboard /
+ *                     handleContextCopyPath 源码（切片 + new Function），不另抄一份。
+ *   U34 autosave-no-ui   自动保存**只写盘**（v0.11）：着色是一趟全量 tree-sitter + 完整 IPC 往返，
+ *                     大纲是一次 O(全文) 解析 + 整块 innerHTML 重建 —— 挂在每次打字停顿上，
+ *                     等于把"停一下手"变成"跑一趟全量"。两者收敛到唯一出口
+ *                     refreshEditorChrome，只挂切回标签页 / 失焦 / 显式保存；而且高亮没过期
+ *                     就不再跑 IPC。输入只做本地"内容上屏"。
  */
 
 "use strict";
@@ -269,6 +280,54 @@ function runStaticChecks() {
   const missKey = [...new Set(refd)].filter((k) => !zhKeys.has(k));
   check("U5", "i18n-parity", missKey.length === 0,
     `index.html 引用但语言文件缺失: ${missKey.join(", ")}`);
+
+  // U33 ctx-copy-path：菜单项 DOM 契约 —— 两项都得在，且**不能**挂 file-only / folder-only
+  const ctxMenu = (html.match(/<div id="context-menu"[\s\S]*?<\/div>\s*<\/div>/) || [""])[0];
+  const ctxItems = [...ctxMenu.matchAll(/<div class="([^"]*)"[^>]*data-action="([^"]+)"/g)]
+    .map((m) => ({ cls: m[1], action: m[2] }));
+  for (const action of ["copy-path", "copy-full-path"]) {
+    const it = ctxItems.find((i) => i.action === action);
+    check("U33", "ctx-copy-path", !!it, `右键菜单缺少 data-action="${action}"`);
+    if (!it) continue;
+    check("U33", "ctx-copy-path",
+      !it.cls.includes("file-only") && !it.cls.includes("folder-only"),
+      `[${action}] 挂了 file-only/folder-only —— 文件和文件夹上都要能看到它（class="${it.cls}"）`);
+  }
+  const ctxMainJs = read("ui/main.js");
+  check("U33", "ctx-copy-path",
+    /case\s+"copy-path":/.test(ctxMainJs) && /case\s+"copy-full-path":/.test(ctxMainJs),
+    "main.js 的右键 switch 没有 copy-path / copy-full-path 两个分支");
+
+  // U34 autosave-no-ui：自动保存**只写盘**。着色（全量 tree-sitter + 一趟 IPC）与大纲
+  // （O(全文) 解析 + 重建 DOM）不许挂在每次打字停顿上，两者只能从 refreshEditorChrome 出去
+  const autoStart = ctxMainJs.indexOf("async function doAutoSave(tab) {");
+  const autoEnd = autoStart >= 0 ? ctxMainJs.indexOf("\n}\n", autoStart) : -1;
+  check("U34", "autosave-no-ui", autoStart >= 0 && autoEnd > autoStart,
+    "main.js 里定位不到 doAutoSave（切片锚点失效）");
+  const autoBody = autoStart >= 0 && autoEnd > autoStart
+    ? ctxMainJs.slice(autoStart, autoEnd) : "";
+  check("U34", "autosave-no-ui",
+    autoBody.includes("write_file") && !autoBody.includes("highlightAndRender") &&
+      !autoBody.includes("updateOutline"),
+    "doAutoSave 只该有 write_file —— 带 UI 刷新就等于每次打字停顿跑一趟全量 tree-sitter");
+  const debStart = ctxMainJs.indexOf("debounceTimer = setTimeout(() => {");
+  const debEnd = debStart >= 0 ? ctxMainJs.indexOf("}, 1000);", debStart) : -1;
+  const debBody = debStart >= 0 && debEnd > debStart ? ctxMainJs.slice(debStart, debEnd) : "";
+  check("U34", "autosave-no-ui",
+    debBody.includes("doAutoSave") && !debBody.includes("updateOutline") &&
+      !debBody.includes("highlightAndRender"),
+    "自动保存的防抖回调里只该有 doAutoSave，不该带 UI 刷新");
+  for (const fn of ["highlightAndRender", "updateOutline"]) {
+    const calls = [...ctxMainJs.matchAll(new RegExp(`(?<!function )\\b${fn}\\(`, "g"))].length;
+    check("U34", "autosave-no-ui", calls === 1,
+      `${fn} 的调用点应只有 refreshEditorChrome 里那一处，实际 ${calls} 处`);
+  }
+  check("U34", "autosave-no-ui",
+    [...ctxMainJs.matchAll(/refreshEditorChrome\(/g)].length >= 3,
+    "refreshEditorChrome 要挂在切回标签页 / 失焦 / 显式保存三个时机上");
+  check("U34", "autosave-no-ui",
+    /if \(tab\._language && !tab\._highlighted\)/.test(ctxMainJs),
+    "refreshEditorChrome 得先判断高亮是否过期 —— 没过期就别再跑一趟 IPC");
 
   // U9 config-form：配置表单的 DOM 锚点 / 脚本 / config 子动词路由
   const configJs = read("ui/config.js");
@@ -2295,6 +2354,100 @@ async function runExternalLinkChecks() {
   }
 }
 
+/**
+ * U33 ctx-copy-path：文件树右键【复制路径 / 复制绝对路径】回放 —— 执行 main.js 里**真实**的
+ * toRelativePath / copyToClipboard / handleContextCopyPath 源码（切片 + new Function），不另抄一份。
+ */
+async function runContextMenuChecks() {
+  const mainSrc = read("ui/main.js");
+  const start = mainSrc.indexOf("function toRelativePath(fullPath) {");
+  const anchor = mainSrc.indexOf("async function handleContextCopyPath(");
+  const end = anchor >= 0 ? mainSrc.indexOf("\n}\n", anchor) : -1;
+  check("U33", "ctx-copy-path", start >= 0 && end > start,
+    "main.js 里定位不到 toRelativePath…handleContextCopyPath 这段源码（切片锚点失效）");
+  if (start < 0 || end <= start) return;
+
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const statuses = [];
+  const I18N = {
+    t: (k, params) => {
+      let s = zh[k] ?? k;
+      for (const [pk, pv] of Object.entries(params || {})) s = s.split(`{${pk}}`).join(pv);
+      return s;
+    },
+  };
+  const state = { currentProject: { path: "D:\\proj" } };
+  let clip = null;
+  let failClip = false;
+  let execText = null;
+  let lastTa = null;
+  const navigatorStub = {
+    clipboard: {
+      writeText: async (t) => {
+        if (failClip) throw new Error("denied");
+        clip = t;
+      },
+    },
+  };
+  const documentStub = {
+    createElement: () => {
+      lastTa = { style: {}, value: "", select() {}, remove() {} };
+      return lastTa;
+    },
+    body: { appendChild() {} },
+    execCommand: () => {
+      execText = lastTa ? lastTa.value : null;
+      return true;
+    },
+  };
+  const setStatus = (msg, kind) => statuses.push({ msg, kind });
+  const body = mainSrc.slice(start, end + 3);
+  const factory = new Function("state", "I18N", "setStatus", "navigator", "document",
+    `${body}\nreturn { toRelativePath, handleContextCopyPath };`);
+  const mod = factory(state, I18N, setStatus, navigatorStub, documentStub);
+
+  const rel = mod.toRelativePath("D:\\proj\\src\\main.rs");
+  check("U33", "ctx-copy-path", rel === "src\\main.rs",
+    `相对路径要相对项目根，实际 "${rel}"`);
+  check("U33", "ctx-copy-path", mod.toRelativePath("D:\\proj") === "",
+    "项目根自身的相对路径应是空串");
+  state.currentProject.path = "D:/proj";
+  check("U33", "ctx-copy-path", mod.toRelativePath("D:\\proj\\src\\main.rs") === "src\\main.rs",
+    "项目根写成正斜杠时也要认（否则静默退化成复制绝对路径）");
+  state.currentProject.path = "D:\\proj";
+
+  await mod.handleContextCopyPath("D:\\proj\\src\\main.rs", false);
+  check("U33", "ctx-copy-path", clip === "src\\main.rs",
+    `【复制路径】应写相对路径，实际 "${clip}"`);
+  await mod.handleContextCopyPath("D:\\proj\\src\\main.rs", true);
+  check("U33", "ctx-copy-path", clip === "D:\\proj\\src\\main.rs",
+    `【复制绝对路径】应写完整路径，实际 "${clip}"`);
+
+  // 项目根本身：复制出空串 = 剪贴板被清空却报"已复制"，是最难发现的那种错
+  clip = null;
+  await mod.handleContextCopyPath("D:\\proj", false);
+  check("U33", "ctx-copy-path", clip === ".",
+    `项目根复制相对路径应得 "."，实际 ${JSON.stringify(clip)}`);
+
+  // 非安全上下文没有 async clipboard：必须退回 execCommand，不能静默失败
+  failClip = true;
+  clip = null;
+  await mod.handleContextCopyPath("D:\\proj\\a.txt", false);
+  check("U33", "ctx-copy-path", execText === "a.txt",
+    `剪贴板 API 不可用时要退回 execCommand，实际写入 "${execText}"`);
+  const allOk = statuses.every((s) => s.kind !== "error");
+  check("U33", "ctx-copy-path", statuses.length === 4 && allOk,
+    `前 4 次复制都该报成功: ${JSON.stringify(statuses)}`);
+
+  // 两条路都断：必须报 error，不能假装复制成功
+  documentStub.execCommand = () => false;
+  statuses.length = 0;
+  const ok = await mod.handleContextCopyPath("D:\\proj\\a.txt", false);
+  check("U33", "ctx-copy-path",
+    ok === false && statuses.length === 1 && statuses[0].kind === "error",
+    `复制失败要报 error（不能假装成功）: ok=${ok} ${JSON.stringify(statuses)}`);
+}
+
 // ============================================
 // 入口
 // ============================================
@@ -2311,6 +2464,7 @@ async function main() {
     ["U23", "service-replay", runServiceChecks],
     ["U30", "proc-log-replay", runProcLogChecks],
     ["U24", "external-link-replay", runExternalLinkChecks],
+    ["U33", "ctx-copy-path", runContextMenuChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

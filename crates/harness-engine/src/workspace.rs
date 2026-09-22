@@ -81,6 +81,35 @@ pub fn now_iso() -> String {
     chrono::Local::now().to_rfc3339()
 }
 
+/// 给人和模型看的当前本地时间：`2026-09-22 星期二 13:44 +08:00`。
+///
+/// 为什么要由引擎直接给，而不是让模型自己跑 `date /t` / `Get-Date`：它们的输出
+/// **依赖机器区域设置**（同一台机中文环境给 `2026/09/22 周二`，英文环境给
+/// `Tue 09/22/2026`），模型先猜命令、再猜格式，是最容易白烧几轮的活；而"现在几点"
+/// 引擎本来就知道 —— 直接说，别让它去探。
+///
+/// 星期写中文真名而不是 `%A`：chrono 默认 locale 会给出 `Tuesday`，与界面语言对不上。
+pub fn now_human() -> String {
+    const WD_CN: [&str; 7] = [
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+        "星期日",
+    ];
+    let now = chrono::Local::now();
+    let wd = WD_CN[chrono::Datelike::weekday(&now).num_days_from_monday() as usize];
+    format!(
+        "{} {} {} {}",
+        now.format("%Y-%m-%d"),
+        wd,
+        now.format("%H:%M"),
+        now.offset()
+    )
+}
+
 /// 紧凑时间戳（只有数字和 `-`）—— 目录名安全（`now_iso` 含 `:`，Windows 不允许做文件名）
 pub fn now_compact() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()

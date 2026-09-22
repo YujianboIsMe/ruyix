@@ -601,7 +601,8 @@ function switchTab(tabId) {
     const textarea = document.getElementById("editor-textarea");
     if (textarea) textarea.readOnly = true;
   }
-  updateOutline(tab);
+  // 切回来：补上打字期间丢掉的着色与大纲（打字时不跑全量，见 refreshEditorChrome）
+  refreshEditorChrome(tab);
 
   // Git 面板可见时刷新状态（文件可能刚被修改/保存）
   const gitPanel = document.getElementById("git-panel");
@@ -1162,6 +1163,29 @@ function updateOutline(tab) {
   });
 }
 
+/**
+ * 编辑器 UI 刷新（着色 + 大纲）—— **唯一出口**，只挂在"用户看得见结果"的时机：
+ * 打开 / 显式保存 / 切回标签页 / 离开编辑器（失焦）。
+ *
+ * 为什么不挂在打字停顿和自动保存上：着色是一趟全量 tree-sitter + 完整 IPC 往返，
+ * 大纲是一次 O(全文) 解析 + 整块 innerHTML 重建（每个条目还要挂一次点击监听）。
+ * 挂在自动保存上，等于把"停一下手"变成"跑一趟全量"——而保存要的只是把字节写进磁盘，
+ * 它跟屏幕长什么样没有关系。所以输入只做"内容上屏"（本地重画，不碰后端），
+ * 着色与大纲等到人离开或回来时补一次。
+ */
+async function refreshEditorChrome(tab) {
+  if (!tab) return;
+  try {
+    // 高亮还在且没过期（打字才会把它置空）就别再跑一趟 IPC —— 切回标签页不该有这开销
+    if (tab._language && !tab._highlighted) {
+      await highlightAndRender(tab, tab._language);
+    }
+    updateOutline(tab);
+  } catch {
+    // 刷新失败不影响保存与切换：最坏就是这一屏没着色（highlightAndRender 会退回纯文本）
+  }
+}
+
 function parseMarkdownOutline(content) {
   const headings = [];
   const lines = content.split("\n");
@@ -1681,10 +1705,8 @@ async function saveCurrentFile() {
     tab._modified = false;
     renderTabs();
 
-    // 如果之前有语法高亮，保存后重新高亮
-    if (tab._language) {
-      await highlightAndRender(tab, tab._language);
-    }
+    // 显式保存是用户看得见结果的时机：着色与大纲在这里补一次（统一走 refreshEditorChrome）
+    await refreshEditorChrome(tab);
 
     setStatus(I18N.t("save.ok", { name: tab.name }));
   } catch (err) {
@@ -1852,11 +1874,10 @@ function setupTextareaSync() {
       renderTabs();
     }
 
-    // 防抖：重置计时器
+    // 防抖：重置计时器。只保存，不刷新 UI（着色与大纲有自己的时机，见 refreshEditorChrome）
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       doAutoSave(tab);
-      updateOutline(tab);
     }, 1000);
   });
 
@@ -1868,6 +1889,10 @@ function setupTextareaSync() {
     const tab = state.tabs.find((t) => t.id === state.activeTabId);
     if (tab && tab._modified && !tab._isTerminal && !tab._isHelp) {
       doAutoSave(tab);
+    }
+    // 离开编辑器 = 打完了：这时才补着色与大纲（打字与自动保存都不跑，见 refreshEditorChrome）
+    if (tab && !tab._isTerminal && !tab._isHelp) {
+      refreshEditorChrome(tab);
     }
   });
 
@@ -1891,6 +1916,7 @@ function setupTextareaSync() {
   }, 5 * 60 * 1000);
 }
 
+/** 自动保存：**只写盘**。UI 刷新（着色 / 大纲）不归它管 —— 见 refreshEditorChrome */
 async function doAutoSave(tab) {
   if (!tab || !tab.path || !tab._modified) return;
   const invoke = getTauriInvoke();
@@ -1899,11 +1925,6 @@ async function doAutoSave(tab) {
     await invoke("write_file", { path: tab.path, content: tab.content });
     tab._modified = false;
     renderTabs();
-    // 保存后重新高亮（自动保存路径；blur/切标签页保存同样走这里）
-    if (tab._language) {
-      await highlightAndRender(tab, tab._language);
-    }
-    // 增量索引
   } catch {
     // 静默失败，定时器下次会重试
   }
@@ -2268,6 +2289,12 @@ function setupContextMenu() {
     }
 
     switch (action) {
+      case "copy-path":
+        await handleContextCopyPath(_ctxPath, false);
+        break;
+      case "copy-full-path":
+        await handleContextCopyPath(_ctxPath, true);
+        break;
       case "delete":
         await deleteFileOrFolder(_ctxPath);
         break;
@@ -2498,9 +2525,56 @@ async function createRunTargets(fullPath, specs) {
 /** 全路径 → 相对于项目根的路径 */
 function toRelativePath(fullPath) {
   if (!state.currentProject) return fullPath;
-  const root = state.currentProject.path.replace(/[/\\]+$/, "");
-  if ((fullPath || "").replace(/[/\\]+$/, "") === root) return "";
-  return fullPath.startsWith(root + "\\") ? fullPath.slice(root.length + 1) : fullPath;
+  // 分隔符归一化只用于**比较**：后端 list_dir 在 Windows 上给反斜杠，而项目根也可能来自
+  // 正斜杠的输入。不归一化就会静默退化成"复制绝对路径"——不报错，只是复制的东西不对。
+  const norm = (p) => p.replace(/\//g, "\\").replace(/\\+$/, "");
+  const rawRoot = state.currentProject.path.replace(/[/\\]+$/, "");
+  const rawFull = (fullPath || "").replace(/[/\\]+$/, "");
+  if (norm(rawFull) === norm(rawRoot)) return "";
+  // 归一化是等长替换，切片下标可以直接用在原串上 —— 复制出来的仍是原始分隔符
+  return norm(rawFull).startsWith(norm(rawRoot) + "\\")
+    ? rawFull.slice(rawRoot.length + 1)
+    : fullPath;
+}
+
+/** 写剪贴板。优先 async clipboard，失败退回 execCommand（非安全上下文里没有前者） */
+async function copyToClipboard(text) {
+  const nav = typeof navigator !== "undefined" ? navigator : null;
+  try {
+    if (nav && nav.clipboard && typeof nav.clipboard.writeText === "function") {
+      await nav.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 权限被拒 / 无焦点：走下面兜底
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 右键"复制路径 / 复制绝对路径"
+ * @param {string} fullPath 树节点上的绝对路径
+ * @param {boolean} absolute true=完整磁盘路径，false=相对项目根（项目根本身复制成 "."）
+ */
+async function handleContextCopyPath(fullPath, absolute) {
+  const text = absolute ? fullPath : (toRelativePath(fullPath) || ".");
+  const ok = await copyToClipboard(text);
+  if (ok) setStatus(I18N.t("ctx.copied", { path: text }));
+  else setStatus(I18N.t("ctx.copy_fail", { path: text }), "error");
+  return ok;
 }
 
 function hideContextMenu(menu) {
