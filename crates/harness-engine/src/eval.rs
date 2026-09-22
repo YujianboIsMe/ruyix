@@ -1069,17 +1069,9 @@ pub async fn cli(args: &[String]) -> i32 {
         return recheck(&suite, &arms, &out_path, &md_path);
     }
 
-    // 自愈：上次被打断的评估可能把 [kb] 留成了实验值
-    recover_kb_settings();
-
     // 知识库参数：默认用配置原值；给了 --kb-settings 就临时改（跑完还原）。
     // 为什么要它能改：默认 top_k=4/budget=1200 装不下约定文档，"知识进不去"会被误读成"知识没用"。
     let kb_settings = arg_value(args, "--kb-settings").unwrap_or_default();
-    let kb_saved = if kb_settings.trim().is_empty() {
-        std::collections::BTreeMap::new()
-    } else {
-        apply_kb_settings(&kb_settings)
-    };
 
     let mut parsed_arms = Vec::new();
     for a in &arms {
@@ -1092,17 +1084,21 @@ pub async fn cli(args: &[String]) -> i32 {
         }
     }
 
-    let cfg = match config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("读取配置失败：{e}");
-            return 2;
-        }
-    };
+    // 引擎不再自己读配置文件：配置由调用方注入，脚本场景就是默认值 + 环境变量。
+    let mut cfg = AppConfig::default();
+    config::apply_env_overrides(&mut cfg);
     if cfg.llm.api_key.trim().is_empty() {
-        eprintln!("没有 API Key（config.toml 或 DEEPSEEK_API_KEY），评估要真调模型");
+        eprintln!(
+            "没有 API Key（配置表单的 ai.api_key 或环境变量 DEEPSEEK_API_KEY），评估要真调模型"
+        );
         return 2;
     }
+    // 实验参数在内存里覆盖（跑完还原）—— 不再去动任何文件。
+    let kb_saved = if kb_settings.trim().is_empty() {
+        std::collections::BTreeMap::new()
+    } else {
+        apply_kb_settings(&mut cfg, &kb_settings)
+    };
     let mut specs = match load_suite(&suite_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -1227,7 +1223,7 @@ pub async fn cli(args: &[String]) -> i32 {
 
     save_report(&report, &out_path, &md_path);
     if !kb_saved.is_empty() {
-        restore_kb_settings(&kb_saved);
+        restore_kb_settings(&mut cfg, &kb_saved);
         println!("  [kb] 参数已还原到配置原值");
     }
     println!("\n报告已写入 {out_path}");
@@ -1255,68 +1251,40 @@ const KB_KEYS: [&str; 6] = [
     "chunk_chars",
 ];
 
-/// 临时改 `[kb]` 参数（返回原值）。**与 `scripts/kb-ab.py` 同一套做法**：
-/// 实验条件必须显式、可还原，不能偷偷依赖操作者机器上的配置。
-fn apply_kb_settings(spec: &str) -> std::collections::BTreeMap<String, Option<String>> {
+/// 临时改 `kb` 参数（返回原值，跑完还原）。
+///
+/// **在内存里改**，不再动用户的配置文件。以前那套是"先把原值写进备份文件、
+/// 再改配置、跑完还原、下次启动还来自愈"—— 全是为了防"Ctrl-C 打断把实验值
+/// 留在用户配置里"。配置入口废掉之后这些防护一个都不需要了：没有文件可污染。
+fn apply_kb_settings(
+    cfg: &mut AppConfig,
+    spec: &str,
+) -> std::collections::BTreeMap<String, String> {
     let mut saved = std::collections::BTreeMap::new();
-    for k in KB_KEYS {
-        saved.insert(k.to_string(), crate::config::raw_value("kb", k));
-    }
-    if let Some(path) = kb_backup_path()
-        && let Ok(text) = serde_json::to_string_pretty(&saved)
-    {
-        let _ = std::fs::write(path, text);
-    }
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for pair in spec.split(',').filter(|p| p.contains('=')) {
         let (k, v) = pair.split_once('=').unwrap();
-        if !crate::config::set_raw_value("kb", k.trim(), v.trim()) {
-            println!("  ⚠️ [kb] 里没有 {}（跳过）", k.trim());
+        let k = k.trim();
+        if !KB_KEYS.contains(&k) {
+            println!("  ⚠️ kb 里没有 {}（跳过）", k);
+            continue;
         }
+        if let Some(old) = config::flat_value(cfg, &format!("kb.{k}")) {
+            saved.insert(k.to_string(), old);
+        }
+        pairs.push((format!("kb.{k}"), v.trim().to_string()));
     }
+    config::apply_flat(cfg, &pairs);
     println!("  [kb] 实验参数：{spec}");
     saved
 }
 
-fn restore_kb_settings(saved: &std::collections::BTreeMap<String, Option<String>>) {
-    for (k, v) in saved {
-        if let Some(val) = v {
-            crate::config::set_raw_value("kb", k, val);
-        }
-    }
-    if let Some(p) = kb_backup_path() {
-        let _ = std::fs::remove_file(p);
-    }
-}
-
-/// 备份文件：**被打断也能还原**。
-///
-/// 踩过：用 Ctrl-C / 杀进程结束评估，`restore_kb_settings` 根本没机会跑，
-/// 用户的 `[kb]` 参数就被实验值留在那儿了（"实验条件不该污染用户配置"）。
-/// 所以改之前先把原值写进文件，下次启动时自愈。
-fn kb_backup_path() -> Option<PathBuf> {
-    let cfg = config::load().ok()?;
-    Some(config::runs_root(&cfg).join(".kb-settings-backup.json"))
-}
-
-/// 启动时的自愈：上次评估要是没跑完，这里把它改过的 `[kb]` 值还原回去。
-fn recover_kb_settings() {
-    let Some(path) = kb_backup_path() else { return };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(saved) =
-        serde_json::from_str::<std::collections::BTreeMap<String, Option<String>>>(&text)
-    else {
-        let _ = std::fs::remove_file(&path);
-        return;
-    };
-    for (k, v) in &saved {
-        if let Some(val) = v {
-            crate::config::set_raw_value("kb", k, val);
-        }
-    }
-    let _ = std::fs::remove_file(&path);
-    println!("⚠ 上次评估没跑完，已还原它临时改过的 [kb] 参数");
+fn restore_kb_settings(cfg: &mut AppConfig, saved: &std::collections::BTreeMap<String, String>) {
+    let pairs: Vec<(String, String)> = saved
+        .iter()
+        .map(|(k, v)| (format!("kb.{k}"), v.clone()))
+        .collect();
+    config::apply_flat(cfg, &pairs);
 }
 
 /// 判据修正后按既有产物重算（模型输出一个字节都不动）。
@@ -1342,7 +1310,7 @@ fn recheck(suite: &str, arms: &[String], out_path: &str, md_path: &str) -> i32 {
             return 2;
         }
     };
-    let root = config::load().map(|c| config::runs_root(&c)).ok();
+    let root = Some(config::runs_root(&AppConfig::default()));
     let mut rechecked = 0usize;
     let mut missing = 0usize;
     for r in report.runs.iter_mut() {

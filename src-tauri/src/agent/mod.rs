@@ -103,6 +103,10 @@ async fn run_task_pipeline(
     project_root: Option<&str>,
 ) -> Result<engine::workspace::RunRecord, String> {
     state.cancel.store(false, Ordering::Relaxed);
+    // 密钥脱敏的钥匙只能来自"发出这次运行的一方"（引擎不再自己读配置文件 ——
+    // 那条路读的是另一个文件的 key，等于没脱敏）。每次 run 都重设一遍，
+    // 免得用户改了配置之后还拿旧 key 去替换日志。
+    engine::observe::set_secrets(vec![cfg.llm.api_key.clone()]);
     let sink = AgentSink::new(app);
     let opts = engine::pipeline::RunOpts {
         task: contextualize(&cfg, task.trim(), project_root),

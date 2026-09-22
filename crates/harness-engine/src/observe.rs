@@ -161,6 +161,31 @@ fn slot() -> &'static Mutex<Option<Arc<Tracer>>> {
     TRACER.get_or_init(|| Mutex::new(None))
 }
 
+/// 需要脱敏的密钥（精确匹配替换，不靠正则猜格式）。
+///
+/// 由**调用方**在 run 入口注入。曾经这里由引擎自己去读配置文件拿 key ——
+/// 那条路在 IDE 下读的是**另一个文件**（引擎实验室的 config.toml），
+/// 而用户真正在用的 key 在 ruyix 配置里，于是密钥从来没被脱敏过。
+/// 现在钥匙只能从"发出这次运行的那一方"手里来。
+static SECRETS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+fn secrets_slot() -> &'static Mutex<Vec<String>> {
+    SECRETS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 注入本进程要脱敏的密钥（空串自动剔除）。
+pub fn set_secrets(v: Vec<String>) {
+    let cleaned = v
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect::<Vec<_>>();
+    *secrets_slot().lock().unwrap() = cleaned;
+}
+
+pub fn secrets() -> Vec<String> {
+    secrets_slot().lock().unwrap().clone()
+}
+
 /// 挂上 tracer（每次运行开始时调一次）。
 pub fn install(t: Arc<Tracer>) {
     *slot().lock().unwrap() = Some(t);

@@ -260,11 +260,17 @@ function runStaticChecks() {
       has(commandJs, "ConfigUI?.handleCommand("),
     "config.js 未加载 / 未暴露 ConfigUI / config.js 子动词未在 command.js 路由");
 
-  // U10 config-contract：表单命令注册齐全 + schema 字段的 i18n 齐全
-  const cfgCmds = [...new Set([...configJs.matchAll(/"(config_form_\w+)"/g)].map((m) => m[1]))];
+  // U10 config-contract：表单命令注册齐全 + 静态 schema 字段的 i18n 齐全
+  //
+  // 注意 harness 段的字段**不再手写在 config.js 里** —— 它由后端 `config_schema`
+  // 给出（键表单源化）。所以这里守三件事：①引用的命令都注册了；
+  // ②harness 键确实没被抄回前端（抄回去就等于又开始漂移）；③已有文案没被批量删掉。
+  const cfgCmds = [...new Set([...configJs.matchAll(/"(config_\w+)"/g)].map((m) => m[1]))];
   const cfgUnreg = cfgCmds.filter((c) => !mainRs.includes(`${c},`));
-  check("U10", "config-contract", cfgCmds.length === 3 && cfgUnreg.length === 0,
-    `config.js 引用了未注册的命令: ${cfgUnreg.join(", ")}`);
+  check("U10", "config-contract",
+    cfgCmds.includes("config_form_load") && cfgCmds.includes("config_schema") &&
+      cfgUnreg.length === 0,
+    `config.js 引用的命令未全部注册: ${cfgUnreg.join(", ")}`);
   const schemaText = configJs.slice(
     configJs.indexOf("const SCHEMA"), configJs.indexOf("const NUMERIC"));
   const schemaFields = [];
@@ -277,8 +283,17 @@ function runStaticChecks() {
   }
   const missField = schemaFields.filter(
     (p) => !zhKeys.has(`config.field.${p}`) || !zhKeys.has(`config.desc.${p}`));
-  check("U10", "config-contract", schemaFields.length >= 16 && missField.length === 0,
-    `SCHEMA 字段缺 i18n 键: ${missField.join(", ")}（解析到 ${schemaFields.length} 个字段）`);
+  check("U10", "config-contract", schemaFields.length >= 6 && missField.length === 0,
+    `静态 SCHEMA 字段缺 i18n 键: ${missField.join(", ")}（解析到 ${schemaFields.length} 个字段）`);
+  // harness 段的键一旦被抄回前端，这条立刻红
+  check("U10", "config-contract",
+    !/key:\s*"(llm|verify|gate|reflect|agent|step|lint|sandbox|kb|discover|env|proc|ask)\./
+      .test(schemaText),
+    "harness 段的键又被手写回 config.js 了（应由引擎 schema 提供）");
+  // 已有文案是产品资产：新键暂无文案时回落到显示键路径，但不许被批量删掉
+  const harpLabels = [...zhKeys].filter((k) => k.startsWith("config.field.harness."));
+  check("U10", "config-contract", harpLabels.length >= 20,
+    `harness 段的 i18n 文案只剩 ${harpLabels.length} 条`);
 
   // U10 config-contract：面板模块读 window.state，main.js 必须真的把它导出。
   // （顶层 const 只进全局词法环境，不挂 window —— 漏导出时 root() 恒为 null，
@@ -546,9 +561,9 @@ function runStaticChecks() {
       has(execRs, "pub fn bin_version(") &&
       has(intentRs, "discover::render_note(") &&
       has(stepRs, "discover::render_note(") &&
-      has(cfgBridgeRs, "discover.extra") &&
-      has(configJs, '"discover.enabled"') &&
-      has(configJs, '"discover.extra"'),
+      has(cfgBridgeRs, "engine::config::schema()") &&
+      zhKeys.has("config.field.harness.discover.enabled") &&
+      zhKeys.has("config.field.harness.discover.extra"),
     "命令发现没接上：工具表 / 两步探测（where+shell）/ 可用与不可用都写 / 主循环与子步骤都注入 / 配置项 缺一不可");
 
   // U20 env-install：环境准备（v0.5）—— 缺工具时的按需安装。它**不是第五种原语、不占新的 connect
@@ -570,8 +585,8 @@ function runStaticChecks() {
       has(envSetupRs, "installs.jsonl") &&
       has(envSetupRs, "discover::invalidate_cache()") &&
       has(execRs, "pub fn run_line(") &&
-      has(cfgBridgeRs, "env.install_enabled") &&
-      has(configJs, '"env.install_enabled"'),
+      has(cfgBridgeRs, "engine::config::schema()") &&
+      zhKeys.has("config.field.harness.env.install_enabled"),
     "环境准备没接上：宿主 env 目标（清单 + call 分流）/ 包管理器表 / 留记录 / 走 shell / 缓存失效 / 开关 缺一不可");
 
   // U21 exec-safety：执行前闸门 + 输出按代码页解码（v0.6）。两个病根各钉一遍：
@@ -675,12 +690,12 @@ function runStaticChecks() {
   check("U23", "proc-lifecycle",
     has(configRs, "pub struct ProcConfig") &&
       has(configRs, "pub proc: ProcConfig") &&
-      has(cfgBridgeRs, "ruyix.code.harness.proc.enabled") &&
-      has(cfgBridgeRs, "proc.ready_timeout_secs") &&
-      has(configJs, '"proc.enabled"') && has(configJs, '"proc.max"') &&
-      has(configJs, '"proc.ready_timeout_secs"') &&
+      has(cfgBridgeRs, "engine::config::schema()") &&
+      zhKeys.has("config.field.harness.proc.enabled") &&
+      zhKeys.has("config.field.harness.proc.max") &&
+      zhKeys.has("config.field.harness.proc.ready_timeout_secs") &&
       has(mainRs, "harness_engine::proc::shutdown_all(false)"),
-    "proc 配置没贯通或宿主退出未收尾：引擎 ProcConfig → 配置桥三键 → UI 三字段 → 退出全收");
+    "proc 配置没贯通或宿主退出未收尾：引擎 ProcConfig → 配置桥（照 schema）→ UI 三字段 → 退出全收");
 
   // U25 batch-calls：一轮多个调用（v0.7）。病根是"轮次全花在一次一个调用上"——一次模型往返
   // 只换回一个文件内容，而每轮都要把上下文重发一遍（轮数还近似平方地涨 token）。
@@ -719,12 +734,11 @@ function runStaticChecks() {
     has(configRs, "pub batch: bool") &&
       has(configRs, "pub batch_max: usize") &&
       has(configRs, "pub batch_parallel: bool") &&
-      has(cfgBridgeRs, "ruyix.code.harness.agent.batch") &&
-      has(cfgBridgeRs, "agent.batch_max") &&
-      has(configJs, '"agent.batch"') &&
-      has(configJs, '"agent.batch_max"') &&
-      has(configJs, '"agent.batch_parallel"'),
-    "批开关没贯通：引擎 AgentConfig 三字段 → 配置桥三键 → UI 三字段，缺一样用户就没法一行回退");
+      has(cfgBridgeRs, "engine::config::schema()") &&
+      zhKeys.has("config.field.harness.agent.batch") &&
+      zhKeys.has("config.field.harness.agent.batch_max") &&
+      zhKeys.has("config.field.harness.agent.batch_parallel"),
+    "批开关没贯通：引擎 AgentConfig 三字段 → 配置桥（照 schema）→ UI 三字段，缺一样用户就没法一行回退");
 
   check("U25", "batch-calls",
     has(intentRs, "fn batch_hint(") &&
@@ -790,11 +804,10 @@ function runStaticChecks() {
   check("U26", "ask-user",
     has(configRs, "pub struct AskConfig") &&
       has(configRs, "pub max_per_run: u32") &&
-      has(cfgBridgeRs, "ruyix.code.harness.ask.enabled") &&
-      has(cfgBridgeRs, "ask.max_per_run") &&
-      has(configJs, '"ask.enabled"') &&
-      has(configJs, '"ask.timeout_secs"') &&
-      has(configJs, '"ask.max_per_run"'),
+      has(cfgBridgeRs, "engine::config::schema()") &&
+      zhKeys.has("config.field.harness.ask.enabled") &&
+      zhKeys.has("config.field.harness.ask.timeout_secs") &&
+      zhKeys.has("config.field.harness.ask.max_per_run"),
     "配置三键没贯通（引擎 → 宿主桥 → 表单）：能不能问 / 等多久算没人回答 / 最多问几次都要能一行回退");
   check("U26", "ask-user",
     has(sessRs, "pub struct AskSnap") && has(sessRs, "pub ask: Vec<AskSnap>"),
@@ -1186,6 +1199,34 @@ async function runConfigChecks() {
     return;
   }
 
+  // 引擎配置 schema 的假实现（真实来源是 harness_engine::config::schema()）。
+  // 刻意覆盖全部 kind + 一个 ui:false 的键 —— 后者用来验证前端确实按**引擎的**
+  // 判断过滤，而不是自己在那边维护一份"该显示什么"的名单。
+  const engineSchema = [
+    { path: "workspace_root", kind: "text", default: "C:/x/runs", ui: true, options: [] },
+    { path: "llm.temperature", kind: "float", default: "0.2", ui: true, options: [] },
+    { path: "llm.max_tokens", kind: "int", default: "8192", ui: true, options: [] },
+    { path: "llm.api_key", kind: "text", default: "", ui: false, options: [] },
+    { path: "sandbox.mode", kind: "text", default: "require", ui: true,
+      options: ["require", "prefer", "off"] },
+    { path: "sandbox.image", kind: "text", default: "rust:1", ui: true, options: [] },
+    { path: "lint.enabled", kind: "bool", default: "true", ui: true, options: [] },
+    { path: "lint.package_dir", kind: "text", default: "", ui: true, options: [] },
+    { path: "lint.max_repair_rounds", kind: "int", default: "3", ui: true, options: [] },
+    { path: "kb.enabled", kind: "bool", default: "false", ui: true, options: [] },
+    { path: "kb.top_k", kind: "int", default: "4", ui: true, options: [] },
+    { path: "step.execute_plan", kind: "bool", default: "true", ui: true, options: [] },
+    { path: "step.max_steps", kind: "int", default: "96", ui: true, options: [] },
+    { path: "agent.max_elapsed_secs", kind: "int", default: "1800", ui: true, options: [] },
+    { path: "discover.extra", kind: "list", default: "", ui: true, options: [] },
+    { path: "proc.enabled", kind: "bool", default: "true", ui: true, options: [] },
+    { path: "proc.max", kind: "int", default: "4", ui: true, options: [] },
+    { path: "proc.ready_timeout_secs", kind: "int", default: "60", ui: true, options: [] },
+    { path: "ask.enabled", kind: "bool", default: "true", ui: true, options: [] },
+    { path: "ask.timeout_secs", kind: "int", default: "300", ui: true, options: [] },
+    { path: "ask.max_per_run", kind: "int", default: "4", ui: true, options: [] },
+  ];
+
   const sandbox = {
     I18N: i18n,
     window: Object.assign(
@@ -1204,6 +1245,7 @@ async function runConfigChecks() {
     getTauriInvoke: () => async (cmd, args) => {
       calls.push({ cmd, args });
       if (cmd === "config_form_load") return dump;
+      if (cmd === "config_schema") return engineSchema;
       // 模拟后端写回：空值 = 删键（与 config.rs 的增量语义一致），供重扫读回
       for (const e of args.entries) {
         const i = dump.entries.findIndex((x) => x.section === e.section && x.key === e.key);
@@ -1244,9 +1286,11 @@ async function runConfigChecks() {
 
     // ---- U11：命令系统入口 → 扫描 → 表单 ----
     await ConfigUI.handleCommand("form global");
+    const scanCalls = calls.filter((c) => c.cmd === "config_form_load");
     check("U11", "config-scan",
-      calls.length === 1 && calls[0].cmd === "config_form_load" && calls[0].args.scope === "global",
-      `form global 未按契约调用 config_form_load: ${JSON.stringify(calls)}`);
+      scanCalls.length === 1 && scanCalls[0].args.scope === "global" &&
+        calls.some((c) => c.cmd === "config_schema"),
+      `form global 未按契约调用 config_form_load / config_schema: ${JSON.stringify(calls.map((c) => c.cmd))}`);
     const tab = appState.tabs[0];
     check("U11", "config-open",
       !!tab && tab._isConfig === true && tab.configScope === "global" &&
@@ -1263,6 +1307,12 @@ async function runConfigChecks() {
     check("U11", "config-render",
       ctrls.length >= 17 && el("config-btn-save").disabled === true,
       `控件数 ${ctrls.length}（应 ≥17）；无改动时保存按钮应为禁用`);
+    // harness 段由引擎 schema 生成：ui:true 的要出现、ui:false 的不许出现
+    // （"该给用户看哪些键"是引擎的判断，前端不自己维护这份名单）
+    check("U11", "config-render",
+      has(html, "ruyix.code.harness.sandbox.mode") && has(html, "harness.sandbox") &&
+        !has(html, 'title="ruyix.code.harness.sandbox.engine"'),
+      "harness 段未按引擎 schema 渲染 / 未过滤 ui:false 的键 / 未按 path 首段分组");
     const bits = {
       既有值: has(html, "old-model"),
       继承提示: has(html, "继承自 global: zh-CN"),

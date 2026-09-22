@@ -1,6 +1,11 @@
-//! 配置：`%APPDATA%\darkhorse-harness\config.toml`，环境变量可覆盖。
+//! 配置：`AppConfig` 是引擎的全部可调参数，**由调用方注入**。
 //!
-//! 环境变量覆盖的意义：脚本/CI 里塞 `DEEPSEEK_API_KEY` 就能复用，不用改 GUI 配置。
+//! 这里**没有配置文件入口** —— 融合前引擎自己读 `%APPDATA%\darkhorse-harness\config.toml`，
+//! 那正是"两份真相源"的病根：IDE 里用户改的是 ruyix 配置，引擎却读另一个文件，
+//! 于是同一个键要配两次、日志脱敏还拿错了钥匙（详见 `schema()` 上方的说明）。
+//! IDE 场景下配置的唯一来源是 ruyix 的三作用域配置（`src-tauri/src/agent/config_bridge.rs`）。
+//!
+//! 环境变量覆盖保留（`DEEPSEEK_*`）：脚本 / CI 里塞 key 就能跑，不用改 GUI 配置。
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -862,11 +867,6 @@ impl Default for AppConfig {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("darkhorse-harness").join("config.toml")
-}
-
 /// 知识库根目录：注册表 `kb.json` 与每个来源的索引库都放这里。
 ///
 /// 与 `HARNESS_LINT_DIR` 同一套做法：允许环境变量覆盖（**测试靠它隔离**，
@@ -907,22 +907,7 @@ pub fn runs_root(cfg: &AppConfig) -> PathBuf {
     }
 }
 
-/// 读配置。文件不存在返回默认值（不报错），解析失败才报错 —— 用户手改坏了要能看见。
-pub fn load() -> Result<AppConfig, String> {
-    let path = config_path();
-    let mut cfg = if path.exists() {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("读取配置失败 {}: {e}", path.display()))?;
-        toml::from_str::<AppConfig>(&text)
-            .map_err(|e| format!("解析配置失败 {}: {e}", path.display()))?
-    } else {
-        AppConfig::default()
-    };
-    apply_env_overrides(&mut cfg);
-    Ok(cfg)
-}
-
-/// 环境变量优先于文件：方便脚本化调用 / 不把 key 落盘。
+/// 环境变量优先于配置：方便脚本化调用 / 不把 key 落盘。
 pub fn apply_env_overrides(cfg: &mut AppConfig) {
     if let Ok(v) = std::env::var("DEEPSEEK_API_KEY")
         && !v.trim().is_empty()
@@ -941,71 +926,217 @@ pub fn apply_env_overrides(cfg: &mut AppConfig) {
     }
 }
 
-pub fn save(cfg: &AppConfig) -> Result<(), String> {
-    let path = config_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
-    }
-    let text = toml::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("写入配置失败 {}: {e}", path.display()))?;
-    Ok(())
+// ============================================
+// 配置形态：由调用方注入 + 引擎自描述
+// ============================================
+//
+// 这里**没有配置文件入口**。融合前引擎自己读写 `%APPDATA%\darkhorse-harness\config.toml`，
+// 那就是"第二真相源"：IDE 里用户改的是 ruyix 配置，引擎读的是另一个文件。
+// 实测代价有两笔 —— 同一个键要配两次；`workspace::save` 做日志脱敏时
+// 从那个文件取 api_key，而 IDE 跑的是 `~/.ruyix/code/ai.toml` 里的 key，
+// 等于**拿错了钥匙、密钥根本没被脱敏**（已随本次改造修掉）。
+//
+// 现在配置一律由调用方构造（IDE 见 `src-tauri/src/agent/config_bridge.rs`），
+// 引擎只提供两样东西：
+//   1. `schema()` —— "我有哪些键、什么类型、默认多少"，供宿主桥接与配置表单使用；
+//   2. `apply_flat()` —— 把宿主的扁平键值对按类型灌进来（非法值保持默认）。
+// 加一个字段只需加字段 + 默认值，宿主、表单、桥全部自动跟上。
+
+/// 配置键的元信息。**路径 / 类型 / 默认值全部从 `AppConfig::default()` 推导**，
+/// 不在这里手写 —— 那是"同一个键名写四遍"的老病根。
+#[derive(Debug, Clone, Serialize)]
+pub struct KeySpec {
+    /// 相对配置树根的路径，如 `llm.temperature`（与 serde 路径同构）
+    pub path: String,
+    /// `bool` / `int` / `float` / `text` / `list`
+    pub kind: &'static str,
+    /// 默认值的字符串形态（表单用它做空值提示）
+    pub default: String,
+    /// 是否建议摆进 IDE 配置表单（见 `FORM_HIDDEN`）
+    pub ui: bool,
+    /// 取值有穷时的合法值（空 = 任意值）。见 `ENUM_KEYS`。
+    pub options: Vec<String>,
 }
 
-/// 读配置文件里某个段下的原始文本值（评估实验要用：临时改 `[kb]` 参数再还原）。
+/// 取值有穷的键（键 → 合法值）。**声明在引擎里**是因为只有引擎知道
+/// `sandbox.mode` 有哪三档、写错会静默落到哪一档。宿主桥的校验与表单的下拉
+/// 都从 `schema()` 读它，所以全局只有这一份。
+const ENUM_KEYS: &[(&str, &[&str])] = &[("sandbox.mode", &["require", "prefer", "off"])];
+
+/// 不进配置表单的键（**前缀匹配**：写 `entropy` 就盖住整段）。
 ///
-/// 为什么按文本读而不是反序列化：**要保住用户手写的注释与顺序**，
-/// 只动那一行的值，别把整个 config.toml 重排。
-pub fn raw_value(section: &str, key: &str) -> Option<String> {
-    let path = config_path();
-    let text = std::fs::read_to_string(&path).ok()?;
-    let mut cur = String::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            cur = t.to_string();
-        } else if cur == format!("[{section}]") {
-            if let Some(rest) = t.strip_prefix(&format!("{key} = ")) {
-                return Some(rest.trim().to_string());
-            }
-            if let Some(rest) = t.strip_prefix(&format!("{key}=")) {
-                return Some(rest.trim().to_string());
-            }
-        }
-    }
-    None
+/// 为什么是"隐藏表"而不是"白名单"：白名单会让**新增字段默认不可见**
+/// （忘了加一行 = 用户配不到），而隐藏表失效的方向只是"多露出一个键"，无害。
+const FORM_HIDDEN: &[&str] = &[
+    // LLM 端点 / 密钥 / 模型由宿主的 `ai` 段管（D8：配置单源），不在这里重复暴露 ——
+    // 同一样东西摆两处正是这次要消灭的问题。
+    "llm.base_url",
+    "llm.api_key",
+    "llm.model",
+    // 沙箱引擎（docker / bubblewrap）是平台实现细节，不是用户旋钮；
+    // `sandbox.image` 保留可见（换镜像是真需求）。
+    "sandbox.engine",
+    // 熵管理（自动开 PR 那套）是实验室能力，IDE 场景用不到。
+    "entropy",
+];
+
+fn is_hidden(path: &str) -> bool {
+    FORM_HIDDEN
+        .iter()
+        .any(|h| path == *h || path.starts_with(&format!("{h}.")))
 }
 
-/// 覆盖配置文件里某个段下的某个键（只改那一行，其余原样）。找不到该键返回 false。
-pub fn set_raw_value(section: &str, key: &str, value: &str) -> bool {
-    let path = config_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let mut cur = String::new();
-    let mut hit = false;
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            cur = t.to_string();
-            out.push(line.to_string());
+/// 列出全部配置键（含类型与默认值）。宿主拿它做键桥接与表单 schema，
+/// 于是**不存在"引擎有键、宿主不知道"这种漂移** —— 这正是以前加一个键要改六处的成因。
+pub fn schema() -> Vec<KeySpec> {
+    let root = toml::Value::try_from(AppConfig::default())
+        .unwrap_or_else(|_| toml::Value::Table(Default::default()));
+    let mut out = Vec::new();
+    flatten(&root, String::new(), &mut out);
+    out
+}
+
+fn flatten(v: &toml::Value, prefix: String, out: &mut Vec<KeySpec>) {
+    match v {
+        toml::Value::Table(t) => {
+            for (k, child) in t {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten(child, path, out);
+            }
+        }
+        leaf => {
+            let (kind, default) = leaf_of(leaf);
+            out.push(KeySpec {
+                ui: !is_hidden(&prefix),
+                options: options_of(&prefix),
+                path: prefix,
+                kind,
+                default,
+            });
+        }
+    }
+}
+
+fn options_of(path: &str) -> Vec<String> {
+    ENUM_KEYS
+        .iter()
+        .find(|(k, _)| *k == path)
+        .map(|(_, v)| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn leaf_of(v: &toml::Value) -> (&'static str, String) {
+    match v {
+        toml::Value::Boolean(b) => ("bool", b.to_string()),
+        toml::Value::Integer(i) => ("int", i.to_string()),
+        toml::Value::Float(f) => ("float", f.to_string()),
+        toml::Value::String(s) => ("text", s.clone()),
+        toml::Value::Array(a) => (
+            "list",
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        _ => ("text", String::new()),
+    }
+}
+
+/// 把扁平的字符串键值对灌进配置：`[("llm.temperature", "0.5"), …]`。
+///
+/// 返回**被采纳的键数**。规则：
+/// - 键不在 schema 里 → 忽略（拼错不该静默造出一个幽灵字段）；
+/// - 值按目标位置的类型 coerce；**转不过去就丢弃该键、保持原值**
+///   （用户敲错一个数字不该让整个配置或整批改动一起失效）；
+/// - 空串按"未设置"处理（保持默认），与宿主"空值 = 删键"的语义一致。
+///
+/// 实现刻意不含任何键名：拿配置的序列化结果当"类型表"，逐个打补丁再反序列化回来，
+/// 所以**加字段不用改这里**。逐键提交（而非整批）也是刻意的 —— 一个坏值不该连坐。
+pub fn apply_flat(cfg: &mut AppConfig, pairs: &[(String, String)]) -> usize {
+    let mut taken = 0;
+    for (path, raw) in pairs {
+        let raw = raw.trim();
+        if raw.is_empty() {
             continue;
         }
-        if cur == format!("[{section}]")
-            && (t.starts_with(&format!("{key} = ")) || t.starts_with(&format!("{key}=")))
-        {
-            out.push(format!("{key} = {value}"));
-            hit = true;
+        let Ok(mut tree) = toml::Value::try_from(&*cfg) else {
+            break;
+        };
+        let Some(slot) = lookup_mut(&mut tree, path) else {
             continue;
+        };
+        let Some(value) = coerce(slot, raw) else {
+            continue;
+        };
+        *slot = value;
+        match tree.try_into::<AppConfig>() {
+            Ok(next) => {
+                *cfg = next;
+                taken += 1;
+            }
+            Err(_) => continue,
         }
-        out.push(line.to_string());
     }
-    if !hit {
-        return false;
+    taken
+}
+
+/// 按路径定位到树上的叶子（`a.b.c`）。中间层不存在就 None。
+fn lookup_mut<'a>(tree: &'a mut toml::Value, path: &str) -> Option<&'a mut toml::Value> {
+    let mut cur = tree;
+    for seg in path.split('.') {
+        cur = cur.as_table_mut()?.get_mut(seg)?;
     }
-    let mut body = out.join("\n");
-    body.push('\n');
-    std::fs::write(&path, body).is_ok()
+    Some(cur)
+}
+
+/// 读某个键当前值的字符串形态 —— **与 `apply_flat` 的输入同构，可原样回灌**。
+///
+/// 存在的意义是"改了要能还原"（评估实验的临时参数覆盖）。列表用逗号连接，
+/// 与 `coerce` 的分隔符解析对称。
+pub fn flat_value(cfg: &AppConfig, path: &str) -> Option<String> {
+    let tree = toml::Value::try_from(cfg).ok()?;
+    let mut cur = &tree;
+    for seg in path.split('.') {
+        cur = cur.as_table()?.get(seg)?;
+    }
+    Some(match cur {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        other => other.to_string(),
+    })
+}
+
+/// 把字符串按**目标位置的类型**转成 toml 值；转不了返回 None（= 保持默认）。
+fn coerce(slot: &toml::Value, raw: &str) -> Option<toml::Value> {
+    match slot {
+        // 只认明确的真假值。旧桥的写法是"值存在但不是 true/1 就当 false"，
+        // 于是 `proc.enabled = "也许"` 会**静默把功能关掉** —— 现在它保持默认。
+        toml::Value::Boolean(_) => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(toml::Value::Boolean(true)),
+            "false" | "0" | "no" | "off" => Some(toml::Value::Boolean(false)),
+            _ => None,
+        },
+        toml::Value::Integer(_) => raw.parse::<i64>().ok().map(toml::Value::Integer),
+        toml::Value::Float(_) => raw.parse::<f64>().ok().map(toml::Value::Float),
+        toml::Value::String(_) => Some(toml::Value::String(raw.to_string())),
+        // 列表：逗号 / 分号 / 换行 / 空白都当分隔符 —— 手写配置的人不该被格式绊住
+        toml::Value::Array(_) => Some(toml::Value::Array(
+            raw.split([',', ';', '\n', '\t', ' '])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect(),
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1086,5 +1217,131 @@ mod tests {
         assert_eq!(kb_dir(&kb), PathBuf::from("D:/tmp/kb-test"));
         kb.dir = String::new();
         assert!(kb_dir(&kb).ends_with("kb"), "{:?}", kb_dir(&kb));
+    }
+
+    // ============================================
+    // 配置 schema / 表驱动注入
+    // ============================================
+
+    /// schema 里的每个路径都必须**真的能在配置树上定位到**，且 kind 与实际类型相符。
+    /// 这条测试是"键清单与结构体不漂移"的凭据 —— 以前键名在四处各写一遍，
+    /// 漏同步只能靠人眼；现在漂移会直接红。
+    #[test]
+    fn every_schema_key_resolves_on_the_real_config_tree() {
+        let specs = schema();
+        assert!(
+            specs.len() > 40,
+            "schema 键太少（{}），多半没走通推导",
+            specs.len()
+        );
+
+        let tree = toml::Value::try_from(AppConfig::default()).unwrap();
+        for s in &specs {
+            let mut got = &tree;
+            for seg in s.path.split('.') {
+                got = got
+                    .as_table()
+                    .and_then(|t| t.get(seg))
+                    .unwrap_or_else(|| panic!("schema 报了一个配置树上不存在的键：{}", s.path));
+            }
+            let (kind, default) = leaf_of(got);
+            assert_eq!(kind, s.kind, "{} 的类型标注与结构体不符", s.path);
+            assert_eq!(default, s.default, "{} 的默认值与结构体不符", s.path);
+        }
+    }
+
+    /// LLM 端点 / 密钥 / 模型归宿主的 `ai` 段，熵管理整段是实验室能力 —— 都不该进表单。
+    #[test]
+    fn schema_hides_keys_owned_by_other_layers() {
+        let specs = schema();
+        let ui = |p: &str| specs.iter().find(|s| s.path == p).map(|s| s.ui);
+        for p in ["llm.api_key", "llm.base_url", "llm.model", "sandbox.engine"] {
+            assert_eq!(ui(p), Some(false), "{p} 不该出现在配置表单里");
+        }
+        assert!(
+            specs
+                .iter()
+                .filter(|s| s.path.starts_with("entropy."))
+                .all(|s| !s.ui),
+            "entropy 整段不该进表单"
+        );
+        // 对照组：真旋钮必须可见，否则隐藏表写宽了没人发现
+        for p in [
+            "sandbox.image",
+            "kb.enabled",
+            "ask.max_per_run",
+            "verify.test_timeout_secs",
+        ] {
+            assert_eq!(ui(p), Some(true), "{p} 应该出现在配置表单里");
+        }
+    }
+
+    /// 值按**目标位置的类型**转换：数字串进数字键、真假词进布尔键、分隔符串进列表键。
+    #[test]
+    fn apply_flat_coerces_by_target_type() {
+        let mut cfg = AppConfig::default();
+        let pairs = vec![
+            ("llm.temperature".to_string(), "0.55".to_string()),
+            ("llm.max_tokens".to_string(), "1234".to_string()),
+            ("agent.batch".to_string(), "off".to_string()),
+            ("proc.enabled".to_string(), "YES".to_string()),
+            (
+                "discover.extra".to_string(),
+                "gradle, mvn;  ./x.sh".to_string(),
+            ),
+            ("workspace_root".to_string(), "D:/tmp/runs".to_string()),
+        ];
+        let n = apply_flat(&mut cfg, &pairs);
+        assert_eq!(n, pairs.len(), "合法的键应全部被采纳");
+        assert!((cfg.llm.temperature - 0.55).abs() < 1e-6);
+        assert_eq!(cfg.llm.max_tokens, 1234);
+        assert!(!cfg.agent.batch, "off 应解析为 false");
+        assert!(cfg.proc.enabled, "YES 应解析为 true");
+        assert_eq!(cfg.discover.extra, vec!["gradle", "mvn", "./x.sh"]);
+        assert_eq!(cfg.workspace_root, "D:/tmp/runs");
+    }
+
+    /// **坏值不许连坐**：敲错的那个键保持默认，同一批里正确的键照常生效。
+    #[test]
+    fn apply_flat_keeps_defaults_for_garbage_and_never_fails_the_batch() {
+        let mut cfg = AppConfig::default();
+        let before = cfg.clone();
+        let pairs = vec![
+            ("llm.temperature".to_string(), "hot".to_string()), // 非数字
+            ("llm.max_tokens".to_string(), "4096".to_string()), // 合法
+            ("agent.batch".to_string(), "也许".to_string()),    // 非真假词
+            ("max_context_chars".to_string(), "-1".to_string()), // 负数给 usize
+            ("没有这个键".to_string(), "x".to_string()),        // 不在 schema 里
+            ("kb.top_k".to_string(), "".to_string()),           // 空 = 未设置
+        ];
+        let n = apply_flat(&mut cfg, &pairs);
+        assert_eq!(n, 1, "六个里只有 max_tokens 该被采纳");
+        assert_eq!(
+            cfg.llm.temperature, before.llm.temperature,
+            "坏值必须保持默认"
+        );
+        assert_eq!(
+            cfg.agent.batch, before.agent.batch,
+            "不认识的真假词不许当 false"
+        );
+        assert_eq!(
+            cfg.max_context_chars, before.max_context_chars,
+            "负数不许把 usize 打成 0"
+        );
+        assert_eq!(cfg.kb.top_k, before.kb.top_k, "空串 = 未设置");
+        assert_eq!(cfg.llm.max_tokens, 4096, "同批里的正确键必须生效");
+    }
+
+    /// 旧桥把"值存在但不是 true/1"判为 false，于是 `proc.enabled = "也许"`
+    /// 会静默把功能关掉。这条钉住新语义：不认识的真假词 = 保持默认。
+    #[test]
+    fn a_misspelled_boolean_never_silently_disables_a_feature() {
+        let mut cfg = AppConfig::default();
+        assert!(cfg.proc.enabled, "前置：这个功能默认是开的");
+        apply_flat(
+            &mut cfg,
+            &[("proc.enabled".to_string(), "ture".to_string())],
+        );
+        assert!(cfg.proc.enabled, "拼错的 true 不该把功能关掉");
     }
 }

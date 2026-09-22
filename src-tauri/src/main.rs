@@ -1048,6 +1048,15 @@ fn config_form_apply(
     mgr.apply_scope_entries(&s, &entries, project_root.as_deref())
 }
 
+/// 配置菜单：引擎声明的配置键（键名 / 类型 / 默认值 / 枚举取值）。
+///
+/// 配置表单的 harness 段由它生成 —— 键名只在引擎里声明一次，前端不再手抄一份
+/// （"同一个键名写四遍"正是过去加一个键要改六处的成因）。
+#[tauri::command]
+fn config_schema() -> Vec<harness_engine::config::KeySpec> {
+    harness_engine::config::schema()
+}
+
 // ============================================
 // MCP 命令（stdio 客户端，配置在 mcp.toml）
 // ============================================
@@ -1537,6 +1546,7 @@ fn main() {
             config_form_load,
             config_form_save,
             config_form_apply,
+            config_schema,
             ai_translate,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,

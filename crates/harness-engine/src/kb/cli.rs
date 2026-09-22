@@ -13,12 +13,11 @@ pub fn kb_cli(args: &[String]) -> i32 {
         usage();
         return 2;
     };
-    let cfg = match crate::config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("读配置失败：{e}");
-            return 2;
-        }
+    // 配置由调用方注入；无头场景就是默认值 + 环境变量（引擎不再自己读配置文件）。
+    let cfg = {
+        let mut c = crate::config::AppConfig::default();
+        crate::config::apply_env_overrides(&mut c);
+        c
     };
     let mut engine = Engine::from_config(&cfg);
 
@@ -137,7 +136,7 @@ fn cmd_index(engine: &mut Engine, args: &[String]) -> i32 {
             }
         }
     }
-    *engine = Engine::from_config(&crate::config::load().unwrap_or_default());
+    *engine = Engine::from_config(&crate::config::AppConfig::default());
     code
 }
 

@@ -114,14 +114,10 @@ pub fn save(root: &Path, rec: &RunRecord) -> Result<(), String> {
         .unwrap_or(true);
     if need_install {
         let dir = run_dir(root, &rec.run_id)?;
-        // 脱敏用：自己那把钥匙做精确替换，不靠正则猜格式
-        let secrets: Vec<String> = crate::config::load()
-            .ok()
-            .map(|c| vec![c.llm.api_key])
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|k| !k.trim().is_empty())
-            .collect();
+        // 脱敏用的密钥由 run 入口注入（`observe::set_secrets`）。
+        // **不再自己去读配置文件**：那条路在 IDE 下读的是引擎实验室的 config.toml，
+        // 而用户实际用的是 ruyix 配置里的 key —— 拿错了钥匙等于没脱敏。
+        let secrets = crate::observe::secrets();
         crate::observe::install(crate::observe::Tracer::new(&dir, &rec.run_id, secrets));
         crate::observe::log("info", "run", format!("开始记录：{}", rec.run_id));
     }

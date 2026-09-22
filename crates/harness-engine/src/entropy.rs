@@ -1275,7 +1275,10 @@ mod tests {
     fn live_entropy_cycle_on_temp_repo() {
         use std::process::Command;
 
-        let cfg = crate::config::load().expect("读配置失败");
+        // 配置由调用方注入（这里是 live 测试）：默认值 + 环境变量。
+        // 刻意不落盘 key —— 要跑这个测试就 `export DEEPSEEK_API_KEY=...`。
+        let mut cfg = crate::config::AppConfig::default();
+        crate::config::apply_env_overrides(&mut cfg);
         assert!(!cfg.llm.api_key.trim().is_empty(), "需要先配置 API Key");
 
         let base = std::env::temp_dir().join(format!(

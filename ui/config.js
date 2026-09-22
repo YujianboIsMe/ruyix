@@ -20,7 +20,12 @@ window.ConfigUI = (() => {
   const SUB_COMMANDS = ["form", "save", "apply", "cancel"];
 
   // ============================================
-  // 已知配置项 schema（"扫描配置项"的已知面）
+  // 已知配置项 schema
+  //   ai / ui 两段是**宿主的键空间**（不在引擎 schema 里），键名在这里声明。
+  //   harness 段的字段**不在这里写** —— 运行时由后端 `config_schema` 给出，
+  //   键名 / 类型 / 默认值 / 枚举取值全部来自引擎自己的声明（见 loadHarnessFields）。
+  //   加一个引擎键不用改这个文件，这正是"键表单源化"要买到的东西。
+  //
   // 标签 / 说明走 i18n：config.field.<section>.<key> / config.desc.<section>.<key>
   // 这里只声明 section 顺序、字段顺序与控件类型
   // ============================================
@@ -41,57 +46,52 @@ window.ConfigUI = (() => {
         { key: "emoji", kind: "toggle" },
       ],
     },
-    {
-      section: "harness",
-      fields: [
-        { key: "workspace_root", kind: "text" },
-        { key: "llm.temperature", kind: "number" },
-        { key: "llm.max_tokens", kind: "number" },
-        { key: "sandbox.mode", kind: "select", options: ["prefer", "require", "off"] },
-        { key: "sandbox.image", kind: "text" },
-        { key: "lint.enabled", kind: "toggle" },
-        { key: "lint.package_dir", kind: "text" },
-        { key: "lint.max_repair_rounds", kind: "number" },
-        { key: "kb.enabled", kind: "toggle" },
-        { key: "kb.top_k", kind: "number" },
-        // v0.4 计划即执行：默认开。关掉就回到"plan 只给用户看进度"的旧行为 ——
-        // 但关着的时候大纲进度只能靠推断（拿模型事前列的 files 对账），实测会大面积误判，
-        // 所以这个开关要摆在明面上，用户看得见"我关了什么"。
-        { key: "step.execute_plan", kind: "toggle" },
-        { key: "step.max_steps", kind: "number" },
-        { key: "agent.max_elapsed_secs", kind: "number" },
-        // v0.5 命令发现：把"本机有什么命令"实测后写进模型上下文。默认开 —— 关掉之后模型
-        // 只能自己一轮轮试（实测有 5~6 轮纯耗在探 mvn / java 在不在）。extra 是逃生口：
-        // 工具表没覆盖的命令写在这里，逗号分隔，不用改代码。
-        { key: "discover.enabled", kind: "toggle" },
-        { key: "discover.ttl_secs", kind: "number" },
-        { key: "discover.extra", kind: "text" },
-        // v0.5 环境准备：缺失工具按需安装，走 connect（宿主挑包管理器，每次留记录）。默认开 ——
-        // 这是自成长闭环的最后一环（探测 → 告知 → 请求安装 → 再探测）。关掉后宿主连清单都不摆
-        // env 目标，模型侧彻底看不见。
-        { key: "env.install_enabled", kind: "toggle" },
-        // v0.6 托管进程：永不退出的服务有了生命周期出口。后台起 + 一条命令判就绪 + 句柄收。
-        // 这不是新原语，是 execute 的第三个维度。默认开 —— 关掉后 background 一律被拒，
-        // 模型会被推回 `start` / `Start-Process` 那套歪招（实测就死在这儿，空转 17 轮）。
-        { key: "proc.enabled", kind: "toggle" },
-        { key: "proc.max", kind: "number" },
-        { key: "proc.ready_timeout_secs", kind: "number" },
-        // v0.7 批量调用：一轮发多个互不依赖的调用，引擎把**连续的只读调用并发执行**、
-        // 写入/执行按声明顺序串行，结果一次全回给模型。默认开 —— 这是省轮次的主通道
-        // （一次读 5 个文件从 5 轮降到 1 轮）。batch_max 是单批上限（超了报上限让它拆批，
-        // 不静默截断）；batch_parallel 只关"并发读"本身，用于排查并发相关的问题。
-        { key: "agent.batch", kind: "toggle" },
-        { key: "agent.batch_max", kind: "number" },
-        { key: "agent.batch_parallel", kind: "toggle" },
-        // v0.8 提问（ask_user）：需求歧义只能问委托人 —— "做一个远程登录功能" 登哪台机器？
-        // 四原语组合都取不到这个答案。默认开：关掉等于让模型回去猜（猜错的代价是整体返工）。
-        // timeout_secs = 0 表示无限等；超时一律 fail-closed（引擎拒绝依赖它的动作，绝不假设同意）。
-        { key: "ask.enabled", kind: "toggle" },
-        { key: "ask.timeout_secs", kind: "number" },
-        { key: "ask.max_per_run", kind: "number" },
-      ],
-    },
   ];
+
+  /** 引擎声明的 harness 字段（运行时拉一次；拉不到就只剩 ai/ui，表单仍可用） */
+  let harnessFields = null;
+
+  /** 引擎的 kind → 控件类型 */
+  function kindOf(kind) {
+    if (kind === "bool") return "toggle";
+    if (kind === "int" || kind === "float") return "number";
+    return "text";
+  }
+
+  /**
+   * 从后端取引擎配置 schema。
+   *
+   * 只取 `ui: true` 的键 —— 哪些键该给用户看是**引擎自己**的判断
+   * （`config::FORM_HIDDEN`），前端不维护这份名单，也就不会与引擎脱节。
+   */
+  async function loadHarnessFields() {
+    if (harnessFields) return harnessFields;
+    const invoke = getInvoke();
+    if (!invoke) return null;
+    try {
+      const specs = await invoke("config_schema");
+      harnessFields = (specs || [])
+        .filter((s) => s.ui)
+        .map((s) => {
+          const path = String(s.path);
+          return {
+            key: path,
+            kind: kindOf(s.kind),
+            options: s.options && s.options.length ? s.options : null,
+            // 分组用 path 第一段（llm / sandbox / kb …），渲染成子段标题。
+            // **注意**：section 仍是 `harness`（落盘键由 section+key 拼出，不能动），
+            // 这个 group 只影响显示。
+            group: path.split(".")[0],
+            hint: s.default,
+          };
+        });
+      return harnessFields;
+    } catch (err) {
+      // 取不到 schema 不该让表单不可用：未知键仍会以"扫描"形态出现，照样能编辑
+      status(String(err), "error");
+      return null;
+    }
+  }
 
   const NUMERIC = /^-?\d+(\.\d+)?$/;
 
@@ -126,11 +126,6 @@ window.ConfigUI = (() => {
     if (typeof setStatus === "function") setStatus(msg, kind);
   }
 
-  function schemaField(section, key) {
-    const s = SCHEMA.find((x) => x.section === section);
-    return s ? s.fields.find((f) => f.key === key) : null;
-  }
-
   /** 未知键的类型猜测：键名敏感词 → 布尔字面量 → 数字 → 文本 */
   function guessKind(key, value) {
     if (/key|secret|token|password/i.test(key)) return "password";
@@ -149,16 +144,17 @@ window.ConfigUI = (() => {
 
     const rows = [];
     const used = new Set();
-    const push = (section, key) => {
+    // known = schema 里的声明（宿主手写段，或引擎 schema 给的字段）；group 只影响分组显示
+    const push = (section, key, known, group) => {
       const id = section + "." + key;
       if (used.has(id)) return;
       used.add(id);
       const entry = byId.get(id);
-      const known = schemaField(section, key);
       const value = entry ? entry.value : "";
       rows.push({
         idx: 0,
         section,
+        group: group || null,
         key,
         fullKey: entry ? entry.full_key : "ruyix.code." + id,
         initial: value,
@@ -169,11 +165,14 @@ window.ConfigUI = (() => {
       });
     };
 
-    for (const s of SCHEMA) for (const f of s.fields) push(s.section, f.key);
+    for (const s of SCHEMA) for (const f of s.fields) push(s.section, f.key, f, null);
+    // 引擎声明的 harness 字段：section 恒为 `harness`（落盘键 = section + key），
+    // group 取 path 第一段，只影响渲染出来的子段标题。
+    for (const f of harnessFields || []) push("harness", f.key, f, f.group);
     const rest = dump.entries
       .filter((e) => !used.has(e.section + "." + e.key))
       .sort((a, b) => (a.section + "." + a.key).localeCompare(b.section + "." + b.key));
-    for (const e of rest) push(e.section, e.key);
+    for (const e of rest) push(e.section, e.key, null, null);
 
     rows.forEach((r, i) => {
       r.idx = i;
@@ -181,12 +180,14 @@ window.ConfigUI = (() => {
     return rows;
   }
 
+  /** 按"段 + 子组"聚类：harness 会拆成 harness.llm / harness.sandbox / … 便于阅读 */
   function groupRows(rows) {
     const groups = [];
     for (const r of rows) {
-      let g = groups.find((x) => x.section === r.section);
+      const title = r.group ? r.section + "." + r.group : r.section;
+      let g = groups.find((x) => x.title === title);
       if (!g) {
-        g = { section: r.section, rows: [] };
+        g = { section: r.section, title, rows: [] };
         groups.push(g);
       }
       g.rows.push(r);
@@ -278,9 +279,9 @@ window.ConfigUI = (() => {
 
     const groups = groupRows(conf.rows || []);
     body.innerHTML = groups.map((g) => {
-      const title = hasKey("config.section." + g.section)
-        ? I18N.t("config.section." + g.section)
-        : g.section;
+      const title = hasKey("config.section." + g.title)
+        ? I18N.t("config.section." + g.title)
+        : g.title;
       return `<section class="config-section">` +
         `<div class="config-section-head">` +
         `<span class="config-section-name">${esc(title)}</span>` +
@@ -377,7 +378,8 @@ window.ConfigUI = (() => {
       return;
     }
     tab = window.state.tabs.find((t) => t._isConfig && t.configScope === scope) || null;
-    const dump = await load(scope);
+    // 表单数据与引擎 schema 并行取：schema 拿不到只影响 harness 段（ai/ui 照常）
+    const [dump] = await Promise.all([load(scope), loadHarnessFields()]);
     if (!dump) return;
 
     // 已开着的标签保留未保存的编辑值（从菜单重开不该吞掉它）
