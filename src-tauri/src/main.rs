@@ -73,18 +73,109 @@ struct FileBase64 {
     base64: String,
 }
 
-#[derive(serde::Serialize, Clone)]
-struct LineHighlight {
-    line_number: usize,
-    text: String,
-    spans: Vec<LineSpan>,
+/// 语法高亮的 tag（前端 CSS 类是 `tok-<name>`）。
+///
+/// 取值集合是**闭的**：`arborium_theme::tag_to_name` 的 match 只有 27 个出口，
+/// 而它上游的 `.and_then()` 已经把不认识的捕获名滤掉了 —— 也就是说**今天**这条链路
+/// 最多也只能产出这 27 个名字。既然集合是闭的，就没有理由让每个 span 各自扛一个
+/// `String`：枚举化之后打错一个名字是编译错误，而不是"这个 span 悄悄没颜色"。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tok {
+    Keyword,
+    Function,
+    String,
+    Comment,
+    Type,
+    Variable,
+    Constant,
+    Number,
+    Operator,
+    Punctuation,
+    Property,
+    Attribute,
+    Tag,
+    Macro,
+    Label,
+    Namespace,
+    Constructor,
+    Title,
+    Strong,
+    Emphasis,
+    Link,
+    Literal,
+    Strikethrough,
+    DiffAdd,
+    DiffDelete,
+    Embedded,
+    Error,
 }
 
+/// 名字 ↔ 枚举的**唯一来源**。`from_name` / `name` 都查这张表，不各写一份 match ——
+/// 两份 match 迟早会有一份忘了改。
+const TOK_TABLE: &[(&str, Tok)] = &[
+    ("keyword", Tok::Keyword),
+    ("function", Tok::Function),
+    ("string", Tok::String),
+    ("comment", Tok::Comment),
+    ("type", Tok::Type),
+    ("variable", Tok::Variable),
+    ("constant", Tok::Constant),
+    ("number", Tok::Number),
+    ("operator", Tok::Operator),
+    ("punctuation", Tok::Punctuation),
+    ("property", Tok::Property),
+    ("attribute", Tok::Attribute),
+    ("tag", Tok::Tag),
+    ("macro", Tok::Macro),
+    ("label", Tok::Label),
+    ("namespace", Tok::Namespace),
+    ("constructor", Tok::Constructor),
+    ("title", Tok::Title),
+    ("strong", Tok::Strong),
+    ("emphasis", Tok::Emphasis),
+    ("link", Tok::Link),
+    ("literal", Tok::Literal),
+    ("strikethrough", Tok::Strikethrough),
+    ("diff-add", Tok::DiffAdd),
+    ("diff-delete", Tok::DiffDelete),
+    ("embedded", Tok::Embedded),
+    ("error", Tok::Error),
+];
+
+impl Tok {
+    /// 表外的名字 → `None`（丢弃该 span）。与旧版 `.and_then(tag_to_name)` 的行为一致。
+    fn from_name(name: &str) -> Option<Tok> {
+        TOK_TABLE.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
+    }
+
+    /// CSS 类名后缀。
+    fn name(self) -> &'static str {
+        TOK_TABLE
+            .iter()
+            .find(|(_, t)| *t == self)
+            .map(|(n, _)| *n)
+            .expect("Tok 的每个取值都必须在 TOK_TABLE 里")
+    }
+}
+
+/// `highlight_code` 的返回载荷。两处是刻意的：
+///
+/// 1. **不回传正文**。前端手里就有（`tab.content`），逐行回传一遍等于把文件复制一份
+///    再走一遍 JSON。而且后端用 `code.lines()` 收行（**吃掉末尾空行**），前端
+///    `split("\n")` 不吃 —— 拿后端的行去拼 textarea 的值，就会让"以换行结尾的文件"
+///    少一个末尾 `\n`，用户一按键 `tab.content = textarea.value` 把差值固化，写回时
+///    末尾换行就真没了。所以**行由前端自己切**，后端只回答"第 i 行的片段在哪"。
+/// 2. **tag 走名表 + 下标**。整份响应里名表只出现一次（≤27 项），span 里只放一个下标。
+///    比"每个 span 带一个 tag 字符串"省掉几乎全部字节；也不会因为两边枚举顺序不一致
+///    而整体错色 —— 顺序漂移在这个设计下最多是"查到另一个名字"，而裸数字编码会是全篇错色。
 #[derive(serde::Serialize, Clone)]
-struct LineSpan {
-    start_col: usize,
-    end_col: usize,
-    tag: String,
+struct HighlightPayload {
+    /// tag 名表：按首次出现顺序去重，span 里的第三个数是它的下标
+    tags: Vec<&'static str>,
+    /// 每行一串扁平三元组 `[start, end, tag_idx, start, end, tag_idx, ...]`；
+    /// 下标就是行号（0 基），空行是 `[]`。行数与 `code.lines().count()` 一致，
+    /// 可能比前端的 `split("\n")` **少一行**（末行换行）—— 前端按不足处理即可。
+    lines: Vec<Vec<u32>>,
 }
 
 // ============================================
@@ -482,7 +573,7 @@ fn rename_path(from: String, to: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn highlight_code(language: String, code: String) -> Result<Vec<LineHighlight>, String> {
+async fn highlight_code(language: String, code: String) -> Result<HighlightPayload, String> {
     // 在后台线程中执行 CPU 密集的语法高亮，避免阻塞异步运行时
     tauri::async_runtime::spawn_blocking(move || {
         use arborium::Highlighter;
@@ -865,11 +956,12 @@ pub(crate) fn resolve_windows_cmd(program: &str) -> String {
 /// 一秒就重跑一次，于是文件一大就整个编辑器无响应。
 ///
 /// 现在：一次扫出每行起始偏移 → 每个 span 二分定位所在行 → 跨行 span 按行切分。
-/// 输出与旧实现逐字节相同（`slow_reference` + 等价性测试钉住）。
+/// 片段语义（切点、排序、去重）与旧实现逐字节相同（`slow_reference` + 等价性测试钉住），
+/// 只是输出换成了紧凑载荷（见 `HighlightPayload`）。
 fn build_line_highlights(
     code: &str,
     spans: &[(u32, u32, &str)],
-) -> Result<Vec<LineHighlight>, String> {
+) -> Result<HighlightPayload, String> {
     let lines: Vec<&str> = code.lines().collect();
 
     // 第 k 行的起始字节偏移 = 第 k 个 '\n' 之后。一次扫完，
@@ -883,8 +975,12 @@ fn build_line_highlights(
     }
 
     // 二分定位每个 span 覆盖的行区间，再按行切分（跨行的注释/字符串会横跨多行）
-    let mut per_line: Vec<Vec<(usize, usize, &str)>> = vec![Vec::new(); lines.len()];
+    let mut per_line: Vec<Vec<(usize, usize, Tok)>> = vec![Vec::new(); lines.len()];
     for &(start, end, tag) in spans {
+        // 名字 → 枚举在这里就做掉：下游全是 Copy 的小整数，不再碰字符串
+        let Some(tok) = Tok::from_name(tag) else {
+            continue;
+        };
         let (s, e) = (start as usize, end as usize);
         if e <= s {
             continue;
@@ -899,40 +995,45 @@ fn build_line_highlights(
             let rel_start = s.max(line_start) - line_start;
             let rel_end = e.min(line_end) - line_start;
             if rel_start < rel_end {
-                per_line[li].push((rel_start, rel_end, tag));
+                per_line[li].push((rel_start, rel_end, tok));
             }
             li += 1;
         }
     }
 
-    let mut result = Vec::with_capacity(lines.len());
-    for (line_idx, line_text) in lines.iter().enumerate() {
+    let mut tags: Vec<&'static str> = Vec::new();
+    let mut out_lines: Vec<Vec<u32>> = Vec::with_capacity(per_line.len());
+    // 直接消费 per_line：每行取走自己的片段，免得再用下标索引一遍
+    for mut line_spans in per_line {
         // 排序并去重：tree-sitter 会对同一段文本产生多个重叠 capture
-        let mut line_spans = std::mem::take(&mut per_line[line_idx]);
         line_spans.sort_by_key(|a| a.0);
-        let mut deduped: Vec<LineSpan> = Vec::new();
+        let mut flat: Vec<u32> = Vec::new();
         let mut covered = 0usize;
-        for (start_col, end_col, tag) in line_spans {
+        for (start_col, end_col, tok) in line_spans {
             if end_col <= covered {
                 continue;
             }
             let start_col = start_col.max(covered);
             covered = end_col;
-            deduped.push(LineSpan {
-                start_col,
-                end_col,
-                tag: tag.to_string(),
-            });
+            // 名表按首次出现顺序收集；重复出现的只留下来一次
+            let idx = match tags.iter().position(|t| *t == tok.name()) {
+                Some(i) => i,
+                None => {
+                    tags.push(tok.name());
+                    tags.len() - 1
+                }
+            };
+            flat.push(start_col as u32);
+            flat.push(end_col as u32);
+            flat.push(idx as u32);
         }
-
-        result.push(LineHighlight {
-            line_number: line_idx + 1,
-            text: line_text.to_string(),
-            spans: deduped,
-        });
+        out_lines.push(flat);
     }
 
-    Ok(result)
+    Ok(HighlightPayload {
+        tags,
+        lines: out_lines,
+    })
 }
 
 // ============================================
@@ -1649,7 +1750,9 @@ mod tests {
 
     /// 旧实现的等价物，**只作测试参照**：每行重扫全文件找行首 + 每行遍历全部 span。
     /// 刻意保留它的 O(n²) —— 用来钉住线性重写的输出，并给出复杂度比值。
-    fn slow_reference(code: &str, spans: &[(u32, u32, &str)]) -> Vec<LineHighlight> {
+    /// 片段语义（切点 / 排序 / 去重）与生产实现各自独立写一遍，两边都错成同一个样子
+    /// 才会通过，所以它同时也是"没把语义顺手改歪"的参照。
+    fn slow_reference(code: &str, spans: &[(u32, u32, &str)]) -> HighlightPayload {
         fn line_byte_offset(source: &str, line_number: usize) -> usize {
             if line_number <= 1 {
                 return 0;
@@ -1664,13 +1767,17 @@ mod tests {
         }
 
         let lines: Vec<&str> = code.lines().collect();
-        let mut result = Vec::new();
+        let mut tags: Vec<&'static str> = Vec::new();
+        let mut out_lines: Vec<Vec<u32>> = Vec::new();
         for (line_idx, line_text) in lines.iter().enumerate() {
             let line_start = line_byte_offset(code, line_idx + 1);
             let line_end = line_start + line_text.len();
 
-            let mut line_spans = Vec::new();
+            let mut line_spans: Vec<(usize, usize, Tok)> = Vec::new();
             for &(start, end, tag) in spans {
+                let Some(tok) = Tok::from_name(tag) else {
+                    continue;
+                };
                 let s = start as usize;
                 let e = end as usize;
                 if e > line_start && s < line_end {
@@ -1681,37 +1788,37 @@ mod tests {
                         line_text.len()
                     };
                     if rel_start < rel_end {
-                        line_spans.push(LineSpan {
-                            start_col: rel_start,
-                            end_col: rel_end,
-                            tag: tag.to_string(),
-                        });
+                        line_spans.push((rel_start, rel_end, tok));
                     }
                 }
             }
 
-            line_spans.sort_by_key(|a| a.start_col);
-            let mut deduped: Vec<LineSpan> = Vec::new();
+            line_spans.sort_by_key(|a| a.0);
+            let mut flat: Vec<u32> = Vec::new();
             let mut covered = 0usize;
-            for span in line_spans {
-                if span.end_col <= covered {
+            for (start_col, end_col, tok) in line_spans {
+                if end_col <= covered {
                     continue;
                 }
-                let mut s = span;
-                if s.start_col < covered {
-                    s.start_col = covered;
-                }
-                covered = s.end_col;
-                deduped.push(s);
+                let start_col = start_col.max(covered);
+                covered = end_col;
+                let idx = match tags.iter().position(|t| *t == tok.name()) {
+                    Some(i) => i,
+                    None => {
+                        tags.push(tok.name());
+                        tags.len() - 1
+                    }
+                };
+                flat.push(start_col as u32);
+                flat.push(end_col as u32);
+                flat.push(idx as u32);
             }
-
-            result.push(LineHighlight {
-                line_number: line_idx + 1,
-                text: line_text.to_string(),
-                spans: deduped,
-            });
+            out_lines.push(flat);
         }
-        result
+        HighlightPayload {
+            tags,
+            lines: out_lines,
+        }
     }
 
     /// 线性重写必须与旧实现**逐字节相同**。
@@ -1780,10 +1887,11 @@ mod tests {
         let reference = slow_reference(&src, &spans);
         let d_reference = t1.elapsed().as_secs_f64();
 
-        assert_eq!(linear.len(), reference.len(), "行数不一致");
+        let span_count = |p: &HighlightPayload| p.lines.iter().map(|l| l.len() / 3).sum::<usize>();
+        assert_eq!(linear.lines.len(), reference.lines.len(), "行数不一致");
         assert_eq!(
-            linear.iter().map(|l| l.spans.len()).sum::<usize>(),
-            reference.iter().map(|l| l.spans.len()).sum::<usize>(),
+            span_count(&linear),
+            span_count(&reference),
             "span 总数不一致"
         );
 
@@ -1857,11 +1965,213 @@ mod tests {
         }
 
         // 端到端：行级高亮结果应携带 span（前端据此渲染 <span class="tok-*">）
-        let lines = build_line_highlights(src, &themed).expect("构建行级高亮失败");
-        assert_eq!(lines.len(), 6, "6 行源码应生成 6 行高亮");
+        let payload = build_line_highlights(src, &themed).expect("构建行级高亮失败");
+        assert_eq!(payload.lines.len(), 6, "6 行源码应生成 6 行高亮");
         assert!(
-            lines.iter().any(|l| !l.spans.is_empty()),
+            payload.lines.iter().any(|l| !l.is_empty()),
             "至少一行应包含高亮 span"
+        );
+    }
+
+    // ============================================
+    // 高亮载荷的形状（P3）
+    // ============================================
+
+    /// 一段有规模的真源码：400 行、每行都有 span、还带中文注释（顺带覆盖多字节行）。
+    fn sample_source() -> String {
+        let mut src = String::new();
+        for i in 0..400 {
+            src.push_str(&format!(
+                "fn f{i}(x: i32) -> i32 {{\n    // 注释 {i}\n    x + {i}\n}}\n"
+            ));
+        }
+        src
+    }
+
+    fn payload_of(lang: &str, src: &str) -> HighlightPayload {
+        let owned = themed_spans(lang, src);
+        let spans: Vec<(u32, u32, &str)> =
+            owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+        build_line_highlights(src, &spans).expect("构建载荷失败")
+    }
+
+    /// **载荷里不许出现文件正文。**
+    ///
+    /// 后端回传逐行 `text` 是纯浪费（前端手里就有 `tab.content`），而且 `code.lines()`
+    /// 会吃掉末尾空行、前端 `split("\n")` 不吃 —— 拿后端的行拼 textarea 的值，就会把
+    /// "以换行结尾的文件"的末尾换行弄丢。有人为了"省前端一次 split"把它加回来，这条要红。
+    #[test]
+    fn highlight_payload_does_not_echo_the_source_text() {
+        let src = "fn main() {\n    let secret = \"UNIQUE_MARKER_9f3a\";\n}\n";
+        let json = serde_json::to_string(&payload_of("rust", src)).unwrap();
+        assert!(
+            !json.contains("UNIQUE_MARKER_9f3a") && !json.contains("main"),
+            "载荷里出现了源码正文（逐行回传等于把文件复制一份再走一遍 JSON）：{json}"
+        );
+        assert!(
+            !json.contains("start_col") && !json.contains("line_number"),
+            "载荷退回了逐 span 的对象编码 —— key 名重复才是载荷的大头，扁平成三元组才有意义：{json}"
+        );
+    }
+
+    /// 载荷必须**显著小于**旧形状（逐行对象 + 逐 span 对象 + 回传正文）。
+    ///
+    /// 判据用**比值**，和复杂度金丝雀同一个路子：机器、内容都不影响结论。
+    /// 旧形状在同一份片段上现搭出来比 —— 这样比的只是"编码"，不是"高亮质量"。
+    #[test]
+    fn highlight_payload_is_much_smaller_than_the_legacy_shape() {
+        let src = sample_source();
+        let payload = payload_of("rust", &src);
+
+        let lines: Vec<&str> = src.lines().collect();
+        let legacy: Vec<serde_json::Value> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let flat = payload.lines.get(i).cloned().unwrap_or_default();
+                let spans: Vec<serde_json::Value> = (0..flat.len())
+                    .step_by(3)
+                    .map(|k| {
+                        serde_json::json!({
+                            "start_col": flat[k],
+                            "end_col": flat[k + 1],
+                            "tag": payload.tags[flat[k + 2] as usize],
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "line_number": i + 1, "text": text, "spans": spans })
+            })
+            .collect();
+
+        let new_len = serde_json::to_string(&payload).unwrap().len();
+        let old_len = serde_json::to_string(&legacy).unwrap().len();
+        assert!(
+            new_len * 3 <= old_len,
+            "载荷没瘦下来：新 {new_len} 字节 vs 旧 {old_len} 字节（要求至少 3 倍）。\
+             检查是不是把 text 加回来了、或片段又变成每 span 一个对象。"
+        );
+    }
+
+    /// 载荷形状：行号即下标、每行是 3 的倍数、下标落在名表内、片段升序且不重叠。
+    /// 前端**直接顺序切片**渲染（不做排序/重叠检查），所以这些前提必须由后端保证。
+    #[test]
+    fn highlight_payload_shape_is_dense_and_flat() {
+        let src = sample_source();
+        let payload = payload_of("rust", &src);
+
+        assert_eq!(
+            payload.lines.len(),
+            src.lines().count(),
+            "载荷行数必须等于 code.lines().count()（下标即行号）"
+        );
+        assert!(
+            !payload.tags.is_empty() && payload.tags.len() <= TOK_TABLE.len(),
+            "名表只该含用到的 tag 且不超过全集：{:?}",
+            payload.tags
+        );
+        let uniq: std::collections::BTreeSet<&str> = payload.tags.iter().copied().collect();
+        assert_eq!(uniq.len(), payload.tags.len(), "名表必须去重");
+
+        for (i, flat) in payload.lines.iter().enumerate() {
+            assert_eq!(flat.len() % 3, 0, "第 {i} 行不是 3 的倍数：{flat:?}");
+            let mut prev_end = 0usize;
+            for k in (0..flat.len()).step_by(3) {
+                let (s, e, t) = (flat[k] as usize, flat[k + 1] as usize, flat[k + 2] as usize);
+                assert!(t < payload.tags.len(), "第 {i} 行的 tag 下标越界：{t}");
+                assert!(s < e, "第 {i} 行有空/倒置片段：{s}..{e}");
+                assert!(s >= prev_end, "第 {i} 行的片段重叠或未升序：{flat:?}");
+                prev_end = e;
+            }
+        }
+    }
+
+    /// `Tok` 必须覆盖高亮器**实际会产出**的每个名字。
+    /// 漏一个的后果不是报错，而是那一类片段从此没有颜色（`from_name` 返回 `None` 被丢弃）。
+    #[test]
+    fn tok_table_covers_every_name_the_highlighter_produces() {
+        let corpus: &[(&str, &str)] = &[
+            (
+                "rust",
+                "fn main() { let v = vec![1, 2]; println!(\"{:?}\", v); }",
+            ),
+            ("python", "def f(x):\n    return {'a': 1}\n"),
+            ("javascript", "const f = (x) => x + 1; // note\n"),
+            (
+                "html",
+                "<!DOCTYPE html>\n<html lang=\"zh\"><body class=\"a\">t</body></html>\n",
+            ),
+            ("css", ".a { color: #fff; }\n"),
+            ("markdown", "# T\n\n[l](http://x)\n\n~~s~~ **b** *i* `c`\n"),
+            ("sql", "SELECT id, name FROM t WHERE id = 1; -- note\n"),
+            ("java", "public class A { int f(int x) { return x; } }\n"),
+        ];
+
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (lang, src) in corpus {
+            for (_, _, name) in themed_spans(lang, src) {
+                assert!(
+                    Tok::from_name(&name).is_some(),
+                    "{lang} 产出了表外的 tag `{name}`：这一类片段会静默失去颜色。\
+                     加进 TOK_TABLE，并补上 .tok-{name} 的样式"
+                );
+                seen.insert(name);
+            }
+        }
+        assert!(
+            seen.len() >= 8,
+            "语料太弱，只覆盖了 {} 个 tag，钉不住表：{seen:?}",
+            seen.len()
+        );
+    }
+
+    /// 每个 `Tok` 都必须在 `styles.css` 里有 `.tok-<name>`。
+    ///
+    /// 枚举化之后"表里有的 tag 却没人给它配色"是**新的**一类坏：以前未知名字至少还会
+    /// 拼出一个类名（配不配上色另说），现在得显式确认每个枚举值都真能画出颜色。
+    /// 反向读源码而不是靠人记 —— 加枚举值忘了配色时这条会红。
+    #[test]
+    fn every_tag_has_a_css_class() {
+        let css = include_str!("../../ui/styles.css");
+
+        // **先去掉注释**：注释里提一句 `.tok-macro` 不该算数，否则门禁会被一句说明骗过
+        // （这正是反向验证抓出来的：把规则换成一句含类名的注释，门禁照过）。
+        let mut code = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(i) = rest.find("/*") {
+            code.push_str(&rest[..i]);
+            match rest[i + 2..].find("*/") {
+                Some(j) => rest = &rest[i + 2 + j + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        code.push_str(rest);
+
+        let mut declared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut rest = code.as_str();
+        while let Some(i) = rest.find(".tok-") {
+            let tail = &rest[i + 5..];
+            let end = tail
+                .find(|c: char| !(c.is_ascii_lowercase() || c == '-'))
+                .unwrap_or(tail.len());
+            // 只有"类名后面跟 `{`"才算真声明（选择器列表 `.a, .tok-b {` 也认）
+            if tail[end..].trim_start().starts_with('{') {
+                declared.insert(tail[..end].to_string());
+            }
+            rest = &tail[end..];
+        }
+
+        let missing: Vec<&str> = TOK_TABLE
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| !declared.contains(*n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "下列 tag 没有 CSS 规则（会渲染成默认色，看起来像「高亮丢了」）：{missing:?}；\
+             TOK_TABLE 里声明的名字必须与 styles.css 的 .tok-* 对得上"
         );
     }
 

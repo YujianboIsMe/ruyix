@@ -792,21 +792,30 @@ function editorWindowRows(lineH) {
   return Math.max(1, Math.ceil(vh / lineH) + 1 + EDITOR_OVERSCAN * 2);
 }
 
-/** 一行 → .code-line 的内层 HTML（有高亮片段就按片段切） */
+/**
+ * 一行 → .code-line 的内层 HTML（有高亮片段就按片段切）。
+ *
+ * 片段是**扁平三元组** `[start, end, tagIdx, ...]`（后端 `HighlightPayload.lines`），
+ * 这里直接按下标读、不建对象 —— 5000 行的文件有上万个片段，逐个 `{start_col, end_col, tag}`
+ * 建出来就是上万次分配。`m.tags` 是 tag 名表，第三个数是在它里面的下标。
+ */
 function editorLineHtml(m, i) {
   const text = m.texts[i];
   if (!text) return " ";
-  const spans = m.spans && m.spans[i];
-  if (!spans || !spans.length) return escapeHtml(text);
+  const flat = m.spans && m.spans[i];
+  if (!flat || !flat.length) return escapeHtml(text);
+  const tags = m.tags || [];
   let html = "";
   let pos = 0;
-  for (const span of spans) {
-    if (span.start_col > pos) html += escapeHtml(text.slice(pos, span.start_col));
+  for (let k = 0; k + 2 < flat.length; k += 3) {
+    const s = flat[k];
+    const e = flat[k + 1];
+    if (s > pos) html += escapeHtml(text.slice(pos, s));
     html +=
-      '<span class="tok-' + span.tag + '">' +
-      escapeHtml(text.slice(span.start_col, span.end_col)) +
+      '<span class="tok-' + (tags[flat[k + 2]] || "text") + '">' +
+      escapeHtml(text.slice(s, e)) +
       "</span>";
-    pos = span.end_col;
+    pos = e;
   }
   if (pos < text.length) html += escapeHtml(text.slice(pos));
   return html || " ";
@@ -863,8 +872,10 @@ function paintEditorWindow() {
  * 「textarea 显式高度」和「窗口渲染」必须成套出现，只做一半编辑器就不可用。
  *
  * texts      每行文本
- * spans      每行的高亮片段（与 texts 等长）；null = 纯文本
- * text       写进 textarea 的完整文本
+ * spans      每行的高亮片段，**扁平三元组** `[start, end, tagIdx, ...]`
+ *            （可直接用后端 `HighlightPayload.lines`；比 texts 短也算合法，缺的行按纯文本画）
+ * tags       tag 名表，spans 里的第三个数是它的下标；null = 全部按纯文本
+ * text       写进 textarea 的完整文本（**必须与 tab.content 逐字节相同**）
  * lineClass  附加到 .code-line 的类（终端输出用 terminal-line）
  * readOnly   textarea 是否只读
  */
@@ -875,6 +886,7 @@ function setEditorContent(opts) {
   editorModel = {
     texts: texts,
     spans: opts.spans || null,
+    tags: opts.tags || null,
     lineClass: opts.lineClass || "",
     total: texts.length,
     lineH: lineH,
@@ -934,9 +946,9 @@ async function highlightAndRender(tab, language) {
   try {
     // 快照：请求返回时若内容已变化，丢弃过期的高亮结果
     const snapshot = tab.content;
-    const lines = await invoke("highlight_code", { language, code: snapshot });
+    const payload = await invoke("highlight_code", { language, code: snapshot });
     if (tab.content !== snapshot) return;
-    tab._highlighted = lines;
+    tab._highlighted = payload;
     tab._language = language;
     if (tab.id === state.activeTabId) {
       renderHighlightedCode(tab);
@@ -950,20 +962,25 @@ async function highlightAndRender(tab, language) {
 }
 
 function renderHighlightedCode(tab) {
-  const lines = tab._highlighted;
-  if (!lines) {
+  // 后端给的是紧凑载荷 { tags, lines }（见 Rust 侧 HighlightPayload）
+  const payload = tab._highlighted;
+  if (!payload || !payload.lines) {
     renderPlainCode(tab);
     return;
   }
 
-  // 只在这里摊平成两个等长数组，DOM 交给 paintEditorWindow 按窗口建
-  const texts = new Array(lines.length);
-  const spans = new Array(lines.length);
-  for (let i = 0; i < lines.length; i++) {
-    texts[i] = lines[i].text;
-    spans[i] = lines[i].spans;
-  }
-  setEditorContent({ texts: texts, spans: spans, text: texts.join("\n"), readOnly: false });
+  // 行由**前端**自己切，不用后端的行数：后端用 `code.lines()` 收行、会吃掉末尾空行，
+  // 而 textarea 的值必须与 tab.content 逐字节相同 —— 否则"以换行结尾的文件"一打开就
+  // 少一个末尾 \n，用户按一下键 `tab.content = textarea.value` 把差值固化，写回时
+  // 末尾换行就真没了。行数不足的部分（最多差一行）按纯文本画。
+  const text = tab.content == null ? "" : String(tab.content);
+  setEditorContent({
+    texts: text.split("\n"),
+    spans: payload.lines,
+    tags: payload.tags,
+    text: text,
+    readOnly: false,
+  });
 }
 
 function renderPlainCode(tab) {

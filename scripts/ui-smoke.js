@@ -101,6 +101,10 @@
  *                     另钉两条**静默退化**的样式契约：backdrop 必须绝对定位（回到 grid 叠加会让
  *                     layout 每次重问 textarea 的内在高度 → 25000 行重绘 1.4ms 变 110ms）、
  *                     textarea 必须 wrap="off"（软换行会让光标与高亮从折行处起错开）
+ *                     P3 追加：高亮载荷是紧凑形状 { tags, lines }（名表只出现一次 + 每行扁平
+ *                     三元组），且**行由前端按 tab.content 自己切** —— 后端 code.lines() 会吃掉
+ *                     末尾空行，用后端的行拼 textarea 的值就会把文件末尾的换行弄丢（见下面那条
+ *                     "末尾换行" 检查）
  */
 
 "use strict";
@@ -1008,6 +1012,19 @@ function runStaticChecks() {
     "渲染入口没走 setEditorContent：" +
       entryPoints.filter((n) => !editorBodyOf(n).includes("setEditorContent(")).join(" / ") +
       "（三者必须都走，它俩才是「显式高度 + 窗口渲染」成套出现的地方）");
+  // P3：行必须由**前端**按 tab.content 自己切。后端回的是 `code.lines()` 的行（吃掉末尾空行），
+  // 拿它去拼 textarea 的值 = 文件末尾换行被静默吃掉，按键后固化、写回真丢。
+  check("U31", "editor-virtual-render",
+    editorBodyOf("renderHighlightedCode").includes("tab.content") &&
+      editorBodyOf("renderHighlightedCode").includes('split("\\n")'),
+    "renderHighlightedCode 不再按 tab.content 自己切行：行数一旦取自后端，textarea 的值就会与 " +
+      "tab.content 差一个末尾换行（写回时把文件末尾的换行删掉）");
+  // P3：片段是扁平三元组 [start, end, tagIdx]，渲染直接按下标读、不建每 span 的对象
+  check("U31", "editor-virtual-render",
+    editorBodyOf("editorLineHtml").includes("k + 2 < flat.length") &&
+      editorBodyOf("editorLineHtml").includes("m.tags"),
+    "editorLineHtml 没按「扁平三元组 + 名表」渲染：退回逐 span 建对象（5000 行上万次分配），" +
+      "或名表没接上（tag 会渲染成 undefined）");
 }
 
 // ============================================
@@ -1815,17 +1832,39 @@ async function runEditorChecks() {
         ta.style.height === 3 * 20 + 16 + "px",
       "3 行的小文件不该留宽度占位（会白算一遍全文列宽），高度仍要对");
 
-    // ---- 高亮路径：片段要切成 tok-* ----
+    // ---- 高亮路径：紧凑载荷（名表 + 扁平三元组）要能切成 tok-* ----
     api.renderHighlightedCode({
       id: "t3",
       name: "x.rs",
-      _highlighted: [
-        { line_number: 1, text: "let a = 1;", spans: [{ start_col: 0, end_col: 3, tag: "keyword" }] },
-      ],
+      content: "let a = 1;",
+      _highlighted: { tags: ["keyword", "number"], lines: [[0, 3, 0, 8, 9, 1]] },
     });
     check("U31", "editor-virtual-render",
-      backdrop.innerHTML.includes('class="tok-keyword">let</span>'),
-      "高亮片段没切成 tok-* span（渲染入口改道时把高亮丢了）");
+      backdrop.innerHTML.includes('class="tok-keyword">let</span>') &&
+        backdrop.innerHTML.includes('class="tok-number">1</span>'),
+      "高亮片段没按「名表 + 扁平三元组」切成 tok-* span（渲染入口改道时把高亮丢了）");
+
+    // ---- 末尾换行：textarea 的值必须与 tab.content 逐字节相同 ----
+    // 后端用 code.lines() 收行、**吃掉末尾空行**（这里只回 1 行），前端必须自己按
+    // tab.content 切出 2 行。用后端的行去拼 textarea 的值 = 少一个末尾 \n，
+    // 用户一按键 `tab.content = textarea.value` 就把差值固化，写回时真丢。
+    const withNl = "fn a() {}\n";
+    api.renderHighlightedCode({
+      id: "t4",
+      name: "n.rs",
+      content: withNl,
+      _highlighted: { tags: ["keyword"], lines: [[0, 2, 0]] },
+    });
+    check("U31", "editor-virtual-render",
+      ta.value === withNl,
+      "末尾换行被吃掉：textarea 的值 " +
+        JSON.stringify(ta.value) +
+        " != tab.content " +
+        JSON.stringify(withNl) +
+        "（用户一按键就把它固化进内容，写回时文件末尾的换行真没了）");
+    check("U31", "editor-virtual-render",
+      ta.style.height === 2 * 20 + 16 + "px",
+      "后端少回的那一行没补上：textarea 的值/高度与 tab.content 对不上（滚动高度会短一行）");
   } finally {
     for (const [k, v] of saved) {
       if (v === undefined) delete globalThis[k];

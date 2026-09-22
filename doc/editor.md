@@ -69,6 +69,73 @@
 > `ui/main.js` 的 `extToLanguage()`（扩展名 → arborium 语言名）与 `fileIcon()`（标签页/文件树图标）。
 > 三者缺一，表现为"打开文件没有高亮"。
 
+### 载荷形状：`{ tags, lines }`（不回传正文）
+
+`highlight_code` 回的是 `HighlightPayload`，不是逐行的对象数组：
+
+```json
+{ "tags": ["keyword", "function"],
+  "lines": [[0, 2, 0, 3, 6, 1], []] }
+```
+
+`lines[i]` 是第 i 行的**扁平三元组** `[start, end, tagIdx, ...]`（空行是 `[]`），
+`tagIdx` 是 `tags` 里的下标。三条设计理由，改动前请先读完：
+
+1. **不回传正文**。前端手里就有（`tab.content`），逐行回传等于把文件复制一份再走一遍 JSON。
+   更要紧的是**不能回传**：后端用 `code.lines()` 收行（**吃掉末尾空行**），前端
+   `split("\n")` 不吃 —— 拿后端的行去拼 textarea 的值，就会让"以换行结尾的文件"少一个末尾
+   `\n`，用户一按键 `tab.content = textarea.value` 把差值固化，写回时文件末尾的换行就真没了。
+   所以**行由前端自己切**（`renderHighlightedCode` 里的 `text.split("\n")`），后端只回答
+   "第 i 行的片段在哪"。前端行数可能比后端多一行，多出来的按纯文本画。
+2. **tag 走名表 + 下标**，不是每个 span 带一个字符串。整份响应里名表只出现一次（≤27 项）。
+   也没用裸数字编码：那要求两边的枚举顺序永远一致，一旦漂移就是**全篇错色**；名表设计下
+   顺序漂移最多是"查到另一个名字"。
+3. **扁平三元组**，不是每 span 一个对象。省掉两层 key 名重复。
+   实测 400 行样例：**36,374 字节 vs 旧形状 307,644 字节（8.5 倍）**。
+
+后端 tag 是枚举 `Tok`（`main.rs` 的 `TOK_TABLE` 是名字↔枚举的唯一来源）。取值集合是**闭的**：
+`arborium_theme::tag_to_name` 只有 27 个出口，上游 `.and_then()` 已经滤掉不认识的捕获名 ——
+也就是说这条链路本来最多也只能产出这 27 个名字。枚举化之后打错名字是编译错误，
+而不是"这个 span 悄悄没颜色"。
+
+### 三道契约门禁（都在 `cargo test -p ruyix`）
+
+| 测试 | 钉什么 | 反向验证 |
+|---|---|---|
+| `highlight_payload_does_not_echo_the_source_text` | 载荷里不许出现正文，也不许退回 `start_col`/`line_number` 的对象编码 | 加回 `text` 字段即红 |
+| `highlight_payload_is_much_smaller_than_the_legacy_shape` | 新载荷 ≥ 旧形状的 1/3（比值判据，机器不影响结论） | 阈值抬到 100× 即红，并打印实测字节数 |
+| `every_tag_has_a_css_class` | `TOK_TABLE` 的每个名字在 `styles.css` 里都有 `.tok-<name>` **规则** | 删一条规则即红（会点名 `["macro"]`） |
+
+> `every_tag_has_a_css_class` 的实现细节值得说一句：它**先剥掉 CSS 注释**、再要求类名后面跟
+> `{`。第一版没做这两件事，反向验证时把规则换成一句"含 `.tok-macro` 的注释"，门禁照过 ——
+> **绿而不会红的门禁是摆设**，这就是反向验证要抓的东西。
+
+前端侧由 ui-smoke `U31` 补两条行为检查：高亮载荷能切成 `tok-*`；
+以及**"末尾换行"**——喂一份 `content` 以 `\n` 结尾、后端只回 1 行的载荷，
+断言 `textarea.value === tab.content`（这条在旧实现上是红的）。
+
+### 已知问题：片段偏移算的是**字节**，前端按 JS 索引切（含非 ASCII 的行会错位）
+
+`lines` 里的 `start`/`end` 是**行内字节偏移**（由 tree-sitter 的字节区间减去行首字节偏移得到），
+前端 `editorLineHtml` 却用 `text.slice(start, end)` 切 —— JS 索引是 UTF-16 单元。纯 ASCII 行两者
+相同，**含中文/emoji 的行从第一个非 ASCII 字符起就错位**。
+
+实测（`let x = "中"; // 尾`，源码 22 字节 / 18 字符）：
+
+| 后端报的字节区间 | 前端切出来的 | 应该是什么 |
+|---|---|---|
+| `0..3` → `let` | `let` ✅ | `let` |
+| `8..13` → `"中"` | `"中"; ` ❌ | `"中"` |
+| `13..14` → `;` | `/` ❌ | `;` |
+| `15..21` → `// 尾` | ` 尾` ❌ | `// 尾` |
+
+表现是"中文注释/字符串的着色起点跑了、顺带把后面的标点染上"。这是 P3 **之前就存在**的问题
+（与载荷形状无关），P3 刻意没动它 —— 改了就是"顺手换了渲染语义"，会把等价性门禁
+（`highlight_output_is_unchanged_by_the_linear_rewrite`）的意义冲掉。
+
+修法很小：在 `build_line_highlights` 里把字节偏移换算成 UTF-16 偏移（`char_indices` 数一遍，
+补充平面字符算 2 个单元），`start`/`end` 与 `slow_reference` 一起改，等价性测试仍然成立。
+
 ## 标签页图标
 参考[icon](./icon.md)
 

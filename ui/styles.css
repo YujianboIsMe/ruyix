@@ -1152,6 +1152,16 @@ html, body {
 .tok-attr-value { color: #ce9178; }
 .tok-doctype { color: #808080; }
 .tok-entity { color: #4ec9b0; }
+/* TOK_TABLE 里"曾经没配色"的 7 个：高亮器能产出它们（markdown 的 link/strikethrough、
+   Rust 的 macro、ERROR 节点等），缺了就是渲染成默认色、看起来像高亮丢了。
+   门禁 U32/Rust `every_tag_has_a_css_class` 保证这两处永远对得上。 */
+.tok-macro { color: #dcdcaa; }
+.tok-link { color: #4fc1ff; text-decoration: underline; }
+.tok-strikethrough { text-decoration: line-through; }
+.tok-diff-add { color: #b5cea8; }
+.tok-diff-delete { color: #d16969; }
+.tok-embedded { color: #d4d4d4; }
+.tok-error { color: #d16969; }
 
 /* --- 自定义弹窗 --- */
 
