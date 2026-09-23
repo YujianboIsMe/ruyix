@@ -459,17 +459,22 @@ JSON 对象选一个能力，直到给出 `{"final": ...}`（上限 96 轮，`ag
 
 | 原语 | 参数 | 边界 |
 |------|------|------|
-| **Read** | `{"path":"src/ 或 src/main.rs"}` | 目录给结构树、文件给内容；路径封闭在项目内（`safe_rel_path`）；Git 历史用 Execute 跑 `git log` |
-| **Write** | `{"path","content"}` | 整文件写入（新增/覆盖）；内容为空拒绝静默清空；写入策略见下 |
+| **Read** | `{"path"}` 或 `{"path","offset","limit"}` | 目录给结构树、文件给内容；给 `offset`/`limit` 时只取那一段行窗口（表头写明「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」）；文件路径封闭在项目内（`safe_rel_path`）；Git 历史用 Execute 跑 `git log` |
+| **Write** | `{"path","content"}` 或 `{"path","edits":[{"find","replace"}]}` | 两副面孔**二选一**（同时给当面拒）；内容为空拒绝静默清空；`edits` 的 `find` 必须逐字一致且恰好出现一次，不合法整批不落盘；写入策略见下 |
 | **Execute** | `{"cmd","timeout_secs"}` | cwd 钉项目根，超时 5–120s（默认 30），stdout/stderr 各裁到 4KB，破坏性模式拒绝清单拦"不可逆的系统级破坏"（绊线不是沙箱，真隔离在 verify 的 docker 模式） |
 | **Connect** | `{"action":"list"\|"call"\|"send", ...}` | 见下 |
 
-**为什么删掉 `edit`（find/replace 结构化修改）**：四原语是能力集的上限，Write 已经覆盖
-"改文件"这件事的语义；多一个 edit 就多一种模型要选的形态、多一类"find 不唯一/不匹配"
-的失败模式。代价是改动也走整份内容（先 read 再整份 write），换来的是能力集简单、审查口径统一
-（任何变更都是一份完整新内容），差异面板与暂存/备份/三模式写入全部原样复用。
-提示词里明确写了"哪怕只改一行也交回整份内容，没把握的地方原样保留"。
-管道自修复（`repair.rs`）的 find/replace 是另一条独立通路，不受影响。
+**为什么当初删掉 `edit`、后来又把它收回来（但只作为 Write 的参数形状）**：四原语是**能力集**的
+上限，这条没变 —— 现在也仍然只有 read / write / execute / connect 四个。变的是 Write 的**参数形状**：
+一条 `write` 可以带整份 `content`，也可以带一串 `edits`（find→replace 锚点）。这么做的理由是
+**token 与上下文**：改一个 3000 行文件里的一行，整份形态要把那 3000 行吐一遍，而且这段正文会在
+后续每一轮被当作历史重发。锚点形态只传改动，匹配规则**不重写** —— 直接复用 `repair::replace_unique`
+（"恰好出现一次" + 行尾归一化，CRLF 文件能匹配 LF 的 find），落盘通道仍然只有 `Ctx::commit_with`
+一条（**不调 `repair::apply_edits`**：那个函数自己写盘，会绕过覆盖层与备份/暂存记账）。
+`content` 形态保留为 fallback：新建文件、整篇重排、以及锚点划不出来的大改都还走它。
+提示词里两种形状的判据**成对写**（什么时候用 edits / 什么时候别用），且子步骤的 `STEP_SYSTEM`
+各自自洽（父子提示词不许互相广告对方没有的能力）。
+管道自修复（`repair.rs`）的 find/replace 是另一条独立通路，共用同一份匹配规则。
 
 **Connect 的契约与落地**：
 

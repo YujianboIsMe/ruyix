@@ -26,11 +26,16 @@ const HARNESS_PREFIX: &str = "ruyix.code.harness.";
 const FROM_AI_NAMESPACE: &[&str] = &["llm.base_url", "llm.api_key", "llm.model"];
 
 /// 这几个整数键上的 0 不是"关"，而是**把能力静默关死**（批调用会拒掉所有批、
-/// 提问次数为 0 等于关掉提问），所以按非法值处理、保持默认。
+/// 提问次数为 0 等于关掉提问、历史保留 0 轮等于把**当前这一轮**的结果也折掉 ——
+/// 模型将永远看不到自己刚拿到的工具结果），所以按非法值处理、保持默认。
 ///
 /// 反例（0 有明确语义，不在此列）：`ask.timeout_secs = 0` 是"无限等"、
 /// `agent.max_elapsed_secs = 0` 是"不限时"、`discover.ttl_secs = 0` 是"不缓存"。
-const ZERO_MEANS_BROKEN: &[&str] = &["agent.batch_max", "ask.max_per_run"];
+const ZERO_MEANS_BROKEN: &[&str] = &[
+    "agent.batch_max",
+    "agent.history_keep_rounds",
+    "ask.max_per_run",
+];
 
 /// 从三 scope 读一个键（runtime → project → global，空值跳过）
 fn read(mgr: &ConfigManager, key: &str, project_root: Option<&str>) -> Option<String> {
@@ -422,6 +427,28 @@ mod tests {
         let worse = bridge(&[("ask.max_per_run", "-2"), ("agent.batch_max", "很多")]);
         assert_eq!(worse.ask.max_per_run, d.ask.max_per_run);
         assert_eq!(worse.agent.batch_max, d.agent.batch_max);
+    }
+
+    /// v0.11 历史折叠：默认开（保留最近 6 轮），两个键都能一行回退；
+    /// `history_keep_rounds = 0` 按非法值处理 —— 0 轮等于把当前这轮的结果也折掉
+    #[test]
+    fn agent_history_fold_bridge_defaults_on_and_can_be_turned_off() {
+        let d = bridge(&[]);
+        assert!(d.agent.history_trim, "默认开：老轮次的正文不该每轮重发");
+        assert_eq!(d.agent.history_keep_rounds, 6);
+
+        let off = bridge(&[
+            ("agent.history_trim", "false"),
+            ("agent.history_keep_rounds", "3"),
+        ]);
+        assert!(!off.agent.history_trim, "必须能一行回退到只增不裁");
+        assert_eq!(off.agent.history_keep_rounds, 3);
+
+        let zero = bridge(&[("agent.history_keep_rounds", "0")]);
+        assert_eq!(
+            zero.agent.history_keep_rounds, d.agent.history_keep_rounds,
+            "0 轮 = 连当前这轮的结果都折掉，模型将看不到自己刚拿到的东西"
+        );
     }
 
     /// v0.5：环境准备（按需安装）默认开，`false` 能关回去

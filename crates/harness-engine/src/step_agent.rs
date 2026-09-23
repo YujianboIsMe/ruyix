@@ -19,10 +19,11 @@
 //! 子步骤自报事件会撞掉父的 index。步骤进度由父循环在派发前/返回后统一发。
 
 use crate::agent::{
-    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, StepAction, VerifyOutcome, batch_hint,
-    batch_json_result, batch_waves_for_step, flush_write_disk, json_result, narrow_verify,
-    parse_failure_feedback, parse_step_actions, policy_system_note, proc_op_name, read_group,
-    staged_execute_note, tool_exec_bg, tool_execute, tool_proc, write_ok_text,
+    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, StepAction, VerifyOutcome,
+    WriteBody, WriteSpec, batch_hint, batch_json_result, batch_waves_for_step, flush_write_disk,
+    json_result, narrow_verify, parse_failure_feedback, parse_step_actions, policy_system_note,
+    proc_op_name, read_group, resolve_write, staged_execute_note, tool_exec_bg, tool_execute,
+    tool_proc, write_edits_ok_text, write_ok_text,
 };
 use crate::config::AppConfig;
 use crate::discover;
@@ -50,14 +51,19 @@ pub const STEP_SYSTEM: &str = r#"你是 ruyix 的步骤执行体：只负责**�
 
 三种原子能力：
 - read    读项目：{"tool":"read","args":{"path":"src/ 或 src/main.rs"}} —— 目录给结构树，文件给内容。
-- write   写文件：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}} —— 改已有文件前先 read 拿到现状，交回的必须是整份内容，不许用省略号或"其余不变"敷衍。
+  文件大、只要一段：{"tool":"read","args":{"path":"src/big.rs","offset":120,"limit":60}} —— 从第 120 行起读 60 行（从 1 起，一次上限 400 行）；表头写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」。
+- write   写文件，两种写法**二选一**：
+  · 改已有文件的几处 —— 用 edits（首选，只传改动）：{"tool":"write","args":{"path":"src/x.rs","edits":[{"find":"要被替换的原文","replace":"换成什么"}]}}
+    `find` 必须与文件里**逐字符一致**且在文件中**恰好出现一次**（不唯一就多带两行上下文）；匹配不上或撞上多次 → **整批作废，一个字节都不落盘**。
+  · 新建文件、或整篇重排 —— 用 content（整份）：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}}
+  别用 edits 改新建/没读过的文件（没有原文可锚）；别用 content 改只动几行的既有文件（贵，而且容易顺手丢原文）。两种形态不许同时给。
 - execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化都走它。
   永不退出的服务（spring-boot:run / java -jar / npm run dev）用后台模式："background":true 加一条 "ready_cmd"（一条命令，退出码 0 即就绪），返回 handle；随后 op=status / op=log / op=stop 用 handle 操作。不要用 start / Start-Process 那类花招。同一个服务重启前先 status 或 stop。
 
 规则：
 1. 每轮只输出一个 JSON 对象（一次能力调用，或本步的交付说明），不要解释文字、不要 markdown 代码块包裹。
 2. 只做本步。发现计划与实际不符（要改的文件不存在、步骤拆得不对、范围明显比本步大）时不要自作主张扩大范围：做你能做的部分，并在交付说明里写清哪里对不上。
-3. 改代码：先 read 全文，再 write 交回整份新内容（哪怕只改一行）；没把握的地方原样保留，绝不丢内容。
+3. 改代码：先 read 拿到现状；改已有文件用 write + edits 只传改动，新建或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 能验证就验证：execute 跑本项目自己的编译/测试命令，失败就继续修。
 5. 本步做完输出：{"final":"本步做了什么、产出哪些文件、跑了什么验证、结果如何；对不上的地方写在这里"}"#;
 
@@ -285,13 +291,14 @@ async fn step_exec_one(
     action: StepAction,
 ) -> (String, String, Result<String, String>) {
     match action {
-        StepAction::Read(path) => {
-            let brief = format!("read {path}");
-            ("read".into(), brief, cx.tool_read(&path))
+        StepAction::Read(spec) => {
+            let brief = format!("read {}", spec.brief());
+            ("read".into(), brief, cx.tool_read(&spec))
         }
-        StepAction::Write(path, content) => {
-            let brief = format!("write {path}（{} 字节）", content.len());
-            ("write".into(), brief, cx.tool_write(&path, &content))
+        StepAction::Write(spec) => {
+            let brief = spec.brief();
+            let r = cx.apply_write(&spec);
+            ("write".into(), brief, r)
         }
         StepAction::Execute(cmd, t) => {
             let mut r = tool_execute(cx.project_root(), &cmd, t);
@@ -342,7 +349,7 @@ async fn run_step_wave(
         return;
     }
 
-    let mut reads: Vec<(usize, String)> = Vec::new();
+    let mut reads: Vec<(usize, ReadSpec)> = Vec::new();
     let mut writes: Vec<(usize, String, Option<String>, String)> = Vec::new();
     let mut execs: Vec<(usize, String, Option<u64>)> = Vec::new();
     let mut bgs: Vec<(usize, crate::proc::StartSpec)> = Vec::new();
@@ -351,13 +358,17 @@ async fn run_step_wave(
 
     for &i in wave {
         match &actions[i] {
-            StepAction::Read(p) => reads.push((i, p.clone())),
-            StepAction::Write(p, after) => match safe_rel_path(p) {
+            StepAction::Read(spec) => reads.push((i, spec.clone())),
+            // 与主循环同款：归约（edits 要先读当前内容）在**主线程**做完，线程里只写盘
+            StepAction::Write(spec) => match safe_rel_path(&spec.path) {
                 Ok(rel) => {
                     let before = cx.before_of(&rel);
-                    writes.push((i, rel, before, after.clone()));
+                    match resolve_write(&rel, &spec.body, before.as_deref()) {
+                        Ok(after) => writes.push((i, rel, before, after)),
+                        Err(e) => errs.push((i, "write".into(), spec.brief(), e)),
+                    }
                 }
-                Err(e) => errs.push((i, "write".into(), format!("write {p}"), e)),
+                Err(e) => errs.push((i, "write".into(), spec.brief(), e)),
             },
             StepAction::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
             StepAction::ExecBg(spec) => bgs.push((i, spec.clone())),
@@ -374,9 +385,9 @@ async fn run_step_wave(
     }
 
     if !reads.is_empty() {
-        let paths: Vec<String> = reads.iter().map(|(_, p)| p.clone()).collect();
-        for ((i, p), r) in reads.iter().zip(read_group(cx, &paths, true)) {
-            slots[*i] = Some(("read".to_string(), format!("read {p}"), r));
+        let specs: Vec<ReadSpec> = reads.iter().map(|(_, s)| s.clone()).collect();
+        for ((i, spec), r) in reads.iter().zip(read_group(cx, &specs, true)) {
+            slots[*i] = Some(("read".to_string(), format!("read {}", spec.brief()), r));
         }
     }
     for (i, tool, brief, e) in errs {
@@ -456,11 +467,22 @@ async fn run_step_wave(
     }
 
     for ((i, rel, before, after), (_, r)) in writes.iter().zip(write_out) {
-        let brief = format!("write {rel}（{} 字节）", after.len());
+        // 摘要用调用方声明的形状（content 报字节、edits 报几处替换）
+        let brief = match &actions[*i] {
+            StepAction::Write(spec) => spec.brief(),
+            _ => format!("write {rel}（{} 字节）", after.len()),
+        };
         let res = match r {
             Ok(()) => {
                 cx.record(rel.clone(), before.clone(), after.clone());
-                Ok(write_ok_text(rel, after.len(), cx.policy()))
+                let ok = match &actions[*i] {
+                    StepAction::Write(WriteSpec {
+                        body: WriteBody::Edits(e),
+                        ..
+                    }) => write_edits_ok_text(rel, e.len(), after.len(), cx.policy()),
+                    _ => write_ok_text(rel, after.len(), cx.policy()),
+                };
+                Ok(ok)
             }
             Err(e) => Err(e),
         };
@@ -660,18 +682,19 @@ pub async fn run_step(
             if *tool == "write" && ok {
                 any_write_ok = true;
             }
-            // 读过 / 写过什么：父循环靠这两份清单（复核员的证据集合、进度对账）
+            // 读过 / 写过什么：父循环靠这两份清单（复核员的证据集合、进度对账）。
+            // 记的都是**路径** —— 同一文件读了两个窗口、或分两次锚点改，都只记一次
             if ok
-                && let StepAction::Read(p) = &actions[i]
-                && !read.contains(p)
+                && let StepAction::Read(spec) = &actions[i]
+                && !read.contains(&spec.path)
             {
-                read.push(p.clone());
+                read.push(spec.path.clone());
             }
             if ok
-                && let StepAction::Write(p, _) = &actions[i]
-                && !written.contains(p)
+                && let StepAction::Write(spec) = &actions[i]
+                && !written.contains(&spec.path)
             {
-                written.push(p.clone());
+                written.push(spec.path.clone());
             }
             let icon = if ok { "✓" } else { "✗" };
             trace.push(clip(&format!("{tool} {icon} {brief}"), TRACE_CLIP));
@@ -1273,11 +1296,12 @@ mod tests {
         use crate::agent::parse_step_action as parse;
         assert!(matches!(
             parse(r#"{"tool":"read","args":{"path":"a.py"}}"#).unwrap(),
-            StepAction::Read(p) if p == "a.py"
+            StepAction::Read(spec) if spec.path == "a.py" && !spec.is_window()
         ));
         assert!(matches!(
             parse(r#"{"tool":"write","args":{"path":"a.py","content":"x"}}"#).unwrap(),
-            StepAction::Write(_, _)
+            StepAction::Write(WriteSpec { path, body: WriteBody::Content(c) })
+                if path == "a.py" && c == "x"
         ));
         assert!(matches!(
             parse(r#"{"tool":"execute","args":{"cmd":"ls"}}"#).unwrap(),

@@ -51,7 +51,6 @@ ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Mo
 │   ├── src/pty.rs        # PtyManager: spawn/write/resize/close PTY sessions
 │   ├── src/ai.rs         # AI translation: natural language → standard commands
 │   ├── src/command.md    # AI system prompt (compiled via include_str!)
-│   ├── src/command-emoji.md  # Emoji-flavored AI system prompt
 │   ├── src/agent/          # Agent bridge + sessions (see doc/融合计划-Agent集成-v0.2.md)
 │   ├── src/mcp.rs          # MCP client: stdio JSON-RPC, server registry (mcp.toml)
 │   ├── src/a2a.rs          # A2A client: agent card discovery + task delegation (a2a.toml)
@@ -242,20 +241,18 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 
 ```
   lang: "zh-CN" | "en"        (mutually exclusive base language)
-  emoji: true | false          (overlay toggle, independent)
 ```
 
-- Config keys: `ruyix.code.ui.lang`, `ruyix.code.ui.emoji`
+- Config keys: `ruyix.code.ui.lang`
 - `I18N.init()` reads config, loads the right JSON file
 - `I18N.t(key, params)` returns translated string with `{param}` substitution
-- `I18N.setLang()` / `I18N.setEmoji()` persist to config
-- Language menu: 中文 / 英文 (radio) + Emoji (toggle checkbox)
+- `I18N.setLang()` persists to config
+- Language menu: 中文 / 英文 (radio)
 - All `setStatus()` calls use `I18N.t()` keys
 
 ## AI Integration (ai.rs)
 
 - System prompt: `src-tauri/src/command.md` compiled via `include_str!`
-- Emoji mode: `src-tauri/src/command-emoji.md` (selected when `ruyix.code.ui.emoji == "true"`)
 - Project context: When project is open, project root path is prepended to user message
 - All AI config read from `ruyix.code.ai.*` keys (runtime → project → global fallback)
 
@@ -296,7 +293,7 @@ Three scopes with prefix `ruyix.code`:
 
 Known config keys:
 - `ruyix.code.ai.api_key` / `api_url` / `model`
-- `ruyix.code.ui.lang` / `ruyix.code.ui.emoji`
+- `ruyix.code.ui.lang`
 - `ruyix.code.run.target<N>.cmd` / `target<N>.name`
 - `ruyix.code.harness.gate.narrow` / `gate.full` / `gate.max_full_attempts` / `gate.staged_timeout_secs`（v0.3 机械验证门禁）
 - `ruyix.code.harness.reflect.enabled` / `reflect.max_rounds` / `reflect.model`（v0.3 复核 agent）

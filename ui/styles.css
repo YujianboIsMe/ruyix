@@ -1539,6 +1539,57 @@ html, body {
   opacity: 0.75;
 }
 
+/* 大纲区 · 配置块索引（配置标签页在前台时显示：标题 + 字段数，点了展开并滚过去） */
+.outline-config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.config-outline-all {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.config-outline-all:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.outline-config-block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.outline-config-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.outline-config-count {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+/* 正文滚到哪一块 —— 不给这个答案，索引就只是另一份要读完的清单 */
+.outline-item--active {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 /* 大纲区多标签（大纲 / Git） */
 .outline-tabs {
   display: flex;
@@ -3712,13 +3763,42 @@ html, body {
   overflow: hidden;
 }
 
+/* 块标题条 = 折叠开关（点整条切换，caret 只在折叠时转向） */
 .config-section-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 5px 12px;
   background: var(--bg-titlebar);
   border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
+  user-select: none;
+}
+
+.config-section-head:hover {
+  background: var(--hover-bg);
+}
+
+.config-section-caret {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-secondary);
+  transition: transform 0.12s ease;
+}
+
+.config-section--folded .config-section-caret {
+  transform: rotate(-90deg);
+}
+
+.config-section--folded {
+  margin-bottom: 6px;
+}
+
+/* 折叠只用 display:none：**节点还在 DOM 里**，所以 controls（下标 = row.idx）
+   与 collect() 读到的用户输入都不受影响。改成重建 DOM 会静默漏提交改过的值。 */
+.config-section--folded .config-section-rows {
+  display: none;
 }
 
 .config-section-name {
@@ -3728,6 +3808,7 @@ html, body {
 }
 
 .config-section-file {
+  margin-left: auto;
   font-family: "Cascadia Code", "Consolas", monospace;
   font-size: 11px;
   color: var(--text-secondary);

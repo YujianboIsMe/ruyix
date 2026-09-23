@@ -1176,24 +1176,19 @@ mod tests {
         let mut mgr = ConfigManager::new_with_dir(temp_dir("rt"));
         mgr.config_write(&Scope::Runtime, "ruyix.code.ai.api_key", "old", None)
             .unwrap();
-        mgr.config_write(&Scope::Runtime, "ruyix.code.ui.emoji", "true", None)
-            .unwrap();
 
         let dump = mgr.scan_scope_entries(&Scope::Runtime, None).unwrap();
         assert_eq!(dump.dir, "(内存 · 不落盘)");
-        assert_eq!(dump.entries.len(), 2);
+        assert_eq!(dump.entries.len(), 1);
 
         let report = mgr
             .save_scope_entries(
                 &Scope::Runtime,
-                &[
-                    entry("ai", "model", "deepseek-chat"),
-                    entry("ui", "emoji", ""),
-                ],
+                &[entry("ai", "model", "deepseek-chat")],
                 None,
             )
             .unwrap();
-        assert_eq!((report.saved, report.removed), (1, 1));
+        assert_eq!((report.saved, report.removed), (1, 0));
         assert_eq!(
             mgr.config_read(&Scope::Runtime, "ruyix.code.ai.model", None)
                 .unwrap(),
@@ -1204,12 +1199,6 @@ mod tests {
             mgr.config_read(&Scope::Runtime, "ruyix.code.ai.api_key", None)
                 .unwrap(),
             Some("old".into())
-        );
-        // 提交了空值 → 删掉
-        assert_eq!(
-            mgr.config_read(&Scope::Runtime, "ruyix.code.ui.emoji", None)
-                .unwrap(),
-            None
         );
     }
 

@@ -340,6 +340,15 @@ pub struct AgentConfig {
     /// 只是读文件改回排队（用于排查"并发读"本身的问题）。
     #[serde(default = "d_agent_batch_parallel")]
     pub batch_parallel: bool,
+    /// 工具循环的**历史折叠**：把"超出保留窗口"的老轮次压成一行事实
+    /// （调了什么、成没成、结果多大），不再每轮重发它们的正文。
+    ///
+    /// 关掉即回到"历史只增不裁"的老行为 —— 排查"模型好像忘了自己读过什么"时的一行回滚。
+    #[serde(default = "d_true")]
+    pub history_trim: bool,
+    /// 最近几轮的正文**不动**（更老的才折叠）。数字越大越安全、上下文越贵。
+    #[serde(default = "d_agent_history_keep_rounds")]
+    pub history_keep_rounds: usize,
 }
 
 impl Default for AgentConfig {
@@ -349,6 +358,8 @@ impl Default for AgentConfig {
             batch: d_agent_batch(),
             batch_max: d_agent_batch_max(),
             batch_parallel: d_agent_batch_parallel(),
+            history_trim: d_true(),
+            history_keep_rounds: d_agent_history_keep_rounds(),
         }
     }
 }
@@ -369,6 +380,12 @@ fn d_agent_batch_max() -> usize {
 
 fn d_agent_batch_parallel() -> bool {
     true
+}
+
+/// 保留窗口 6 轮：一次"读 → 改 → 跑测试 → 再改"大约 4~6 轮，窗口比它小就会把模型
+/// 刚看过的现场折掉（它只能重读一遍，反而更贵）。
+fn d_agent_history_keep_rounds() -> usize {
+    6
 }
 
 fn d_python() -> String {

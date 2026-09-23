@@ -5,8 +5,10 @@
 //! 正确形态是一个循环：模型自己决定下一步用哪个能力（看结构 → 读文件 → 写回 → 跑测试），
 //! 直到给出最终回答。能力集刻意只有四条原语，不搞一堆专项工具：
 //!
-//! - **Read**    读项目结构与文件内容（Git 历史经 Execute 的 `git log` / `git show` 达成）
-//! - **Write**   写整文件（新增或覆盖）—— 改动也走整份内容，不留 find/replace 这类"半截写入"
+//! - **Read**    读项目结构与文件内容（可给 `offset`/`limit` 只取一段；Git 历史经 Execute 的
+//!   `git log` / `git show` 达成）
+//! - **Write**   写文件，两种参数形状：`content`（整份，新建/大改）或 `edits`（锚点替换，
+//!   改既有文件的主力）。**能力只有一条** —— 变的只是"要传多少东西"，见 [`WriteBody`]
 //! - **Execute** 跑系统命令（工作目录钉在项目根、超时、输出裁剪；破坏性模式拒绝执行）
 //! - **Connect** 连外部能力：MCP 服务器上的工具、A2A 远端 Agent（[`Connector`]）
 //!
@@ -47,6 +49,10 @@ pub const MAX_STEPS: usize = 96;
 /// "抖两次就放弃"与"抖十次才放弃"是两种产品行为，不该在两个模块里各写一个数。
 pub(crate) const LLM_FAIL_LIMIT: u32 = 3;
 const READ_CLIP: usize = 8_000;
+/// 窗口读不传 `limit` 时的默认行数（约"一个屏幕上下"）
+const READ_WINDOW_DEFAULT_LINES: usize = 200;
+/// 窗口读一次最多几行 —— 防止一个大 `limit` 把窗口读退化成"整份读 + 表头"
+const READ_WINDOW_MAX_LINES: usize = 400;
 const EXEC_CLIP: usize = 4_000;
 const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const EXEC_MIN_TIMEOUT_SECS: u64 = 5;
@@ -418,7 +424,16 @@ fn connect_note(targets: &[ConnectTarget]) -> Option<String> {
 pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过工具循环完成用户的工作。只有四种原子能力：
 
 - read    读项目：{"tool":"read","args":{"path":"src/ 或 src/main.rs"}} —— 目录给结构树，文件给内容；Git 历史用 execute 跑 git log / git show 查。
-- write   写文件：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}} —— 新建或整文件重写。改已有文件前先 read 拿到现状，交回的必须是整份内容，不许用省略号或"其余不变"敷衍。
+  文件大、只要一段：{"tool":"read","args":{"path":"src/big.rs","offset":120,"limit":60}} —— 从第 120 行起读 60 行（行号从 1 起，一次上限 400 行）。表头上写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」，照着它接着读就能把缺口补齐。
+  **该用窗口**：文件好几百行、你只需要其中一段（定位一个函数、看某一处报错）；**别用窗口**：文件不大（一次读完更省事），或者你紧接着要用 content 整份重写它（那必须先看全）。只读了一段就别在 final 里断言"全篇如何如何"—— 没看到的部分就是没看到。
+- write   写文件，两种写法**二选一**：
+  · 改已有文件里的一处或几处 —— 用 **edits**（首选：只传改动，不重发全文）：
+    {"tool":"write","args":{"path":"src/x.rs","edits":[{"find":"要被替换的原文","replace":"换成什么"}]}}
+    `find` 必须与文件里**逐字符一致**（含缩进），且在文件里**恰好出现一次**；不唯一就把上下文多带两行。匹配不上或撞上多次 → **整批作废、一个字节都不落盘**，所以改之前先 read 确认原文。同一文件的多条 edits 按你给的顺序累积。
+  · 新建文件、或改动大到划不出锚点 —— 用 **content**（整份内容）：
+    {"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}}
+  **别用 edits**：新建文件（没有原文可锚）、整篇重排、或者你压根没读过这个文件 —— 猜出来的 find 匹配不上，白费一轮。**别用 content**：只改几行的既有文件 —— 把整份吐回来既贵又容易顺手丢原文（曾经真这么删掉过用户的代码）。
+  两种形态**不许同时给**（引擎当面拒），content 不许是空串。
 - execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化、git 都走它。
   永不退出的服务（spring-boot:run / java -jar / npm run dev / vite）**必须**用后台模式，不要用 start、Start-Process、往 %TEMP% 写 bat/ps1 那类花招（它们拿不到输出，进程还会脱离掌控）：
   {"tool":"execute","args":{"cmd":"mvn spring-boot:run","background":true,"ready_cmd":"netstat -ano | findstr :8083","ready_timeout_secs":90,"keep_alive":true}}
@@ -431,7 +446,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 规则：
 1. 每轮只输出一个 JSON 对象（一次能力调用，或最终答复），不要输出解释文字、不要 markdown 代码块包裹。
 2. 回答关于本项目的问题前，先 read 相关文件/目录 —— 不要凭空猜测项目内容。
-3. 改代码：先 read 全文，再用 write 交回整份新内容（哪怕只改一行）；没把握的地方原样保留，绝不丢内容。
+3. 改代码：先 read 拿到现状。改已有文件用 write + edits 只传改动；新建文件、或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 改动能验证就验证：execute 跑编译/测试（如 cargo test、python -m pytest、npm test），失败就继续修。
 5. 项目之外的东西（数据库、浏览器、远端服务、另一个 Agent）走 connect —— 不要自己写脚本硬凑协议，也不要把外部能力的事当成项目内的改动。
 6. 全部完成后输出最终答复：{"final":"给用户的完整说明（Markdown：结论、改了哪些文件、验证结果）"}
@@ -588,12 +603,105 @@ fn ask_failed_note(id: &str, err: &AskErr, _spec: &AskSpec) -> String {
 // 动作解析（模型输出 → 结构化动作）
 // ============================================
 
+/// read 的参数：路径 + 可选行窗口。
+///
+/// 不传 offset/limit = 老行为（整份裁剪读，`READ_CLIP` 掐头去尾）。传了 = 只取那一段 ——
+/// 这是"缺口可以再接一次"的入口：改一个 3000 行文件中间那 40 行，不必为读它付整份的 token，
+/// 也不必为改它把整份吐回来（后者见 [`WriteBody::Edits`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadSpec {
+    pub path: String,
+    /// 起始行（1-based，含）
+    pub offset: Option<usize>,
+    /// 最多几行
+    pub limit: Option<usize>,
+}
+
+impl ReadSpec {
+    /// 整份读（老形状）。生产路径由 [`parse_read`] 直接构造，这条给测试与调用方省噪声。
+    #[cfg(test)]
+    pub(crate) fn whole(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            offset: None,
+            limit: None,
+        }
+    }
+
+    /// 是不是"窗口读"。全空就是整份读 —— 老形状一字不改地走老路径。
+    pub(crate) fn is_window(&self) -> bool {
+        self.offset.is_some() || self.limit.is_some()
+    }
+
+    /// 台账 / 日志里怎么称呼这次读（窗口读必须写出窗口，否则日志看不出"那次只读了 40 行"）
+    pub(crate) fn brief(&self) -> String {
+        match (self.offset, self.limit) {
+            (None, None) => self.path.clone(),
+            (o, l) => format!(
+                "{}（{}-{}）",
+                self.path,
+                o.unwrap_or(1),
+                l.map(|l| format!("+{l}"))
+                    .unwrap_or_else(|| "末".to_string())
+            ),
+        }
+    }
+}
+
+/// write 的一条**锚点改动**：把 `find` 换成 `replace`。
+///
+/// `find` 必须与原文**逐字一致**（含缩进）且**恰好出现一次** —— 匹配规则不在这里重写，
+/// 与修复流水线共用 [`repair::replace_unique`]（它已带行尾归一化：CRLF 文件匹配 LF 的 find，
+/// 落盘再还原 CRLF。真机踩过 `core.autocrlf` 让 LF 片段一条都匹配不上）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentEdit {
+    pub find: String,
+    /// 换成什么。空串 = 删掉这一段（合法，且与"没变化"不同）。
+    #[serde(default)]
+    pub replace: String,
+}
+
+/// write 的两副面孔。**同一个能力，两种参数形状** —— 不新增第五种原子能力：
+/// "写文件"的效果没变，变的只是"要传多少东西"。
+#[derive(Clone, Debug)]
+pub(crate) enum WriteBody {
+    /// 整份内容。新建文件、或改动大到锚点划不出来时用（老形态，逐字保留）。
+    Content(String),
+    /// 锚点替换：只传改动，不重发全文。改既有文件的**首选**。
+    Edits(Vec<AgentEdit>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WriteSpec {
+    pub path: String,
+    pub body: WriteBody,
+}
+
+impl WriteSpec {
+    /// 整份内容形态。生产路径由 [`parse_write`] 直接构造，这条给测试与调用方省噪声。
+    #[cfg(test)]
+    pub(crate) fn content(path: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            body: WriteBody::Content(content.into()),
+        }
+    }
+
+    /// 日志 / 调用摘要里的一句话
+    pub(crate) fn brief(&self) -> String {
+        match &self.body {
+            WriteBody::Content(c) => format!("write {}（{} 字节）", self.path, c.len()),
+            WriteBody::Edits(e) => format!("write {}（{} 处锚点替换）", self.path, e.len()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Action {
     Final(String),
     Plan(Vec<PlanStep>),
-    Read(String),
-    Write(String, String),
+    Read(ReadSpec),
+    Write(WriteSpec),
     Execute(String, Option<u64>),
     /// 后台启动：`execute` 的第三种生命周期（有界 / 无界托管 / 句柄操作）。
     /// 模型侧仍是同一个 `execute` 工具，只是多了 `background` 这一维。
@@ -828,15 +936,10 @@ fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
         .to_ascii_lowercase();
     let args = v.get("args").cloned().unwrap_or(serde_json::Value::Null);
     match tool.as_str() {
-        "read" => Ok(Action::Read(get_str(&args, "path")?)),
-        "write" => Ok(Action::Write(
-            get_str(&args, "path")?,
-            v.get("args")
-                .and_then(|a| a.get("content"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        )),
+        "read" => parse_read(&args),
+        // write 两副面孔：content（整份）或 edits（锚点）。形状判断在 parse_write 里一处收口 ——
+        // 与 read 的窗口参数同款：参数形状变了，能力没变。
+        "write" => parse_write(&args),
         "connect" => {
             let action = args
                 .get("action")
@@ -946,13 +1049,15 @@ pub(crate) struct Shape<'a> {
 
 fn shape_of(a: &Action) -> Shape<'_> {
     match a {
-        Action::Read(p) => Shape {
-            path: Some(p),
+        Action::Read(s) => Shape {
+            path: Some(&s.path),
             write: false,
             proc: false,
         },
-        Action::Write(p, _) => Shape {
-            path: Some(p),
+        // 冲突只看路径与"是不是写"，不看传的是 content 还是 edits：
+        // 同一个文件的两种写法仍然互斥。
+        Action::Write(s) => Shape {
+            path: Some(&s.path),
             write: true,
             proc: false,
         },
@@ -975,13 +1080,13 @@ fn shape_of(a: &Action) -> Shape<'_> {
 
 pub(crate) fn shape_of_step(a: &StepAction) -> Shape<'_> {
     match a {
-        StepAction::Read(p) => Shape {
-            path: Some(p),
+        StepAction::Read(s) => Shape {
+            path: Some(&s.path),
             write: false,
             proc: false,
         },
-        StepAction::Write(p, _) => Shape {
-            path: Some(p),
+        StepAction::Write(s) => Shape {
+            path: Some(&s.path),
             write: true,
             proc: false,
         },
@@ -1062,18 +1167,18 @@ pub(crate) fn batch_waves_for_step(actions: &[StepAction]) -> Vec<Vec<usize>> {
 /// 也不要求 runtime 是多线程 —— 单测跑在 `new_current_thread` 上，那里 `block_in_place` 会直接 panic。
 pub(crate) fn read_group(
     ctx: &Ctx<'_>,
-    paths: &[String],
+    specs: &[ReadSpec],
     parallel: bool,
 ) -> Vec<Result<String, String>> {
-    if paths.len() == 1 || !parallel {
-        return paths.iter().map(|p| ctx.tool_read(p)).collect();
+    if specs.len() == 1 || !parallel {
+        return specs.iter().map(|s| ctx.tool_read(s)).collect();
     }
-    let mut slots: Vec<Option<Result<String, String>>> = (0..paths.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<Result<String, String>>> = (0..specs.len()).map(|_| None).collect();
     std::thread::scope(|s| {
         let handles: Vec<_> = slots
             .iter_mut()
-            .zip(paths.iter())
-            .map(|(slot, path)| s.spawn(move || *slot = Some(ctx.tool_read(path))))
+            .zip(specs.iter())
+            .map(|(slot, spec)| s.spawn(move || *slot = Some(ctx.tool_read(spec))))
             .collect();
         // 全部 join 掉：线程 panic 时它的槽位留 None（下面统一报"线程异常"），
         // 不 join 的话 `scope` 结束时会自己再抛一次 "scoped thread panicked"
@@ -1097,6 +1202,119 @@ pub(crate) fn json_result(r: Result<String, String>) -> String {
         Ok(v) => format!("{{\"ok\": true, \"result\": {}}}", json_str(&v)),
         Err(e) => format!("{{\"ok\": false, \"error\": {}}}", json_str(&e)),
     }
+}
+
+/// 把 write 的两种参数形状都归约成"最终整份内容"。**能力没变，变的只是要传多少东西**：
+///
+/// - [`WriteBody::Content`] —— 原样透传（老路径语义逐字不变；空内容仍然拒）
+/// - [`WriteBody::Edits`] —— 拿**当前**内容逐条锚点替换。匹配规则不在这里重写：
+///   [`repair::replace_unique`] 负责"恰好出现一次"与行尾归一化（CRLF 文件能匹配 LF 的 `find`，
+///   落盘再还原 CRLF —— 真机踩过 `core.autocrlf` 让 LF 片段一条都匹配不上）
+///
+/// `cur` = 当前内容（覆盖层优先，`None` = 文件不存在）。锚点编辑只能改**已有**文件：
+/// 新建文件的锚点无处可锚，那种场合用 `content` 形态。
+pub(crate) fn resolve_write(
+    rel: &str,
+    body: &WriteBody,
+    cur: Option<&str>,
+) -> Result<String, String> {
+    match body {
+        WriteBody::Content(c) => {
+            if c.is_empty() {
+                return Err("content 为空 —— 不允许静默清空文件".into());
+            }
+            Ok(c.clone())
+        }
+        WriteBody::Edits(edits) => {
+            let Some(text) = cur else {
+                return Err(format!(
+                    "{rel} 不存在 —— 锚点编辑只能改已有文件；新建文件请用 content 形态（整份内容）"
+                ));
+            };
+            let mut out = text.to_string();
+            for (i, e) in edits.iter().enumerate() {
+                if e.find.is_empty() {
+                    return Err(format!(
+                        "第 {} 条 edit：find 为空（{rel}）—— 锚点编辑要给出要被替换的原文；\
+                         要给整份内容请用 content 形态",
+                        i + 1
+                    ));
+                }
+                // 同一文件的多条改动**按声明顺序累积**（与 repair::apply_edits 同一语义）
+                out = repair::replace_unique(&out, &e.find, &e.replace)
+                    .map_err(|why| format!("第 {} 条 edit：{why}（{rel}）", i + 1))?;
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// 锚点写入成功的回灌文案。必须把"改了几处"说出来：只说"已写入 N 字节"，
+/// 模型看不出自己那轮传的是 edits 还是 content，下一轮容易再 verify 一遍。
+pub(crate) fn write_edits_ok_text(
+    rel: &str,
+    count: usize,
+    len: usize,
+    policy: WritePolicy,
+) -> String {
+    format!(
+        "已改 {rel}：{count} 处锚点替换（改后 {len} 字节）{}",
+        if policy == WritePolicy::Stage {
+            "（已暂存到 .ruyix/stage/，项目磁盘未变，用户确认后才生效）"
+        } else {
+            ""
+        }
+    )
+}
+
+/// 文件内容"怎么给"：整份走老裁剪，窗口走行切片。
+fn read_body(rel: &str, content: &str, spec: &ReadSpec) -> Result<String, String> {
+    if !spec.is_window() {
+        return Ok(clip(content, READ_CLIP));
+    }
+    window_of(rel, content, spec.offset, spec.limit)
+}
+
+/// 行窗口读：从 `offset`（1-based）起最多 `limit` 行。
+///
+/// 表头不是装饰，它是这个能力的**一半**：模型要靠"共 N 行 / 还有 M 行，接着读用 offset=X"
+/// 才知道缺口在哪、怎么接上。没有它，模型只知道自己拿到了 200 行。
+fn window_of(
+    rel: &str,
+    content: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String, String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return Ok(format!("（{rel} 是空文件）"));
+    }
+    let start = offset.unwrap_or(1);
+    if start > total {
+        // 越界当场说清：静默返回最后一行会让模型以为"中间没内容"
+        return Err(format!(
+            "offset={start} 越界：{rel} 只有 {total} 行（行号从 1 起）"
+        ));
+    }
+    let asked = limit.unwrap_or(READ_WINDOW_DEFAULT_LINES);
+    let take = asked.min(READ_WINDOW_MAX_LINES);
+    let end = (start - 1 + take).min(total);
+    let body = lines[start - 1..end].join("\n");
+    let tail = if end < total {
+        format!("；还有 {} 行，接着读用 offset={}", total - end, end + 1)
+    } else {
+        "；已到文件末尾".to_string()
+    };
+    let clamped = if asked > READ_WINDOW_MAX_LINES {
+        format!("（请求 {asked} 行，一次窗口上限 {READ_WINDOW_MAX_LINES} 行）")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "--- {rel}（第 {start}-{end} 行 / 共 {total} 行{tail}）{clamped}---\n{}",
+        clip(&body, READ_CLIP)
+    ))
 }
 
 /// 写入成功的回灌文案。**单动作与批并发两条路径共用**：确认模式必须把"磁盘没变"说清，
@@ -1224,13 +1442,14 @@ async fn exec_one(
     action: Action,
 ) -> (String, String, Result<String, String>) {
     match action {
-        Action::Read(path) => {
-            let brief = format!("read {path}");
-            ("read".into(), brief, ctx.tool_read(&path))
+        Action::Read(spec) => {
+            let brief = format!("read {}", spec.brief());
+            ("read".into(), brief, ctx.tool_read(&spec))
         }
-        Action::Write(path, content) => {
-            let brief = format!("write {path}（{} 字节）", content.len());
-            ("write".into(), brief, ctx.tool_write(&path, &content))
+        Action::Write(spec) => {
+            let brief = spec.brief();
+            let r = ctx.apply_write(&spec);
+            ("write".into(), brief, r)
         }
         Action::Execute(cmd, t) => {
             let brief = format!("execute {}", clip(&cmd, 80));
@@ -1289,7 +1508,7 @@ async fn run_wave(
         return;
     }
 
-    let mut reads: Vec<(usize, String)> = Vec::new();
+    let mut reads: Vec<(usize, ReadSpec)> = Vec::new();
     let mut writes: Vec<(usize, String, Option<String>, String)> = Vec::new();
     let mut execs: Vec<(usize, String, Option<u64>)> = Vec::new();
     let mut bgs: Vec<(usize, crate::proc::StartSpec)> = Vec::new();
@@ -1299,14 +1518,18 @@ async fn run_wave(
 
     for &i in wave {
         match &actions[i] {
-            Action::Read(p) => reads.push((i, p.clone())),
-            Action::Write(p, after) => match safe_rel_path(p) {
-                // `before` 在主线程取（覆盖层命中或一次小文件读）—— 线程里只做磁盘
+            Action::Read(spec) => reads.push((i, spec.clone())),
+            Action::Write(spec) => match safe_rel_path(&spec.path) {
+                // `before` 与"归约成整份内容"都在主线程做（要碰覆盖层：edits 得先读到当前内容）
+                // —— 线程里只做磁盘
                 Ok(rel) => {
                     let before = ctx.before_of(&rel);
-                    writes.push((i, rel, before, after.clone()));
+                    match resolve_write(&rel, &spec.body, before.as_deref()) {
+                        Ok(after) => writes.push((i, rel, before, after)),
+                        Err(e) => slots[i] = Some(("write".into(), spec.brief(), Err(e))),
+                    }
                 }
-                Err(e) => slots[i] = Some(("write".into(), format!("write {p}"), Err(e))),
+                Err(e) => slots[i] = Some(("write".into(), spec.brief(), Err(e))),
             },
             Action::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
             Action::ExecBg(spec) => bgs.push((i, spec.clone())),
@@ -1328,9 +1551,9 @@ async fn run_wave(
 
     // 只读：复用同一份并发读（顺序按声明落位）
     if !reads.is_empty() {
-        let paths: Vec<String> = reads.iter().map(|(_, p)| p.clone()).collect();
-        for ((i, p), r) in reads.iter().zip(read_group(ctx, &paths, true)) {
-            slots[*i] = Some(("read".to_string(), format!("read {p}"), r));
+        let specs: Vec<ReadSpec> = reads.iter().map(|(_, s)| s.clone()).collect();
+        for ((i, spec), r) in reads.iter().zip(read_group(ctx, &specs, true)) {
+            slots[*i] = Some(("read".to_string(), format!("read {}", spec.brief()), r));
         }
     }
 
@@ -1403,7 +1626,12 @@ async fn run_wave(
 
     // 写入：磁盘已落 → 这里按**声明顺序**记账（内存状态只有一份）
     for ((i, rel, before, after), (_, r)) in writes.iter().zip(write_out) {
-        let brief = format!("write {rel}（{} 字节）", after.len());
+        // 摘要用**调用方声明的形状**（content 报字节、edits 报几处替换）——
+        // 只说"写成了 N 字节"会让模型看不出自己那轮传的是哪种形态
+        let brief = match &actions[*i] {
+            Action::Write(spec) => spec.brief(),
+            _ => format!("write {rel}（{} 字节）", after.len()),
+        };
         let res = match r {
             Ok(()) => {
                 ctx.record(rel.clone(), before.clone(), after.clone());
@@ -1431,6 +1659,83 @@ async fn run_wave(
         for ((i, brief), r) in conn_briefs.iter().zip(JoinAll::new(conn_futs).await) {
             slots[*i] = Some(("connect".into(), brief.clone(), r));
         }
+    }
+}
+
+/// 正整数字段（`offset` / `limit` 这类）。0 与负数都当场拒 ——
+/// 静默收下 0 会让模型拿到空结果，然后以为"文件是空的"，比报错难查得多。
+fn get_pos_usize(args: &serde_json::Value, key: &str) -> Result<Option<usize>, String> {
+    let Some(v) = args.get(key) else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let n = v
+        .as_u64()
+        .ok_or_else(|| format!("{key} 只能是正整数，收到 {}", clip(&v.to_string(), 40)))?;
+    if n == 0 {
+        return Err(format!("{key} 不能是 0（{key} 是行数/行号，从 1 起）"));
+    }
+    Ok(Some(n as usize))
+}
+
+/// `read` 的两副面孔：`{"path":"a.rs"}`（整份）与 `{"path":"a.rs","offset":120,"limit":60}`（窗口）。
+///
+/// 窗口只对**文件**有意义；目录给的本来就是结构树，窗口参数在那边被忽略（不报错：
+/// 报错会换来一轮无效往返，而模型"想看看某个目录的一段"的意图本身没有歧义）。
+fn parse_read(args: &serde_json::Value) -> Result<Action, String> {
+    let path = get_str(args, "path")?;
+    let offset = get_pos_usize(args, "offset")?;
+    let limit = get_pos_usize(args, "limit")?;
+    Ok(Action::Read(ReadSpec {
+        path,
+        offset,
+        limit,
+    }))
+}
+
+/// `write` 的两副面孔收口在这一处：`content`（整份）或 `edits`（锚点）。
+///
+/// **两个都给 = 当面拒**，不猜哪个优先：模型给两套互相矛盾的意图时，猜错就是静默改错文件。
+fn parse_write(args: &serde_json::Value) -> Result<Action, String> {
+    let path = get_str(args, "path")?;
+    let content = args.get("content").and_then(|x| x.as_str());
+    let edits = args.get("edits");
+    match (content, edits) {
+        (Some(_), Some(_)) => Err(
+            "write 的 args 里 content 与 edits 只能给一个：整份重写用 content，\
+             只改动几处用 edits"
+                .into(),
+        ),
+        (Some(c), None) => {
+            if c.is_empty() {
+                return Err("write.content 为空 —— 不允许静默清空文件".into());
+            }
+            Ok(Action::Write(WriteSpec {
+                path,
+                body: WriteBody::Content(c.to_string()),
+            }))
+        }
+        (None, Some(v)) => {
+            let list: Vec<AgentEdit> = serde_json::from_value(v.clone()).map_err(|e| {
+                format!(
+                    "write.edits 解析失败（形状是 [{{\"find\":\"要被替换的原文\",\"replace\":\"换成什么\"}}]）：{e}"
+                )
+            })?;
+            if list.is_empty() {
+                return Err("write.edits 为空 —— 没有改动就别说要改".into());
+            }
+            Ok(Action::Write(WriteSpec {
+                path,
+                body: WriteBody::Edits(list),
+            }))
+        }
+        (None, None) => Err(
+            "write 的 args 里必须给 content（整份内容）或 edits（锚点改动）：\
+             改已有文件优先用 edits"
+                .into(),
+        ),
     }
 }
 
@@ -1492,8 +1797,8 @@ fn parse_execute(args: &serde_json::Value) -> Result<Action, String> {
 #[derive(Clone, Debug)]
 pub(crate) enum StepAction {
     Final(String),
-    Read(String),
-    Write(String, String),
+    Read(ReadSpec),
+    Write(WriteSpec),
     Execute(String, Option<u64>),
     ExecBg(crate::proc::StartSpec),
     Proc(ProcOp, String),
@@ -1504,8 +1809,8 @@ pub(crate) enum StepAction {
 fn to_step_action(a: Action) -> StepAction {
     match a {
         Action::Final(t) => StepAction::Final(t),
-        Action::Read(p) => StepAction::Read(p),
-        Action::Write(p, c) => StepAction::Write(p, c),
+        Action::Read(s) => StepAction::Read(s),
+        Action::Write(s) => StepAction::Write(s),
         Action::Execute(c, t) => StepAction::Execute(c, t),
         Action::ExecBg(s) => StepAction::ExecBg(s),
         Action::Proc(op, h) => StepAction::Proc(op, h),
@@ -1621,11 +1926,17 @@ impl<'a> Ctx<'a> {
         self.policy
     }
 
-    /// read：目录给结构树（复用 repair 的列表逻辑），文件给内容；"." = 项目根
-    pub(crate) fn tool_read(&self, raw: &str) -> Result<String, String> {
+    /// read：目录给结构树（复用 repair 的列表逻辑），文件给内容；"." = 项目根。
+    ///
+    /// `spec` 带 `offset`/`limit` 时只取那一段行窗口（[`ReadSpec::is_window`]）——
+    /// 让模型不必为读 3000 行文件里中间那 40 行而付整份 token。
+    /// 不带窗口时与老行为**逐字一致**（同一次 `clip`）。
+    pub(crate) fn tool_read(&self, spec: &ReadSpec) -> Result<String, String> {
+        let raw = spec.path.as_str();
         let raw_trim = raw.trim();
         if raw_trim == "." || raw_trim == "./" {
             // 项目根结构：read "." 是模型探索项目的第一步
+            // （目录给的本来就是结构树，窗口参数在这里无意义 —— 忽略，不报错换一轮白跑）
             let mut listing = String::from("--- 项目根目录结构 ---\n");
             let mut n = 0usize;
             repair::list_dir(self.proj, "", 0, &mut n, &mut listing);
@@ -1633,10 +1944,8 @@ impl<'a> Ctx<'a> {
         }
         let rel = safe_rel_path(raw)?;
         if let Some(c) = self.overlay.get(&rel) {
-            return Ok(format!(
-                "（{rel} 的当前内容 = 本会话已暂存的修改）\n{}",
-                clip(c, READ_CLIP)
-            ));
+            let body = read_body(&rel, c, spec)?;
+            return Ok(format!("（{rel} 的当前内容 = 本会话已暂存的修改）\n{body}"));
         }
         let p = self.proj.join(&rel);
         if p.is_dir() {
@@ -1648,7 +1957,8 @@ impl<'a> Ctx<'a> {
         } else if p.is_file() {
             let content =
                 std::fs::read_to_string(&p).unwrap_or_else(|e| format!("<读取失败：{e}>"));
-            Ok(format!("--- {rel} ---\n{}", clip(&content, READ_CLIP)))
+            let body = read_body(&rel, &content, spec)?;
+            Ok(format!("--- {rel} ---\n{body}"))
         } else {
             Err(format!(
                 "{rel} 不存在（项目根目录用 read \".\" 看整体结构）"
@@ -1656,19 +1966,54 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// write：记录变更进覆盖层；Apply 策略立刻落盘（覆盖前备份）
+    /// write 的整份形态（老形状，逐字保留）。生产路径走 [`Ctx::apply_write`]，
+    /// 这条是测试与调用方直连的入口。
+    #[cfg(test)]
     pub(crate) fn tool_write(&mut self, path: &str, content: &str) -> Result<String, String> {
-        let rel = safe_rel_path(path)?;
-        if content.is_empty() {
-            return Err("content 为空 —— 不允许静默清空文件".into());
-        }
-        self.commit(rel.clone(), content.to_string())?;
-        Ok(write_ok_text(&rel, content.len(), self.policy))
+        self.apply_write(&WriteSpec::content(path, content))
     }
 
-    /// 记录变更 + 更新覆盖层；Apply 策略同步落盘
-    fn commit(&mut self, rel: String, after: String) -> Result<(), String> {
+    /// write 的锚点形态：只传改动，不重发全文
+    #[cfg(test)]
+    pub(crate) fn tool_edit(
+        &mut self,
+        path: &str,
+        edits: Vec<AgentEdit>,
+    ) -> Result<String, String> {
+        self.apply_write(&WriteSpec {
+            path: path.to_string(),
+            body: WriteBody::Edits(edits),
+        })
+    }
+
+    /// write 的**唯一入口**：两种参数形状都在 [`resolve_write`] 里归约成"最终整份内容"，
+    /// 再走同一条记账/落盘通道。
+    ///
+    /// 为什么不直接调 [`repair::apply_edits`]：那个函数**自己写盘**，会绕过覆盖层与
+    /// 备份/暂存记账 —— 确认模式下磁盘本来就不该动（那是"read 看到新内容、execute 看到旧内容"
+    /// 那场 65 轮误侦察的根）。共用的只是**匹配规则**（[`repair::replace_unique`]），
+    /// 落盘通道仍然只有 [`Ctx::commit_with`] 一条。
+    pub(crate) fn apply_write(&mut self, spec: &WriteSpec) -> Result<String, String> {
+        let rel = safe_rel_path(&spec.path)?;
         let before = self.before_of(&rel);
+        let after = resolve_write(&rel, &spec.body, before.as_deref())?;
+        let len = after.len();
+        let reply = match &spec.body {
+            WriteBody::Content(_) => write_ok_text(&rel, len, self.policy),
+            WriteBody::Edits(edits) => write_edits_ok_text(&rel, edits.len(), len, self.policy),
+        };
+        self.commit_with(rel, before, after)?;
+        Ok(reply)
+    }
+
+    /// 记录变更 + 更新覆盖层；Apply 策略同步落盘。
+    /// `before` 由调用方给：它往往已经为了别的目的读过一遍当前内容，这里再读一次是白付一次 I/O。
+    fn commit_with(
+        &mut self,
+        rel: String,
+        before: Option<String>,
+        after: String,
+    ) -> Result<(), String> {
         if self.policy == WritePolicy::Apply {
             let bdir = self.ensure_backup_dir(before.is_some());
             flush_write_disk(self.proj, bdir.as_deref(), &rel, before.as_deref(), &after)?;
@@ -2264,6 +2609,81 @@ pub fn tail_history(history: &[HistoryMsg], n: usize) -> Vec<HistoryMsg> {
     }
 }
 
+/// 一轮工具调用在 `msgs` 里的两个落点，以及它折叠后各自替换成什么。
+///
+/// 为什么记下标、而不给消息加个"这是第几轮"的字段：`ChatMessage` 是 `{role, content}` 且
+/// 全仓共用（`llm.rs`），为工具循环的记账给它加字段会污染每一个调用方。
+/// 下标 + **幂等**的摘要文本就够：同一轮反复折叠写进去的是同一串，不会漂移。
+struct RoundSlot {
+    /// 模型那半（assistant，含它发出的调用 JSON）在 msgs 里的下标
+    assistant: usize,
+    /// 结果那半（user）在 msgs 里的下标
+    result: usize,
+    /// 折叠后 assistant 那半替换成什么（只留"调了什么"，不留 content 正文）
+    call_digest: String,
+    /// 折叠后 result 那半替换成什么（一行事实）
+    outcome_digest: String,
+}
+
+/// 一轮调用的形状摘要（**不带正文**）：折叠后模型仍认得出自己那一轮调了什么。
+fn call_shape(actions: &[Action]) -> String {
+    let one = |a: &Action| match a {
+        Action::Read(s) => format!("read {}", s.brief()),
+        Action::Write(s) => s.brief(),
+        Action::Execute(c, _) => format!("execute {}", clip(c, 60)),
+        Action::ExecBg(s) => format!("execute bg {}", clip(&s.cmd, 60)),
+        Action::Proc(op, h) => format!("execute {} {h}", proc_op_name(*op)),
+        Action::Connect(_) => "connect".to_string(),
+        Action::Plan(p) => format!("plan {} 步", p.len()),
+        Action::Ask(_) => "ask_user".to_string(),
+        Action::Final(_) => "final".to_string(),
+    };
+    if actions.len() == 1 {
+        one(&actions[0])
+    } else {
+        actions.iter().map(one).collect::<Vec<_>>().join("；")
+    }
+}
+
+/// 一条工具结果折成一行：调了什么、成没成、头一行是什么。
+///
+/// 取头一行对四种能力刚好都是最有信息量的那行：read 的表头（`--- src/a.rs ---` 或
+/// 窗口表头）、write 的"已写入/已改"、execute 输出的第一行（往往就是那行 error）。
+fn outcome_line(tool: &str, brief: &str, res: &Result<String, String>) -> String {
+    match res {
+        Ok(t) => {
+            let head = t.lines().next().unwrap_or("").trim();
+            format!("{tool} {brief} ✓ {}", clip(head, 100))
+        }
+        Err(e) => format!("{tool} {brief} ✗ {}", clip(e, 100)),
+    }
+}
+
+/// 把"超出保留窗口"的老轮次折叠成一行事实，返回 `(折叠了几轮, 省下多少字节)`。
+///
+/// 幂等：已折叠的轮次再折一次写进去的是同一串文本，所以每轮都调它没有副作用。
+/// 它管的是**单次 run 内**工具循环的历史；跨会话的输入历史归 [`tail_history`]，两回事。
+fn fold_history(msgs: &mut [ChatMessage], rounds: &[RoundSlot], keep: usize) -> (usize, usize) {
+    if rounds.len() <= keep {
+        return (0, 0);
+    }
+    let (mut folded, mut saved) = (0usize, 0usize);
+    for r in &rounds[..rounds.len() - keep] {
+        let mut hit = false;
+        for (idx, digest) in [(r.assistant, &r.call_digest), (r.result, &r.outcome_digest)] {
+            if msgs[idx].content != *digest {
+                saved += msgs[idx].content.len().saturating_sub(digest.len());
+                msgs[idx].content = digest.clone();
+                hit = true;
+            }
+        }
+        if hit {
+            folded += 1;
+        }
+    }
+    (folded, saved)
+}
+
 /// plan 步骤 → 大纲区的任务列表
 fn plan_to_outline(task: &str, steps: Vec<PlanStep>) -> Plan {
     Plan {
@@ -2817,6 +3237,8 @@ pub async fn run_with_ask(
     let mut asks: Vec<AskRecord> = Vec::new();
     // 这一轮读过哪些文件（依据核对的证据集合，复核员会看到这份清单）
     let mut read_paths: Vec<String> = Vec::new();
+    // 本轮跑过哪些工具轮次（历史折叠的账本：老轮次的正文不再每轮重发）
+    let mut round_slots: Vec<RoundSlot> = Vec::new();
     // 连续模型调用失败计数：成功一轮即清零
     let mut llm_failures: u32 = 0;
 
@@ -3073,6 +3495,9 @@ pub async fn run_with_ask(
                 continue;
             }
         };
+        // 记下模型那半在 msgs 里的落点 —— 历史折叠要靠它回头把这一格的正文换掉。
+        // （ask / final / 解析失败那几条 `continue` 不会走到"记落点"，所以不会留下悬空的轮次）
+        let assistant_idx = msgs.len();
         msgs.push(ChatMessage::assistant(reply.content.clone()));
 
         // 第五个动作：向委托人提问。控制动作独占一轮（批里的 ask_user 已被当面拒）。
@@ -3290,12 +3715,13 @@ pub async fn run_with_ask(
             if *tool == "write" && ok {
                 any_write_ok = true;
             }
-            // 读过什么 = 依据核对的证据集合（复核员会看到这份清单）
+            // 读过什么 = 依据核对的证据集合（复核员会看到这份清单）。
+            // 记的是**路径**：同一文件读了两个窗口算"读过它"一次。
             if ok
-                && let Action::Read(p) = &actions[i]
-                && !read_paths.contains(p)
+                && let Action::Read(spec) = &actions[i]
+                && !read_paths.contains(&spec.path)
             {
-                read_paths.push(p.clone());
+                read_paths.push(spec.path.clone());
             }
             // 取证留痕：命令输出原本用完即弃（只活在 msgs 里），复核员看不到 →
             // 靠命令取证的答复永远"证据无处可查"。单动作与批都在这一汇总。
@@ -3370,12 +3796,48 @@ pub async fn run_with_ask(
             }
         }
 
+        // 折叠账本的原料：形状与结果摘要都在**回灌之前**算好
+        // （`n == 1` 那条分支会把 `results` 整个移走）
+        let all_ok = results.iter().all(|(_, _, r)| r.is_ok());
+        let shape = call_shape(&actions);
+        let outcome = results
+            .iter()
+            .map(|(tool, brief, res)| outcome_line(tool, brief, res))
+            .collect::<Vec<_>>()
+            .join("；");
+
         // 回灌：单动作保持老形状（模型学过它），批走 results 数组、按声明顺序逐条给
         if n == 1 {
             let (_, _, r) = results.into_iter().next().expect("n == 1 时必有结果");
             msgs.push(ChatMessage::user(json_result(r)));
         } else {
             msgs.push(ChatMessage::user(batch_json_result(&results)));
+        }
+
+        // ---- 历史折叠：老轮次的正文不再每轮重发 ----
+        //
+        // 账本在第 1 轮就记（哪怕这次不折），因为"保留最近 keep 轮"要看的是**总轮数**，
+        // 不是"这一轮动了没有"。折叠是幂等的，所以每轮都调它没有副作用。
+        round_slots.push(RoundSlot {
+            assistant: assistant_idx,
+            result: msgs.len() - 1,
+            call_digest: format!("{{\"folded\":\"第 {step} 轮调用（{shape}）—— 请求正文已折叠\"}}"),
+            outcome_digest: format!(
+                "{{\"ok\":{all_ok},\"folded\":\"第 {step} 轮结果（{outcome}）—— 正文已从上下文移除，需要时重新 read\"}}"
+            ),
+        });
+        if cfg.agent.history_trim {
+            let (folded, saved) =
+                fold_history(&mut msgs, &round_slots, cfg.agent.history_keep_rounds);
+            if folded > 0 {
+                sink.log(
+                    "info",
+                    format!(
+                        "[agent] 第 {step} 轮 历史折叠 {folded} 轮（省 {saved} 字节；保留最近 {} 轮正文）",
+                        cfg.agent.history_keep_rounds
+                    ),
+                );
+            }
         }
 
         // 模型已经对失败做出过回应（无论它选了哪个动作），把控制权交回引擎继续派发。

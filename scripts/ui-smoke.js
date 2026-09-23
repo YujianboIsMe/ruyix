@@ -125,6 +125,13 @@
  *                     等于把"停一下手"变成"跑一趟全量"。两者收敛到唯一出口
  *                     refreshEditorChrome，只挂切回标签页 / 失焦 / 显式保存；而且高亮没过期
  *                     就不再跑 IPC。输入只做本地"内容上屏"。
+ *   U38 open-project-args `open project` / `open file` 的路径参数必须经**引号感知**的分词还原：
+ *                     命令入口（handleCommand）是哑空白切分，而标题栏项目切换下拉发的是
+ *                     转义过的 `open project "D:\\Projects\\x"`（escArg 翻倍 \ 与 "，约定
+ *                     parseQuotedTokens 还原）—— 引号原样混进路径后端 exists() 必然 false，
+ *                     实测 2026-09-23：下拉切项目从来没成功过。回放真加载 command.js 驱动
+ *                     handleCommand：下拉形态转义串还原 / 手打带引号含空格路径 / 不带引号
+ *                     原样透传 / UNC 打头双反斜杠不被转义规则吃掉，四个都要对。
  */
 
 "use strict";
@@ -401,7 +408,7 @@ function runStaticChecks() {
   }
   const missField = schemaFields.filter(
     (p) => !zhKeys.has(`config.field.${p}`) || !zhKeys.has(`config.desc.${p}`));
-  check("U10", "config-contract", schemaFields.length >= 6 && missField.length === 0,
+  check("U10", "config-contract", schemaFields.length >= 5 && missField.length === 0,
     `静态 SCHEMA 字段缺 i18n 键: ${missField.join(", ")}（解析到 ${schemaFields.length} 个字段）`);
   // harness 段的键一旦被抄回前端，这条立刻红
   check("U10", "config-contract",
@@ -871,6 +878,155 @@ function runStaticChecks() {
       has(intentRs, "batch_parallel") &&
       has(intentRs, "并发跑"),
     "开关与接受判定没绑在一起：提示词教不教批、引擎收不收批必须同一个开关（不虚报能力）；提示词还要说清「一批并发跑、只有同文件与托管进程保序」");
+
+  // U36 param-shapes + history-fold（v0.11）：原子**能力集不变**（仍是 read/write/execute/
+  // connect 四个），变的是参数形状与历史管理。四条不许退：
+  // ① read 能只取一段（offset/limit）；② write 能只传改动（edits 锚点），且匹配规则
+  // **复用 repair::replace_unique 而不是 apply_edits** —— 后者自己写盘，会绕过覆盖层与
+  // 备份/暂存记账（确认模式下磁盘本就不该动，那是"read 看到新内容 / execute 看到旧内容"
+  // 那场 65 轮误侦察的根）；③ 工具循环把超出保留窗口的老轮次折成一行事实（否则上面两处
+  // 省下的 token 会被"历史每轮重发"复利吃掉）；④ 提示词判据**成对写**，且老那句"必须是
+  // 整份内容"必须消失 —— 留着它，模型看见新形状也不会用（同 WEB_SEARCH_HINT 的教训）。
+  // 放在这里（U25 之后）而不是 U35 旁边：`intentRs` / `stepRs` / `configRs` 都是这一带
+  // 才 `read()` 出来的 const，提前用会撞 TDZ。
+  check("U36", "param-shapes-history-fold",
+    has(intentRs, "struct ReadSpec") &&
+      has(intentRs, "pub offset: Option<usize>") &&
+      has(intentRs, "pub limit: Option<usize>") &&
+      has(intentRs, "fn window_of(") &&
+      has(intentRs, "接着读用 offset="),
+    "read 的窗口形态没落地：表头必须写出「共 N 行 / 还有 M 行，接着读用 offset=X」，否则模型不知道缺口在哪、怎么接上");
+
+  check("U36", "param-shapes-history-fold",
+    has(intentRs, "struct WriteSpec") &&
+      has(intentRs, "enum WriteBody") &&
+      has(intentRs, "Edits(Vec<AgentEdit>)") &&
+      has(intentRs, "fn resolve_write(") &&
+      has(intentRs, "fn apply_write("),
+    "write 的两副面孔没落地：content（整份）与 edits（锚点）要归约到同一条落盘通道");
+
+  check("U36", "param-shapes-history-fold",
+    has(intentRs, "repair::replace_unique(") && !has(intentRs, "repair::apply_edits("),
+    "锚点匹配必须复用 repair::replace_unique（恰好一次 + 行尾归一化）；不许调 repair::apply_edits —— 它自己写盘，会绕过覆盖层与备份/暂存记账");
+
+  check("U36", "param-shapes-history-fold",
+    has(intentRs, "fn fold_history(") &&
+      has(intentRs, "struct RoundSlot") &&
+      has(intentRs, "cfg.agent.history_trim") &&
+      has(intentRs, "cfg.agent.history_keep_rounds") &&
+      has(intentRs, "正文已从上下文移除"),
+    "历史折叠没落地：老轮次要压成一行事实（且写明正文去哪了、要看就重新 read），否则 read/write 省下的 token 会被「历史每轮重发」复利吃掉");
+
+  check("U36", "param-shapes-history-fold",
+    has(configRs, "pub history_trim: bool") &&
+      has(configRs, "pub history_keep_rounds: usize") &&
+      has(cfgBridgeRs, '"agent.history_keep_rounds"') &&
+      zhKeys.has("config.field.harness.agent.history_trim") &&
+      zhKeys.has("config.field.harness.agent.history_keep_rounds"),
+    "折叠开关没贯通：引擎 AgentConfig 两字段 → 配置桥（0 轮 = 连当前这轮都折掉，必须按非法值拒）→ UI 两字段，缺一样用户就没法一行回滚");
+
+  check("U36", "param-shapes-history-fold",
+    has(intentRs, "该用窗口") &&
+      has(intentRs, "别用窗口") &&
+      has(intentRs, "别用 edits") &&
+      has(intentRs, "别用 content") &&
+      !has(intentRs, "交回的必须是整份内容") &&
+      !has(intentRs, "再用 write 交回整份新内容") &&
+      has(stepRs, "edits") &&
+      has(stepRs, "offset") &&
+      !has(stepRs, "交回的必须是整份内容"),
+    "提示词的判据必须成对写（该用/别用），且老那句「必须是整份内容」要消失 —— 留着它模型看见新形状也不会用；子步骤那份要各自自洽");
+
+  // U37 config-index：配置页十几个块、几十行，一屏装不下 → 正文只给"块标题条"，
+  // 右侧大纲区渲染同一份**块索引**（标题 + 字段数）。四条不许退：
+  // ① 索引带双守卫（ownerIs + activeTabId）—— 大纲区只有一块 DOM，文件大纲与会话任务计划
+  //    都写它；后台标签不许覆盖前台的（session.js::renderOutline 的同一课）；
+  // ② **折叠只切 class，不重建 DOM** —— controls 是 render 那一刻抓下来的节点引用
+  //    （下标 = row.idx），重建 = 用户改过的值在 collect() 眼里变回初始值 → 保存时静默
+  //    漏提交，而且界面看着完全正常。这是本次改动最容易踩的坑；
+  // ③ 折叠在 CSS 里是 display:none（节点还在，collect 读得到），不是 visibility/height:0
+  //    （那会留下不可见却仍能 Tab 聚焦的控件）；
+  // ④ 每个 harness 子段都有**可读标题**（zh + en）—— 缺了就会显示 `harness.llm` 这种原始
+  //    键名，那正是"看得累"的根因之一。子段名不是手写死表，而是从 AppConfig 解析出来：
+  //    加了配置组却不加文案，这条立刻红。
+  const renderBody = configJs.slice(
+    configJs.indexOf("function render(tabRef)"), configJs.indexOf("function readValue("));
+  check("U37", "config-index",
+    has(configJs, "function renderOutline(") &&
+      has(configJs, "el.dataset.configTab !== t.id") &&
+      has(configJs, "window.state?.activeTabId !== t.id"),
+    "配置块索引没带双守卫：缺了它会用后台标签的索引盖掉前台的文件大纲 / 会话计划");
+
+  // 归属标记要在建 DOM **之前**打 —— 放到函数尾巴上，applyFold / renderOutline 会被
+  // 自己的 ownerIs 挡掉（表现：折叠态要等下一次渲染才生效，第一次点没反应）
+  const ownerAt = renderBody.indexOf("view.dataset.configTab = tab.id");
+  const buildAt = renderBody.indexOf("body.innerHTML");
+  check("U37", "config-index",
+    ownerAt >= 0 && buildAt >= 0 && ownerAt < buildAt &&
+      has(renderBody, "applyFold(tab)") && has(renderBody, "renderOutline(tab)") &&
+      has(renderBody, "data-section="),
+    "render 未接上折叠与索引（或归属标记排在建 DOM 之后）：块上还要有 data-section，索引点击靠它定位");
+
+  const foldBody = configJs.slice(
+    configJs.indexOf("function applyFold("), configJs.indexOf("function sectionAtTop("));
+  const revealBody = configJs.slice(
+    configJs.indexOf("function revealBlock("), configJs.indexOf("function renderControl("));
+  check("U37", "config-index",
+    foldBody.length > 0 && revealBody.length > 0 &&
+      has(foldBody, "classList.toggle(") && !has(foldBody, "innerHTML") &&
+      !has(revealBody, "innerHTML"),
+    "折叠路径里出现 innerHTML 了：重建 DOM = controls 引用失效 = 用户改过的值在 collect() 眼里变回初始值（保存静默漏提交）");
+
+  check("U37", "config-index",
+    /\.config-section--folded \.config-section-rows\s*\{[^}]*display:\s*none/.test(stylesCss),
+    "折叠必须落成 display:none（visibility:hidden / height:0 会留下不可见但仍能 Tab 聚焦的控件）");
+
+  check("U37", "config-index",
+    has(configJs, '".config-section-head"') && has(configJs, '"[data-config-fold-all]"') &&
+      has(configJs, '"[data-config-section]"') &&
+      has(configJs, 'addEventListener("click", (e) => {') &&
+      /\.outline-item--active\s*\{/.test(stylesCss) && has(configJs, "syncOutlineActive("),
+    "块标题条点击 / 索引点击 / 全局开关 / 滚动高亮没接全（高亮缺了，索引就只是另一份要读完的清单）");
+
+  // 子段标题：从 AppConfig 的字段推出"有哪些配置块"，逐个要求 zh + en 文案。
+  // 叶子键（#[serde(default = "...")]，无点路径）归到 general 一块。
+  const appCfgSrc = configRs.slice(
+    configRs.indexOf("pub struct AppConfig"), configRs.indexOf("impl Default for AppConfig"));
+  const hiddenSrc = configRs.slice(
+    configRs.indexOf("const FORM_HIDDEN"),
+    configRs.indexOf("];", configRs.indexOf("const FORM_HIDDEN")));
+  // 隐藏项是前缀匹配：**不带点**的（如 `entropy`）盖住整段 → 这个块不会出现在表单里；
+  // 带点的（如 `llm.api_key`）只藏单个键，`llm` 这个块照样要有标题。
+  const hiddenTop = new Set(
+    [...hiddenSrc.matchAll(/"([\w.]+)"/g)]
+      .map((m) => m[1])
+      .filter((s) => !s.includes(".")));
+  const groups37 = [];
+  let isLeaf = false;
+  let hasLeaf = false;
+  for (const line of appCfgSrc.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith("#[serde(default = ")) isLeaf = true;
+    else if (t === "#[serde(default)]") isLeaf = false;
+    const f = line.match(/^\s+pub (\w+):/);
+    if (!f) continue;
+    if (isLeaf) hasLeaf = true;
+    else groups37.push(f[1]);
+    isLeaf = false;
+  }
+  const wanted = groups37.filter((g) => !hiddenTop.has(g))
+    .map((g) => `config.section.harness.${g}`);
+  if (hasLeaf) wanted.push("config.section.harness.general");
+  const missTitle = wanted.filter((k) => !zhKeys.has(k) || !enKeys.has(k));
+  check("U37", "config-index",
+    wanted.length >= 12 && missTitle.length === 0,
+    `配置块缺可读标题（会退化成 harness.llm 这种原始键名）: ${missTitle.join(", ")}（解析出 ${wanted.length} 块）`);
+
+  const ui37Keys = ["config.outline_head", "config.outline_expand_all",
+    "config.outline_collapse_all", "config.outline_empty", "config.fold_tip"];
+  const miss37 = ui37Keys.filter((k) => !zhKeys.has(k) || !enKeys.has(k));
+  check("U37", "config-index", miss37.length === 0,
+    `索引交互文案缺键（两语言都要）: ${miss37.join(", ")}`);
 
   // U26 ask-user：第五个动作（v0.8）—— **需求歧义只能问委托人**。
   // 病根：四个效果原语取不到"意图"（read 读磁盘、execute 跑命令、connect 连机器，
@@ -1355,7 +1511,6 @@ async function runConfigChecks() {
       { section: "ai", key: "model", full_key: "ruyix.code.ai.model", value: "old-model", inherited: null },
       { section: "ai", key: "api_key", full_key: "ruyix.code.ai.api_key", value: "", inherited: { scope: "global", value: "sk-hidden" } },
       { section: "ui", key: "lang", full_key: "ruyix.code.ui.lang", value: "", inherited: { scope: "global", value: "zh-CN" } },
-      { section: "ui", key: "emoji", full_key: "ruyix.code.ui.emoji", value: "true", inherited: null },
       { section: "custom", key: "flag", full_key: "ruyix.code.custom.flag", value: "true", inherited: null },
     ],
   };
@@ -2487,6 +2642,102 @@ async function runContextMenuChecks() {
 // 入口
 // ============================================
 
+/**
+ * U38 open-project-args：`open project` 的路径参数回放。
+ * 真加载 ui/command.js，驱动 handleCommand 走完整分发（哑空白切分入口 → handleOpenCommand），
+ * 断言后端 invoke("open_project") 收到的是**还原后**的路径：
+ * ① 下拉形态（main.js escArg 转义过的带引号串）→ 引号剥掉、\\ 还原成单反斜杠；
+ * ② 手打带引号 + 含空格路径 → 整段还原；
+ * ③ 不带引号的普通路径 → 原样透传（老行为不许变）；
+ * ④ 不带引号的 UNC → 打头 \\ 不被转义规则吃掉；
+ * ⑤ 空参数 → 用法提示，不发 invoke。
+ * 每条用例独立（清 currentProject / 计数），互不串场。
+ */
+async function runOpenProjectArgsChecks() {
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const i18n = {
+    getLang: () => "zh-CN",
+    t: (k, params) => {
+      let s = zh[k] ?? k;
+      for (const [pk, pv] of Object.entries(params || {})) s = s.split(`{${pk}}`).join(pv);
+      return s;
+    },
+  };
+  const statuses = [];
+  const invokes = []; // 只记 open_project
+  const shown = [];
+  const sandbox = {
+    I18N: i18n,
+    window: { I18N: i18n, SessionUI: null },
+    state: { tabs: [], activeTabId: null, currentProject: null },
+    samePath: (a, b) => String(a) === String(b),
+    getTauriInvoke: () => async (cmd, args) => {
+      if (cmd === "open_project") invokes.push(args);
+      return { name: "proj", path: args.path, lang: "rust" };
+    },
+    setStatus: (msg, kind) => statuses.push({ msg, kind }),
+    showProjectWorkspace: () => shown.push(true),
+    updateTitlebarTitle: () => {},
+  };
+  const saved = ["window", "state", "samePath", "getTauriInvoke", "setStatus",
+    "showProjectWorkspace", "updateTitlebarTitle", "I18N"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/command.js") +
+      "\n;globalThis.__CmdAPI = { handleCommand };")();
+    const handleCommand = globalThis.__CmdAPI.handleCommand;
+
+    // 单条用例独立跑：清场（currentProject 置空避免走 teardownProject 那条大链路）
+    const open = async (cmd) => {
+      sandbox.state.currentProject = null;
+      invokes.length = 0;
+      statuses.length = 0;
+      shown.length = 0;
+      await handleCommand(cmd);
+    };
+
+    // ① 标题栏项目切换下拉发的就是这条（main.js escArg 转义后的形态）—— 用户踩到的 bug 本体
+    await open('open project "D:\\\\Projects\\\\Go\\\\ai-gateway"');
+    check("U38", "open-project-args",
+      invokes.length === 1 && invokes[0].path === "D:\\Projects\\Go\\ai-gateway" &&
+        shown.length === 1,
+      `下拉形态的转义路径必须还原成单反斜杠且不带引号: ${JSON.stringify(invokes)}`);
+
+    // ② 手打带引号 + 含空格
+    await open('open project "D:\\My Docs\\hello world"');
+    check("U38", "open-project-args",
+      invokes.length === 1 && invokes[0].path === "D:\\My Docs\\hello world",
+      `带引号含空格的路径要整段还原: ${JSON.stringify(invokes)}`);
+
+    // ③ 不带引号（命令栏手打的常态）→ 行为不许变
+    await open("open project D:\\Projects\\Go\\ai-gateway");
+    check("U38", "open-project-args",
+      invokes.length === 1 && invokes[0].path === "D:\\Projects\\Go\\ai-gateway",
+      `不带引号的路径原样透传: ${JSON.stringify(invokes)}`);
+
+    // ④ 不带引号的 UNC —— 打头双反斜杠不许被转义规则吃掉（这正是"引号感知重切"
+    //    只对带引号的路径启用的原因）
+    await open("open project \\\\server\\share\\proj");
+    check("U38", "open-project-args",
+      invokes.length === 1 && invokes[0].path === "\\\\server\\share\\proj",
+      `UNC 打头双反斜杠必须原样保留: ${JSON.stringify(invokes)}`);
+
+    // ⑤ 空参数 → 用法提示，不发 invoke
+    await open("open project");
+    check("U38", "open-project-args",
+      invokes.length === 0 && statuses.some((s) => String(s.msg).includes("open project")),
+      `空参数要给用法提示且不发 invoke: ${JSON.stringify({ invokes, statuses })}`);
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+    delete globalThis.__CmdAPI;
+  }
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -2500,6 +2751,7 @@ async function main() {
     ["U30", "proc-log-replay", runProcLogChecks],
     ["U24", "external-link-replay", runExternalLinkChecks],
     ["U33", "ctx-copy-path", runContextMenuChecks],
+    ["U38", "open-project-args", runOpenProjectArgsChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

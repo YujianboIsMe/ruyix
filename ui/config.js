@@ -10,6 +10,11 @@
  *   应用  保存 + 把这些值刷新进 IDE 运行时内存里的配置对象（优先级最高，重启失效）
  *   取消  丢弃未保存的改动，重新扫描
  *
+ * 页面组织：十几个块、几十行，一屏装不下。所以正文只给"块标题条"（点击折叠 / 展开，
+ * 默认全折），右侧大纲区渲染同一份**块索引**（标题 + 字段数）：点一下展开并滚过去，
+ * 滚正文时高亮当前块。折叠一律走 CSS class —— 重建 DOM 会让 collect() 静默漏掉用户
+ * 已改的值（见 applyFold 的注释）。
+ *
  * 与其它面板同款防御式写法：无 Tauri（浏览器直开）时显示"后端不可用"。
  */
 
@@ -45,7 +50,6 @@ window.ConfigUI = (() => {
       section: "ui",
       fields: [
         { key: "lang", kind: "select", options: ["zh-CN", "en"] },
-        { key: "emoji", kind: "toggle" },
       ],
     },
   ];
@@ -84,9 +88,11 @@ window.ConfigUI = (() => {
             kind: kindOf(s.kind),
             options: s.options && s.options.length ? s.options : null,
             // 分组用 path 第一段（llm / sandbox / kb …），渲染成子段标题。
+            // 无点的顶层键（workspace_root / max_context_chars）不成组 —— 各占一块
+            // 只会多出一堆"一块一行"的碎片，归到 general。
             // **注意**：section 仍是 `harness`（落盘键由 section+key 拼出，不能动），
             // 这个 group 只影响显示。
-            group: path.split(".")[0],
+            group: path.includes(".") ? path.split(".")[0] : "general",
             hint: s.default,
           };
         });
@@ -237,6 +243,151 @@ window.ConfigUI = (() => {
   }
 
   // ============================================
+  // 折叠 + 大纲区索引
+  //
+  // 配置页有十几个块、几十行，一屏装不下 —— 正文只给"块标题条"，块里内容按需展开；
+  // 右侧大纲区就是这个页面的索引：每块一行（标题 + 字段数），点一下展开并滚过去，
+  // 滚正文时高亮当前块。折叠态挂在标签上，切走再回来不丢。
+  // ============================================
+
+  /** 块标题条的状态：标题 → true 表示**展开**。空对象 = 全部折叠（首屏即索引） */
+  function isOpen(t, title) {
+    return !!(t._configOpen && t._configOpen[title]);
+  }
+
+  function blockTitle(title) {
+    return hasKey("config.section." + title) ? I18N.t("config.section." + title) : title;
+  }
+
+  /** 属性选择器里的取值转义（块标题可能是扫描来的任意 section 名） */
+  function attrEsc(s) {
+    return String(s ?? "").replace(/["\\]/g, "\\$&");
+  }
+
+  /**
+   * 只切换 class，**绝不重建 innerHTML**。
+   *
+   * controls 是 render 那一刻 `querySelectorAll("[data-row]")` 抓下来的节点引用，
+   * 下标 = row.idx，collect() / isDirty() 全靠它读用户输入。一旦为了"折叠"重建 DOM，
+   * 用户改过的值在 collect() 眼里静默变回 row.initial —— 保存时漏提交，且界面看着正常。
+   * 所以折叠走 CSS（display:none），节点一个都不动。
+   */
+  function applyFold(t) {
+    if (!t || !t._isConfig || !ownerIs(t)) return;
+    const body = $("config-body");
+    if (!body) return;
+    body.querySelectorAll(".config-section").forEach((sec) => {
+      sec.classList.toggle("config-section--folded", !isOpen(t, sec.dataset.section || ""));
+    });
+  }
+
+  /**
+   * 正文字顶端的那个块 —— 滚动高亮用它，不猜、只量。
+   *
+   * 滚到底要单独判：内容到头时最后一块的顶**永远压不到视口顶部**，照"顶 ≤ 视口顶"去找
+   * 会停在倒数第三四块上（用户明明在看最后一块，高亮却指着已经滚出去的那块）。所以
+   * 触底就直接给最后一块 —— 这也正是"我在哪"想要的答案。
+   */
+  function sectionAtTop() {
+    const body = $("config-body");
+    const nodes = body ? body.querySelectorAll(".config-section") : [];
+    if (!nodes.length) return null;
+    if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) {
+      return nodes[nodes.length - 1].dataset.section || null;
+    }
+    const limit = body.getBoundingClientRect().top + 8;
+    let cur = nodes[0];
+    for (const n of nodes) {
+      if (n.getBoundingClientRect().top <= limit) cur = n;
+      else break;
+    }
+    return cur.dataset.section || null;
+  }
+
+  /** 高亮当前块（只改 class，不重建 —— 重建会把用户刚点的项换掉、焦点也丢） */
+  function syncOutlineActive(t) {
+    const el = $("outline-content");
+    if (!el || el.dataset.configTab !== t.id) return;
+    const title = sectionAtTop();
+    el.querySelectorAll(".outline-config-block").forEach((n) => {
+      n.classList.toggle("outline-item--active", n.dataset.configSection === title);
+    });
+  }
+
+  /**
+   * 大纲区渲染本配置页的块索引。
+   *
+   * 双守卫（ownerIs + activeTabId）：大纲区只有一块 DOM，文件大纲与会话任务计划都写它。
+   * 后台标签的渲染不许覆盖前台的 —— 少了这道门，切回文件时大纲已经被别的标签悄悄换掉了
+   * （同 session.js::renderOutline 的教训）。
+   */
+  function renderOutline(t) {
+    const el = $("outline-content");
+    if (!el || !t || !t._isConfig || !t._config) return;
+    if (window.state?.activeTabId !== t.id || !ownerIs(t)) return;
+    const groups = groupRows(t._config.rows || []);
+    if (!groups.length) {
+      el.innerHTML = `<div class="outline-placeholder">${I18N.t("config.outline_empty")}</div>`;
+      delete el.dataset.configTab;
+      return;
+    }
+    const allOpen = groups.every((g) => isOpen(t, g.title));
+    el.dataset.configTab = t.id;
+    el.innerHTML =
+      `<div class="outline-plan-head outline-config-head">` +
+      `<span>${esc(I18N.t("config.outline_head", { n: groups.length }))}</span>` +
+      `<button type="button" class="config-outline-all" data-config-fold-all>` +
+      `${esc(I18N.t(allOpen ? "config.outline_collapse_all" : "config.outline_expand_all"))}` +
+      `</button></div>` +
+      groups
+        .map((g) => {
+          const name = blockTitle(g.title);
+          return (
+            `<div class="outline-item outline-config-block"` +
+            ` data-config-section="${esc(g.title)}" title="${esc(name)}">` +
+            `<span class="outline-config-name">${esc(name)}</span>` +
+            `<span class="outline-config-count">${g.rows.length}</span></div>`
+          );
+        })
+        .join("");
+    syncOutlineActive(t);
+  }
+
+  /** 点块标题条：翻转这一块（只改 class，见 applyFold） */
+  function toggleSection(sec) {
+    if (!tab || !sec) return;
+    const title = sec.dataset.section || "";
+    tab._configOpen = tab._configOpen || {};
+    tab._configOpen[title] = !tab._configOpen[title];
+    applyFold(tab);
+    renderOutline(tab); // 索引头部的"展开全部 / 全部折叠"文案跟着翻
+  }
+
+  /** 索引头部按钮：全开 ↔ 全收 */
+  function foldAll() {
+    if (!tab || !tab._config) return;
+    const groups = groupRows(tab._config.rows || []);
+    const allOpen = groups.length > 0 && groups.every((g) => isOpen(tab, g.title));
+    tab._configOpen = {};
+    if (!allOpen) for (const g of groups) tab._configOpen[g.title] = true;
+    applyFold(tab);
+    renderOutline(tab);
+  }
+
+  /** 点索引里的某一块：展开它，再滚到正文对应位置 */
+  function revealBlock(title) {
+    if (!tab || !tab._config) return;
+    tab._configOpen = tab._configOpen || {};
+    tab._configOpen[title] = true;
+    // 顺序要紧：**先展开再量位置** —— 折叠着的块高度是 0，那一刻量出来的 rect 是错的
+    applyFold(tab);
+    const body = $("config-body");
+    const sec = body?.querySelector(`.config-section[data-section="${attrEsc(title)}"]`);
+    sec?.scrollIntoView({ block: "start" });
+    renderOutline(tab);
+  }
+
+  // ============================================
   // 渲染
   // ============================================
 
@@ -311,13 +462,17 @@ window.ConfigUI = (() => {
     $("config-dir").textContent = conf.dir || "";
     $("config-hint").textContent = I18N.t("config.hint");
 
+    // 归属标记要**在建 DOM 之前**打：applyFold / renderOutline 都用 ownerIs 判定，
+    // 放到函数尾巴会让这一次渲染被自己挡掉（折叠态要等下一次渲染才生效）。
+    view.dataset.configTab = tab.id;
+
     const groups = groupRows(conf.rows || []);
     body.innerHTML = groups.map((g) => {
-      const title = hasKey("config.section." + g.title)
-        ? I18N.t("config.section." + g.title)
-        : g.title;
-      return `<section class="config-section">` +
-        `<div class="config-section-head">` +
+      const title = blockTitle(g.title);
+      // 块标题条 = 折叠开关（点击交由 attach 的委托处理），caret 只在折叠时转个向
+      return `<section class="config-section" data-section="${esc(g.title)}">` +
+        `<div class="config-section-head" title="${esc(I18N.t("config.fold_tip"))}">` +
+        `<span class="config-section-caret">▾</span>` +
         `<span class="config-section-name">${esc(title)}</span>` +
         `<span class="config-section-file">${esc(g.section)}.toml</span></div>` +
         `<div class="config-section-rows">${g.rows.map(renderRow).join("")}</div>` +
@@ -325,8 +480,8 @@ window.ConfigUI = (() => {
     }).join("");
 
     controls = Array.from(body.querySelectorAll("[data-row]"));
-    // 标记渲染归属：stash / isDirty 只对"这份 DOM 的主人"生效
-    view.dataset.configTab = tab.id;
+    applyFold(tab);
+    renderOutline(tab);
     updateButtons();
   }
 
@@ -473,7 +628,7 @@ window.ConfigUI = (() => {
         kind === "apply" ? "config_form_apply" : "config_form_save",
         { scope: tab.configScope, entries, projectRoot: root() },
       );
-      // 改的是界面语言 / Emoji → 立刻生效（应用与保存都算数：值已落盘）
+      // 改的是界面语言 → 立刻生效（应用与保存都算数：值已落盘）
       await maybeReloadUiConfig(entries);
       await refreshTab();
       status(reportLine(kind, report));
@@ -517,9 +672,9 @@ window.ConfigUI = (() => {
     return I18N.t("config.saved", { saved, removed });
   }
 
-  /** ui.lang / ui.emoji 改动后热重载界面语言（含 Emoji 叠加） */
+  /** ui.lang 改动后热重载界面语言 */
   async function maybeReloadUiConfig(entries) {
-    const touched = entries.some((e) => e.section === "ui" && (e.key === "lang" || e.key === "emoji"));
+    const touched = entries.some((e) => e.section === "ui" && e.key === "lang");
     if (!touched || !window.I18N) return;
     try {
       await I18N.init();
@@ -578,15 +733,45 @@ window.ConfigUI = (() => {
     view.addEventListener("input", updateButtons);
     view.addEventListener("change", updateButtons);
 
-    // 密码显示 / 隐藏
+    // 块标题条 = 折叠开关；眼睛 = 密码显隐
     view.addEventListener("click", (e) => {
+      const head = e.target.closest(".config-section-head");
+      if (head) {
+        toggleSection(head.closest(".config-section"));
+        return;
+      }
       const btn = e.target.closest("[data-eye]");
       if (!btn) return;
       const input = controls[Number(btn.dataset.eye)];
       if (!input) return;
       input.type = input.type === "password" ? "text" : "password";
     });
+
+    // 滚正文 → 索引里的高亮跟着走（passive：这是纯观察，不该拖慢滚动）
+    $("config-body")?.addEventListener(
+      "scroll",
+      () => {
+        if (tab && tab._isConfig) syncOutlineActive(tab);
+      },
+      { passive: true },
+    );
+
+    // 索引区：点某一块 → 展开 + 滚过去；点头部按钮 → 全开 / 全收。
+    // 用委托（不逐项挂监听）—— renderOutline 每次滚动高亮都可能重写这棵子树。
+    $("outline-content")?.addEventListener("click", (e) => {
+      if (!tab || !tab._isConfig) return;
+      if (e.target.closest("[data-config-fold-all]")) {
+        foldAll();
+        return;
+      }
+      const item = e.target.closest("[data-config-section]");
+      if (item) revealBlock(item.dataset.configSection || "");
+    });
   }
 
-  return { attach, handleCommand, render, stash, open, save, apply, cancel, isDirty };
+  return {
+    attach, handleCommand, render, renderOutline, stash, open, save, apply, cancel, isDirty,
+    // 测试/门禁用的内部钩子：折叠态是"改值之后仍然收得到"的前提，值得被断言
+    toggleSection, foldAll, revealBlock,
+  };
 })();

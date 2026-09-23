@@ -468,9 +468,17 @@ async function handleOpenCommand(args, raw = "") {
   }
 
   const sub = args[0]?.toLowerCase();
-  const targetPath = args.slice(1).join(" ");
   // `open url <链接>`：从**原始串**里截（URL 别再被空白切一次）
   const urlArg = (/^open\s+url\s+(.+)$/i.exec(String(raw).trim()) || [])[1] || "";
+  // project / file 的路径：handleCommand 入口是**哑空白切分**，引号原样混在 token 里；
+  // 而标题栏项目切换下拉发的是转义过的 `open project "D:\\Projects\\Go\\ai-gateway"`
+  // （main.js 的 escArg 把 \ 与 " 翻倍，约定由 parseQuotedTokens 还原）。哑 token
+  // 直接拼给后端 = 路径带着字面引号 → exists() 必然 false —— 实测 2026-09-23：
+  // 下拉切项目从来没成功过。路径首 token 带引号时从原始串用引号感知的分词器重切；
+  // 不带引号保持原样，UNC（\\server\share）打头的双反斜杠才不会被转义规则吃掉。
+  const targetPath = /^["']/.test(String(args[1] ?? ""))
+    ? parseQuotedTokens(String(raw).trim()).slice(2).join(" ")
+    : args.slice(1).join(" ");
 
   switch (sub) {
     case "project":

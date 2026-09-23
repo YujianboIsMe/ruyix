@@ -1,0 +1,4740 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Darkhorse Code</title>
+  
+  
+  
+  
+</head>
+<body>
+  <div id="app">
+    <!-- 眉部：菜单区 + Windows 窗口按钮 -->
+    <header id="titlebar" data-tauri-drag-region>
+      <div class="titlebar-left">
+        <nav class="menu-bar">
+          <!-- 项目 -->
+          <span class="menu-item" id="menu-project" style="position:relative">
+            <span data-i18n="menu.project">项目</span>
+            <div class="menu-dropdown" id="menu-project-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-action="new-project" data-i18n="menu.project.new">新建</div>
+              <div class="menu-dropdown-item" data-action="close-project" data-i18n="menu.project.close">退出</div>
+            </div>
+          </span>
+          <!-- 配置 -->
+          <span class="menu-item" id="menu-config" style="position:relative">
+            <span data-i18n="menu.config">配置</span>
+            <div class="menu-dropdown" id="menu-config-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-config-scope="global" data-i18n="menu.config.global">全局</div>
+              <div class="menu-dropdown-item" data-config-scope="project" data-i18n="menu.config.project">项目</div>
+              <div class="menu-dropdown-item" data-config-scope="runtime" data-i18n="menu.config.runtime">运行</div>
+            </div>
+          </span>
+          <!-- 能力：MCP / A2A / 工具 / SKILL -->
+          <span class="menu-item" id="menu-capability" style="position:relative">
+            <span data-i18n="menu.capability">能力 ▾</span>
+            <div class="menu-dropdown" id="menu-capability-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-cap="mcp" data-i18n="menu.cap.mcp">MCP 服务器</div>
+              <div class="menu-dropdown-item" data-cap="a2a" data-i18n="menu.cap.a2a">A2A 远端</div>
+              <div class="menu-dropdown-item" data-cap="tools" data-i18n="menu.cap.tools">工具（命令行白名单）</div>
+              <div class="menu-dropdown-item" data-cap="skills" data-i18n="menu.cap.skills">SKILL（技能）</div>
+            </div>
+          </span>
+          <!-- 语言 -->
+          <span class="menu-item" id="menu-lang" style="position:relative">
+            <span data-i18n="menu.lang">语言 ▾</span>
+            <div class="menu-dropdown" id="menu-lang-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-lang="zh-CN">
+                <span data-i18n="menu.lang.zh">中文</span><span class="lang-check">✔️</span>
+              </div>
+              <div class="menu-dropdown-item" data-lang="en">
+                <span data-i18n="menu.lang.en">English</span><span class="lang-check">✔️</span>
+              </div>
+            </div>
+          </span>
+          <!-- 服务：agent 用 background 起的托管进程（mvn spring-boot:run / java -jar …），
+               引擎持有、UI 原先看不见也停不掉 —— 这个面板读的是引擎同一份表 -->
+          <span class="menu-item" id="menu-service" style="position:relative">
+            <span data-i18n="menu.service">服务</span>
+          </span>
+          <!-- 帮助 -->
+          <span class="menu-item" id="menu-help" style="position:relative">
+            <span data-i18n="menu.help">帮助</span>
+          </span>
+        </nav>
+      </div>
+      <div class="titlebar-center" data-tauri-drag-region>
+        <!-- 点击项目名快速切换项目（no-drag 保证可点击） -->
+        <div id="project-switch-trigger" class="project-switch-trigger"
+             data-tauri-drag-region="false" data-i18n-title="titlebar.switch_project">
+          <span id="titlebar-title" class="titlebar-title">Darkhorse Code</span>
+          <span id="project-switch-arrow" class="project-switch-arrow" style="display:none">▾</span>
+          <div id="project-switch-dropdown" class="menu-dropdown project-switch-dropdown" style="display:none"></div>
+        </div>
+      </div>
+      <div class="titlebar-right">
+        <button class="window-btn" id="btn-minimize" title="最小化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="window-btn" id="btn-maximize" title="最大化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+        </button>
+        <button class="window-btn window-btn--close" id="btn-close" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 工作区 -->
+    <main id="workspace">
+      <!-- 项目工作区始终可见 -->
+      <div id="project-workspace" class="project-layout">
+        <!-- 导航区：多标签页侧边栏 -->
+        <aside id="navigator" class="navigator">
+          <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="projects">项目列表</button>
+            <button class="nav-tab" data-tab="files">项目文件</button>
+            <button class="nav-tab" data-tab="terminal">终端资源</button>
+            <button class="nav-tab" data-tab="target">运行目标</button>
+            <button class="nav-tab" data-tab="sessions" data-i18n="nav.tab_sessions">会话</button>
+            <button class="nav-tab" data-tab="capability" data-i18n="nav.tab_capability">能力</button>
+          </div>
+          <div class="nav-content">
+            <div id="nav-panel-projects" class="nav-panel active">
+              <div id="project-list" class="project-list"></div>
+            </div>
+            <div id="nav-panel-files" class="nav-panel">
+              <div id="file-tree" class="file-tree"></div>
+            </div>
+            <div id="nav-panel-terminal" class="nav-panel">
+              <ul id="terminal-list" class="terminal-list">
+                <li data-cmd="powershell.exe">
+                  <span class="terminal-name">PowerShell</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="cmd.exe">
+                  <span class="terminal-name">Cmd</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="wsl.exe">
+                  <span class="terminal-name">Ubuntu (WSL)</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="claude">
+                  <span class="terminal-name">Claude</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="python.exe">
+                  <span class="terminal-name">Python</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="node.exe">
+                  <span class="terminal-name">Node.js</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="&quot;C:\Program Files\Git\bin\bash.exe&quot; --login -i"
+                    data-cmd-window="&quot;C:\Program Files\Git\git-bash.exe&quot;">
+                  <span class="terminal-name">Git Bash</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+              </ul>
+            </div>
+            <div id="nav-panel-target" class="nav-panel">
+              <div id="run-targets-list" class="run-targets-list"></div>
+            </div>
+            <div id="nav-panel-sessions" class="nav-panel">
+              <button id="session-new-btn" class="agent-btn agent-btn--run" data-i18n="session.new">＋ 新建会话</button>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="session.list">会话列表</div>
+                <div id="session-list" class="agent-history-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="agent.env">环境探针</div>
+                <div id="agent-env-chips" class="agent-env-chips"></div>
+              </div>
+            </div>
+          <div id="nav-panel-capability" class="nav-panel">
+          <div class="cap-sub-tabs">
+            <button class="cap-sub-tab active" data-cap-tab="mcp" data-i18n="cap.tab_mcp">MCP</button>
+            <button class="cap-sub-tab" data-cap-tab="a2a" data-i18n="cap.tab_a2a">A2A</button>
+            <button class="cap-sub-tab" data-cap-tab="tools" data-i18n="cap.tab_tools">工具</button>
+            <button class="cap-sub-tab" data-cap-tab="skills" data-i18n="cap.tab_skills">技能</button>
+          </div>
+          <div id="cap-sub-mcp" class="cap-sub-panel active">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.servers">MCP 服务器</div>
+                <div id="mcp-server-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.add">添加服务器</div>
+                <input type="text" id="mcp-add-name" class="a2a-input"
+                       placeholder="名称，例如 fs" data-i18n-placeholder="mcp.name_ph">
+                <input type="text" id="mcp-add-command" class="a2a-input"
+                       placeholder="命令，例如 npx -y @modelcontextprotocol/server-filesystem /tmp"
+                       data-i18n-placeholder="mcp.cmd_ph">
+                <button id="mcp-add-btn" class="agent-btn agent-btn--run" data-i18n="mcp.add_btn">＋ 添加</button>
+              </div>
+              <div id="mcp-tool-section" class="agent-side-section" style="display:none">
+                <div class="agent-side-title"><span id="mcp-selected-name"></span>
+                  <button id="mcp-start-btn" class="agent-btn agent-btn--run mcp-mini-btn" data-i18n="mcp.connect">连接</button>
+                  <button id="mcp-stop-btn" class="agent-btn agent-btn--cancel mcp-mini-btn" data-i18n="mcp.disconnect" style="display:none">断开</button>
+                </div>
+                <div id="mcp-tool-list" class="mcp-tool-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.call">调用工具</div>
+                <select id="mcp-call-tool" class="a2a-input"><option value="">—</option></select>
+                <textarea id="mcp-call-args" class="agent-task-input" rows="3"
+                          placeholder='参数 JSON，例如 {"path": "src/main.rs"}'
+                          data-i18n-placeholder="mcp.args_ph"></textarea>
+                <button id="mcp-call-btn" class="agent-btn agent-btn--run" data-i18n="mcp.call_btn">▶ 调用</button>
+                <pre id="mcp-call-result" class="mcp-call-result"></pre>
+              </div>
+            </div>
+            <div id="cap-sub-a2a" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="a2a.agents">远端 Agent</div>
+                <div id="a2a-agent-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="a2a.discover">发现 Agent</div>
+                <input type="text" id="a2a-discover-url" class="a2a-input"
+                       placeholder="基址 URL，例如 http://127.0.0.1:9000"
+                       data-i18n-placeholder="a2a.url_ph">
+                <button id="a2a-discover-btn" class="agent-btn agent-btn--run" data-i18n="a2a.discover_btn">🔍 发现</button>
+              </div>
+              <div id="a2a-task-section" class="agent-side-section" style="display:none">
+                <div class="agent-side-title" data-i18n="a2a.task">委托任务 → <span id="a2a-selected-name"></span></div>
+                <textarea id="a2a-task-input" class="agent-task-input" rows="3"
+                          placeholder="任务描述" data-i18n-placeholder="a2a.task_ph"></textarea>
+                <button id="a2a-send-btn" class="agent-btn agent-btn--run" data-i18n="a2a.send_btn">▶ 发送</button>
+                <div id="a2a-state-line" class="a2a-state-line"></div>
+                <pre id="a2a-result" class="mcp-call-result"></pre>
+              </div>
+            </div>
+            <div id="cap-sub-tools" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="tools.list">工具白名单</div>
+                <div id="tools-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="tools.add">添加工具</div>
+                <input type="text" id="tools-add-name" class="a2a-input"
+                       placeholder="名称，例如 graphviz" data-i18n-placeholder="tools.name_ph">
+                <input type="text" id="tools-add-command" class="a2a-input"
+                       placeholder="命令（缺省同名称），例如 dot" data-i18n-placeholder="tools.cmd_ph">
+                <input type="text" id="tools-add-desc" class="a2a-input"
+                       placeholder="描述（给 agent 看的用途说明）" data-i18n-placeholder="tools.desc_ph">
+                <button id="tools-add-btn" class="agent-btn agent-btn--run" data-i18n="tools.add_btn">＋ 添加</button>
+              </div>
+            </div>
+            <div id="cap-sub-skills" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="skill.list">SKILL 技能</div>
+                <div id="skills-list" class="mcp-server-list"></div>
+                <div class="agent-btn-row" style="margin-top:6px">
+                  <button id="skill-new-btn" class="agent-btn agent-btn--run" data-i18n="skill.new">＋ 新建</button>
+                  <button id="skill-del-btn" class="agent-btn agent-btn--cancel" data-i18n="skill.delete">✕ 删除</button>
+                </div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="skill.editor">编辑</div>
+                <input type="text" id="skill-edit-name" class="a2a-input"
+                       placeholder="技能名（保存时的唯一标识）" data-i18n-placeholder="skill.name_ph">
+                <input type="text" id="skill-edit-desc" class="a2a-input"
+                       placeholder="一句话描述" data-i18n-placeholder="skill.desc_ph">
+                <textarea id="skill-edit-content" class="agent-task-input" rows="8"
+                          placeholder="Markdown 正文：步骤、规约、注意事项…" data-i18n-placeholder="skill.content_ph"></textarea>
+                <button id="skill-save-btn" class="agent-btn agent-btn--run" data-i18n="skill.save">💾 保存</button>
+              </div>
+            </div>
+          </div>
+          </div>
+        </aside>
+
+        <!-- 编辑区 -->
+        <section id="editor-area" class="editor-area">
+          <!-- 标签页栏 -->
+          <div id="tab-bar" class="tab-bar"></div>
+          <!-- 欢迎内容（无项目时显示）— 由 loadWelcome() 从 welcome-zh.html / welcome-en.html 动态加载 -->
+          <div id="welcome-content" class="welcome" style="display:none"></div>
+
+          <!-- 帮助页：正文是 markdown 源文件（help-zh.md / help-en.md），由 markdown-it 渲染 -->
+          <div id="help-page" class="help-page" style="display:none">
+            <div id="help-body" class="help-content"></div>
+            <button id="btn-help-back" class="help-back-btn" data-i18n="help.back">← 返回</button>
+          </div>
+
+          <!-- Agent 控制台（融合计划 Z4）：引擎落位前含演示回放 -->
+                    <!-- 编辑器主体：gutter + 代码区 -->
+          <div id="editor-body" class="editor-body">
+            <div id="editor-empty" class="editor-empty">
+              <p>打开文件以开始编辑</p>
+            </div>
+            <div id="editor-view" class="editor-view" style="display:none">
+              <div id="editor-gutter" class="editor-gutter"></div>
+              <div id="editor-code-container" class="editor-code-container">
+                <div id="editor-code-backdrop" class="editor-code-backdrop"></div>
+                <!-- wrap="off" 必须有：textarea 默认软换行，长行会在它内部折成两行，
+                     而 backdrop 按「一行」画 —— 光标就会和高亮文字错开。
+                     关掉之后 textarea 的可视行数恒等于逻辑行数。 -->
+                <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" wrap="off"></textarea>
+              </div>
+            </div>
+            <div id="service-view" class="service-view" style="display:none">
+              <div class="service-head">
+                <div class="service-head-main">
+                  <span class="service-title" data-i18n="service.title">服务</span>
+                  <span id="service-count" class="service-count"></span>
+                </div>
+                <div class="service-head-actions">
+                  <button id="service-btn-refresh" class="service-btn"
+                          data-i18n="service.btn_refresh">刷新</button>
+                </div>
+              </div>
+              <div id="service-hint" class="service-hint" data-i18n="service.hint"></div>
+              <div id="service-body" class="service-body"></div>
+            </div>
+            <div id="config-view" class="config-view" style="display:none">
+              <div class="config-head">
+                <div class="config-head-main">
+                  <span id="config-scope-title" class="config-scope-title">配置</span>
+                  <span id="config-dir" class="config-dir"></span>
+                </div>
+                <div class="config-head-actions">
+                  <span id="config-dirty" class="config-dirty" style="display:none"
+                        data-i18n="config.dirty">● 未保存</span>
+                  <button id="config-btn-save" class="config-btn" data-i18n="config.btn_save">保存</button>
+                  <button id="config-btn-apply" class="config-btn config-btn--primary"
+                          data-i18n="config.btn_apply">应用</button>
+                  <button id="config-btn-cancel" class="config-btn"
+                          data-i18n="config.btn_cancel">取消</button>
+                </div>
+              </div>
+              <div id="config-hint" class="config-hint" data-i18n="config.hint"></div>
+              <div id="config-body" class="config-body"></div>
+            </div>
+            <div id="terminal-view" class="terminal-view" style="display:none">
+              <div id="terminal-container" class="terminal-container"></div>
+            </div>
+            <!-- 托管进程的输出（每个标签页一个 pane，切回来内容还在） -->
+            <div id="proc-log-view" class="proc-log-view" style="display:none">
+              <div id="proc-log-panes" class="proc-log-panes"></div>
+            </div>
+            <div id="session-view" class="terminal-view" style="display:none">
+              <div id="session-container" class="session-container"></div>
+            </div>
+            <div id="image-view" class="image-view" style="display:none">
+              <div id="image-container" class="image-container">
+                <img id="image-preview" src="" alt="" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 大纲区：多标签（大纲 / Git） -->
+        <aside id="outline" class="outline">
+          <div class="outline-tabs">
+            <button class="outline-tab active" data-outline-tab="outline" data-i18n="outline.header">大纲</button>
+            <button class="outline-tab" data-outline-tab="git">Git</button>
+          </div>
+          <div id="outline-content" class="outline-content">
+            <div class="outline-placeholder">
+              大纲（支持 Markdown / Rust / Python / Java）
+            </div>
+          </div>
+          <div id="git-panel" class="git-panel" style="display:none">
+            <!-- 非仓库：仓库初始化引导视图（git_status.is_repo=false 时显示） -->
+            <div id="git-init-view" class="git-init-view" style="display:none">
+              <div class="git-init-icon">🌱</div>
+              <div class="git-init-title" data-i18n="git.init.title">当前项目还不是 Git 仓库</div>
+              <div class="git-init-desc" data-i18n="git.init.desc">初始化后即可在此查看改动、提交与推送</div>
+              <div class="git-init-actions">
+                <button id="git-btn-init" class="git-btn git-btn-primary" data-i18n="git.init.btn">初始化仓库</button>
+                <button id="git-btn-init-remote" class="git-btn" disabled
+                        data-i18n="git.remote.add" data-i18n-title="git.remote.need_init">添加远程仓库</button>
+              </div>
+              <div class="git-init-hint" data-i18n="git.remote.need_init">初始化仓库后才能添加远程仓库</div>
+            </div>
+
+            <!-- 仓库视图：分支 / 远程提示 / 提交输入 / staged + unstaged -->
+            <div id="git-repo-view" class="git-repo-view">
+              <div class="git-actions">
+                <button id="git-btn-commit" class="git-btn git-btn-primary" data-i18n="git.btn_commit">Commit ✅</button>
+                <button id="git-btn-pull" class="git-btn" data-i18n="git.btn_pull">Pull 📥</button>
+                <button id="git-btn-push" class="git-btn" data-i18n="git.btn_push">Push 📤</button>
+              </div>
+              <div id="git-branch" class="git-branch"></div>
+              <!-- 已初始化但未配置远程仓库时的提示条 -->
+              <div id="git-remote-banner" class="git-banner" style="display:none">
+                <span class="git-banner-text" data-i18n="git.remote.missing">尚未配置远程仓库</span>
+                <button id="git-btn-add-remote" class="git-banner-btn" data-i18n="git.remote.add">添加远程仓库</button>
+              </div>
+              <input id="git-commit-input" class="git-commit-input" type="text"
+                     data-i18n-placeholder="git.commit_msg" placeholder="commit message" />
+              <div class="git-section-header">
+                <span id="git-staged-header" class="git-section-title" data-i18n="git.staged">Staged</span>
+              </div>
+              <div id="git-staged-tree" class="git-file-tree"></div>
+              <div class="git-section-header">
+                <span id="git-unstaged-header" class="git-section-title" data-i18n="git.unstaged">Unstaged</span>
+                <button id="git-btn-stage-all" class="git-stage-all-btn" data-i18n-title="git.stage_all">➕</button>
+              </div>
+              <div id="git-unstaged-tree" class="git-file-tree"></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- 命令区：单行命令输入 -->
+    <div id="command-bar">
+      <span class="command-prompt">&gt;</span>
+      <input
+        type="text"
+        id="command-input"
+        class="command-input"
+        placeholder="任意输入，回车执行，最懂你的IDE"
+        autofocus
+      />
+    </div>
+
+    <!-- 状态栏 -->
+    <footer id="statusbar">
+      <span class="status-item">就绪</span>
+      <span class="status-spacer"></span>
+      <span class="status-item">UTF-8</span>
+      <span class="status-item">Rust 2024</span>
+    </footer>
+  </div>
+
+  <!-- 自定义右键菜单 -->
+  <div id="context-menu" class="context-menu" style="display:none">
+    <div class="context-menu-item" data-action="copy-path" data-i18n="ctx.copy_path">📋 复制路径</div>
+    <div class="context-menu-item" data-action="copy-full-path" data-i18n="ctx.copy_full_path">📋 复制绝对路径</div>
+    <div class="context-menu-item context-menu-sep"></div>
+    <div class="context-menu-item context-menu-file-only" data-action="run" data-i18n="ctx.run">▶️ 运行</div>
+    <div class="context-menu-item context-menu-file-only" data-action="try-run" data-i18n="ctx.try_run">🔍 试跑</div>
+    <div class="context-menu-item context-menu-sep"></div>
+    <div class="context-menu-item" data-action="delete" data-i18n="ctx.delete">🗑️ 删除</div>
+    <div class="context-menu-item" data-action="rename" data-i18n="ctx.rename">✏️ 重命名</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfile" data-i18n="ctx.new_file">📄 创建文件</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfolder" data-i18n="ctx.new_folder">📁 创建文件夹</div>
+  </div>
+
+  <!-- 自定义弹窗 -->
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-input-row" id="modal-input-row" style="display:none">
+        <input type="text" id="modal-input" class="modal-input" />
+      </div>
+      <div class="modal-buttons">
+        <button id="modal-btn-cancel" class="modal-btn modal-btn-cancel">取消</button>
+        <button id="modal-btn-ok" class="modal-btn modal-btn-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改项目弹窗 -->
+  <div id="project-edit-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box" style="max-width:420px">
+      <div class="modal-title" data-i18n="project.edit.title">修改项目</div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.name_label">名称</label>
+        <input type="text" id="project-edit-name" class="modal-input" />
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.icon_label">图标</label>
+        <div id="project-edit-icons" class="project-icon-options"></div>
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.path_label">路径（不可修改）</label>
+        <div id="project-edit-path" class="project-edit-path"></div>
+      </div>
+      <div class="modal-buttons">
+        <button id="project-edit-cancel" class="modal-btn modal-btn-cancel" data-i18n="modal.cancel">取消</button>
+        <button id="project-edit-ok" class="modal-btn modal-btn-ok" data-i18n="modal.ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+<style>/* ============================================
+   Darkhorse Code — Dark IDE Theme
+   ============================================ */
+
+:root {
+  color-scheme: dark; /* 原生控件（select/option）也走深色 */
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-titlebar: #2d2d30;
+  --bg-statusbar: #007acc;
+  --bg-command: #1e1e1e;
+  --text-primary: #cccccc;
+  --text-secondary: #969696;
+  --text-statusbar: #ffffff;
+  --border-color: #3e3e42;
+  --hover-bg: #3e3e42;
+  --accent: #007acc;
+  --danger: #e81123;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  scrollbar-color: #c1c1c1 transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  user-select: none;
+}
+
+/* 编辑器区域内允许文本选择 */
+.editor-code-backdrop,
+.editor-textarea,
+.editor-gutter {
+  user-select: text;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ============================================
+   眉部 / Title Bar
+   ============================================ */
+
+#titlebar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding-left: 8px;
+}
+
+.menu-bar {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 2px;
+}
+
+.menu-item {
+  padding: 0 10px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  cursor: default;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-radius: 4px;
+}
+
+.menu-item:hover {
+  background: var(--hover-bg);
+}
+
+/* 语言下拉菜单 */
+.menu-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 120px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 1000;
+  padding: 4px 0;
+}
+
+.menu-dropdown-item {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: default;
+  white-space: nowrap;
+}
+
+/* 语言菜单：当前选中项的 ✔️ 标记 */
+.lang-check {
+  margin-left: 8px;
+  font-size: 11px;
+}
+
+.menu-dropdown-item:hover {
+  background: var(--accent);
+}
+
+.menu-dropdown-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 8px;
+}
+
+.titlebar-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  -webkit-app-region: drag;
+}
+
+/* 标题栏项目切换下拉：no-drag 保证可点击 */
+.project-switch-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.project-switch-trigger:hover {
+  background: var(--hover-bg);
+}
+
+.project-switch-arrow {
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.project-switch-dropdown {
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 260px;
+  max-width: 480px;
+}
+
+.project-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.project-switch-item:hover {
+  background: var(--accent);
+}
+
+/* 当前项目行：高亮 + ✔ */
+.project-switch-item.current {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.project-switch-name {
+  flex-shrink: 0;
+}
+
+.project-switch-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.project-switch-check {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  transition: color 0.2s;
+}
+
+/* 打开项目后标题使用强调色 */
+.titlebar-title.has-project {
+  color: var(--text-primary);
+}
+
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.window-btn {
+  width: 46px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  cursor: default;
+  transition: background 0.1s;
+}
+
+.window-btn:hover {
+  background: var(--hover-bg);
+}
+
+.window-btn--close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ============================================
+   工作区 / Workspace
+   ============================================ */
+
+#workspace {
+  flex: 1;
+  display: flex;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* --- 状态一：欢迎内容（无项目时在编辑区显示） --- */
+
+#welcome-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.welcome {
+  text-align: center;
+  animation: fadeIn 0.5s ease-out;
+}
+
+/* 九宫格 */
+.welcome-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  max-width: 600px;
+  width: 100%;
+}
+
+/* 维度行标签：功能 / 性能 / 智能，横跨整行 */
+.welcome-row-label {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent);
+  font-size: 12px;
+  letter-spacing: 4px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.welcome-row-label:first-child {
+  margin-top: 0;
+}
+
+.welcome-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 18px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.welcome-card:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: var(--accent);
+}
+
+.welcome-card-icon {
+  font-size: 22px;
+}
+
+.welcome-card-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.welcome-title {
+  font-size: 28px;
+  font-weight: 300;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+  margin-top: 24px;
+  margin-bottom: 8px;
+}
+
+.welcome-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* 帮助页（无项目时替换欢迎页） */
+.help-page {
+  text-align: left;
+  animation: fadeIn 0.3s ease-out;
+  overflow-y: auto;
+  padding: 32px 48px;
+}
+
+.help-content {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.help-content h1 {
+  font-size: 24px;
+  font-weight: 400;
+  color: var(--text-primary);
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.help-content h2 {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-top: 28px;
+  margin-bottom: 10px;
+}
+
+.help-content p {
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin: 6px 0;
+}
+
+/* 以下选择器面向 markdown-it 渲染结果（裸 table / code / ul …），
+   不是手写的 HTML —— 帮助正文源文件为 ui/help-zh.md、ui/help-en.md */
+.help-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 16px;
+  font-size: 13px;
+}
+
+.help-content th {
+  text-align: left;
+  color: var(--text-primary);
+  font-weight: 500;
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.help-content td {
+  color: var(--text-secondary);
+  padding: 4px 12px 4px 0;
+  vertical-align: top;
+}
+
+.help-content code {
+  color: var(--accent);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 12px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.help-content pre {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0 16px;
+}
+
+.help-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.help-content ul,
+.help-content ol {
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.help-content li {
+  margin: 2px 0;
+}
+
+.help-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.help-content a:hover {
+  text-decoration: underline;
+}
+
+.help-content strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.help-content blockquote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.help-content hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 20px 0;
+}
+
+.help-content kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+}
+
+.help-back-btn {
+  display: block;
+  margin: 32px auto 0;
+  padding: 8px 20px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.help-back-btn:hover {
+  background: var(--hover-bg);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- 状态二：项目工作区 --- */
+
+.project-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 导航区侧边栏 */
+.navigator {
+  width: 260px;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.nav-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  min-height: 32px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.nav-tab {
+  flex: 1 1 auto;
+  min-height: 30px;
+  padding: 4px 6px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: default;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.nav-tab:hover {
+  color: var(--text-primary);
+}
+
+.nav-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.nav-content {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+}
+
+.nav-panel {
+  display: none;
+  padding: 12px;
+  height: 100%;
+}
+
+.nav-panel.active {
+  display: block;
+}
+
+.file-tree-placeholder {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* --- 文件树 --- */
+
+.file-tree {
+  font-size: 13px;
+  user-select: none;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
+  cursor: default;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.tree-node:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tree-arrow {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-secondary);
+  transition: transform 0.12s;
+}
+
+.tree-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.tree-arrow.hidden {
+  visibility: hidden;
+}
+
+.tree-icon {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-right: 4px;
+  font-size: 12px;
+}
+
+.tree-icon--folder {
+  color: #dcb67a;
+}
+
+.tree-icon--file {
+  color: var(--text-secondary);
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-children {
+  /* 子节点容器 */
+}
+
+/* 文件夹行最右侧的从磁盘刷新按钮 */
+.tree-refresh {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 6px 0 4px;
+  opacity: 0.5;
+}
+
+.tree-refresh:hover {
+  opacity: 1;
+}
+
+/* --- 终端资源列表 --- */
+
+.terminal-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.terminal-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: default;
+  border-radius: 3px;
+}
+
+.terminal-list li:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.terminal-list .terminal-name {
+  flex: 1;
+  cursor: pointer;
+}
+
+.terminal-list .terminal-name::before {
+  content: ">_ ";
+  color: var(--accent);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 11px;
+}
+
+.terminal-new-window {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 2px 4px;
+  font-size: 14px;
+  opacity: 0.45;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+  line-height: 1;
+  user-select: none;
+}
+
+.terminal-new-window:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* --- 运行目标列表 --- */
+
+.run-targets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-target-item {
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  cursor: default;
+  display: flex;
+  align-items: center;
+}
+
+.run-target-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.run-target-item:hover .run-target-del {
+  opacity: 1;
+}
+
+.run-target-item:hover .run-target-edit {
+  opacity: 1;
+}
+
+.run-target-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.run-target-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+  margin-bottom: 3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-target-name .run-icon {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.run-target-cmd {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.7;
+}
+
+.run-target-bind {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.6;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-target-edit,
+.run-target-del {
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  padding: 4px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.run-target-edit:hover {
+  background: rgba(255, 200, 80, 0.15);
+}
+
+.run-target-del:hover {
+  background: rgba(255, 80, 80, 0.15);
+}
+
+.run-targets-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* 编辑区 */
+.editor-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* --- 标签页栏 --- */
+
+.tab-bar {
+  display: flex;
+  height: 32px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tab-bar::-webkit-scrollbar {
+  height: 2px;
+}
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  height: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border-color);
+  cursor: default;
+  white-space: nowrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tab-item.active {
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border-bottom: 2px solid var(--accent);
+}
+
+.tab-item:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tab-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.tab-item:hover .tab-close {
+  opacity: 0.7;
+}
+
+.tab-close:hover {
+  opacity: 1 !important;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* --- 编辑器主体 --- */
+
+.editor-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.editor-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  font-size: 14px;
+}
+
+.editor-view {
+  flex: 1;
+  display: flex;
+  overflow: auto;  /* 唯一滚动容器 —— 垂直/水平滚动都在这里 */
+}
+
+/* --- Gutter（行号） --- */
+
+.editor-gutter {
+  min-width: 48px;
+  padding: 8px 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  text-align: right;
+  user-select: none;
+  flex-shrink: 0;
+  /* 水平滚动时行号固定在左侧 */
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.gutter-line {
+  height: 20px;
+  line-height: 20px;
+  padding: 0 12px 0 8px;
+  font-size: 12px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+/* --- 代码区：背景高亮 + 透明 textarea 叠加 ---
+ *
+ * ⚠️ 这里刻意**不用** CSS Grid 叠加（历史写法是 grid-area 1/1 让两者同格），改成
+ * 「backdrop 绝对定位 + textarea 留在流内撑高」。原因是实测出来的：
+ * 两者同处一个 grid 单元时，backdrop 的内容一变，layout 就必须重新去问 textarea 的
+ * **内在高度**，于是它把全文每一行重新排版一遍 —— 25000 行时每次窗口重绘 110ms，
+ * 而 backdrop 移出流后只要 1.4ms（16~90 倍）。改回 grid 会让编辑器重新卡死。
+ *
+ * 代价：全文高度不能靠 backdrop 撑了，必须由 JS 给 textarea 显式高度
+ * （见 main.js 的 setEditorContent）。门禁 U31 钉住这两半必须成套出现。
+ */
+
+.editor-code-container {
+  flex: 1;
+  display: block;
+  min-height: 0;
+  /* backdrop 的定位基准 */
+  position: relative;
+  /* ⚠️ min-width 由 JS 给（= 最宽那一行的宽度，见 main.js 的 syncCodeWidth）。
+     它必须**恰好等于内容宽度**，否则 textarea 的正文装不下自己那一格，就会：
+     ① 自己长出一对滚动条（Chromium 对 textarea 强制 overflow:auto，CSS 里的
+        visible 不生效）→ 编辑器里出现"水平和垂直都双滚动条"；
+     ② 为了露出光标而内部滚动 → 光标落在框边、与背板字形错开。
+     P2 之前这是 in-flow 背板自然撑出来的，背板改绝对定位后必须补回来。 */
+}
+
+.editor-code-backdrop,
+.editor-textarea {
+  /* 水平 padding 保持一致：光标与高亮文字对齐的关键 */
+  padding: 8px 16px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre;
+  tab-size: 4;
+}
+
+/* 绝对定位：内容高度由虚拟化的 spacer 给出，不再参与 textarea 的尺寸计算；
+   溢出交给父级 .editor-view 统一滚（容器的 min-width 已经是内容宽度） */
+.editor-code-backdrop {
+  overflow: visible;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  z-index: 1;
+  color: var(--text-primary);
+  pointer-events: none;
+}
+
+/* 在流内 + 显式高度（全文高度）= .editor-view 的滚动高度来源 */
+.editor-textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  z-index: 2;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
+  /* ⚠️ 必须 hidden，不能靠默认的 auto：
+     textarea 天生是滚动容器，Chromium 会把作者写的 `overflow: visible` 当作 auto，
+     于是"正文比格子宽"时它自己长出一对滚动条（与 .editor-view 的那对叠成双滚动条）。
+     配合同一处的 min-width（内容宽度），正文恰好装得下 = 永远没有可滚的余量。 */
+  overflow: hidden;
+}
+
+.code-line {
+  height: 20px;
+  line-height: 20px;
+  padding: 0;
+  white-space: pre;
+}
+
+/* --- 虚拟化的两支辅助元素（窗口外的行不建 DOM） ---
+   见 main.js 的 paintEditorWindow：topPad + 窗口行 + botPad，三者高度之和
+   必须恒等于「总行数 × 行高」，这样滚动高度与虚拟化之前逐像素一致。 */
+
+/* 撑高度的空 spacer：不产生任何内容与宽度 */
+.editor-virt-pad {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* 宽度占位：零高、不可见，但把「全局最宽那一行」的宽度留在窗口里。
+   textarea 对 scrollWidth 的贡献恒为 0（它内部自己换行，实测），所以水平滚动
+   宽度完全由 backdrop 决定；不留占位，滚到宽行不在窗口的位置时水平滚动条会缩掉、
+   scrollLeft 被钳住（实测 5000 行最多缩 55px）。 */
+.editor-virt-keeper {
+  height: 0;
+  line-height: 0;
+  visibility: hidden;
+  overflow: visible;
+}
+
+/* 终端行 */
+.terminal-line {
+  color: #d4d4d4;
+  background: var(--bg-primary);
+}
+
+/* --- xterm.js 终端容器 --- */
+
+.terminal-view {
+  flex: 1;
+  display: flex;
+  overflow: auto;
+  background: #000;
+}
+
+.terminal-container {
+  flex: 1;
+  min-width: fit-content;
+  padding: 4px;
+}
+
+.terminal-container .xterm {
+  height: 100%;
+  padding: 4px;
+}
+
+/* --- 图片预览 --- */
+
+.image-view {
+  flex: 1;
+  display: flex;
+  overflow: auto;
+  background: var(--bg-primary);
+  justify-content: flex-start;
+  align-items: flex-start;
+}
+
+.image-container {
+  display: flex;
+  padding: 16px;
+}
+
+.image-container img {
+  display: block;
+  image-rendering: pixelated;
+  max-width: none;
+  max-height: none;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.5);
+}
+
+.image-info {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #999;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* --- 语法高亮颜色 (VS Code Dark+ 风格) --- */
+
+.tok-comment { color: #6a9955; font-style: italic; }
+.tok-string { color: #ce9178; }
+.tok-keyword { color: #569cd6; }
+.tok-function { color: #dcdcaa; }
+.tok-type { color: #4ec9b0; }
+.tok-number { color: #b5cea8; }
+.tok-operator { color: #d4d4d4; }
+.tok-property { color: #9cdcfe; }
+.tok-variable { color: #9cdcfe; }
+.tok-constant { color: #4fc1ff; }
+.tok-punctuation { color: #d4d4d4; }
+.tok-parameter { color: #9cdcfe; }
+.tok-constructor { color: #4ec9b0; }
+.tok-label { color: #569cd6; }
+.tok-namespace { color: #4ec9b0; }
+.tok-escape { color: #d7ba7d; }
+.tok-regexp { color: #d16969; }
+.tok-decorator { color: #dcdcaa; }
+.tok-attribute { color: #9cdcfe; }
+.tok-include { color: #569cd6; }
+.tok-boolean { color: #569cd6; }
+.tok-repeat { color: #569cd6; }
+.tok-conditional { color: #569cd6; }
+.tok-exception { color: #569cd6; }
+.tok-storageclass { color: #569cd6; }
+.tok-struct { color: #4ec9b0; }
+.tok-enum-member { color: #4fc1ff; }
+.tok-field { color: #9cdcfe; }
+.tok-text { color: #d4d4d4; }
+.tok-title { color: #dcdcaa; }
+.tok-literal { color: #ce9178; }
+.tok-uri { color: #d4d4d4; text-decoration: underline; }
+.tok-strong { font-weight: bold; }
+.tok-emphasis { font-style: italic; }
+.tok-tag { color: #569cd6; }
+.tok-tag-delimiter { color: #808080; }
+.tok-selector { color: #d7ba7d; }
+.tok-id { color: #d7ba7d; }
+.tok-class { color: #4ec9b0; }
+.tok-unit { color: #b5cea8; }
+.tok-attr-value { color: #ce9178; }
+.tok-doctype { color: #808080; }
+.tok-entity { color: #4ec9b0; }
+/* TOK_TABLE 里"曾经没配色"的 7 个：高亮器能产出它们（markdown 的 link/strikethrough、
+   Rust 的 macro、ERROR 节点等），缺了就是渲染成默认色、看起来像高亮丢了。
+   门禁 U32/Rust `every_tag_has_a_css_class` 保证这两处永远对得上。 */
+.tok-macro { color: #dcdcaa; }
+.tok-link { color: #4fc1ff; text-decoration: underline; }
+.tok-strikethrough { text-decoration: line-through; }
+.tok-diff-add { color: #b5cea8; }
+.tok-diff-delete { color: #d16969; }
+.tok-embedded { color: #d4d4d4; }
+.tok-error { color: #d16969; }
+
+/* --- 自定义弹窗 --- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(2px);
+}
+
+.modal-box {
+  min-width: 360px;
+  max-width: 480px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  overflow: hidden;
+  animation: modalIn 0.15s ease-out;
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.95) translateY(-8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.modal-title {
+  padding: 14px 20px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 4px 20px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.modal-input-row {
+  padding: 0 20px 16px;
+}
+
+.modal-input-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  outline: none;
+}
+
+.modal-input:focus {
+  border-color: var(--accent);
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 20px 14px;
+}
+
+.modal-btn {
+  padding: 6px 20px;
+  font-size: 12px;
+  font-family: inherit;
+  border: none;
+  border-radius: 4px;
+  cursor: default;
+  transition: background 0.15s;
+}
+
+.modal-btn-ok {
+  color: #fff;
+  background: var(--accent);
+}
+
+.modal-btn-ok:hover {
+  background: #1a8ad4;
+}
+
+.modal-btn-cancel {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.modal-btn-cancel:hover {
+  background: #555;
+}
+
+/* --- 右键菜单 --- */
+
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 140px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  padding: 4px 0;
+}
+
+.context-menu-item {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: default;
+  white-space: nowrap;
+}
+
+.context-menu-item:hover {
+  background: var(--accent);
+}
+
+.context-menu-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 3px 8px;
+}
+
+/* --- 项目列表 --- */
+
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-list-item {
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-list-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.project-list-item .project-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.project-list-item .project-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.project-list-item .project-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-list-item .project-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 项目条目操作按钮 */
+.project-list-item .project-item-edit {
+  margin-left: auto;
+}
+
+.project-list-item .project-item-edit,
+.project-list-item .project-item-del {
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.project-list-item .project-item-edit:hover {
+  background: rgba(255, 200, 80, 0.15);
+}
+
+.project-list-item .project-item-del:hover {
+  background: rgba(255, 80, 80, 0.15);
+}
+
+/* 修改项目弹窗 */
+.project-icon-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.project-icon-option {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.project-icon-option:hover {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.project-icon-option.selected {
+  border-color: var(--accent);
+  background: rgba(0, 122, 204, 0.2);
+}
+
+.project-edit-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+.project-list-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* 大纲区 */
+.outline {
+  width: 220px;
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.outline-header {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.outline-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.outline-placeholder {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.outline-item {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 3px 12px 3px 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 2px;
+}
+
+.outline-item:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.outline-dot {
+  margin-right: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+/* 大纲区 · 会话任务计划（模型返回计划后显示，三态 emoji：✅ ⌛ ⛏️） */
+.outline-plan-head {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.outline-plan-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.outline-plan-step .outline-plan-emoji {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.outline-plan-step .outline-plan-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.outline-plan-step--running {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+/* 失败步骤：独立视觉状态（颜色与会话里 session-status--err 一致） */
+.outline-plan-step--error {
+  color: #f48771;
+}
+
+/* 未对齐的步骤：做了事，产出却和它自己开列的清单不一致（改名 / 少写 / 只写一部分）。
+   既不是失败（红）也不是没做（压暗），所以用告警色 —— 描述得比事实重和比事实轻
+   都是在骗人，这个态的作用就是别再把它归到"跳过"里。 */
+.outline-plan-step--partial {
+  color: var(--agent-warn, #d7ba7d);
+}
+
+/* 本次未完成的步骤：run 已结束却没产出 —— 压暗，不抢已完成步骤的注意力 */
+.outline-plan-step--skipped {
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+/* 大纲区 · 配置块索引（配置标签页在前台时显示：标题 + 字段数，点了展开并滚过去） */
+.outline-config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.config-outline-all {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.config-outline-all:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.outline-config-block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.outline-config-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.outline-config-count {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+/* 正文滚到哪一块 —— 不给这个答案，索引就只是另一份要读完的清单 */
+.outline-item--active {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* 大纲区多标签（大纲 / Git） */
+.outline-tabs {
+  display: flex;
+  height: 28px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.outline-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+
+.outline-tab:hover {
+  color: var(--text-primary);
+}
+
+.outline-tab.active {
+  color: var(--text-primary);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* ============================================
+   Git 面板
+   ============================================ */
+
+.git-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.git-actions {
+  display: flex;
+  gap: 4px;
+  padding: 8px 8px 4px;
+  flex-shrink: 0;
+}
+
+.git-btn {
+  flex: 1;
+  padding: 4px 0;
+  background: var(--bg-titlebar);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-btn:hover {
+  background: var(--hover-bg);
+}
+
+.git-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.git-btn-primary:hover {
+  background: #1b8fd4;
+}
+
+.git-branch {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.git-commit-input {
+  margin: 0 8px 8px;
+  padding: 5px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.git-commit-input:focus {
+  border-color: var(--accent);
+}
+
+.git-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.git-section-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* unstaged 标题右侧 ➕：全部暂存 */
+.git-stage-all-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.git-stage-all-btn:hover {
+  color: #6a9955;
+  border-color: #6a9955;
+  background: rgba(106, 153, 85, 0.12);
+}
+
+.git-file-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  min-height: 40px;
+}
+
+.git-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.git-file:hover {
+  background: var(--hover-bg);
+}
+
+.git-file-status {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.git-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 文件树条目右侧 ➕：暂存该文件夹/文件 */
+.git-stage-btn {
+  flex-shrink: 0;
+  margin-left: 6px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 3px;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.git-stage-btn:hover {
+  opacity: 1;
+  background: rgba(106, 153, 85, 0.2);
+}
+
+/* 文件夹节点 */
+.git-dir-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+}
+
+.git-children {
+  /* 子节点容器（文件夹展开时显示） */
+}
+
+/* git 状态字母配色 */
+.git-st-m { color: #e2c08d; } /* modified  */
+.git-st-a { color: #6a9955; } /* added     */
+.git-st-d { color: #f48771; } /* deleted   */
+.git-st-r { color: #c586c0; } /* renamed   */
+.git-st-c { color: #c586c0; } /* copied    */
+.git-st-u { color: #f48771; } /* unmerged  */
+.git-st-\? { color: #969696; } /* untracked */
+
+.git-empty {
+  padding: 6px 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-style: italic;
+  word-break: break-all;
+}
+
+/* --- 仓库视图容器（与非仓库引导视图互斥显示） --- */
+.git-repo-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* --- 非仓库：仓库初始化引导视图 --- */
+.git-init-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px 12px;
+  text-align: center;
+}
+
+.git-init-icon {
+  font-size: 24px;
+}
+
+.git-init-title {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.git-init-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.git-init-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* 纵向排列时按钮高度略大，便于点击 */
+.git-init-actions .git-btn {
+  padding: 6px 0;
+}
+
+.git-init-hint {
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.git-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* --- 已初始化但未配置远程仓库的提示条 --- */
+.git-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 0 8px 6px;
+  padding: 4px 8px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.35);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.git-banner-text {
+  font-size: 11px;
+  color: #e2c08d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-banner-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: #ffffff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-banner-btn:hover {
+  background: #1b8fd4;
+}
+
+/* ============================================
+   命令区 / Command Bar
+   ============================================ */
+
+#command-bar {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  background: var(--bg-command);
+  border-top: 1px solid var(--border-color);
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.command-prompt {
+  color: var(--accent);
+  font-weight: bold;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.command-input {
+  flex: 1;
+  height: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+  caret-color: var(--accent);
+}
+
+.command-input::placeholder {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* ============================================
+   状态栏 / Status Bar
+   ============================================ */
+
+#statusbar {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  background: var(--bg-statusbar);
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.status-item {
+  color: var(--text-statusbar);
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+.status-spacer {
+  flex: 1;
+}
+
+/* ============================================
+   Agent 控制台（融合计划 Z4）
+   ============================================ */
+
+.agent-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+/* --- 空闲视图（能力卡片） --- */
+
+.agent-idle {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+}
+
+.agent-idle-inner {
+  max-width: 780px;
+  width: 100%;
+}
+
+.agent-engine-chip {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(215, 186, 125, 0.5);
+  color: var(--agent-warn, #d7ba7d);
+  background: rgba(215, 186, 125, 0.08);
+  font-size: 11px;
+  margin-bottom: 16px;
+}
+
+.agent-idle-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.agent-idle-sub {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+.agent-cap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.agent-cap {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px;
+  transition: border-color 0.15s;
+}
+
+.agent-cap:hover {
+  border-color: var(--accent);
+}
+
+.agent-cap-icon {
+  font-size: 18px;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.agent-cap-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.agent-cap-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.agent-idle-actions {
+  margin-bottom: 12px;
+}
+
+.agent-idle-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.agent-idle-hint code {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+/* --- 运行视图：头部 / 管线 --- */
+
+.agent-console {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.agent-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.agent-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agent-header-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.agent-run-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.agent-icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 4px 6px;
+  cursor: default;
+}
+
+.agent-icon-btn:hover {
+  color: var(--text-primary);
+}
+
+.agent-pill {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.agent-pill--run {
+  color: #4fc1ff;
+  border-color: rgba(79, 193, 255, 0.5);
+  animation: agentPulse 1.2s ease-in-out infinite;
+}
+
+.agent-pill--ok {
+  color: #89d185;
+  border-color: rgba(137, 209, 133, 0.5);
+}
+
+.agent-pill--err {
+  color: #f14c4c;
+  border-color: rgba(241, 76, 76, 0.5);
+}
+
+.agent-pill--off {
+  color: var(--text-secondary);
+}
+
+.agent-pipeline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.agent-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.agent-stage-icon {
+  font-size: 10px;
+}
+
+.agent-stage-arrow {
+  color: var(--text-secondary);
+  margin: 0 8px;
+  font-size: 11px;
+}
+
+.agent-stage-detail {
+  color: var(--text-secondary);
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.agent-stage--running {
+  color: #4fc1ff;
+  border-color: rgba(79, 193, 255, 0.5);
+  animation: agentPulse 1.2s ease-in-out infinite;
+}
+
+.agent-stage--done {
+  color: #89d185;
+  border-color: rgba(137, 209, 133, 0.5);
+}
+
+.agent-stage--error {
+  color: #f14c4c;
+  border-color: rgba(241, 76, 76, 0.5);
+}
+
+.agent-stage--skip {
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+@keyframes agentPulse {
+
+  0%, 100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* --- 运行视图：主体双栏（步骤 | 报告） --- */
+
+.agent-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(280px, 5fr) minmax(300px, 6fr);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.agent-col {
+  overflow-y: auto;
+  padding: 10px 14px;
+  min-height: 0;
+}
+
+.agent-col--steps {
+  border-right: 1px solid var(--border-color);
+}
+
+.agent-col-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.agent-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* 步骤卡片 */
+
+.agent-step {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.agent-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-step-idx {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.agent-step-title {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-step-icon {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.agent-step--running .agent-step-icon {
+  color: #4fc1ff;
+  animation: agentPulse 1.2s ease-in-out infinite;
+}
+
+.agent-step--done .agent-step-icon {
+  color: #89d185;
+}
+
+.agent-step--error {
+  border-color: rgba(241, 76, 76, 0.5);
+}
+
+.agent-step--error .agent-step-icon {
+  color: #f14c4c;
+}
+
+.agent-step-notes {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.agent-step-files {
+  margin-top: 5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.agent-step-files code {
+  font-size: 11px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #ce9178;
+}
+
+.agent-step-error {
+  margin-top: 5px;
+  font-size: 11px;
+  color: #f14c4c;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* 报告卡片 */
+
+.agent-reports {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 5px;
+}
+
+.agent-card-body {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.agent-card-body code {
+  font-family: Consolas, "Courier New", monospace;
+  color: #ce9178;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.agent-card-note {
+  font-size: 11px;
+}
+
+.agent-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.agent-badge--ok {
+  color: #89d185;
+  border-color: rgba(137, 209, 133, 0.5);
+}
+
+.agent-badge--err {
+  color: #f14c4c;
+  border-color: rgba(241, 76, 76, 0.5);
+}
+
+.agent-badge--run {
+  color: #4fc1ff;
+  border-color: rgba(79, 193, 255, 0.5);
+  animation: agentPulse 1.2s ease-in-out infinite;
+}
+
+.agent-badge--off {
+  color: var(--text-secondary);
+}
+
+.agent-diag {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+.agent-diag code {
+  font-family: Consolas, "Courier New", monospace;
+  color: #ce9178;
+}
+
+.agent-diag-rule {
+  color: #d7ba7d;
+}
+
+.agent-progress {
+  margin-top: 5px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.agent-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+
+/* --- 运行视图：日志 --- */
+
+.agent-log-title {
+  padding: 6px 16px 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.agent-log {
+  height: 150px;
+  overflow-y: auto;
+  padding: 4px 16px 10px;
+  background: #181818;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  user-select: text;
+  flex-shrink: 0;
+}
+
+.agent-log-line {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.agent-log-line--ok {
+  color: #89d185;
+}
+
+.agent-log-line--warn {
+  color: #d7ba7d;
+}
+
+.agent-log-line--error {
+  color: #f14c4c;
+}
+
+/* --- 侧栏：任务入口 / 环境 / 历史 --- */
+
+.agent-task-input {
+  width: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  font-size: 12px;
+  resize: vertical;
+  user-select: text;
+}
+
+.agent-task-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.agent-btn-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.agent-btn {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: default;
+  transition: filter 0.15s, border-color 0.15s;
+}
+
+.agent-btn:hover {
+  border-color: var(--accent);
+}
+
+.agent-btn:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.agent-btn--run {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.agent-btn--run:hover {
+  filter: brightness(1.15);
+}
+
+.agent-btn--cancel {
+  color: #f14c4c;
+}
+
+.agent-btn--cancel:hover {
+  border-color: rgba(241, 76, 76, 0.5);
+}
+
+.agent-btn--demo {
+  width: 100%;
+  margin-bottom: 4px;
+  color: #d7ba7d;
+  border-color: rgba(215, 186, 125, 0.4);
+}
+
+.agent-btn--demo:hover {
+  border-color: #d7ba7d;
+}
+
+.agent-side-section {
+  margin-top: 14px;
+}
+
+.agent-side-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.agent-env-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.agent-chip--ok {
+  color: #89d185;
+  border-color: rgba(137, 209, 133, 0.4);
+}
+
+.agent-chip--warn {
+  color: #d7ba7d;
+  border-color: rgba(215, 186, 125, 0.4);
+}
+
+.agent-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-history-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.agent-history-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.agent-history-item:hover {
+  background: var(--hover-bg);
+}
+
+.agent-history-task {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.agent-history-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.agent-dot--done {
+  background: #89d185;
+}
+
+.agent-dot--error {
+  background: #f14c4c;
+}
+
+.agent-dot--canceled {
+  background: var(--text-secondary);
+}
+
+/* 窄窗口：双栏退化为上下滚动 */
+
+@media (max-width: 900px) {
+  .agent-main {
+    grid-template-columns: 1fr;
+    grid-auto-rows: minmax(180px, 1fr);
+  }
+
+  .agent-col--steps {
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+  }
+}
+
+/* ============================================
+   MCP / A2A 面板（服务器列表、工具、调用、任务委托）
+   ============================================ */
+
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.mcp-server {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mcp-server:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.mcp-server--sel {
+  border-color: var(--border-color);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mcp-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.mcp-dot--on {
+  background: #4ec9b0;
+}
+
+.mcp-server-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.mcp-server-name {
+  font-size: 13px;
+  color: var(--text-primary, #d4d4d4);
+}
+
+.mcp-tools-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mcp-server-cmd {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.mcp-server-info {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mcp-icon-btn {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.mcp-icon-btn:hover {
+  color: #f48771;
+  background: rgba(244, 135, 113, 0.1);
+}
+
+.mcp-mini-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  margin-left: 6px;
+}
+
+.mcp-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.mcp-tool {
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.mcp-tool code {
+  font-size: 12px;
+  color: #4ec9b0;
+}
+
+.mcp-tool-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.a2a-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text-primary, #d4d4d4);
+  background: var(--bg-input, rgba(0, 0, 0, 0.3));
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.mcp-call-result {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary, #d4d4d4);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.mcp-call-result--err {
+  color: #f48771;
+}
+
+.a2a-skill-chip {
+  display: inline-block;
+  margin: 2px 4px 0 0;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #569cd6;
+  border: 1px solid rgba(86, 156, 214, 0.4);
+  border-radius: 8px;
+}
+
+.a2a-state-line {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.a2a-state-line--run {
+  color: #dcdcaa;
+}
+
+.a2a-state-line--ok {
+  color: #4ec9b0;
+}
+
+.a2a-state-line--err {
+  color: #f48771;
+}
+
+
+/* 能力面板子标签（MCP / A2A / 工具 / 技能） */
+.cap-sub-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.cap-sub-tab {
+  flex: 1;
+  padding: 4px 6px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.cap-sub-tab:hover {
+  color: var(--text-primary);
+}
+
+.cap-sub-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.cap-sub-panel {
+  display: none;
+}
+
+.cap-sub-panel.active {
+  display: block;
+}
+
+/* ============================================
+   会话（中央聊天 tab）
+   ============================================ */
+
+.session-container {
+  width: 100%;
+  height: 100%;
+}
+
+.session-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary, #1e1e1e);
+}
+
+.session-msgs {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.session-empty {
+  margin: auto;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+  line-height: 1.8;
+}
+
+.session-msg {
+  max-width: 78%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-msg--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.session-msg--agent {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.session-msg--system {
+  align-self: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.session-bubble {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.session-msg--user .session-bubble {
+  background: rgba(86, 156, 214, 0.22);
+  color: var(--text-primary, #d4d4d4);
+}
+
+.session-msg--agent .session-bubble {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary, #d4d4d4);
+}
+
+.session-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.session-run-id {
+  color: #569cd6;
+  cursor: pointer;
+  font-family: var(--font-mono, monospace);
+}
+
+.session-status--ok {
+  color: #4ec9b0;
+}
+
+.session-status--err {
+  color: #f48771;
+}
+
+/* 验证 / 复核小节（v0.3 质量门禁）：挂在助手气泡下，一眼看出"这轮验过没有" */
+.session-gate {
+  margin-top: 6px;
+  border-left: 2px solid var(--border-color);
+  padding: 4px 0 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* 提问卡（v0.8 ask_user）：需要用户拿主意时才出现，所以给足视觉重量 */
+.session-ask-box {
+  border-left-color: #dcdcaa;
+}
+
+.session-ask + .session-ask {
+  margin-top: 8px;
+}
+
+.session-ask-q {
+  color: #e8e8e8;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.session-ask-why {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.session-ask-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.session-ask-free {
+  display: flex;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.session-ask-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--input-bg, #1e1e1e);
+  border: 1px solid var(--border-color);
+  color: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.session-ask-answer {
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.session-ask-ok {
+  color: #4ec9b0;
+}
+
+.session-ask-miss {
+  color: #dcdcaa;
+}
+
+.session-ask-note {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.session-gate-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.session-gate-tag {
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.session-gate-text {
+  word-break: break-word;
+}
+
+.session-gate-row--passed .session-gate-text {
+  color: #4ec9b0;
+}
+
+.session-gate-row--failed .session-gate-text {
+  color: #f48771;
+}
+
+.session-gate-row--skipped .session-gate-text {
+  color: #dcdcaa;
+}
+
+.session-gate-item {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  word-break: break-word;
+  padding-left: 4px;
+}
+
+.session-gate-ev {
+  margin-left: 6px;
+  color: #569cd6;
+}
+
+/* 产物写回面板（差异预览 + 勾选 + 确认写入） */
+.session-apply {
+  margin-top: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary, #1e1e1e);
+  padding: 8px 10px;
+  max-width: 100%;
+}
+
+.session-apply-head {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.session-apply-head--ok {
+  color: #4ec9b0;
+}
+
+.session-apply-head--err {
+  color: #f48771;
+}
+
+.session-apply-warn {
+  display: block;
+  margin-top: 4px;
+  color: #dcb67a;
+}
+
+.session-apply-all {
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.session-apply-list {
+  margin: 6px 0;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.session-apply-row {
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.session-apply-row--same {
+  opacity: 0.55;
+}
+
+.session-apply-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.session-apply-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.session-apply-kind {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.session-apply-kind--add {
+  background: rgba(78, 201, 176, 0.18);
+  color: #4ec9b0;
+}
+
+.session-apply-kind--modify {
+  background: rgba(86, 156, 214, 0.18);
+  color: #569cd6;
+}
+
+.session-apply-kind--same {
+  background: rgba(128, 128, 128, 0.18);
+  color: var(--text-secondary);
+}
+
+/* 覆盖会让文件变短 = 可能有内容被抹掉，这一条必须显眼 */
+.session-apply-loss {
+  font-size: 10px;
+  color: #dcb67a;
+  flex: 0 0 auto;
+}
+
+.session-apply-detail {
+  margin: 4px 0 6px 22px;
+}
+
+.session-apply-detail summary {
+  font-size: 11px;
+  color: #569cd6;
+  cursor: pointer;
+}
+
+.session-apply-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin: 4px 0 2px;
+}
+
+.session-apply-pre {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.session-apply-pre--before {
+  background: rgba(244, 135, 113, 0.1);
+}
+
+.session-apply-pre--after {
+  background: rgba(78, 201, 176, 0.1);
+}
+
+.session-apply-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-apply-hint {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.session-apply-skip {
+  font-size: 10px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+
+.session-input-row {
+  border-top: 1px solid var(--border-color);
+  padding: 10px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary, #d4d4d4);
+  background: var(--bg-input, rgba(0, 0, 0, 0.3));
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  resize: none;
+}
+
+.session-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-toolbar .agent-btn {
+  padding: 4px 14px;
+  font-size: 12px;
+}
+
+/* 写回模式选择（🤝 确认 / ✍️ 写入 / 🚀 自主） */
+.session-mode-select {
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-primary, #d4d4d4);
+  background: var(--bg-input, rgba(0, 0, 0, 0.3));
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+}
+
+.session-mode-select:focus {
+  border-color: var(--accent);
+}
+
+/* 🌏 服务端联网检索开关：开了才有底色（关着与相邻按钮无差别，一眼看得出状态）。
+   禁用态 = 当前模型没这个能力（矩阵见引擎 llm::model_caps）—— 半透明 + 禁点，
+   别给一个按下去没反应的按钮。 */
+.session-web {
+  padding: 4px 10px;
+  opacity: 0.45;
+}
+
+.session-web--on {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.session-web:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+/* ============================================
+   外链标记
+   ============================================ */
+/* ↗ = "这一下会离开 IDE，交给系统浏览器"（闸门见 ui/external.js + main.rs::nav_verdict）。
+   只标外链：`#锚点` 与自家文档不算外链，标了反而误导。 */
+.session-bubble--md a[href^="http"]::after,
+#help-body a[href^="http"]::after {
+  content: " ↗";
+  font-size: 0.85em;
+  opacity: 0.65;
+}
+
+/* ============================================
+   服务页（托管进程面板）
+   ============================================ */
+.service-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.service-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: none;
+  padding: 9px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.service-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.service-title {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.service-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.service-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.service-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.service-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.service-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.service-hint {
+  flex: none;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.service-body {
+  flex: 1;
+  overflow: auto;
+  padding: 20px 24px 24px;
+}
+
+.service-empty {
+  padding: 24px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* 学术三线表：只有顶线（粗）、表头下线（细）、底线（粗）三条横线，
+   没有竖线、没有内部行线 —— 行与行之间靠留白分，不靠线。 */
+.service-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  table-layout: fixed;
+}
+
+.service-table th {
+  padding: 7px 8px 6px;
+  font-weight: 500;
+  text-align: left;
+  color: var(--text-primary);
+  border-top: 1.5px solid var(--text-primary);
+  border-bottom: 0.75px solid var(--text-primary);
+}
+
+.service-table td {
+  padding: 6px 8px;
+  color: var(--text-secondary);
+  vertical-align: top;
+  text-align: left;
+  border: none;
+}
+
+.service-table tbody tr:last-child td {
+  border-bottom: 1.5px solid var(--text-primary);
+}
+
+.service-col-pid {
+  width: 84px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: var(--text-primary);
+}
+
+.service-col-started {
+  width: 232px;
+  white-space: nowrap;
+}
+
+.service-elapsed {
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.service-col-cmd {
+  word-break: break-all;
+}
+
+.service-cmd {
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+/* "输出" / "停止" 不是三字段之一，挂在命令行单元格右侧，不占列。
+   float 只加在外层容器上 —— 多个 float:right 在 DOM 里是反序排的，靠它排按钮顺序靠不住。 */
+.service-actions {
+  float: right;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-left: 10px;
+}
+
+.service-act {
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.service-act:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.service-act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.service-stop {
+  float: none;
+}
+
+/* ============================================
+   输出（托管进程日志的实时跟随）
+   ============================================ */
+.proc-log-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #1e1e1e; /* 与终端同色：周围一圈亮色会把终端衬得很小 */
+}
+
+.proc-log-panes,
+.proc-log-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.proc-log-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #d4d4d4;
+  background: #252526;
+  border-bottom: 1px solid #37373d;
+}
+
+.proc-log-pid {
+  flex: none;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: #9cdcfe;
+}
+
+.proc-log-state {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: #333333;
+  color: #ce9178;
+}
+
+.proc-log-state--dead {
+  background: #4b1f1f;
+  color: #f48771;
+}
+
+.proc-log-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  color: #808080;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proc-log-btn {
+  flex: none;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: #d4d4d4;
+  background: #333333;
+  border: 1px solid #3f3f3f;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.proc-log-btn:hover {
+  background: #3f3f3f;
+}
+
+.proc-log-term {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 0 0 8px;
+}
+
+.proc-log-term .xterm {
+  height: 100%;
+}
+
+/* 没有 xterm 时的降级（浏览器直开 UI）—— 总比一片空白强 */
+.proc-log-plain {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ============================================
+   配置表单（配置菜单 → 全局 / 项目 / 运行）
+   ============================================ */
+.config-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: none;
+  padding: 9px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.config-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.config-scope-title {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e6e6e6;
+}
+
+.config-dir {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.config-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.config-dirty {
+  font-size: 12px;
+  color: #d7ba7d;
+}
+
+.config-btn {
+  padding: 4px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: #3a3d41;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.config-btn:hover:not(:disabled) {
+  background: #45494e;
+}
+
+.config-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.config-btn--primary {
+  color: #ffffff;
+  background: #0e639c;
+  border-color: #1177bb;
+}
+
+.config-btn--primary:hover:not(:disabled) {
+  background: #1177bb;
+}
+
+.config-hint {
+  flex: none;
+  padding: 7px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: rgba(0, 122, 204, 0.08);
+  border-bottom: 1px solid var(--border-color);
+  user-select: text;
+}
+
+.config-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px 24px;
+}
+
+.config-section {
+  margin-bottom: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* 块标题条 = 折叠开关（点整条切换，caret 只在折叠时转向） */
+.config-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
+  user-select: none;
+}
+
+.config-section-head:hover {
+  background: var(--hover-bg);
+}
+
+.config-section-caret {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-secondary);
+  transition: transform 0.12s ease;
+}
+
+.config-section--folded .config-section-caret {
+  transform: rotate(-90deg);
+}
+
+.config-section--folded {
+  margin-bottom: 6px;
+}
+
+/* 折叠只用 display:none：**节点还在 DOM 里**，所以 controls（下标 = row.idx）
+   与 collect() 读到的用户输入都不受影响。改成重建 DOM 会静默漏提交改过的值。 */
+.config-section--folded .config-section-rows {
+  display: none;
+}
+
+.config-section-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d4d4d4;
+}
+
+.config-section-file {
+  margin-left: auto;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.config-section-rows {
+  padding: 2px 12px;
+}
+
+.config-field {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  padding: 7px 0;
+}
+
+.config-field + .config-field {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.config-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 5px;
+  min-width: 0;
+}
+
+.config-field-name {
+  font-size: 12px;
+  color: #c8c8c8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-tag {
+  flex: none;
+  padding: 0 4px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+}
+
+.config-field-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.config-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 560px;
+  padding: 4px 8px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  outline: none;
+  user-select: text;
+}
+
+.config-input:focus {
+  border-color: var(--accent);
+}
+
+.config-input--select {
+  font-family: inherit;
+}
+
+.config-pw {
+  position: relative;
+  display: block;
+  max-width: 560px;
+}
+
+.config-pw .config-input {
+  padding-right: 30px;
+}
+
+.config-eye {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: 0.6;
+  transform: translateY(-50%);
+}
+
+.config-eye:hover {
+  opacity: 1;
+}
+
+.config-inherit,
+.config-field-desc {
+  font-size: 11px;
+  color: #7d7d7d;
+}
+
+.config-switch {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding-top: 1px;
+  cursor: pointer;
+}
+
+.config-switch input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
+.config-switch-track {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  background: #4a4a4a;
+  border-radius: 9px;
+  transition: background 0.15s;
+}
+
+.config-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: #d4d4d4;
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+
+.config-switch input:checked + .config-switch-track {
+  background: var(--accent);
+}
+
+.config-switch input:checked + .config-switch-track::after {
+  transform: translateX(16px);
+}
+
+/* --- 会话消息 markdown 渲染（session-bubble--md） --- */
+
+.session-bubble--md p {
+  margin: 0 0 8px;
+}
+
+.session-bubble--md p:last-child {
+  margin-bottom: 0;
+}
+
+.session-bubble--md h1,
+.session-bubble--md h2,
+.session-bubble--md h3,
+.session-bubble--md h4 {
+  margin: 10px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.session-bubble--md h1:first-child,
+.session-bubble--md h2:first-child,
+.session-bubble--md h3:first-child {
+  margin-top: 0;
+}
+
+.session-bubble--md ul,
+.session-bubble--md ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.session-bubble--md li {
+  margin: 2px 0;
+}
+
+.session-bubble--md code {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.session-bubble--md pre {
+  background: #181818;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+
+.session-bubble--md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #ce9178;
+  white-space: pre;
+}
+
+.session-bubble--md blockquote {
+  margin: 0 0 8px;
+  padding: 2px 10px;
+  border-left: 3px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.session-bubble--md a {
+  color: #4fc1ff;
+  text-decoration: none;
+}
+
+.session-bubble--md a:hover {
+  text-decoration: underline;
+}
+
+.session-bubble--md table {
+  border-collapse: collapse;
+  margin: 0 0 8px;
+}
+
+.session-bubble--md th,
+.session-bubble--md td {
+  border: 1px solid var(--border-color);
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.session-bubble--md hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 10px 0;
+}
+</style><script>
+(async function () {
+  // 导成预览页给人看时：别把探针的 JSON 结果糊在页面底下，也别让"打开文件以开始编辑"
+  // 那行空态文字留在配置页上方（真机上 showConfigView() 会把它藏掉，这里没有 main.js）
+  const PREVIEW = true;
+  const out = { errors: [], notes: [], steps: {} };
+  window.onerror = (m) => out.errors.push(String((m && m.message) || m));
+  const box = (el) => {
+    const r = el.getBoundingClientRect();
+    return { top: Math.round(r.top), h: Math.round(r.height) };
+  };
+  try {
+    const zh = {"_lang":"zh-CN","_emoji":false,"titlebar.default":"Darkhorse Code","titlebar.maximize":"最大化","titlebar.restore":"还原","menu.project":"项目","menu.project.new":"新建","menu.project.close":"退出","menu.help":"帮助","menu.lang":"语言 ▾","menu.lang.zh":"中文","menu.lang.en":"英文","menu.config":"配置","menu.config.global":"全局","menu.config.project":"项目","menu.config.runtime":"运行","config.tab_global":"配置 · 全局","config.tab_project":"配置 · 项目","config.tab_runtime":"配置 · 运行","config.loaded":"已加载配置: {dir}","config.btn_save":"保存","config.btn_apply":"应用","config.btn_cancel":"取消","config.dirty":"● 未保存","config.hint":"扫描本作用域及其回退链上的配置项。保存 = 只把改动过的项写回本作用域（清空某一项再保存 = 删除该键）；应用 = 保存后再把这些值刷新进 IDE 运行时内存里的配置对象（优先级最高，本次运行有效，重启失效）。","config.saved":"已保存 {saved} 项，删除 {removed} 项","config.applied":"已保存 {saved} 项、删除 {removed} 项；已刷新运行时内存 {applied} 项","config.cancelled":"已放弃未保存的改动","config.no_change":"没有改动可保存","config.need_project":"未打开项目，无法编辑项目配置","config.cmd_usage":"用法: config \u003cform|save|apply|cancel> [global|project|runtime]","config.origin_inherit":"未设置 · 当前继承自 {scope}: {value}","config.cancel_title":"放弃改动","config.cancel_msg":"有未保存的改动，确定要放弃吗？","config.section.ai":"AI 助手","config.section.ui":"界面","config.section.harness":"Agent 引擎","config.section.run":"运行目标","config.section.harness.llm":"大模型","config.section.harness.verify":"验证","config.section.harness.gate":"质量门禁","config.section.harness.reflect":"复核","config.section.harness.agent":"循环预算","config.section.harness.step":"步骤执行","config.section.harness.lint":"规约检查","config.section.harness.sandbox":"沙箱","config.section.harness.kb":"知识库","config.section.harness.discover":"命令发现","config.section.harness.env":"环境准备","config.section.harness.proc":"托管进程","config.section.harness.ask":"委托人提问","config.section.harness.general":"引擎 · 其他","config.outline_head":"配置块 · {n}","config.outline_expand_all":"展开全部","config.outline_collapse_all":"全部折叠","config.outline_empty":"暂无可显示的配置块","config.fold_tip":"点击折叠 / 展开这一块","config.field.ai.api_url":"API 地址","config.field.ai.api_key":"API 密钥","config.field.ai.model":"模型","config.field.ai.alias":"模型别名","config.field.ui.lang":"界面语言","config.field.ui.emoji":"Emoji 模式","config.field.harness.workspace_root":"工作目录","config.field.harness.llm.temperature":"采样温度","config.field.harness.llm.max_tokens":"最大输出长度","config.field.harness.sandbox.mode":"沙箱模式","config.field.harness.sandbox.image":"沙箱镜像","config.field.harness.lint.enabled":"规约检查","config.field.harness.lint.package_dir":"规约包目录","config.field.harness.lint.max_repair_rounds":"最大修复轮次","config.field.harness.kb.enabled":"知识库","config.field.harness.kb.top_k":"知识库召回数","config.field.harness.step.execute_plan":"计划即执行","config.field.harness.step.max_steps":"单步轮次上限","config.field.harness.agent.max_elapsed_secs":"单次运行时长上限（秒）","config.field.harness.discover.enabled":"命令发现","config.field.harness.discover.ttl_secs":"命令探测缓存（秒）","config.field.harness.discover.extra":"额外要探测的命令","config.field.harness.env.install_enabled":"按需安装缺失工具","config.field.harness.proc.enabled":"托管进程","config.field.harness.proc.max":"托管进程上限","config.field.harness.proc.ready_timeout_secs":"就绪判据超时（秒）","config.field.harness.agent.batch":"批量调用","config.field.harness.agent.batch_max":"单批调用上限","config.field.harness.agent.batch_parallel":"波内并发","config.field.harness.agent.history_trim":"折叠历史","config.field.harness.agent.history_keep_rounds":"保留最近几轮","config.field.harness.ask.enabled":"允许提问","config.field.harness.ask.timeout_secs":"提问等待上限（秒）","config.field.harness.ask.max_per_run":"每次运行最多问几次","config.field.harness.llm.timeout_secs":"请求超时（秒）","config.field.harness.verify.python_bin":"Python 命令","config.field.harness.verify.node_bin":"Node 命令","config.field.harness.verify.cargo_bin":"Cargo 命令","config.field.harness.verify.go_bin":"Go 命令","config.field.harness.verify.cmd_timeout_secs":"命令超时（秒）","config.field.harness.verify.test_timeout_secs":"测试超时（秒）","config.field.harness.gate.narrow":"窄层门禁","config.field.harness.gate.full":"全量门禁","config.field.harness.gate.max_full_attempts":"全量重试上限","config.field.harness.gate.staged_timeout_secs":"暂存检查超时（秒）","config.field.harness.reflect.enabled":"交付前复核","config.field.harness.reflect.max_rounds":"复核回灌轮次","config.field.harness.reflect.max_steps":"复核工具轮次上限","config.field.harness.reflect.model":"复核用模型","config.field.harness.sandbox.network":"沙箱网络","config.field.harness.sandbox.memory":"沙箱内存","config.field.harness.sandbox.cpus":"沙箱 CPU","config.field.harness.sandbox.pids_limit":"沙箱进程数上限","config.field.harness.sandbox.tmpfs_size":"沙箱临时空间","config.field.harness.sandbox.user":"沙箱用户","config.field.harness.sandbox.timeout_secs":"沙箱执行超时（秒）","config.field.harness.sandbox.probe_timeout_secs":"沙箱探测超时（秒）","config.field.harness.kb.dir":"知识库目录","config.field.harness.kb.roots":"知识库来源","config.field.harness.kb.token_budget":"注入预算（token）","config.field.harness.kb.per_source_limit":"每源条数上限","config.field.harness.kb.min_score":"最低相关度","config.field.harness.kb.chunk_chars":"分块大小（字符）","config.field.harness.kb.max_file_bytes":"单文件字节上限","config.field.harness.kb.diversity_max_sim":"多样度上限","config.field.harness.max_context_chars":"上下文预算（字符）","config.desc.ai.api_url":"OpenAI 兼容端点，如 https://api.deepseek.com/v1","config.desc.ai.api_key":"AI 命令翻译与 Agent 运行共用；建议配在全局","config.desc.ai.model":"模型名，如 deepseek-chat","config.desc.ai.alias":"可选：界面显示用的短名，留空则用模型名","config.desc.ui.lang":"中文 / 英文，保存后立即切换","config.desc.ui.emoji":"开启后状态栏文案带 emoji","config.desc.harness.workspace_root":"Agent 任务产物目录，默认 ~/.ruyix/code/agent/runs","config.desc.harness.llm.temperature":"0~2，越小越稳定","config.desc.harness.llm.max_tokens":"单次回复的 token 上限","config.desc.harness.sandbox.mode":"prefer 尽量隔离 / require 必须隔离 / off 关闭","config.desc.harness.sandbox.image":"Docker 镜像名，沙箱开启时使用","config.desc.harness.lint.enabled":"生成后跑 harness_lint 静态检查","config.desc.harness.lint.package_dir":"harness_lint 包所在目录，缺省 tools/lint","config.desc.harness.lint.max_repair_rounds":"检查/验证失败后自动修复的轮数上限（默认 5）；信息不足时模型可追问文件内容","config.desc.harness.kb.enabled":"检索增强，默认关闭","config.desc.harness.kb.top_k":"每次检索返回的片段数","config.desc.harness.step.execute_plan":"模型给出计划后由引擎按序派发每个步骤（一步一轮）；关掉则计划只作展示，界面进度靠推断，容易把做完的步骤报成未完成","config.desc.harness.step.max_steps":"单个步骤内部自己的工具轮次上限，与主循环的轮次预算相互独立","config.desc.harness.agent.max_elapsed_secs":"单次运行的总时长闸，0 表示不限","config.desc.harness.discover.enabled":"实测本机有哪些命令可用（含版本与路径）并写进模型上下文；关掉后模型只能自己一轮轮试探","config.desc.harness.discover.ttl_secs":"探测结果缓存多久，0 表示每次都重新探（换工具链后想立刻生效就用它）","config.desc.harness.discover.extra":"工具表没覆盖的命令写在这里，逗号分隔，用 --version 探测；不用改代码","config.desc.harness.env.install_enabled":"模型发现缺工具时，可经 connect 请求宿主安装（宿主自选包管理器，每次动作写入 .ruyix/env/installs.jsonl 并播 UI 事件）；关掉后模型看不到这条能力","config.desc.harness.proc.enabled":"允许后台起长期进程（关掉后 background 一律被拒）","config.desc.harness.proc.max":"同时存活的后台进程上限","config.desc.harness.proc.ready_timeout_secs":"等待就绪命令返回的秒数，超时按失败处理","config.desc.harness.agent.batch":"允许一轮发多个互不依赖的调用（省轮次；关掉即回到一轮一个调用）","config.desc.harness.agent.batch_max":"一轮最多几个调用，超了让模型拆批","config.desc.harness.agent.batch_parallel":"一批里的调用并发跑（只有同一条路径上的写与读、托管进程的起停查按声明顺序排）","config.desc.harness.agent.history_trim":"把超出保留窗口的老轮次压成一行事实（调了什么、成没成、结果多大），不再每轮重发它们的正文；关掉即回到「历史只增不裁」（排查模型像是忘了自己读过什么时用）","config.desc.harness.agent.history_keep_rounds":"最近几轮的工具结果原样保留；更老的才折叠。一次「读→改→跑测试→再改」约 4~6 轮，调小会把刚看过的现场折掉，模型只能重读","config.desc.harness.ask.enabled":"需求含糊时允许模型问用户（关掉即回到「让它猜」）","config.desc.harness.ask.timeout_secs":"等多久算没人回答；超时后引擎拒绝依赖该答案的动作（0 = 无限等）","config.desc.harness.ask.max_per_run":"上限之外要求模型交付并写清假设，而不是继续追问","config.desc.harness.llm.timeout_secs":"单次模型请求的超时秒数","config.desc.harness.verify.python_bin":"本机 python 可执行名；Windows 通常是 python，类 Unix 可能是 python3","config.desc.harness.verify.node_bin":"本机 node 可执行名","config.desc.harness.verify.cargo_bin":"本机 cargo 可执行名","config.desc.harness.verify.go_bin":"本机 go 可执行名","config.desc.harness.verify.cmd_timeout_secs":"单条验证命令的超时秒数","config.desc.harness.verify.test_timeout_secs":"跑单元测试的超时秒数，应大于命令超时","config.desc.harness.gate.narrow":"每轮有改动后立即跑语法层验证","config.desc.harness.gate.full":"交付（final）前跑全量验证：语法 + 单测 + 规约","config.desc.harness.gate.max_full_attempts":"全量验证连续失败多少次后放弃拦截，防止无限修复","config.desc.harness.gate.staged_timeout_secs":"确认模式下检查暂存内容的超时秒数","config.desc.harness.reflect.enabled":"交付前用干净上下文复核一遍改动","config.desc.harness.reflect.max_rounds":"复核发现问题后最多回灌主循环几轮","config.desc.harness.reflect.max_steps":"复核 agent 自己的工具轮次上限（只允许读）","config.desc.harness.reflect.model":"复核用哪个模型；留空 = 与主循环同模型","config.desc.harness.sandbox.network":"none = 容器无网络（默认）；只有确实要装依赖时才改","config.desc.harness.sandbox.memory":"容器内存上限，如 2g","config.desc.harness.sandbox.cpus":"容器可用 CPU 数","config.desc.harness.sandbox.pids_limit":"PID 上限，防 fork bomb","config.desc.harness.sandbox.tmpfs_size":"容器内临时空间大小，如 512m","config.desc.harness.sandbox.user":"容器内以哪个用户跑命令","config.desc.harness.sandbox.timeout_secs":"容器内单条命令的超时秒数","config.desc.harness.sandbox.probe_timeout_secs":"探测沙箱可用性的超时秒数","config.desc.harness.kb.dir":"注册表与索引库放哪；留空 = 默认目录","config.desc.harness.kb.roots":"要索引的目录列表，逗号 / 分号 / 空白分隔","config.desc.harness.kb.token_budget":"每次注入上下文的 token 上限","config.desc.harness.kb.per_source_limit":"同一个来源最多命中几条","config.desc.harness.kb.min_score":"0~1，低于此相关度的命中直接丢弃","config.desc.harness.kb.chunk_chars":"索引时每块的字符数","config.desc.harness.kb.max_file_bytes":"超过这个大小的文件不入索引","config.desc.harness.kb.diversity_max_sim":"命中之间的最大相似度，用来压下重复内容","config.desc.harness.max_context_chars":"单轮喂给模型的上下文字符上限","nav.tab_projects":"项目列表","nav.tab_files":"项目文件","nav.tab_terminal":"终端资源","nav.tab_targets":"运行目标","ctx.copy_path":"📋 复制路径","ctx.copy_full_path":"📋 复制绝对路径","ctx.copied":"已复制：{path}","ctx.copy_fail":"复制失败，剪贴板不可用：{path}","ctx.run":"▶️ 运行","ctx.try_run":"🔍 试跑","ctx.delete":"🗑️ 删除","ctx.rename":"✏️ 重命名","ctx.new_file":"📄 创建文件","ctx.new_folder":"📁 创建文件夹","welcome.title":"最懂你的IDE","welcome.subtitle":"不花哨，不废话。你要什么，它做什么。","editor.empty":"打开文件以开始编辑","outline.header":"大纲","outline.empty":"大纲（待实现）","outline.none":"无大纲","outline.placeholder":"大纲（支持 Markdown / Rust / Python / Java）","statusbar.ready":"就绪","statusbar.encoding":"UTF-8","statusbar.rust":"Rust 2024","command.prompt":"任意输入，回车执行，最懂你的IDE","help.title":"帮助","agent.env":"环境探针","help.back":"← 返回","filetree.empty":"空目录","filetree.error":"读取失败","tree.refresh":"从磁盘刷新此文件夹","terminal.powershell":"PowerShell","terminal.cmd":"Cmd","terminal.wsl":"Ubuntu (WSL)","terminal.claude":"Claude","terminal.python":"Python","terminal.nodejs":"Node.js","terminal.gitbash":"Git Bash","terminal.new_window":"在新窗口中打开","runtarget.empty":"暂无运行目标","runtarget.no_cmd":"（无命令）","runtarget.executing":"正在执行...","runtarget.done":"进程退出，代码: {code}","runtarget.finished":"进程结束","runtarget.load_error":"加载失败: {err}","projectlist.empty":"暂无历史项目","projectlist.hint":"请使用 open project \u003c路径> 打开项目","projectlist.load_error":"加载失败: {err}","projectlist.edit":"修改项目","projectlist.del":"从项目列表删除","lang.unknown":"未知语言","lang.mix":"混合语言","lang.java":"Java语言","lang.c":"C/C++/C#语言","lang.python":"Python语言","lang.rust":"Rust语言","lang.web":"Html/JavaScript/CSS语言","lang.golang":"Golang语言","lang.document":"文档/笔记","lang.kotlin":"Kotlin语言","cmd.project.usage":"用法: project lang \u003c语言> \u003c项目路径>  或  project edit \"\u003c路径>\" \"\u003c名称>\" \u003c语言>  或  project delete \u003c路径>","cmd.project.edit_usage":"用法: project edit \"\u003c路径>\" \"\u003c名称>\" \u003c语言>","project.lang.ok":"项目语言已设置为: {lang}","project.lang.fail":"设置项目语言失败: {err}","project.edit.title":"修改项目","project.edit.name_label":"名称","project.edit.icon_label":"图标","project.edit.path_label":"路径（不可修改）","project.edit.name_empty":"项目名称不能为空","project.edit.ok":"已更新项目: {name}","project.edit.fail":"更新项目失败: {err}","project.delete.confirm_title":"从项目列表删除","project.delete.confirm":"确认从项目列表删除？\n\n{path}\n\n项目文件夹不会被删除。","project.delete.ok":"已从项目列表删除: {path}","project.delete.fail":"删除项目失败: {err}","status.tauri_unavail":"Tauri API 不可用","status.tauri_browser":"Tauri API 不可用 (浏览器模式)","status.thinking":"正在思考...","status.no_permission":"您没有权限！","status.unknown_cmd":"未知命令: {verb}","cmd.run.usage":"用法: run \u003c名称>=\u003c命令>  示例: run 构建=cargo build","cmd.run.no_eq":"用法: run \u003c名称>=\u003c命令>  (缺少 =)","cmd.run.empty_name":"运行目标名称不能为空","cmd.run.empty_cmd":"运行目标命令不能为空","cmd.run.no_project":"请先打开项目 (open project \u003c路径>)","cmd.run.add_cmd_fail":"添加运行目标命令失败: {err}","cmd.run.add_name_fail":"添加运行目标名称失败: {err}","cmd.run.success":"已添加运行目标: {name} = {cmd}","cmd.run.exists":"运行目标已存在: {name}","cmd.run.del_usage":"用法: run del \u003c名称>  示例: run del 构建","cmd.run.del_not_found":"运行目标不存在: {name}","cmd.run.del_ok":"已删除运行目标: {name}","cmd.run.del_fail":"删除运行目标失败: {err}","cmd.run.edit_ok":"已修改运行目标: {name}","cmd.run.edit_fail":"修改运行目标失败: {err}","cmd.open.usage":"用法: open project \u003c路径>  或  open file \u003c路径>  或  open url \u003c链接>","cmd.open.project_usage":"用法: open project \u003c项目文件夹路径>","cmd.open.file_usage":"用法: open file \u003c文件路径>","cmd.open.unknown":"未知子命令: open {sub}。可用: project, file, url","cmd.open.url_usage":"用法: open url \u003c链接>（http / https / mailto）","cmd.open.url_fail":"打开链接失败：{err}","link.opened":"已在系统浏览器打开：{url}","link.blocked":"这个链接被拦下了：只允许 http / https / mailto，它是 {scheme}:","link.bad":"这个链接不是合法 URL，已拦下","link.own_not_doc":"这是应用内部路径，不作为外链打开（那样只会把 IDE 换成一张白页）","cmd.close.usage":"用法: close project | all | \u003cindex> | other | left | right","cmd.close.unknown":"未知子命令: close {sub}。可用: project, all, \u003cindex>, other, left, right","cmd.new.usage":"用法: new \u003cpy|rs|md|c|file|folder|dir> \u003c相对路径>","cmd.new.unknown":"未知类型: {sub}。可用: py, rs, md, c, file, folder, dir","cmd.new.dir_created":"已创建目录: {path}","cmd.new.dir_failed":"创建目录失败: {err}","cmd.new.file_created":"已创建: {path}","cmd.new.file_failed":"创建失败: {err}","cmd.refresh.ok":"已刷新文件树","cmd.refresh.dir_ok":"已刷新文件夹: {path}","cmd.refresh.not_found":"未找到文件夹: {path}","cmd.refresh.failed":"刷新失败: {err}","cmd.delete.usage":"用法: del|delete|remove|rm \u003c相对路径>","cmd.delete.confirm":"确认删除？\n\n{path}\n\n此操作不可撤销。","cmd.delete.success":"已删除: {path}","cmd.delete.failed":"删除失败: {err}","cmd.config.usage":"用法: {actions} [-g|-p|-r] [ruyix.code.\u003csection>.\u003ckey>[=value]]","cmd.config.sub_usage":"用法: config \u003cform|add|get|update|remove|delete> ...","cmd.config.unknown":"未知 config 子命令: {action}。可用: {actions}","cmd.config.missing_key":"缺少配置键 (格式: ruyix.code.\u003csection>.\u003ckey>)","cmd.config.exists":"配置已存在: {key} = {val}","cmd.config.add_ok":"已添加: {key} = {val}","cmd.config.add_fail":"添加失败: {err}","cmd.config.not_found":"配置不存在: {key}","cmd.config.get_fail":"读取失败: {err}","cmd.config.update_ok":"已更新: {key} = {val}","cmd.config.update_fail":"更新失败: {err}","cmd.config.delete_ok":"已删除: {key}","cmd.config.delete_fail":"删除失败: {err}","cmd.config.no_project":"未打开项目，无法使用项目配置 (-p)。请先 open project \u003c路径>","cmd.config.internal_err":"内部错误: 项目已打开但 path 为空","close.project.none":"没有打开的项目","close.project.ok":"已关闭项目: {name}","close.all.none":"没有打开的文件","close.all.ok":"已关闭所有文件","close.index.range":"序号超出范围: {index}（共 {total} 个文件）","close.one.ok":"已关闭: {name}","close.other.none":"没有其他文件可关闭","close.other.ok":"已关闭其他文件","close.left.none":"当前文件左侧没有文件","close.left.ok":"已关闭左侧文件: {names}","close.right.none":"当前文件右侧没有文件","close.right.ok":"已关闭右侧文件: {names}","open.project.opening":"正在打开项目...","open.project.ok":"已打开项目: {path}","open.project.fail":"打开项目失败: {err}","open.project.already":"已是当前项目","titlebar.switch_project":"切换项目","open.file.reading":"正在读取文件...","open.file.switched":"已切换到: {name}","open.file.ok":"已打开: {name}","open.file.fail":"打开文件失败: {err}","save.no_path":"无法保存: 文件路径未知","save.ok":"已保存: {name}","save.fail":"保存失败: {err}","run.executing":"正在运行: {name}","run.done":"{name} 执行完毕 (exit: {code})","run.fail":"运行失败: {err}","run.auto.created":"已创建 {count} 个运行目标：{names}","run.auto.no_script":"{file} 里没有可运行的 scripts","terminal.spawned":"{name} 已在新窗口中启动","terminal.spawn_fail":"启动失败: {err}","terminal.starting":"正在启动 {name}...","terminal.started":"{name} 已启动","terminal.exited":"{name} 已退出","terminal.xterm_missing":"xterm.js 未加载","project.restoring":"正在恢复项目: {path}","project.restore_fail":"恢复项目失败: {err}","project.welcome":"欢迎使用 ruyix","project.other_instance":"检测到其他实例正在运行，未自动打开上次项目","project.ai_fail":"AI 命令失败: {err}","project.ai_result":"不支持的操作：AI 未返回有效响应","modal.ok":"确认","modal.cancel":"取消","rename_usage":"用法: rename \u003c旧路径> \u003c新名称>","rename_illegal":"新名称含有非法字符","rename_exists":"目标已存在: {path}","rename_ok":"已重命名: {old} → {new}","rename_fail":"重命名失败: {err}","git.btn_commit":"Commit ✅","git.btn_pull":"Pull 📥","git.btn_push":"Push 📤","git.commit_msg":"commit message","git.staged":"已暂存","git.unstaged":"未暂存","git.stage_all":"全部暂存","git.stage":"暂存","git.staged_empty":"无已暂存的更改","git.unstaged_empty":"无未暂存的更改","git.branch":"🌿 {branch}","git.empty":"工作区干净","git.need_msg":"请输入 commit message","git.no_project":"请先打开项目","git.init.title":"当前项目还不是 Git 仓库","git.init.desc":"初始化后即可在此查看改动、提交与推送","git.init.btn":"初始化仓库","git.remote.add":"添加远程仓库","git.remote.missing":"尚未配置远程仓库","git.remote.need_init":"初始化仓库后才能添加远程仓库","git.remote.prompt_title":"输入远程仓库地址（如 https://gitcode.com/user/repo.git）","git.remote.invalid":"远程仓库地址格式不正确（需以 https:// ssh:// git:// 或 git@ 开头）","git.branch_with_remote":"🌿 {branch} · {remote}","git.usage":"用法: git \u003c任意 git 子命令>，例如 git status / git add -A","git.executing":"正在执行: git {cmd}","git.done":"git {cmd} 完成","git.fail":"git {cmd} 失败: {err}","mcp.servers":"MCP 服务器","mcp.add":"添加服务器","mcp.name_ph":"名称，例如 fs","mcp.cmd_ph":"命令，例如 npx -y @modelcontextprotocol/server-filesystem /tmp","mcp.add_btn":"＋ 添加","mcp.connect":"连接","mcp.disconnect":"断开","mcp.call":"调用工具","mcp.args_ph":"参数 JSON，例如 {\"path\": \"src/main.rs\"}","mcp.call_btn":"▶ 调用","a2a.agents":"远端 Agent","a2a.discover":"发现 Agent","a2a.url_ph":"基址 URL，例如 http://127.0.0.1:9000","a2a.discover_btn":"🔍 发现","a2a.task":"委托任务 →","a2a.task_ph":"任务描述","a2a.send_btn":"▶ 发送","menu.capability":"能力 ▾","menu.cap.mcp":"MCP 服务器","menu.cap.a2a":"A2A 远端","menu.cap.tools":"工具（命令行白名单）","menu.cap.skills":"SKILL（技能）","tools.list":"工具白名单","tools.add":"添加工具","tools.name_ph":"名称，例如 graphviz","tools.cmd_ph":"命令（缺省同名称），例如 dot","tools.desc_ph":"描述（给 agent 看的用途说明）","tools.add_btn":"＋ 添加","skill.list":"SKILL 技能","skill.new":"＋ 新建","skill.delete":"✕ 删除","skill.editor":"编辑","skill.name_ph":"技能名（保存时的唯一标识）","skill.desc_ph":"一句话描述","skill.content_ph":"Markdown 正文：步骤、规约、注意事项…","skill.save":"💾 保存","nav.tab_capability":"能力","cap.tab_mcp":"MCP","cap.tab_a2a":"A2A","cap.tab_tools":"工具","cap.tab_skills":"技能","cmd.agent.no_project":"智能体需要先打开项目（agent 任务依赖项目上下文）","nav.tab_sessions":"会话","session.new":"＋ 新建会话","session.list":"会话列表","project.pick_folder":"选择项目文件夹","menu.service":"服务","service.title":"服务","service.hint":"这里列出 agent 用后台模式启动的常驻服务（mvn spring-boot:run、java -jar、npm run dev 等）；停止会连同子进程树一起收掉。","service.btn_refresh":"刷新","service.btn_stop":"停止","service.stopping":"停止中…","service.stop_fail":"停止失败（进程可能已经退出了）","service.load_fail":"读取服务列表失败","service.no_tauri":"后端不可用：浏览器直开时读不到托管进程","service.empty":"当前没有运行中的服务","service.th_pid":"PID","service.th_started":"启动时间","service.th_cmd":"完整命令行","service.btn_output":"输出","service.log_usage":"用法：service log \u003cpid>（pid 从服务面板里看）","service.log_missing":"服务面板里没有 pid={pid} 这个进程（可能已经退出了）","proc_log.title":"输出","proc_log.follow":"回到最新","proc_log.clear":"清屏","proc_log.copy":"复制全部","proc_log.copied":"输出已复制到剪贴板","proc_log.copy_fail":"复制失败：剪贴板不可用","proc_log.truncated":"（已跳过前面 {n} 字节，只显示最近一段输出）","proc_log.closed":"（进程已停止，日志读取结束）","proc_log.ended":"（进程已退出，不会再有新输出）","proc_log.no_tauri":"（后端不可用：浏览器直开时读不到托管进程的日志）"};
+    window.I18N = {
+      getLang: () => "zh-CN",
+      t(key, params) {
+        let s = Object.prototype.hasOwnProperty.call(zh, key) ? zh[key] : key;
+        for (const [k, v] of Object.entries(params || {})) {
+          s = s.replaceAll("{" + k + "}", String(v));
+        }
+        return s;
+      },
+    };
+
+    // 贴近真机的一份 schema：25 个键 → 十几个块（少了就测不出"太长"这件事）
+    const schema = [];
+    const add = (p, kind, dft) => schema.push(
+      { path: p, kind: kind, default: dft, ui: true, options: [] });
+    add("workspace_root", "text", "C:/x/runs");
+    add("max_context_chars", "int", "60000");
+    add("llm.temperature", "float", "0.2");
+    add("llm.max_tokens", "int", "8192");
+    add("verify.enabled", "bool", "true");
+    add("verify.max_rounds", "int", "3");
+    add("gate.enabled", "bool", "true");
+    add("reflect.enabled", "bool", "true");
+    add("agent.max_elapsed_secs", "int", "1800");
+    add("agent.history_trim", "bool", "true");
+    add("agent.history_keep_rounds", "int", "6");
+    add("step.execute_plan", "bool", "true");
+    add("step.max_steps", "int", "96");
+    add("lint.enabled", "bool", "true");
+    add("lint.max_repair_rounds", "int", "3");
+    add("sandbox.mode", "text", "require");
+    add("sandbox.image", "text", "rust:1");
+    add("kb.enabled", "bool", "false");
+    add("kb.top_k", "int", "4");
+    add("discover.extra", "list", "");
+    add("env.enabled", "bool", "true");
+    add("proc.enabled", "bool", "true");
+    add("proc.max", "int", "4");
+    add("ask.enabled", "bool", "true");
+    add("ask.timeout_secs", "int", "300");
+
+    const dump = {
+      scope: "global",
+      dir: "C:\\Users\\probe\\.ruyix\\code",
+      entries: [
+        { section: "ai", key: "model", full_key: "ruyix.code.ai.model",
+          value: "deepseek-chat", inherited: null },
+        { section: "ui", key: "emoji", full_key: "ruyix.code.ui.emoji",
+          value: "true", inherited: null },
+      ],
+    };
+    const seen = { save: null };
+    window.__probe = { seen: seen };
+    window.getTauriInvoke = () => async (cmd, args) => {
+      if (cmd === "config_form_load") return dump;
+      if (cmd === "config_schema") return schema;
+      if (cmd === "ai_list_models") return [];
+      if (cmd === "config_form_save") { seen.save = args; return { saved: args.entries.length, removed: 0, applied: 0 }; }
+      if (cmd === "config_form_apply") { return { saved: args.entries.length, removed: 0, applied: args.entries.length }; }
+      return {};
+    };
+    const appState = { tabs: [], activeTabId: null, currentProject: { path: "C:/proj" } };
+    window.state = appState;
+    window.setStatus = () => {};
+    window.renderTabs = () => {};
+    window.showConfirm = async () => true;
+    window.switchTab = (id) => {
+      appState.activeTabId = id;
+      const t = appState.tabs.find((x) => x.id === id);
+      if (t && t._isConfig) window.ConfigUI.render(t);
+    };
+
+    new Function("/**\n * ruyix — 配置表单（配置菜单 → 全局 / 项目 / 运行）\n *\n * 一个作用域 = 一个表单标签：扫描该作用域及其回退链（runtime → project → global）\n * 上的全部平铺配置项，按 section 分组渲染成表单；已知项给标签/类型/枚举，\n * 扫描到的未知键按值形状猜类型也能编辑。\n *\n * 三个按钮（都走命令系统）：\n *   保存  只把改动过的行写回该作用域（空值 = 删除该键）\n *   应用  保存 + 把这些值刷新进 IDE 运行时内存里的配置对象（优先级最高，重启失效）\n *   取消  丢弃未保存的改动，重新扫描\n *\n * 页面组织：十几个块、几十行，一屏装不下。所以正文只给\"块标题条\"（点击折叠 / 展开，\n * 默认全折），右侧大纲区渲染同一份**块索引**（标题 + 字段数）：点一下展开并滚过去，\n * 滚正文时高亮当前块。折叠一律走 CSS class —— 重建 DOM 会让 collect() 静默漏掉用户\n * 已改的值（见 applyFold 的注释）。\n *\n * 与其它面板同款防御式写法：无 Tauri（浏览器直开）时显示\"后端不可用\"。\n */\n\nwindow.ConfigUI = (() => {\n  \"use strict\";\n\n  const L = (zh, en) => (window.I18N && I18N.getLang() === \"en\" ? en : zh);\n  const SUB_COMMANDS = [\"form\", \"save\", \"apply\", \"cancel\"];\n\n  // ============================================\n  // 已知配置项 schema\n  //   ai / ui 两段是**宿主的键空间**（不在引擎 schema 里），键名在这里声明。\n  //   harness 段的字段**不在这里写** —— 运行时由后端 `config_schema` 给出，\n  //   键名 / 类型 / 默认值 / 枚举取值全部来自引擎自己的声明（见 loadHarnessFields）。\n  //   加一个引擎键不用改这个文件，这正是\"键表单源化\"要买到的东西。\n  //\n  // 标签 / 说明走 i18n：config.field.\u003csection>.\u003ckey> / config.desc.\u003csection>.\u003ckey>\n  // 这里只声明 section 顺序、字段顺序与控件类型\n  // ============================================\n  const SCHEMA = [\n    {\n      section: \"ai\",\n      fields: [\n        { key: \"api_url\", kind: \"text\" },\n        { key: \"api_key\", kind: \"password\" },\n        // 模型：优先渲染成下拉框，选项来自厂商 `/models`（见 loadModelChoices）。\n        // 取不到就退回文本框 —— 让用户手填，也不要给一份可能跑不通的清单。\n        { key: \"model\", kind: \"text\", dynamic: \"models\" },\n        { key: \"alias\", kind: \"text\" },\n      ],\n    },\n    {\n      section: \"ui\",\n      fields: [\n        { key: \"lang\", kind: \"select\", options: [\"zh-CN\", \"en\"] },\n        { key: \"emoji\", kind: \"toggle\" },\n      ],\n    },\n  ];\n\n  /** 引擎声明的 harness 字段（运行时拉一次；拉不到就只剩 ai/ui，表单仍可用） */\n  let harnessFields = null;\n\n  /** 厂商模型列表（运行时拉一次；拉不到为 null，模型那行退回文本框） */\n  let modelChoices = null;\n\n  /** 引擎的 kind → 控件类型 */\n  function kindOf(kind) {\n    if (kind === \"bool\") return \"toggle\";\n    if (kind === \"int\" || kind === \"float\") return \"number\";\n    return \"text\";\n  }\n\n  /**\n   * 从后端取引擎配置 schema。\n   *\n   * 只取 `ui: true` 的键 —— 哪些键该给用户看是**引擎自己**的判断\n   * （`config::FORM_HIDDEN`），前端不维护这份名单，也就不会与引擎脱节。\n   */\n  async function loadHarnessFields() {\n    if (harnessFields) return harnessFields;\n    const invoke = getInvoke();\n    if (!invoke) return null;\n    try {\n      const specs = await invoke(\"config_schema\");\n      harnessFields = (specs || [])\n        .filter((s) => s.ui)\n        .map((s) => {\n          const path = String(s.path);\n          return {\n            key: path,\n            kind: kindOf(s.kind),\n            options: s.options && s.options.length ? s.options : null,\n            // 分组用 path 第一段（llm / sandbox / kb …），渲染成子段标题。\n            // 无点的顶层键（workspace_root / max_context_chars）不成组 —— 各占一块\n            // 只会多出一堆\"一块一行\"的碎片，归到 general。\n            // **注意**：section 仍是 `harness`（落盘键由 section+key 拼出，不能动），\n            // 这个 group 只影响显示。\n            group: path.includes(\".\") ? path.split(\".\")[0] : \"general\",\n            hint: s.default,\n          };\n        });\n      return harnessFields;\n    } catch (err) {\n      // 取不到 schema 不该让表单不可用：未知键仍会以\"扫描\"形态出现，照样能编辑\n      status(String(err), \"error\");\n      return null;\n    }\n  }\n\n  /**\n   * 拉厂商模型列表（`ai_list_models` → GET /models）。\n   *\n   * 失败是**常态**（没配 Key / 断网），所以这里不报错、也不缓存失败结果：\n   * 返回 null 让模型那行退回文本框，用户手填照样能用。\n   */\n  async function loadModelChoices() {\n    if (modelChoices) return modelChoices;\n    const invoke = getInvoke();\n    if (!invoke) return null;\n    try {\n      const ids = await invoke(\"ai_list_models\", { projectRoot: root() });\n      if (Array.isArray(ids) && ids.length) modelChoices = ids.slice();\n    } catch {\n      modelChoices = null;\n    }\n    return modelChoices;\n  }\n\n  const NUMERIC = /^-?\\d+(\\.\\d+)?$/;\n\n  let tab = null;      // 当前渲染的配置标签\n  let controls = [];   // 渲染后的控件引用，下标 = row.idx\n  let busy = false;    // 保存 / 应用进行中，防重入\n\n  // ============================================\n  // 小工具\n  // ============================================\n\n  function $(id) {\n    return document.getElementById(id);\n  }\n\n  function esc(s) {\n    return String(s ?? \"\").replace(/[&\u003c>\"']/g, (c) => ({\n      \"&\": \"&amp;\", \"\u003c\": \"&lt;\", \">\": \"&gt;\", '\"': \"&quot;\", \"'\": \"&#39;\",\n    }[c]));\n  }\n\n  function getInvoke() {\n    if (typeof getTauriInvoke === \"function\") return getTauriInvoke();\n    return window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core) ?? null;\n  }\n\n  function root() {\n    return window.state?.currentProject?.path ?? null;\n  }\n\n  function status(msg, kind) {\n    if (typeof setStatus === \"function\") setStatus(msg, kind);\n  }\n\n  /** 未知键的类型猜测：键名敏感词 → 布尔字面量 → 数字 → 文本 */\n  function guessKind(key, value) {\n    if (/key|secret|token|password/i.test(key)) return \"password\";\n    if (value === \"true\" || value === \"false\") return \"toggle\";\n    if (value !== \"\" && NUMERIC.test(value)) return \"number\";\n    return \"text\";\n  }\n\n  // ============================================\n  // 行模型：schema 已知项 ∪ 扫描到的键\n  // ============================================\n\n  function buildRows(dump) {\n    const byId = new Map();\n    for (const e of dump.entries) byId.set(e.section + \".\" + e.key, e);\n\n    const rows = [];\n    const used = new Set();\n    // known = schema 里的声明（宿主手写段，或引擎 schema 给的字段）；group 只影响分组显示\n    const push = (section, key, known, group) => {\n      const id = section + \".\" + key;\n      if (used.has(id)) return;\n      used.add(id);\n      const entry = byId.get(id);\n      const value = entry ? entry.value : \"\";\n      rows.push({\n        idx: 0,\n        section,\n        group: group || null,\n        key,\n        fullKey: entry ? entry.full_key : \"ruyix.code.\" + id,\n        initial: value,\n        inherited: entry ? entry.inherited : null,\n        kind: known ? known.kind : guessKind(key, value),\n        options: known && known.options ? known.options : null,\n        known: !!known,\n      });\n    };\n\n    for (const s of SCHEMA) {\n      for (const f of s.fields) {\n        // 动态选项：只有真拿到了厂商列表才升级成下拉框（`renderControl` 会顺带\n        // 把枚举外的既有值补进选项，不会把用户已配的模型吞掉）\n        const known =\n          f.dynamic === \"models\" && modelChoices && modelChoices.length\n            ? { ...f, kind: \"select\", options: modelChoices }\n            : f;\n        push(s.section, f.key, known, null);\n      }\n    }\n    // 引擎声明的 harness 字段：section 恒为 `harness`（落盘键 = section + key），\n    // group 取 path 第一段，只影响渲染出来的子段标题。\n    for (const f of harnessFields || []) push(\"harness\", f.key, f, f.group);\n    const rest = dump.entries\n      .filter((e) => !used.has(e.section + \".\" + e.key))\n      .sort((a, b) => (a.section + \".\" + a.key).localeCompare(b.section + \".\" + b.key));\n    for (const e of rest) push(e.section, e.key, null, null);\n\n    rows.forEach((r, i) => {\n      r.idx = i;\n    });\n    return rows;\n  }\n\n  /** 按\"段 + 子组\"聚类：harness 会拆成 harness.llm / harness.sandbox / … 便于阅读 */\n  function groupRows(rows) {\n    const groups = [];\n    for (const r of rows) {\n      const title = r.group ? r.section + \".\" + r.group : r.section;\n      let g = groups.find((x) => x.title === title);\n      if (!g) {\n        g = { section: r.section, title, rows: [] };\n        groups.push(g);\n      }\n      g.rows.push(r);\n    }\n    return groups;\n  }\n\n  /** 期望值：优先取本标签暂存的编辑值（切标签页不丢改动），否则取扫描值 */\n  function shownValue(row) {\n    const stashed = tab && tab._config && tab._config.stash;\n    if (stashed && Object.hasOwn(stashed, row.fullKey)) return stashed[row.fullKey];\n    return row.initial;\n  }\n\n  // ============================================\n  // 折叠 + 大纲区索引\n  //\n  // 配置页有十几个块、几十行，一屏装不下 —— 正文只给\"块标题条\"，块里内容按需展开；\n  // 右侧大纲区就是这个页面的索引：每块一行（标题 + 字段数），点一下展开并滚过去，\n  // 滚正文时高亮当前块。折叠态挂在标签上，切走再回来不丢。\n  // ============================================\n\n  /** 块标题条的状态：标题 → true 表示**展开**。空对象 = 全部折叠（首屏即索引） */\n  function isOpen(t, title) {\n    return !!(t._configOpen && t._configOpen[title]);\n  }\n\n  function blockTitle(title) {\n    return hasKey(\"config.section.\" + title) ? I18N.t(\"config.section.\" + title) : title;\n  }\n\n  /** 属性选择器里的取值转义（块标题可能是扫描来的任意 section 名） */\n  function attrEsc(s) {\n    return String(s ?? \"\").replace(/[\"\\\\]/g, \"\\\\$&\");\n  }\n\n  /**\n   * 只切换 class，**绝不重建 innerHTML**。\n   *\n   * controls 是 render 那一刻 `querySelectorAll(\"[data-row]\")` 抓下来的节点引用，\n   * 下标 = row.idx，collect() / isDirty() 全靠它读用户输入。一旦为了\"折叠\"重建 DOM，\n   * 用户改过的值在 collect() 眼里静默变回 row.initial —— 保存时漏提交，且界面看着正常。\n   * 所以折叠走 CSS（display:none），节点一个都不动。\n   */\n  function applyFold(t) {\n    if (!t || !t._isConfig || !ownerIs(t)) return;\n    const body = $(\"config-body\");\n    if (!body) return;\n    body.querySelectorAll(\".config-section\").forEach((sec) => {\n      sec.classList.toggle(\"config-section--folded\", !isOpen(t, sec.dataset.section || \"\"));\n    });\n  }\n\n  /**\n   * 正文字顶端的那个块 —— 滚动高亮用它，不猜、只量。\n   *\n   * 滚到底要单独判：内容到头时最后一块的顶**永远压不到视口顶部**，照\"顶 ≤ 视口顶\"去找\n   * 会停在倒数第三四块上（用户明明在看最后一块，高亮却指着已经滚出去的那块）。所以\n   * 触底就直接给最后一块 —— 这也正是\"我在哪\"想要的答案。\n   */\n  function sectionAtTop() {\n    const body = $(\"config-body\");\n    const nodes = body ? body.querySelectorAll(\".config-section\") : [];\n    if (!nodes.length) return null;\n    if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) {\n      return nodes[nodes.length - 1].dataset.section || null;\n    }\n    const limit = body.getBoundingClientRect().top + 8;\n    let cur = nodes[0];\n    for (const n of nodes) {\n      if (n.getBoundingClientRect().top \u003c= limit) cur = n;\n      else break;\n    }\n    return cur.dataset.section || null;\n  }\n\n  /** 高亮当前块（只改 class，不重建 —— 重建会把用户刚点的项换掉、焦点也丢） */\n  function syncOutlineActive(t) {\n    const el = $(\"outline-content\");\n    if (!el || el.dataset.configTab !== t.id) return;\n    const title = sectionAtTop();\n    el.querySelectorAll(\".outline-config-block\").forEach((n) => {\n      n.classList.toggle(\"outline-item--active\", n.dataset.configSection === title);\n    });\n  }\n\n  /**\n   * 大纲区渲染本配置页的块索引。\n   *\n   * 双守卫（ownerIs + activeTabId）：大纲区只有一块 DOM，文件大纲与会话任务计划都写它。\n   * 后台标签的渲染不许覆盖前台的 —— 少了这道门，切回文件时大纲已经被别的标签悄悄换掉了\n   * （同 session.js::renderOutline 的教训）。\n   */\n  function renderOutline(t) {\n    const el = $(\"outline-content\");\n    if (!el || !t || !t._isConfig || !t._config) return;\n    if (window.state?.activeTabId !== t.id || !ownerIs(t)) return;\n    const groups = groupRows(t._config.rows || []);\n    if (!groups.length) {\n      el.innerHTML = `\u003cdiv class=\"outline-placeholder\">${I18N.t(\"config.outline_empty\")}\u003c/div>`;\n      delete el.dataset.configTab;\n      return;\n    }\n    const allOpen = groups.every((g) => isOpen(t, g.title));\n    el.dataset.configTab = t.id;\n    el.innerHTML =\n      `\u003cdiv class=\"outline-plan-head outline-config-head\">` +\n      `\u003cspan>${esc(I18N.t(\"config.outline_head\", { n: groups.length }))}\u003c/span>` +\n      `\u003cbutton type=\"button\" class=\"config-outline-all\" data-config-fold-all>` +\n      `${esc(I18N.t(allOpen ? \"config.outline_collapse_all\" : \"config.outline_expand_all\"))}` +\n      `\u003c/button>\u003c/div>` +\n      groups\n        .map((g) => {\n          const name = blockTitle(g.title);\n          return (\n            `\u003cdiv class=\"outline-item outline-config-block\"` +\n            ` data-config-section=\"${esc(g.title)}\" title=\"${esc(name)}\">` +\n            `\u003cspan class=\"outline-config-name\">${esc(name)}\u003c/span>` +\n            `\u003cspan class=\"outline-config-count\">${g.rows.length}\u003c/span>\u003c/div>`\n          );\n        })\n        .join(\"\");\n    syncOutlineActive(t);\n  }\n\n  /** 点块标题条：翻转这一块（只改 class，见 applyFold） */\n  function toggleSection(sec) {\n    if (!tab || !sec) return;\n    const title = sec.dataset.section || \"\";\n    tab._configOpen = tab._configOpen || {};\n    tab._configOpen[title] = !tab._configOpen[title];\n    applyFold(tab);\n    renderOutline(tab); // 索引头部的\"展开全部 / 全部折叠\"文案跟着翻\n  }\n\n  /** 索引头部按钮：全开 ↔ 全收 */\n  function foldAll() {\n    if (!tab || !tab._config) return;\n    const groups = groupRows(tab._config.rows || []);\n    const allOpen = groups.length > 0 && groups.every((g) => isOpen(tab, g.title));\n    tab._configOpen = {};\n    if (!allOpen) for (const g of groups) tab._configOpen[g.title] = true;\n    applyFold(tab);\n    renderOutline(tab);\n  }\n\n  /** 点索引里的某一块：展开它，再滚到正文对应位置 */\n  function revealBlock(title) {\n    if (!tab || !tab._config) return;\n    tab._configOpen = tab._configOpen || {};\n    tab._configOpen[title] = true;\n    // 顺序要紧：**先展开再量位置** —— 折叠着的块高度是 0，那一刻量出来的 rect 是错的\n    applyFold(tab);\n    const body = $(\"config-body\");\n    const sec = body?.querySelector(`.config-section[data-section=\"${attrEsc(title)}\"]`);\n    sec?.scrollIntoView({ block: \"start\" });\n    renderOutline(tab);\n  }\n\n  // ============================================\n  // 渲染\n  // ============================================\n\n  function renderControl(row, val) {\n    const n = row.idx;\n    if (row.kind === \"toggle\") {\n      const on = val === \"true\";\n      return `\u003clabel class=\"config-switch\">\u003cinput type=\"checkbox\" data-row=\"${n}\"` +\n        `${on ? \" checked\" : \"\"}>\u003cspan class=\"config-switch-track\">\u003c/span>\u003c/label>`;\n    }\n    if (row.kind === \"select\") {\n      const options = (row.options || []).slice();\n      if (val && !options.includes(val)) options.push(val); // 保留枚举外的既有值\n      const opts = options\n        .map((o) => `\u003coption value=\"${esc(o)}\"${o === val ? \" selected\" : \"\"}>${esc(o)}\u003c/option>`)\n        .join(\"\");\n      return `\u003cselect class=\"config-input config-input--select\" data-row=\"${n}\">` +\n        `\u003coption value=\"\"${val ? \"\" : \" selected\"}>${L(\"（未设置）\", \"(unset)\")}\u003c/option>` +\n        `${opts}\u003c/select>`;\n    }\n    const type = row.kind === \"password\"\n      ? \"password\"\n      : row.kind === \"number\" && (val === \"\" || NUMERIC.test(val)) ? \"number\" : \"text\";\n    const input = `\u003cinput class=\"config-input\" type=\"${type}\" data-row=\"${n}\" ` +\n      `value=\"${esc(val)}\" spellcheck=\"false\" autocomplete=\"off\">`;\n    if (row.kind !== \"password\") return input;\n    return `\u003cspan class=\"config-pw\">${input}` +\n      `\u003cbutton type=\"button\" class=\"config-eye\" data-eye=\"${n}\" ` +\n      `title=\"${L(\"显示 / 隐藏\", \"show / hide\")}\">👁\u003c/button>\u003c/span>`;\n  }\n\n  function renderRow(row) {\n    const val = shownValue(row);\n    const labelKey = \"config.field.\" + row.section + \".\" + row.key;\n    const descKey = \"config.desc.\" + row.section + \".\" + row.key;\n    const label = row.known ? I18N.t(labelKey) : row.fullKey;\n    const desc = row.known ? I18N.t(descKey) : \"\";\n    const hasDesc = hasKey(descKey);\n    const inherited = val\n      ? \"\"\n      : renderInherited(row);\n    return `\u003cdiv class=\"config-field${!val && row.inherited ? \" config-field--inherited\" : \"\"}\">` +\n      `\u003cdiv class=\"config-field-label\">` +\n      `\u003cspan class=\"config-field-name\" title=\"${esc(row.fullKey)}\">${esc(label)}\u003c/span>` +\n      (row.known ? \"\" : `\u003cspan class=\"config-tag\">${L(\"扫描\", \"scanned\")}\u003c/span>`) +\n      `\u003c/div>` +\n      `\u003cdiv class=\"config-field-body\">${renderControl(row, val)}${inherited}` +\n      (hasDesc ? `\u003cdiv class=\"config-field-desc\">${esc(desc)}\u003c/div>` : \"\") +\n      `\u003c/div>\u003c/div>`;\n  }\n\n  function renderInherited(row) {\n    if (!row.inherited) return \"\";\n    const v = row.kind === \"password\" ? \"••••••\" : row.inherited.value;\n    return `\u003cdiv class=\"config-inherit\">` +\n      `${I18N.t(\"config.origin_inherit\", { scope: row.inherited.scope, value: v })}\u003c/div>`;\n  }\n\n  function hasKey(key) {\n    return I18N.t(key) !== key;\n  }\n\n  function render(tabRef) {\n    tab = tabRef;\n    controls = [];\n    const view = $(\"config-view\");\n    const body = $(\"config-body\");\n    if (!view || !body || !tab) return;\n\n    const conf = tab._config || {};\n    $(\"config-scope-title\").textContent = I18N.t(\"config.tab_\" + tab.configScope);\n    $(\"config-dir\").textContent = conf.dir || \"\";\n    $(\"config-hint\").textContent = I18N.t(\"config.hint\");\n\n    // 归属标记要**在建 DOM 之前**打：applyFold / renderOutline 都用 ownerIs 判定，\n    // 放到函数尾巴会让这一次渲染被自己挡掉（折叠态要等下一次渲染才生效）。\n    view.dataset.configTab = tab.id;\n\n    const groups = groupRows(conf.rows || []);\n    body.innerHTML = groups.map((g) => {\n      const title = blockTitle(g.title);\n      // 块标题条 = 折叠开关（点击交由 attach 的委托处理），caret 只在折叠时转个向\n      return `\u003csection class=\"config-section\" data-section=\"${esc(g.title)}\">` +\n        `\u003cdiv class=\"config-section-head\" title=\"${esc(I18N.t(\"config.fold_tip\"))}\">` +\n        `\u003cspan class=\"config-section-caret\">▾\u003c/span>` +\n        `\u003cspan class=\"config-section-name\">${esc(title)}\u003c/span>` +\n        `\u003cspan class=\"config-section-file\">${esc(g.section)}.toml\u003c/span>\u003c/div>` +\n        `\u003cdiv class=\"config-section-rows\">${g.rows.map(renderRow).join(\"\")}\u003c/div>` +\n        `\u003c/section>`;\n    }).join(\"\");\n\n    controls = Array.from(body.querySelectorAll(\"[data-row]\"));\n    applyFold(tab);\n    renderOutline(tab);\n    updateButtons();\n  }\n\n  // ============================================\n  // 控件读写\n  // ============================================\n\n  function readValue(row) {\n    const el = controls[row.idx];\n    if (!el) return row.initial;\n    if (row.kind === \"toggle\") {\n      if (el.checked) return \"true\";\n      // 从未设置过 → 取消勾选即回到\"未设置\"，不留 false 噪声\n      return row.initial === \"\" ? \"\" : \"false\";\n    }\n    return el.value;\n  }\n\n  /** 收集表单值；changesOnly = 只提交改动过的行（保存用）。基准是已提交值（row.initial） */\n  function collect(changesOnly) {\n    if (!tab || !tab._config || !ownerIs(tab)) return [];\n    const out = [];\n    for (const row of tab._config.rows) {\n      const value = readValue(row);\n      if (changesOnly && value === row.initial) continue;\n      out.push({ section: row.section, key: row.key, value });\n    }\n    return out;\n  }\n\n  /** 把 DOM 上的编辑值暂存到标签里（切标签页不丢） */\n  function stash() {\n    if (!tab || !tab._isConfig || tab.id !== window.state?.activeTabId) return;\n    if (!tab._config || !controls.length || !ownerIs(tab)) return;\n    const map = {};\n    for (const row of tab._config.rows) map[row.fullKey] = readValue(row);\n    tab._config.stash = map;\n    tab._modified = isDirty();\n  }\n\n  /** 当前 DOM 是否属于这个标签（防止把 A 表单的值暂存到 B 标签上） */\n  function ownerIs(t) {\n    const view = $(\"config-view\");\n    return !!view && view.dataset.configTab === t.id;\n  }\n\n  function isDirty() {\n    if (!tab || !tab._config || !ownerIs(tab)) return false;\n    return tab._config.rows.some((r) => readValue(r) !== r.initial);\n  }\n\n  function updateButtons() {\n    const dirty = isDirty();\n    const dot = $(\"config-dirty\");\n    if (dot) dot.style.display = dirty ? \"\" : \"none\";\n    const save = $(\"config-btn-save\");\n    if (save) save.disabled = !dirty || busy;\n    if (tab) tab._modified = dirty;\n  }\n\n  // ============================================\n  // 后端交互\n  // ============================================\n\n  async function load(scope) {\n    const invoke = getInvoke();\n    if (!invoke) {\n      status(I18N.t(\"status.tauri_unavail\"), \"error\");\n      return null;\n    }\n    try {\n      return await invoke(\"config_form_load\", { scope, projectRoot: root() });\n    } catch (err) {\n      status(String(err), \"error\");\n      return null;\n    }\n  }\n\n  /** 打开（或复用）配置标签，渲染表单 */\n  async function open(scope) {\n    if (scope === \"project\" && !root()) {\n      status(I18N.t(\"config.need_project\"), \"error\");\n      return;\n    }\n    tab = window.state.tabs.find((t) => t._isConfig && t.configScope === scope) || null;\n    // 表单数据与引擎 schema 并行取：schema 拿不到只影响 harness 段（ai/ui 照常）\n    const [dump] = await Promise.all([\n      load(scope),\n      loadHarnessFields(),\n      loadModelChoices(),\n    ]);\n    if (!dump) return;\n\n    // 已开着的标签保留未保存的编辑值（从菜单重开不该吞掉它）\n    const stash = tab && tab._config ? tab._config.stash : {};\n    if (!tab) {\n      tab = {\n        id: \"config-\" + scope,\n        name: I18N.t(\"config.tab_\" + scope),\n        path: \"\",\n        content: \"\",\n        _isConfig: true,\n        configScope: scope,\n      };\n      window.state.tabs.push(tab);\n    }\n    tab._config = { dir: dump.dir, rows: buildRows(dump), stash };\n    tab._modified = false;\n\n    if (typeof renderTabs === \"function\") renderTabs();\n    if (typeof switchTab === \"function\") switchTab(tab.id);\n    else render(tab);\n    status(I18N.t(\"config.loaded\", { dir: dump.dir }));\n  }\n\n  /** 保存：只写改动过的行（空值 = 删除该键） */\n  async function save() {\n    return submit(\"save\");\n  }\n\n  /** 应用：保存 + 刷新 IDE 运行时内存里的配置对象 */\n  async function apply() {\n    return submit(\"apply\");\n  }\n\n  async function submit(kind) {\n    if (!tab || busy) return;\n    const invoke = getInvoke();\n    if (!invoke) {\n      status(I18N.t(\"status.tauri_unavail\"), \"error\");\n      return;\n    }\n    // 保存提交增量，应用提交整表（要把值刷进运行时对象）\n    const entries = collect(kind === \"save\");\n    if (kind === \"save\" && entries.length === 0) {\n      status(I18N.t(\"config.no_change\"));\n      return;\n    }\n\n    busy = true;\n    updateButtons();\n    try {\n      const report = await invoke(\n        kind === \"apply\" ? \"config_form_apply\" : \"config_form_save\",\n        { scope: tab.configScope, entries, projectRoot: root() },\n      );\n      // 改的是界面语言 / Emoji → 立刻生效（应用与保存都算数：值已落盘）\n      await maybeReloadUiConfig(entries);\n      await refreshTab();\n      status(reportLine(kind, report));\n    } catch (err) {\n      status(String(err), \"error\");\n    } finally {\n      busy = false;\n      updateButtons();\n    }\n  }\n\n  /** 取消：丢弃未保存的改动，重新扫描 */\n  async function cancel() {\n    if (!tab) return;\n    if (isDirty() && typeof showConfirm === \"function\") {\n      const ok = await showConfirm(\n        I18N.t(\"config.cancel_title\"),\n        I18N.t(\"config.cancel_msg\"),\n      );\n      if (!ok) return;\n    }\n    await refreshTab();\n    status(I18N.t(\"config.cancelled\"));\n  }\n\n  /** 重新扫描并重绘（改完 / 取消后） */\n  async function refreshTab() {\n    if (!tab) return;\n    const dump = await load(tab.configScope);\n    if (!dump) return;\n    tab._config = { dir: dump.dir, rows: buildRows(dump), stash: {} };\n    tab._modified = false;\n    render(tab);\n  }\n\n  function reportLine(kind, report) {\n    const saved = report?.saved ?? 0;\n    const removed = report?.removed ?? 0;\n    const applied = report?.applied ?? 0;\n    if (kind === \"apply\") return I18N.t(\"config.applied\", { saved, removed, applied });\n    return I18N.t(\"config.saved\", { saved, removed });\n  }\n\n  /** ui.lang / ui.emoji 改动后热重载界面语言（含 Emoji 叠加） */\n  async function maybeReloadUiConfig(entries) {\n    const touched = entries.some((e) => e.section === \"ui\" && (e.key === \"lang\" || e.key === \"emoji\"));\n    if (!touched || !window.I18N) return;\n    try {\n      await I18N.init();\n      if (typeof refreshI18nUI === \"function\") refreshI18nUI();\n      if (typeof updateLangMenu === \"function\") updateLangMenu();\n    } catch {\n      // 语言重载失败不影响配置保存结果\n    }\n  }\n\n  // ============================================\n  // 命令入口（命令系统是前端与后端的唯一桥）\n  // ============================================\n\n  async function handleCommand(rest) {\n    const tokens = String(rest || \"\").trim().split(/\\s+/);\n    const sub = (tokens[0] || \"form\").toLowerCase();\n    const scope = tokens[1];\n    if (!SUB_COMMANDS.includes(sub)) {\n      status(I18N.t(\"config.cmd_usage\"), \"error\");\n      return;\n    }\n    if (sub === \"form\") {\n      await open(scope || \"global\");\n      return;\n    }\n    // save / apply / cancel 作用在当前打开的配置标签上\n    if (!tab || (scope && scope !== tab.configScope)) {\n      await open(scope || \"global\");\n      return;\n    }\n    if (sub === \"save\") await save();\n    else if (sub === \"apply\") await apply();\n    else await cancel();\n  }\n\n  // ============================================\n  // 事件绑定\n  // ============================================\n\n  function attach() {\n    const view = $(\"config-view\");\n    if (!view) return;\n\n    $(\"config-btn-save\")?.addEventListener(\"click\", () => {\n      handleCommand(\"save \" + (tab?.configScope ?? \"\"));\n    });\n    $(\"config-btn-apply\")?.addEventListener(\"click\", () => {\n      handleCommand(\"apply \" + (tab?.configScope ?? \"\"));\n    });\n    $(\"config-btn-cancel\")?.addEventListener(\"click\", () => {\n      handleCommand(\"cancel \" + (tab?.configScope ?? \"\"));\n    });\n\n    // 输入 / 勾选 / 下拉：刷新脏标记\n    view.addEventListener(\"input\", updateButtons);\n    view.addEventListener(\"change\", updateButtons);\n\n    // 块标题条 = 折叠开关；眼睛 = 密码显隐\n    view.addEventListener(\"click\", (e) => {\n      const head = e.target.closest(\".config-section-head\");\n      if (head) {\n        toggleSection(head.closest(\".config-section\"));\n        return;\n      }\n      const btn = e.target.closest(\"[data-eye]\");\n      if (!btn) return;\n      const input = controls[Number(btn.dataset.eye)];\n      if (!input) return;\n      input.type = input.type === \"password\" ? \"text\" : \"password\";\n    });\n\n    // 滚正文 → 索引里的高亮跟着走（passive：这是纯观察，不该拖慢滚动）\n    $(\"config-body\")?.addEventListener(\n      \"scroll\",\n      () => {\n        if (tab && tab._isConfig) syncOutlineActive(tab);\n      },\n      { passive: true },\n    );\n\n    // 索引区：点某一块 → 展开 + 滚过去；点头部按钮 → 全开 / 全收。\n    // 用委托（不逐项挂监听）—— renderOutline 每次滚动高亮都可能重写这棵子树。\n    $(\"outline-content\")?.addEventListener(\"click\", (e) => {\n      if (!tab || !tab._isConfig) return;\n      if (e.target.closest(\"[data-config-fold-all]\")) {\n        foldAll();\n        return;\n      }\n      const item = e.target.closest(\"[data-config-section]\");\n      if (item) revealBlock(item.dataset.configSection || \"\");\n    });\n  }\n\n  return {\n    attach, handleCommand, render, renderOutline, stash, open, save, apply, cancel, isDirty,\n    // 测试/门禁用的内部钩子：折叠态是\"改值之后仍然收得到\"的前提，值得被断言\n    toggleSection, foldAll, revealBlock,\n  };\n})();\n")();
+    const ConfigUI = window.ConfigUI;
+    out.hasApi = ["render", "renderOutline", "foldAll", "revealBlock", "toggleSection"]
+      .every((f) => typeof ConfigUI[f] === "function");
+
+    // 祖先里若有 display:none（无项目时的初始态）就地打开；配置视图自身是 inline none
+    for (let el = document.getElementById("config-view"); el && el !== document.body;
+         el = el.parentElement) {
+      if (getComputedStyle(el).display === "none") {
+        el.style.display = el.classList.contains("editor-body") ? "flex" : "block";
+        out.notes.push("强制显示祖先 " + (el.id || el.className));
+      }
+    }
+    document.getElementById("config-view").style.display = "";
+    const empty = document.getElementById("editor-empty");
+    if (empty) empty.style.display = "none"; // showConfigView() 在真机上干的事
+    ConfigUI.attach();
+    await ConfigUI.open("global");
+
+    const body = document.getElementById("config-body");
+    const oc = document.getElementById("outline-content");
+    const secs = Array.from(body.querySelectorAll(".config-section"));
+    const rowsH = (s) => Math.round(s.querySelector(".config-section-rows").getBoundingClientRect().height);
+    const tocSel = "#outline-content .outline-config-block";
+    const toc = () => Array.from(document.querySelectorAll(tocSel));
+
+    out.blockCount = secs.length;
+    out.tocCount = toc().length;
+    out.defH = body.scrollHeight;
+    out.defRowsH = secs.map(rowsH);
+    out.defDisplays = secs.map((s) =>
+      getComputedStyle(s.querySelector(".config-section-rows")).display);
+    out.names = secs.slice(0, 3).map((s) =>
+      s.querySelector(".config-section-name").textContent.trim());
+    out.tocNames = toc().slice(0, 3).map((n) => n.textContent.replace(/\s+/g, " ").trim());
+    out.bodyVisibleH = body.clientHeight;
+    // 诊断量：字段行高度受"说明文字换几行"影响，而换行又受可用宽度影响 ——
+    // 数字对不上时先看这几个，别对着总数猜。
+    const dcs = body.querySelectorAll(".config-field-desc");
+    out.diag = {
+      bodyW: body.clientWidth,
+      fields: body.querySelectorAll(".config-field").length,
+      descs: dcs.length,
+      firstFieldH: Math.round(body.querySelector(".config-field").getBoundingClientRect().height),
+      firstDescH: dcs.length ? Math.round(dcs[0].getBoundingClientRect().height) : -1,
+      preview: PREVIEW,
+    };
+
+    // 全展开 → 量"到底有多长"（判据 2 的分母）
+    ConfigUI.foldAll();
+    out.allH = body.scrollHeight;
+    out.allRowsH = secs.slice(0, 3).map(rowsH);
+
+    // 判据 4：点索引第 3 项，应该展开它并滚进可视区
+    const target = toc()[2];
+    out.clickTarget = target ? target.dataset.configSection : null;
+    target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const tSec = secs.find((s) => s.dataset.section === out.clickTarget);
+    out.jump = {
+      rowsH: tSec ? rowsH(tSec) : -1,
+      secTop: tSec ? box(tSec).top : null,
+      bodyTop: box(body).top,
+      bodyBottom: box(body).top + body.clientHeight,
+    };
+
+    // 判据 5：改一个值 → 折叠它 → 值必须还在，且保存要真的提交它
+    const firstInput = body.querySelector("input.config-input");
+    firstInput.value = "PROBE-VALUE";
+    firstInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const dirtyBefore = ConfigUI.isDirty();
+    const nodeBefore = firstInput;
+    // 折叠它所在的块（点标题条）
+    const hostSec = firstInput.closest(".config-section");
+    hostSec.querySelector(".config-section-head")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const stillThere = body.querySelector('input.config-input[data-row="' +
+      firstInput.dataset.row + '"]');
+    const dirtyAfter = ConfigUI.isDirty();
+    await ConfigUI.save();
+    const savedEntries = (window.__probe.seen.save || { entries: [] }).entries;
+    out.collapse = {
+      dirtyBefore: dirtyBefore,
+      dirtyAfterFold: dirtyAfter,
+      sameNode: stillThere === nodeBefore,
+      valueKept: stillThere ? stillThere.value : null,
+      rowsHAfterFold: rowsH(hostSec),
+      savedProbeValue: savedEntries.some((e) => e.value === "PROBE-VALUE"),
+      savedCount: savedEntries.length,
+    };
+
+    // 判据 6：滚到底 → 高亮最后一块，且只有一个
+    ConfigUI.foldAll(); // 保存后重扫过，先全展开（内容够长才有得滚）
+    body.scrollTop = body.scrollHeight;
+    body.dispatchEvent(new Event("scroll"));
+    const act = toc().filter((n) => n.classList.contains("outline-item--active"));
+    out.spy = {
+      activeCount: act.length,
+      activeTitle: act.length ? act[0].dataset.configSection : null,
+      lastTitle: secs.length ? secs[secs.length - 1].dataset.section : null,
+      scrollTop: Math.round(body.scrollTop),
+    };
+  } catch (err) {
+    out.errors.push("DRIVER: " + ((err && err.stack) || err));
+  }
+  // 收尾：把页面恢复成"刚打开"的样子（全折叠 + 滚回顶部）。探针的输出被导成预览页给人看时，
+  // 看到的该是真实默认态，而不是被测试翻腾过的一堆展开块。
+  try {
+    window.ConfigUI.foldAll();
+    document.getElementById("config-body").scrollTop = 0;
+  } catch (e2) {
+    /* 上面已经报错了就别再添一条 */
+  }
+  const pre = document.createElement("pre");
+  pre.id = "__PROBE__";
+  if (PREVIEW) pre.style.display = "none"; // 导出预览时别把结果糊在页面底下
+  pre.textContent = JSON.stringify(out).replace(/&/g, "&#38;").replace(/</g, "&#60;");
+  document.body.appendChild(pre);
+})();
+</script></body>
+</html>

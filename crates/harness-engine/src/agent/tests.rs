@@ -26,6 +26,12 @@ impl Drop for TempDir {
     }
 }
 
+/// `tool_read` 收 `ReadSpec`（窗口读的入口）。整份读在测试里包一层 ——
+/// 让每个断言只说自己关心的事，不必每行都写一遍 `ReadSpec::whole`
+fn rd(ctx: &Ctx<'_>, path: &str) -> Result<String, String> {
+    ctx.tool_read(&ReadSpec::whole(path))
+}
+
 #[test]
 fn parse_action_covers_all_tools() {
     assert!(matches!(
@@ -34,11 +40,12 @@ fn parse_action_covers_all_tools() {
     ));
     assert!(matches!(
         parse_action(r#"{"tool":"read","args":{"path":"src/"}}"#),
-        Ok(Action::Read(p)) if p == "src/"
+        Ok(Action::Read(s)) if s.path == "src/" && !s.is_window()
     ));
     assert!(matches!(
         parse_action(r#"{"tool":"write","args":{"path":"a.py","content":"x=1"}}"#),
-        Ok(Action::Write(p, c)) if p == "a.py" && c == "x=1"
+        Ok(Action::Write(s)) if s.path == "a.py"
+            && matches!(&s.body, WriteBody::Content(c) if c == "x=1")
     ));
     assert!(matches!(
         parse_action(r#"{"tool":"execute","args":{"cmd":"cargo test","timeout_secs":60}}"#),
@@ -100,7 +107,7 @@ fn system_prompt_defines_four_tools() {
     assert!(AGENT_SYSTEM.contains("不要凭空猜测"), "问答必须先读项目");
     assert!(
         !AGENT_SYSTEM.contains("\"edit\""),
-        "edit 已并入 write（整份内容），提示词里不该再有 edit"
+        "edit 不是一个独立能力：锚点编辑是 write 的 edits 形态，提示词里不该出现裸的 edit 工具名"
     );
 }
 
@@ -382,15 +389,15 @@ fn tool_read_file_dir_overlay_and_jail() {
         policy: WritePolicy::Stage,
         backup_dir: None,
     };
-    assert!(ctx.tool_read("src/main.rs").unwrap().contains("fn main()"));
-    assert!(ctx.tool_read("src").unwrap().contains("main.rs"));
-    assert!(ctx.tool_read("ghost.py").is_err());
-    assert!(ctx.tool_read("../../etc/passwd").is_err());
+    assert!(rd(&ctx, "src/main.rs").unwrap().contains("fn main()"));
+    assert!(rd(&ctx, "src").unwrap().contains("main.rs"));
+    assert!(rd(&ctx, "ghost.py").is_err());
+    assert!(rd(&ctx, "../../etc/passwd").is_err());
 
     // overlay 优先：write 之后 read 能看到修改（Stage 策略磁盘未动）
     ctx.tool_write("src/main.rs", "fn main() { println!(1); }")
         .unwrap();
-    let r = ctx.tool_read("src/main.rs").unwrap();
+    let r = rd(&ctx, "src/main.rs").unwrap();
     assert!(r.contains("已暂存的修改"), "{r}");
     assert!(r.contains("println"));
     assert_eq!(
@@ -1815,9 +1822,9 @@ fn a_batch_parses_in_declared_order_and_rejects_control_actions() {
     )
     .expect("批该被接受");
     assert_eq!(ok.len(), 3);
-    assert!(matches!(&ok[0], Action::Read(p) if p == "a.rs"));
-    assert!(matches!(&ok[1], Action::Read(p) if p == "b.rs"));
-    assert!(matches!(&ok[2], Action::Write(p, _) if p == "c.rs"));
+    assert!(matches!(&ok[0], Action::Read(s) if s.path == "a.rs"));
+    assert!(matches!(&ok[1], Action::Read(s) if s.path == "b.rs"));
+    assert!(matches!(&ok[2], Action::Write(s) if s.path == "c.rs"));
     // calls 是同一件东西的另一个外衣（模型两种都写过）
     assert!(
         parse_actions(
@@ -1888,13 +1895,19 @@ fn a_batch_is_refused_when_the_switch_is_off() {
 /// 分组：只有**连续只读**成组并发；写入/执行/连接一律按序各成一组
 #[test]
 fn waves_parallelize_everything_except_conflicts() {
+    // 多给一个 content：write 现在必须带 content 或 edits（形状含糊当场拒），
+    // 其余能力忽略多余字段 —— 这个测试只关心分组，不关心参数形状
     let a = |tool: &str| {
-        parse_one(&serde_json::json!({"tool": tool, "args": {"path": "x", "cmd": "c"}}))
-            .unwrap_or_else(|e| panic!("{tool} 该能解析：{e}"))
+        parse_one(
+            &serde_json::json!({"tool": tool, "args": {"path": "x", "cmd": "c", "content": "v"}}),
+        )
+        .unwrap_or_else(|e| panic!("{tool} 该能解析：{e}"))
     };
     let mk = |tool: &str, path: &str| {
-        parse_one(&serde_json::json!({"tool": tool, "args": {"path": path, "cmd": "c"}}))
-            .unwrap_or_else(|e| panic!("{tool} 该能解析：{e}"))
+        parse_one(
+            &serde_json::json!({"tool": tool, "args": {"path": path, "cmd": "c", "content": "x"}}),
+        )
+        .unwrap_or_else(|e| panic!("{tool} 该能解析：{e}"))
     };
     // 口径：**要并发就一起并发** —— 读/写/执行/连接只要互不冲突就都在同一波
     assert_eq!(
@@ -1952,9 +1965,9 @@ fn parallel_reads_land_in_declared_order() {
         policy: WritePolicy::Stage,
         backup_dir: None,
     };
-    let paths: Vec<String> = ["a.txt", "ghost.txt", "c.txt", "b.txt"]
+    let paths: Vec<ReadSpec> = ["a.txt", "ghost.txt", "c.txt", "b.txt"]
         .iter()
-        .map(|s| s.to_string())
+        .map(|s| ReadSpec::whole(*s))
         .collect();
     for parallel in [true, false] {
         let rs = read_group(&ctx, &paths, parallel);
@@ -2211,4 +2224,386 @@ fn the_batch_hint_follows_the_switch() {
             "batch={batch} 时提示词提不提批协议：{first}"
         );
     }
+}
+
+// ============================================
+// 原子能力的参数形状：read 的窗口 / write 的锚点 / 工具循环的历史折叠
+// ============================================
+
+/// 建一个只读上下文（`Ctx` 的字段列表只在这里出现一次：加字段时只改这一处）
+fn ctx_for(d: &TempDir) -> Ctx<'_> {
+    Ctx {
+        proj: &d.0,
+        probes: Vec::new(),
+        overlay: BTreeMap::new(),
+        changes: Vec::new(),
+        policy: WritePolicy::Stage,
+        backup_dir: None,
+    }
+}
+
+fn ed(find: &str, replace: &str) -> AgentEdit {
+    AgentEdit {
+        find: find.to_string(),
+        replace: replace.to_string(),
+    }
+}
+
+/// 500 行的样例文件（窗口读的靶子）
+fn lines_fixture(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("line {i}")).collect()
+}
+
+/// 窗口读：只取那一段，并在表头里说清"共几行、缺口在哪、怎么接上"
+#[test]
+fn read_window_returns_the_slice_and_names_the_gap() {
+    let d = TempDir::new("read-window");
+    d.write("big.txt", &format!("{}\n", lines_fixture(500).join("\n")));
+    let ctx = ctx_for(&d);
+
+    // 不传窗口 = 老行为（整份裁读），行号表头不该冒出来
+    let all = rd(&ctx, "big.txt").unwrap();
+    assert!(all.contains("line 500"), "整份读该看到最后一行");
+    assert!(!all.contains("共 500 行"), "整份读不该有窗口表头");
+
+    let w = ctx
+        .tool_read(&ReadSpec {
+            path: "big.txt".into(),
+            offset: Some(120),
+            limit: Some(3),
+        })
+        .unwrap();
+    assert!(w.contains("第 120-122 行 / 共 500 行"), "{w}");
+    assert!(w.contains("line 120") && w.contains("line 122"), "{w}");
+    assert!(!w.contains("line 123"), "limit 之外一行都不许多给：{w}");
+    assert!(w.contains("接着读用 offset=123"), "缺口必须能接上：{w}");
+
+    // 读到底：明说已到末尾（而不是让模型自己猜还剩多少）
+    let tail = ctx
+        .tool_read(&ReadSpec {
+            path: "big.txt".into(),
+            offset: Some(499),
+            limit: None,
+        })
+        .unwrap();
+    assert!(
+        tail.contains("line 500") && tail.contains("已到文件末尾"),
+        "{tail}"
+    );
+
+    // 越界当场说清：静默返回最后一行会让模型以为"中间没内容"
+    let over = ctx
+        .tool_read(&ReadSpec {
+            path: "big.txt".into(),
+            offset: Some(501),
+            limit: None,
+        })
+        .unwrap_err();
+    assert!(over.contains("只有 500 行"), "{over}");
+
+    // 目录不吃窗口参数（它给的本来就是结构树，报错只会白换一轮往返）
+    assert!(
+        ctx.tool_read(&ReadSpec {
+            path: ".".into(),
+            offset: Some(3),
+            limit: Some(2),
+        })
+        .is_ok()
+    );
+}
+
+/// read/write 的参数形状校验：当场拒掉含糊的形状，不去猜模型想干什么
+#[test]
+fn parameter_shapes_are_validated_at_parse_time() {
+    let w = parse_action(
+        r#"{"tool":"write","args":{"path":"a.py","edits":[{"find":"x","replace":"y"}]}}"#,
+    )
+    .unwrap();
+    assert!(matches!(&w, Action::Write(s) if s.path == "a.py"
+        && matches!(&s.body, WriteBody::Edits(e) if e.len() == 1 && e[0].find == "x")));
+
+    // 两套互相矛盾的意图：猜错就是静默改错文件 → 当面拒
+    let both = parse_action(
+        r#"{"tool":"write","args":{"path":"a.py","content":"x","edits":[{"find":"a","replace":"b"}]}}"#,
+    )
+    .unwrap_err();
+    assert!(both.contains("只能给一个"), "{both}");
+    // 都给不出
+    let neither = parse_action(r#"{"tool":"write","args":{"path":"a.py"}}"#).unwrap_err();
+    assert!(
+        neither.contains("content") && neither.contains("edits"),
+        "{neither}"
+    );
+    assert!(parse_action(r#"{"tool":"write","args":{"path":"a.py","content":""}}"#).is_err());
+    assert!(parse_action(r#"{"tool":"write","args":{"path":"a.py","edits":[]}}"#).is_err());
+    assert!(
+        parse_action(r#"{"tool":"write","args":{"path":"a.py","edits":[{"find":"a"}]}}"#).is_ok(),
+        "省略 replace = 删掉这一段（合法，且与「没变化」是两回事）"
+    );
+
+    let r =
+        parse_action(r#"{"tool":"read","args":{"path":"a.py","offset":10,"limit":5}}"#).unwrap();
+    assert!(
+        matches!(&r, Action::Read(s) if s.offset == Some(10) && s.limit == Some(5) && s.is_window())
+    );
+    assert!(matches!(
+        parse_action(r#"{"tool":"read","args":{"path":"a.py"}}"#).unwrap(),
+        Action::Read(s) if !s.is_window()
+    ));
+    // 0 / 负数当场拒：静默收下 0 会让模型拿到空结果，还以为文件是空的
+    assert!(parse_action(r#"{"tool":"read","args":{"path":"a.py","limit":0}}"#).is_err());
+    assert!(parse_action(r#"{"tool":"read","args":{"path":"a.py","offset":-1}}"#).is_err());
+}
+
+/// 锚点编辑：只动那一处；不唯一 / 匹配不上 / 文件不存在都当场拒，且**整批一个字节都不落盘**
+#[test]
+fn anchor_edits_are_surgical_and_all_or_nothing() {
+    let d = TempDir::new("anchor");
+    d.write("a.txt", "one\ntwo\nthree\n");
+    d.write("dup.txt", "same\nsame\n");
+    let mut ctx = ctx_for(&d);
+
+    let r = ctx.tool_edit("a.txt", vec![ed("two", "TWO")]).unwrap();
+    assert!(r.contains("1 处锚点替换"), "回灌要说清改了几处：{r}");
+    let got = rd(&ctx, "a.txt").unwrap();
+    assert!(got.contains("TWO"), "{got}");
+    assert!(
+        got.contains("one") && got.contains("three"),
+        "别处一个字都不许碰：{got}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.0.join("a.txt")).unwrap(),
+        "one\ntwo\nthree\n",
+        "锚点编辑同样走 Stage 通道，磁盘不许动"
+    );
+
+    // 同一文件的多条 edits 按声明顺序累积
+    ctx.tool_edit("a.txt", vec![ed("one", "1"), ed("three", "3")])
+        .unwrap();
+    let got = rd(&ctx, "a.txt").unwrap();
+    assert!(got.contains("1\nTWO\n3"), "{got}");
+
+    // 不唯一 → 拒（"恰好一次"是防改错地方的核心闸）
+    let dup = ctx
+        .tool_edit("dup.txt", vec![ed("same", "other")])
+        .unwrap_err();
+    assert!(dup.contains("出现 2 次"), "{dup}");
+    // 整批作废：同批里第 1 条是合法的，也不许生效
+    let mixed = ctx
+        .tool_edit("a.txt", vec![ed("1", "X"), ed("nope", "Y")])
+        .unwrap_err();
+    assert!(mixed.contains("第 2 条 edit"), "{mixed}");
+    let after = rd(&ctx, "a.txt").unwrap();
+    assert!(
+        !after.contains('X'),
+        "整批作废：第 1 条也不许留下痕迹：{after}"
+    );
+    // 替换前后一致也是错（那说明模型没搞清自己要改什么）
+    let same = ctx.tool_edit("a.txt", vec![ed("1", "1")]).unwrap_err();
+    assert!(same.contains("完全一致"), "{same}");
+    // 文件不存在 → 锚点无处可锚（新建走 content 形态）
+    let ghost = ctx.tool_edit("ghost.txt", vec![ed("a", "b")]).unwrap_err();
+    assert!(ghost.contains("不存在"), "{ghost}");
+}
+
+/// 行尾风格不算"改动"：LF 的 find 能匹配 CRLF 的文件，落盘后 CRLF 原样保留
+#[test]
+fn anchor_edits_survive_crlf_files() {
+    let d = TempDir::new("anchor-crlf");
+    d.write("w.txt", "a\r\nb\r\n");
+    let mut ctx = ctx_for(&d);
+    ctx.tool_edit("w.txt", vec![ed("b", "B")]).unwrap();
+    let got = rd(&ctx, "w.txt").unwrap();
+    assert!(got.contains("a\r\nB\r\n"), "行尾风格必须原样保留：{got:?}");
+}
+
+/// 端到端：模型用 edits 形态改文件 —— 只传改动，落到磁盘的却是完整正确的文件
+#[test]
+fn edits_shape_reaches_the_file_through_the_loop() {
+    let d = TempDir::new("edits-e2e");
+    d.write("a.txt", "alpha\nbeta\ngamma\n");
+    let llm = crate::testllm::fake_llm(vec![
+        r#"{"tool":"write","args":{"path":"a.txt","edits":[{"find":"beta","replace":"BETA"}]}}"#
+            .into(),
+        r#"{"final":"改好了"}"#.into(),
+    ]);
+    let cfg = ask_cfg(&llm);
+    block_on(run(
+        &cfg,
+        &d.0,
+        "把 beta 改成 BETA",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect("run 不该失败");
+
+    assert_eq!(
+        std::fs::read_to_string(d.0.join("a.txt")).unwrap(),
+        "alpha\nBETA\ngamma\n",
+        "只传了一处改动，落盘的必须是完整文件"
+    );
+    assert!(
+        llm.request(1).contains("1 处锚点替换"),
+        "回灌要给模型一句「改了几处」"
+    );
+    assert_eq!(llm.count(), 2);
+}
+
+/// 五轮"读一个互相认得出来的文件" + 交付：折叠测试的靶子
+fn fold_fixture(tag: &str) -> (TempDir, crate::testllm::FakeLlm) {
+    let d = TempDir::new(tag);
+    for i in 1..=5 {
+        d.write(
+            &format!("f{i}.txt"),
+            &format!("MARK{i}-{}", "A".repeat(400)),
+        );
+    }
+    let script: Vec<String> = (1..=5)
+        .map(|i| format!(r#"{{"tool":"read","args":{{"path":"f{i}.txt"}}}}"#))
+        .chain(std::iter::once(r#"{"final":"读完了"}"#.to_string()))
+        .collect();
+    (d, crate::testllm::fake_llm(script))
+}
+
+/// 历史折叠的窗口语义：最近的 keep 轮一字不动，更老的正文换成一行事实；重复折叠无副作用
+#[test]
+fn fold_history_keeps_the_tail_and_shrinks_the_head() {
+    let mut msgs = vec![ChatMessage::system("S"), ChatMessage::user("任务")];
+    let mut slots = Vec::new();
+    for i in 1..=4 {
+        let assistant = msgs.len();
+        msgs.push(ChatMessage::assistant(format!(
+            r#"{{"tool":"read","args":{{"path":"f{i}"}}}}"#
+        )));
+        let result = msgs.len();
+        msgs.push(ChatMessage::user(format!("正文{i}{}", "x".repeat(500))));
+        slots.push(RoundSlot {
+            assistant,
+            result,
+            call_digest: format!("CALL{i}"),
+            outcome_digest: format!("OUT{i}"),
+        });
+    }
+
+    let (folded, saved) = fold_history(&mut msgs, &slots, 2);
+    assert_eq!(folded, 2, "4 轮保留 2 轮 → 该折 2 轮");
+    assert!(saved > 1_000, "省下的正是那两段正文：{saved}");
+    assert_eq!(msgs[slots[0].assistant].content, "CALL1");
+    assert_eq!(msgs[slots[0].result].content, "OUT1");
+    assert_eq!(msgs[slots[1].result].content, "OUT2", "窗口外的都要折");
+    assert!(
+        msgs[slots[2].result].content.contains("正文3"),
+        "窗口内的轮次一字不动：{}",
+        msgs[slots[2].result].content
+    );
+    assert!(msgs[slots[3].result].content.contains("正文4"));
+    // 幂等：再折一次既不该"又折了几轮"，也不该再省字节
+    assert_eq!(fold_history(&mut msgs, &slots, 2), (0, 0));
+    // system 与任务消息不属于任何轮次，永远不动
+    assert_eq!(msgs[0].content, "S");
+    assert_eq!(msgs[1].content, "任务");
+    // 一轮都不折的场合
+    assert_eq!(fold_history(&mut msgs, &slots, 9), (0, 0));
+}
+
+/// 端到端：判据是**模型实际看到了什么**（请求体），不是我们自己的账本
+#[test]
+fn old_tool_results_are_folded_out_of_the_request() {
+    let (d, llm) = fold_fixture("fold-e2e");
+    let mut cfg = ask_cfg(&llm);
+    cfg.agent.history_keep_rounds = 2;
+
+    block_on(run(
+        &cfg,
+        &d.0,
+        "把五个文件都读一遍",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect("run 不该失败");
+
+    assert_eq!(llm.count(), 6, "5 轮读 + 1 轮交付，不该有多余轮次");
+    // request(0) 是开跑前那次（只有 system + 任务），正文从第 2 次请求起才进上下文
+    assert!(
+        llm.request(1).contains("MARK1"),
+        "第 1 轮读到的正文这一轮当然还在"
+    );
+
+    let last = llm.request(5);
+    assert!(
+        last.contains("MARK4") && last.contains("MARK5"),
+        "窗口内的正文不该被动"
+    );
+    assert!(!last.contains("MARK1"), "第 1 轮的正文必须已经被折叠掉");
+    assert!(!last.contains("MARK2") && !last.contains("MARK3"));
+    assert!(
+        last.contains("第 1 轮结果"),
+        "折叠后仍要留下「读过什么」的痕迹：{last}"
+    );
+    assert!(
+        last.contains("正文已从上下文移除"),
+        "还要说清正文去哪了、要看就重新 read"
+    );
+}
+
+/// 一行回滚：关掉 history_trim，老轮次的正文照旧留在上下文里
+#[test]
+fn history_trim_off_restores_the_always_growing_history() {
+    let (d, llm) = fold_fixture("fold-off");
+    let mut cfg = ask_cfg(&llm);
+    cfg.agent.history_keep_rounds = 2;
+    cfg.agent.history_trim = false;
+
+    block_on(run(
+        &cfg,
+        &d.0,
+        "把五个文件都读一遍",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect("run 不该失败");
+
+    let last = llm.request(5);
+    assert!(
+        last.contains("MARK1"),
+        "关掉折叠后第 1 轮的正文仍该在（老行为）：开关没生效"
+    );
+    assert!(!last.contains("正文已从上下文移除"), "不该出现折叠标记");
+}
+
+/// 提示词成对写：两种形状都得说清"什么时候用 / 什么时候别用"。
+/// 老那句"必须是整份内容"必须消失 —— 留着它，模型看见新形状也不会用。
+#[test]
+fn prompt_advertises_both_write_shapes_and_the_read_window() {
+    assert!(AGENT_SYSTEM.contains("edits"), "不写模型就不知道有锚点形态");
+    assert!(AGENT_SYSTEM.contains("offset"), "窗口读也得写进去");
+    assert!(
+        AGENT_SYSTEM.contains("该用窗口") && AGENT_SYSTEM.contains("别用窗口"),
+        "窗口的判据要成对"
+    );
+    assert!(
+        AGENT_SYSTEM.contains("别用 edits") && AGENT_SYSTEM.contains("别用 content"),
+        "两种写法的判据要成对"
+    );
+    assert!(
+        !AGENT_SYSTEM.contains("交回的必须是整份内容"),
+        "老判据会盖掉新形状"
+    );
+    assert!(
+        !AGENT_SYSTEM.contains("再用 write 交回整份新内容"),
+        "规则 3 也得跟着改"
+    );
+    // 子步骤提示词各自自洽：它没有 connect，但 read/write 的新形状必须有
+    assert!(crate::step_agent::STEP_SYSTEM.contains("edits"));
+    assert!(crate::step_agent::STEP_SYSTEM.contains("offset"));
+    assert!(!crate::step_agent::STEP_SYSTEM.contains("交回的必须是整份内容"));
 }
