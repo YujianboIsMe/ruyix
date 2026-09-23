@@ -120,10 +120,46 @@ target0 是用户随意取的名字，不是系统递增的（IDE不维护计数
 AI配置同样遵循配置四级配置机制。
 
 配置项
-ruyix.code.ai.api_key
-ruyix.code.ai.api_url
-ruyix.code.ai.model
-ruyix.code.ai.alias 如果没有指定，则取ruyix.code.ai.model
+
+| 键 | 说明 |
+|---|---|
+| `ruyix.code.ai.api_key` | API 密钥 |
+| `ruyix.code.ai.api_url` | 端点；粘贴完整 `/chat/completions` 也会被自动剥掉（引擎自己拼路径） |
+| `ruyix.code.ai.model` | 模型名 |
+| `ruyix.code.ai.alias` | 界面显示用的短名；没指定则取 `ruyix.code.ai.model` |
+| `ruyix.code.ai.api_format` | **协议格式**：`openai`（默认，走 `/chat/completions`）或 `anthropic`（走 `/v1/messages`） |
+
+`api_format` 在配置页是二选一下拉。合法值声明在引擎的 `ENUM_KEYS`
+（`llm.api_format`），前端不另立一份；对应引擎键 `llm.api_format` 在 `harness` 段表单里被隐藏
+（同一件事不摆两处）。
+
+> Anthropic 协议与 OpenAI 兼容的差异：鉴权用 `x-api-key` + `anthropic-version` 头；
+> `system` 提示词提到顶层、不放进 `messages`；没有 `response_format`（JSON 模式靠提示词保证）；
+> **不支持服务端联网检索**（`llm.web_search` 对它一律视为关闭）。
+
+### 备用 AI（故障切换，`ai_fallback`）
+
+主用端点**不可用**时，引擎自动切到备用端点继续这一次调用。配置项与 `ai` 段基本同构，
+section 固定为 `ai_fallback`：
+
+```
+ruyix.code.ai_fallback.api_url     # 备用端点
+ruyix.code.ai_fallback.api_key     # 备用密钥
+ruyix.code.ai_fallback.model       # 备用模型名
+ruyix.code.ai_fallback.api_format  # 备用协议（openai / anthropic，可与主用不同）
+```
+
+**什么情况才切**：只切"可用性故障" —— 网络错误 / 5xx / 429 / 超时 / 重试耗尽。
+**鉴权（401/403）、余额（402）、参数被拒（400/422）一律不切** —— 那些重试也没用，
+且备用端点多半同样错，切过去只会把真正的错误盖住。
+
+**留空 = 不启用**（引擎里 `llm_fallback` 保持 `None`，行为与不配这一段的旧版完全一致）。
+这一段在配置页是个独立分组「备用 AI（故障切换）」；`alias` **有意不提供** ——
+别名是界面展示字段，而备用 LLM 在界面上没有展示位，加一个没人读的字段正是
+"配了不生效"的形状（门禁 U39 守这条）。
+
+> 主用失败要切备用时会进入**弹性模式**：主用最多重试 2 次、单次请求超时封顶 30s
+> （免得主用僵尸挂死 300s 还不切）。没配备用时仍是原来的 3 次重试 + 完整超时。
 
 ### 引擎（Agent / harness）
 
@@ -163,12 +199,14 @@ max_context_chars = "24000"
 - 转不过去（比如 `agent.batch = "ture"`）→ **丢弃该键、保持默认**，不会让整批配置一起失效。
 - **空串 = 未设置**（与表单"清空 = 删键"一致），回落到回退链或引擎默认。
 - 枚举键（`sandbox.mode`：`require` / `prefer` / `off`；`llm.web_search`：
-  `off` / `auto` / `on`）只认白名单，写错不静默换档 —— 否则 `yolo` 被当成未知档回落，
-  用户会以为隔离开着。
+  `off` / `auto` / `on`；`llm.api_format`：`openai` / `anthropic`）只认白名单，
+  写错不静默换档 —— 否则 `yolo` 被当成未知档回落，用户会以为隔离开着。
 
-LLM 端点 / 密钥 / 模型**不在这里**，见上一节 `ruyix.code.ai.*`；
-引擎的 `llm.base_url` / `llm.api_key` / `llm.model` 三键在表单里被**隐藏**，
-避免同一件事摆两处。
+LLM 端点 / 密钥 / 模型 / 协议**不在这里**，见前面两节 `ruyix.code.ai.*` 与
+`ruyix.code.ai_fallback.*`；引擎的 `llm.base_url` / `llm.api_key` / `llm.model` /
+`llm.api_format` 四键在 `harness` 段表单里被**隐藏**（`FORM_HIDDEN`），避免同一件事摆两处。
+备用 LLM 整段（`llm_fallback`）是 `Option<LlmConfig>`，默认 `None` 时 TOML 序列化
+**整段省略**、根本不进 `schema()`，所以它天然不会出现在 `harness` 表单里。
 
 ### `llm.web_search`：服务端联网搜索（`off` / `auto` / `on`，默认 `auto`）
 

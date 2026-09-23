@@ -218,7 +218,13 @@ pub async fn plan_stage(
 
     sink.stage("plan", "start", format!("调用 {} 拆解任务…", cfg.llm.model));
     let t0 = Instant::now();
-    let (plan, usage, model, ms) = plan::generate(&cfg.llm, task, plan_block.as_deref()).await?;
+    let (plan, usage, model, ms) = plan::generate(
+        &cfg.llm,
+        cfg.llm_fallback.as_ref(),
+        task,
+        plan_block.as_deref(),
+    )
+    .await?;
 
     let root = config::runs_root(cfg);
     // 预设 id（评估：先建目录放既有文件、再跑模型）优先；否则按计划的 slug 生成（GUI）
@@ -701,6 +707,7 @@ pub async fn repair_stage(
 
         let proposed = repair::propose(
             &cfg.llm,
+            cfg.llm_fallback.as_ref(),
             &rec.task,
             &package,
             display_round,

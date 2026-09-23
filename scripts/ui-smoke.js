@@ -132,6 +132,20 @@
  *                     实测 2026-09-23：下拉切项目从来没成功过。回放真加载 command.js 驱动
  *                     handleCommand：下拉形态转义串还原 / 手打带引号含空格路径 / 不带引号
  *                     原样透传 / UNC 打头双反斜杠不被转义规则吃掉，四个都要对。
+ *   U39 failover-config  备用 LLM（故障切换网关）的**跨层键契约**：`config.js` 的 `ai_fallback`
+ *                     段声明的字段顺序 = 落盘键 `ruyix.code.ai_fallback.<key>` = 宿主桥
+ *                     `config_bridge.rs` 里 read 的键。三处只要有一边改名（例如把 ai_fallback
+ *                     写成 ai_backup），界面照样长得对、保存也报成功，**配置却永远读不到** ——
+ *                     正是 open-project 那类静默 bug 的形状。另外守两条单源纪律：
+ *                     `llm_fallback` 整段在引擎 FORM_HIDDEN 里、不许被抄回 `config.js` 表单。
+ *   U40 anthropic-format  LLM 协议二选一（OpenAI 兼容 / Anthropic Messages）的跨层契约：
+ *                     ①`ai` 与 `ai_fallback` 两段各有一个 `api_format` 下拉、取值恰为
+ *                     openai/anthropic；②引擎 `llm.rs` 真的实现了 anthropic 三件套
+ *                     （`/v1/messages` 端点、`x-api-key`+`anthropic-version` 鉴权、
+ *                     `extract_anthropic` 解析）；③`request_plan` **最先**判 anthropic ——
+ *                     判晚了 anthropic 请求会被当成 OpenAI 端点包成 `/responses`；
+ *                     ④合法值声明在引擎 `ENUM_KEYS` 且 `FORM_HIDDEN` 藏掉它（单源在宿主 ai 段）；
+ *                     ⑤新增文案中英 parity（缺英文键界面会直接显示键名）。
  */
 
 "use strict";
@@ -2738,6 +2752,127 @@ async function runOpenProjectArgsChecks() {
   }
 }
 
+/**
+ * U39 failover-config：备用 LLM（故障切换）的跨层键契约。
+ *
+ * 纯静态、跨模块：前端 SCHEMA 声明的字段 → 落盘键 `ruyix.code.<section>.<key>`
+ * （config.js 的 `"ruyix.code." + section + "." + key`）→ 宿主桥 read 的键。
+ * 这条链上任何一侧单边改名，界面都长得完全正常（字段渲染得出、保存也报成功），
+ * 只有"配了不生效"——所以必须把两端的字符串钉在一起。
+ *
+ * **只扫桥的生产代码**（`#[cfg(test)]` 之前）：反向验证时实测过 —— 本文件新增的桥单测里
+ * 就写着同样的键名，整文件 `includes` 会搜到测试里的那一份，于是把生产代码的键改错
+ * 门禁照样绿。"绿得没有理由"就是这么来的。
+ */
+async function runFailoverChecks() {
+  const configJs = read("ui/config.js");
+  const bridgeRs = read("src-tauri/src/agent/config_bridge.rs");
+  const engineCfg = read("crates/harness-engine/src/config.rs");
+  const prodEnd = bridgeRs.indexOf("#[cfg(test)]");
+  const bridgeProd = prodEnd > 0 ? bridgeRs.slice(0, prodEnd) : bridgeRs;
+
+  // 切片本身要可信：切没了（或切错位置）下面几条会退化成"永远绿"
+  check("U39", "failover-config",
+    bridgeProd.includes("fn build_app_config") && bridgeProd.includes("apply_ai_fallback_keys"),
+    "桥的生产代码切片没取到（门禁会退化成永远绿）");
+
+  // ① ai_fallback 段的字段清单与顺序（顺序即表单渲染序，也是桥要读的清单）
+  const fallbackSec = configJs.slice(
+    configJs.indexOf('section: "ai_fallback"'),
+    configJs.indexOf('section: "ui"'));
+  const fbKeys = [...fallbackSec.matchAll(/key:\s*"([\w]+)"/g)].map((m) => m[1]);
+  check("U39", "failover-config",
+    JSON.stringify(fbKeys) ===
+      JSON.stringify(["api_url", "api_key", "model", "api_format"]),
+    `ai_fallback 段字段与约定不符: ${JSON.stringify(fbKeys)}`);
+
+  // ② 前端每个字段，宿主桥都必须 read 同一个键
+  const notBridged = fbKeys.filter((k) => !bridgeProd.includes(`"ruyix.code.ai_fallback.${k}"`));
+  check("U39", "failover-config", notBridged.length === 0,
+    `宿主桥没读这些键（界面配了也不生效）: ${notBridged.join(", ")}`);
+
+  // ③ 主用段也必须能选协议（否则用户改不了主用协议，只能改备用）
+  const aiSec = configJs.slice(configJs.indexOf('section: "ai"'),
+    configJs.indexOf('section: "ai_fallback"'));
+  check("U39", "failover-config",
+    /key:\s*"api_format"/.test(aiSec) && bridgeProd.includes('"ruyix.code.ai.api_format"'),
+    "主用 ai 段缺 api_format（前端或宿主桥任一侧缺失）");
+
+  // ④ 单源纪律：备用 LLM 整段由宿主 ai_fallback 段管，引擎 FormHidden 藏掉，
+  //    且不许被抄回 config.js（抄回去 = 同一样东西摆两处，正是 D8 要消灭的）
+  const hiddenSec = engineCfg.slice(
+    engineCfg.indexOf("const FORM_HIDDEN"),
+    engineCfg.indexOf("fn is_hidden"));
+  check("U39", "failover-config",
+    hiddenSec.includes('"llm_fallback"') && !/key:\s*"llm_fallback/.test(configJs),
+    "llm_fallback 应在引擎 FORM_HIDDEN 里，且不许被抄进 config.js 表单");
+
+  // ⑤ 引擎默认不配备用（None）—— 无备用时行为必须与旧版一致，不能凭空多出个端点
+  const defaultSec = engineCfg.slice(engineCfg.indexOf("impl Default for AppConfig"),
+    engineCfg.indexOf("fn schema()"));
+  check("U39", "failover-config",
+    /llm_fallback:\s*None/.test(defaultSec),
+    "AppConfig::default() 必须是 llm_fallback: None（默认不切换 = 行为等同旧版）");
+}
+
+/**
+ * U40 anthropic-format：LLM 协议二选一（openai / anthropic）的跨层契约。
+ *
+ * 新增一套协议最怕"配置项在、实现没跟上"或"实现只在一条分支上"：
+ * 用户在表单里选了 anthropic，请求却仍按 OpenAI 拼 → 4xx 打回，且报错文案看不出原因。
+ * 这里把「表单可选项 = 引擎合法值 = 引擎真实现的协议要素」三段钉在一起。
+ */
+async function runAnthropicFormatChecks() {
+  const configJs = read("ui/config.js");
+  const llmRs = read("crates/harness-engine/src/llm.rs");
+  const engineCfg = read("crates/harness-engine/src/config.rs");
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const en = JSON.parse(read("ui/lang/en.json"));
+
+  // ① 两段各一个 api_format 二选一下拉，取值恰为 openai,anthropic
+  const opts = [...configJs.matchAll(/key:\s*"api_format"[^}]*options:\s*\[([^\]]*)\]/g)]
+    .map((m) => m[1].split(",").map((s) => s.trim().replace(/^"|"$/g, "")).join(","));
+  check("U40", "anthropic-format",
+    opts.length === 2 && opts.every((o) => o === "openai,anthropic"),
+    `ai / ai_fallback 各需一个 api_format 二选一（openai,anthropic）: ${JSON.stringify(opts)}`);
+
+  // ② 引擎真的实现了 anthropic 三件套：端点 / 鉴权 / 解析
+  const need = ["/v1/messages", "x-api-key", "anthropic-version",
+    "fn extract_anthropic", "AuthScheme::Anthropic"];
+  const lack = need.filter((p) => !llmRs.includes(p));
+  check("U40", "anthropic-format", lack.length === 0,
+    `llm.rs 缺 anthropic 协议要素: ${lack.join(", ")}`);
+
+  // ③ request_plan 必须最先判 anthropic —— 判晚了会被 web_search_on 包成 /responses
+  const rpStart = llmRs.indexOf("fn request_plan");
+  const rp = llmRs.slice(rpStart, rpStart + 900);
+  check("U40", "anthropic-format",
+    rpStart > 0 && rp.indexOf("anthropic") > -1 &&
+      rp.indexOf("anthropic") < rp.indexOf("web_search_on") &&
+      rp.includes("AuthScheme::Anthropic"),
+    "request_plan 必须最先判 api_format==anthropic（否则 anthropic 请求被送进 /responses）");
+
+  // ④ 合法值声明在引擎 ENUM_KEYS，且 harness 表单藏掉它（单源在宿主 ai / ai_fallback 段）
+  const enumSec = engineCfg.slice(
+    engineCfg.indexOf("const ENUM_KEYS"),
+    engineCfg.indexOf("const FORM_HIDDEN"));
+  const hiddenSec = engineCfg.slice(
+    engineCfg.indexOf("const FORM_HIDDEN"),
+    engineCfg.indexOf("fn is_hidden"));
+  check("U40", "anthropic-format",
+    /"llm\.api_format",\s*&\["openai",\s*"anthropic"\]/.test(enumSec) &&
+      hiddenSec.includes('"llm.api_format"'),
+    "引擎 ENUM_KEYS 要声明 llm.api_format 合法值，且 FORM_HIDDEN 要藏掉它（避免与宿主段重复）");
+
+  // ⑤ 新增文案中英 parity（缺英文键界面会直接显示键名）
+  const needI18n = ["config.section.ai_fallback", "config.field.ai.api_format",
+    "config.field.ai_fallback.api_format", "config.desc.ai.api_format",
+    "config.desc.ai_fallback.api_format"];
+  const lackI18n = needI18n.filter((k) => !(k in zh) || !(k in en));
+  check("U40", "anthropic-format", lackI18n.length === 0,
+    `缺 i18n 键（中/英须同步）: ${lackI18n.join(", ")}`);
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -2752,6 +2887,8 @@ async function main() {
     ["U24", "external-link-replay", runExternalLinkChecks],
     ["U33", "ctx-copy-path", runContextMenuChecks],
     ["U38", "open-project-args", runOpenProjectArgsChecks],
+    ["U39", "failover-config", runFailoverChecks],
+    ["U40", "anthropic-format", runAnthropicFormatChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

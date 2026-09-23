@@ -23,7 +23,19 @@ const HARNESS_PREFIX: &str = "ruyix.code.harness.";
 
 /// 这几个引擎键不由 `harness.*` 提供 —— 宿主早就把它们放在 `ai.*` 了（D8：配置单源）。
 /// 同一样东西摆两处正是这次要消灭的问题，所以在这里排除，并单独桥接。
-const FROM_AI_NAMESPACE: &[&str] = &["llm.base_url", "llm.api_key", "llm.model"];
+///
+/// v0.5 起 `llm.api_format` 也归这里：协议开关与端点/密钥/模型同属 `ai` 段，
+/// 摆在 harness 段会让用户看到两份互相打架的开关。
+const FROM_AI_NAMESPACE: &[&str] = &["llm.base_url", "llm.api_key", "llm.model", "llm.api_format"];
+
+/// 这个引擎键是不是由宿主 `ai` 段供值。
+///
+/// 备用 LLM（`llm_fallback`）**不在这里**：它是 `Option<LlmConfig>`，默认 `None` 时
+/// toml 整段省略，于是根本不进 `schema()`，第 1 步的遍历天然碰不到它 —— 备用段的值
+/// 全部由第 2b 步从 `ruyix.code.ai_fallback.*` 直接读（见 `apply_ai_fallback_keys`）。
+fn is_host_owned(path: &str) -> bool {
+    FROM_AI_NAMESPACE.contains(&path)
+}
 
 /// 这几个整数键上的 0 不是"关"，而是**把能力静默关死**（批调用会拒掉所有批、
 /// 提问次数为 0 等于关掉提问、历史保留 0 轮等于把**当前这一轮**的结果也折掉 ——
@@ -107,20 +119,26 @@ fn apply_engine_keys(cfg: &mut engine::config::AppConfig, raw: &[(String, String
     }
 }
 
-/// LLM 三键（宿主所有权，D8）。值缺失时保持引擎默认 —— 面板据此走"未配置"引导态。
+/// 清理用户粘贴的 LLM 端点：尾斜杠 + 完整 `/chat/completions` 后缀都剥掉
+/// （引擎自己会拼路径；anthropic 端点不含该后缀，原样保留）。
+fn clean_base_url(url: &str) -> String {
+    url.trim_end_matches('/')
+        .strip_suffix("/chat/completions")
+        .unwrap_or_else(|| url.trim_end_matches('/'))
+        .to_string()
+}
+
+/// LLM 三键 + 协议格式（宿主所有权，D8）。值缺失时保持引擎默认 —— 面板据此走"未配置"引导态。
 fn apply_ai_keys(
     cfg: &mut engine::config::AppConfig,
     url: Option<&str>,
     key: Option<&str>,
     model: Option<&str>,
+    api_format: Option<&str>,
 ) {
     if let Some(url) = url {
         // 与 ai.rs 同款清理：用户可能粘贴完整 endpoint，引擎自己会拼 /chat/completions
-        cfg.llm.base_url = url
-            .trim_end_matches('/')
-            .strip_suffix("/chat/completions")
-            .unwrap_or(url.trim_end_matches('/'))
-            .to_string();
+        cfg.llm.base_url = clean_base_url(url);
     }
     if let Some(key) = key {
         cfg.llm.api_key = key.to_string();
@@ -128,6 +146,38 @@ fn apply_ai_keys(
     if let Some(model) = model {
         cfg.llm.model = model.to_string();
     }
+    if let Some(fmt) = api_format {
+        // 空值保持默认 openai；非 openai/anthropic 当 openai 兜底（不让坏值静默破坏调用）
+        let f = fmt.trim();
+        if !f.is_empty() {
+            cfg.llm.api_format = f.to_string();
+        }
+    }
+}
+
+/// 备用 LLM（故障切换网关）。任一字段被配置即启用 `cfg.llm_fallback`；全空则保持 `None`
+/// （不切换，行为等同旧版）。`api_format` 缺省回退 openai；其余生成参数用引擎默认。
+fn apply_ai_fallback_keys(
+    cfg: &mut engine::config::AppConfig,
+    url: Option<&str>,
+    key: Option<&str>,
+    model: Option<&str>,
+    api_format: Option<&str>,
+) {
+    if url.is_none() && key.is_none() && model.is_none() {
+        return; // 没配备用 = 不切换
+    }
+    let fmt = api_format
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("openai");
+    cfg.llm_fallback = Some(engine::config::LlmConfig {
+        base_url: url.map(clean_base_url).unwrap_or_default(),
+        api_key: key.unwrap_or_default().to_string(),
+        model: model.unwrap_or_default().to_string(),
+        api_format: fmt.to_string(),
+        ..engine::config::LlmConfig::default()
+    });
 }
 
 /// 命令层入口：读 ruyix 配置 → 引擎 AppConfig。
@@ -142,7 +192,7 @@ pub fn build_app_config(
     // 1) 照引擎的 schema 读 `harness.*`：引擎有键这里就自动跟上，不会漏同步
     let mut pairs: Vec<(String, String)> = Vec::new();
     for spec in engine::config::schema() {
-        if FROM_AI_NAMESPACE.contains(&spec.path.as_str()) {
+        if is_host_owned(&spec.path) {
             continue;
         }
         let key = format!("{HARNESS_PREFIX}{}", spec.path);
@@ -152,15 +202,30 @@ pub fn build_app_config(
     }
     apply_engine_keys(&mut cfg, &pairs);
 
-    // 2) LLM 端点 / 密钥 / 模型来自 `ruyix.code.ai.*`（D8：配置单源）
+    // 2) LLM 端点 / 密钥 / 模型 / 协议格式来自 `ruyix.code.ai.*`（D8：配置单源）
     let ai_url = read(mgr, "ruyix.code.ai.api_url", project_root);
     let ai_key = read(mgr, "ruyix.code.ai.api_key", project_root);
     let ai_model = read(mgr, "ruyix.code.ai.model", project_root);
+    let ai_fmt = read(mgr, "ruyix.code.ai.api_format", project_root);
     apply_ai_keys(
         &mut cfg,
         ai_url.as_deref(),
         ai_key.as_deref(),
         ai_model.as_deref(),
+        ai_fmt.as_deref(),
+    );
+
+    // 2b) 备用 LLM（故障切换）来自 `ruyix.code.ai_fallback.*`
+    let fb_url = read(mgr, "ruyix.code.ai_fallback.api_url", project_root);
+    let fb_key = read(mgr, "ruyix.code.ai_fallback.api_key", project_root);
+    let fb_model = read(mgr, "ruyix.code.ai_fallback.model", project_root);
+    let fb_fmt = read(mgr, "ruyix.code.ai_fallback.api_format", project_root);
+    apply_ai_fallback_keys(
+        &mut cfg,
+        fb_url.as_deref(),
+        fb_key.as_deref(),
+        fb_model.as_deref(),
+        fb_fmt.as_deref(),
     );
 
     // 3) 规约包的目录回退：`HARNESS_LINT_DIR` 是引擎那套"让测试隔离真实 HOME"
@@ -251,7 +316,8 @@ mod tests {
 
         let specs: Vec<engine::config::KeySpec> = engine::config::schema()
             .into_iter()
-            .filter(|s| !FROM_AI_NAMESPACE.contains(&s.path.as_str()))
+            // 宿主所有的键（ai / ai_fallback 段）不走 harness 命名空间，另有专项测试覆盖
+            .filter(|s| !is_host_owned(&s.path))
             // 枚举键的探针必然在白名单外（会被正确拒掉），另有一条测试专测它
             .filter(|s| s.options.is_empty())
             .collect();
@@ -315,6 +381,77 @@ mod tests {
         assert_eq!(cfg.llm.api_key, "sk-test");
         assert_eq!(cfg.llm.model, "deepseek-chat");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v0.5：协议格式（宿主 `ai` 段）与备用 LLM（`ai_fallback` 段）的端到端桥接。
+    ///
+    /// 为什么必须是一条**真配置管理器**的测试：这两个功能的新键都在宿主命名空间里，
+    /// 桥的第 1 步（按 schema 遍历 `harness.*`）**看不见它们** —— 只测 schema 或只测
+    /// `apply_*` 函数都验不到"界面配了真进引擎"。翻车形态是：表单渲染正常、保存报成功、
+    /// 引擎却仍用旧协议 —— 界面完全看不出来。
+    #[test]
+    fn api_format_and_fallback_llm_bridge_from_the_host_namespaces() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Safety：本测试持有 ENV_LOCK，是此刻唯一读写该环境变量的测试
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+
+        // ① 什么都没配：主用默认 openai（旧行为），备用保持 None（不切换）
+        let dir_none = temp_dir("fb_none");
+        let mgr = ConfigManager::new_with_dir(dir_none.clone());
+        let cfg = build_app_config(&mgr, None).unwrap();
+        assert_eq!(cfg.llm.api_format, "openai", "默认协议必须是 openai");
+        assert!(
+            cfg.llm_fallback.is_none(),
+            "没配备用 = 不切换，行为等同旧版"
+        );
+        let _ = std::fs::remove_dir_all(&dir_none);
+
+        // ② 配了：主用协议生效；备用独立成一个 LlmConfig，且**允许与主用异构**
+        let dir_set = temp_dir("fb_set");
+        let mut mgr = ConfigManager::new_with_dir(dir_set.clone());
+        for (k, v) in [
+            ("ruyix.code.ai.api_format", "anthropic"),
+            // 备用端点粘贴完整 URL + 尾斜杠，同样要被清理
+            (
+                "ruyix.code.ai_fallback.api_url",
+                "https://backup.example.com/v1/",
+            ),
+            ("ruyix.code.ai_fallback.api_key", "sk-backup"),
+            ("ruyix.code.ai_fallback.model", "claude-sonnet-4"),
+            ("ruyix.code.ai_fallback.api_format", "anthropic"),
+        ] {
+            mgr.config_write(&Scope::Runtime, k, v, None).unwrap();
+        }
+        let cfg = build_app_config(&mgr, None).unwrap();
+        assert_eq!(cfg.llm.api_format, "anthropic", "主用协议要真进引擎");
+        let fb = cfg
+            .llm_fallback
+            .expect("配了 ai_fallback.* 就该启用备用 LLM");
+        assert_eq!(fb.base_url, "https://backup.example.com/v1", "尾斜杠要清理");
+        assert_eq!(fb.api_key, "sk-backup");
+        assert_eq!(fb.model, "claude-sonnet-4");
+        assert_eq!(fb.api_format, "anthropic", "备用协议与主用互相独立");
+        // 未配的生成参数继承引擎默认（不是空值）
+        assert_eq!(
+            fb.max_tokens,
+            engine::config::AppConfig::default().llm.max_tokens
+        );
+        let _ = std::fs::remove_dir_all(&dir_set);
+    }
+
+    /// 备用 LLM 是**增量**开关：只要填了端点/密钥/模型里的任一个就启用；
+    /// 全空（表单留白）必须保持 None，否则"没配"和"配了个空端点"分不开。
+    #[test]
+    fn fallback_llm_is_enabled_by_any_single_field() {
+        let mut cfg = engine::config::AppConfig::default();
+        apply_ai_fallback_keys(&mut cfg, None, None, None, None);
+        assert!(cfg.llm_fallback.is_none(), "全空 = 不切换");
+
+        let mut cfg = engine::config::AppConfig::default();
+        apply_ai_fallback_keys(&mut cfg, None, Some("sk-only"), None, None);
+        let fb = cfg.llm_fallback.expect("只配了密钥也算配了备用");
+        assert_eq!(fb.api_key, "sk-only");
+        assert_eq!(fb.api_format, "openai", "协议缺省回落 openai");
     }
 
     /// 数字 / 布尔键上的垃圾值一律回落默认，不硬失败。

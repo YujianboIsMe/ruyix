@@ -846,6 +846,7 @@ fn repair_in_worktree(
     );
     let (attempt, _tokens, _elapsed) = rt.block_on(repair::propose(
         &cfg.llm,
+        cfg.llm_fallback.as_ref(),
         &task,
         &package,
         1,

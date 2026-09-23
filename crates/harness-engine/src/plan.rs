@@ -302,6 +302,7 @@ pub fn build_user_prompt(task: &str, kb_block: Option<&str>) -> String {
 /// 调 DeepSeek 生成计划。`kb_block` 是知识库注入块（None = 没有知识库）。
 pub async fn generate(
     cfg: &LlmConfig,
+    fallback: Option<&LlmConfig>,
     task: &str,
     kb_block: Option<&str>,
 ) -> Result<(Plan, llm::Usage, String, u128), String> {
@@ -311,6 +312,7 @@ pub async fn generate(
     let user = build_user_prompt(task, kb_block);
     let out = llm::chat(
         cfg,
+        fallback,
         &[ChatMessage::system(PLAN_SYSTEM), ChatMessage::user(user)],
         true,
     )

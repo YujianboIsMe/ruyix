@@ -44,6 +44,23 @@ window.ConfigUI = (() => {
         // 取不到就退回文本框 —— 让用户手填，也不要给一份可能跑不通的清单。
         { key: "model", kind: "text", dynamic: "models" },
         { key: "alias", kind: "text" },
+        // 协议格式：二选一（OpenAI 兼容 / Anthropic Messages）。引擎按它建请求与解析响应。
+        { key: "api_format", kind: "select", options: ["openai", "anthropic"] },
+      ],
+    },
+    {
+      // 备用 LLM（故障切换）：主用不可用时（网络/5xx/429/超时）引擎自动切到它。
+      // 字段与 `ai` 段基本同构，两处**有意不同**：
+      //   ① 没有 `alias` —— 别名是宿主展示用的字段，而备用 LLM 在界面上没有展示位，
+      //      加上去就是个"配了没人读"的死字段（U39 门禁专门守这条）；
+      //   ② 模型不做 /models 下拉 —— 那份清单来自主用端点的 `/models`，对备用端点未必成立。
+      // `api_format` 允许与主用不同（异构切换：主用 OpenAI、备用 Anthropic）。
+      section: "ai_fallback",
+      fields: [
+        { key: "api_url", kind: "text" },
+        { key: "api_key", kind: "password" },
+        { key: "model", kind: "text" },
+        { key: "api_format", kind: "select", options: ["openai", "anthropic"] },
       ],
     },
     {

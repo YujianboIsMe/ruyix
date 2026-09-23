@@ -49,7 +49,7 @@ fn live_web_search_really_searches_and_the_queries_come_back() {
             "默认端点 api.deepseek.com 应判为 DeepSeek"
         );
 
-        let out = chat(&cfg, &the_question(), true).await.unwrap();
+        let out = chat(&cfg, None, &the_question(), true).await.unwrap();
         println!("联网查询词 = {:?}", out.web_queries);
         println!("答复       = {}", out.content);
         println!(
@@ -74,7 +74,7 @@ fn live_web_search_really_searches_and_the_queries_come_back() {
         // 对照组：关掉联网，同一个问题答不出来 —— 差别不显著就说明开关没真起作用
         let off = mk_cfg("off");
         assert!(!web_search_on(&off));
-        let out2 = chat(&off, &the_question(), true).await.unwrap();
+        let out2 = chat(&off, None, &the_question(), true).await.unwrap();
         println!("关联网答复 = {}", out2.content);
         assert!(out2.web_queries.is_empty());
         assert!(!out2.content.contains("3911"), "关了联网不该也有真值");

@@ -256,6 +256,31 @@ Used by: `openFile`, `handleNewCommand`, `handleDeleteCommand`, `handleRenameCom
 - Project context: When project is open, project root path is prepended to user message
 - All AI config read from `ruyix.code.ai.*` keys (runtime → project → global fallback)
 
+## LLM Call Layer (`crates/harness-engine/src/llm.rs`)
+
+The **agent** LLM calls live here (`ai.rs` above is a separate, independent Lua/command-translation
+client — do not conflate the two). `llm::chat(cfg, fallback, messages, json_mode)` picks one of
+three protocols via `request_plan`:
+
+| `api_format` | Endpoint | Auth | Notes |
+|---|---|---|---|
+| `openai` + `web_search` on | `/responses` | `Authorization: Bearer` | server-side web search (DeepSeek only) |
+| `openai` (default) | `/chat/completions` | `Authorization: Bearer` | supports `response_format` |
+| `anthropic` | `/v1/messages` | `x-api-key` + `anthropic-version: 2023-06-01` | `system` goes to a top-level field; **no** `response_format`; **no** web search |
+
+`request_plan` checks `anthropic` **first** — check it after `web_search_on` and anthropic requests
+get wrapped as `/responses`. All three protocols share one retry/error-classification path;
+only the URL, body, extractor and auth scheme differ.
+
+**Failover (v0.5)**: when `cfg.llm_fallback` is `Some`, a primary failure switches to it — but only
+for *availability* faults (`is_switchable_error`: network / 5xx / 429 / timeout / retries exhausted).
+Auth (401/403), quota (402) and rejected requests (400/422) are **never** switched — retrying will
+not help and the backup would likely fail the same way, hiding the real error. With a fallback
+configured, the primary runs in **resilient mode**: 2 attempts, per-request timeout capped at 30s
+(so a hung primary cannot burn the full 300s before switching). With no fallback the behaviour is
+byte-for-byte the old one (3 attempts, full timeout, same message). Switching is recorded as an
+`llm-failover` observation span.
+
 ## UI Components
 
 ### Welcome Page
@@ -292,7 +317,8 @@ Three scopes with prefix `ruyix.code`:
 | Runtime | `-r` | In-memory HashMap (not persisted) |
 
 Known config keys:
-- `ruyix.code.ai.api_key` / `api_url` / `model`
+- `ruyix.code.ai.api_key` / `api_url` / `model` / `api_format`（`openai` 默认 / `anthropic`）
+- `ruyix.code.ai_fallback.api_url` / `api_key` / `model` / `api_format`（v0.5 备用 LLM；配了才启用故障切换，全空 = 不切换）
 - `ruyix.code.ui.lang`
 - `ruyix.code.run.target<N>.cmd` / `target<N>.name`
 - `ruyix.code.harness.gate.narrow` / `gate.full` / `gate.max_full_attempts` / `gate.staged_timeout_secs`（v0.3 机械验证门禁）

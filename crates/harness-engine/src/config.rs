@@ -74,6 +74,17 @@ pub struct LlmConfig {
     /// 两个条件都满足才开。
     #[serde(default = "d_web_search")]
     pub web_search: String,
+    /// 接口协议格式：`openai`（默认，兼容 DeepSeek / OpenAI / 大多数网关）
+    /// 或 `anthropic`（Anthropic Messages 协议，`/v1/messages` + `x-api-key`）。
+    ///
+    /// 故障切换时主用与备用**各自带自己的格式** —— 允许"DeepSeek(OpenAI 格式) 挂了
+    /// 切到 Claude(anthropic 格式)"这种异构组合。`chat()` 据此分支建请求与解析响应。
+    #[serde(default = "d_api_format")]
+    pub api_format: String,
+}
+
+fn d_api_format() -> String {
+    "openai".to_string()
 }
 
 impl Default for LlmConfig {
@@ -86,6 +97,7 @@ impl Default for LlmConfig {
             max_tokens: d_max_tokens(),
             timeout_secs: d_llm_timeout(),
             web_search: d_web_search(),
+            api_format: d_api_format(),
         }
     }
 }
@@ -833,6 +845,13 @@ impl Default for ProcConfig {
 pub struct AppConfig {
     #[serde(default)]
     pub llm: LlmConfig,
+    /// 备用 LLM（故障切换网关）。`None` = 不配置备用，行为等同旧版（主用不可用时直接报错）。
+    ///
+    /// 主用不可用时（网络 / 5xx / 429 / 超时，见 `llm::is_switchable_error`）`chat()` 自动
+    /// 切到它。主用是鉴权/配额/参数错误时不切换 —— 那些重试也没用。
+    /// 备用可以**是** anthropic 协议（异构切换），也可以和主用同协议。
+    #[serde(default)]
+    pub llm_fallback: Option<LlmConfig>,
     #[serde(default)]
     pub verify: VerifyConfig,
     /// 工具循环的质量门禁：机械验证（v0.3）
@@ -879,6 +898,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             llm: LlmConfig::default(),
+            llm_fallback: None,
             verify: VerifyConfig::default(),
             gate: GateConfig::default(),
             reflect: ReflectConfig::default(),
@@ -996,6 +1016,8 @@ const ENUM_KEYS: &[(&str, &[&str])] = &[
     ("sandbox.mode", &["require", "prefer", "off"]),
     // `auto` = 只对认这个参数的端点开（DeepSeek 官方），配了别的端点也不会被 422 打回。
     ("llm.web_search", &["off", "auto", "on"]),
+    // `api_format` 决定 `chat()` 走哪套协议：OpenAI 兼容 还是 Anthropic Messages。
+    ("llm.api_format", &["openai", "anthropic"]),
 ];
 
 /// 不进配置表单的键（**前缀匹配**：写 `entropy` 就盖住整段）。
@@ -1008,6 +1030,11 @@ const FORM_HIDDEN: &[&str] = &[
     "llm.base_url",
     "llm.api_key",
     "llm.model",
+    // `api_format` 在宿主 `ai` / `ai_fallback` 段以 select 呈现（D8：配置单源），
+    // 不在 harness 段重复出现，否则用户看到两份互相打架的协议开关。
+    "llm.api_format",
+    // 备用 LLM 整段由宿主 `ai_fallback` 段管（同 D8），harness 段不重复渲染。
+    "llm_fallback",
     // 沙箱引擎（docker / bubblewrap）是平台实现细节，不是用户旋钮；
     // `sandbox.image` 保留可见（换镜像是真需求）。
     "sandbox.engine",
@@ -1309,6 +1336,53 @@ mod tests {
         ] {
             assert_eq!(ui(p), Some(true), "{p} 应该出现在配置表单里");
         }
+    }
+
+    /// v0.5：`llm.api_format` 是**取值有穷**的协议开关。合法值声明在引擎 `ENUM_KEYS`
+    /// （宿主表单的下拉与桥的校验都从 `schema()` 读，全局只此一份 —— 前端不许自立一份）；
+    /// 同时它归宿主 `ai` / `ai_fallback` 段呈现，harness 表单必须藏掉，否则用户会看到
+    /// 两份互相打架的协议开关。
+    #[test]
+    fn api_format_is_a_declared_enum_hidden_from_the_harness_form() {
+        let specs = schema();
+        let f = specs
+            .iter()
+            .find(|s| s.path == "llm.api_format")
+            .expect("llm.api_format 必须在 schema 里");
+        assert_eq!(
+            f.options,
+            vec!["openai".to_string(), "anthropic".to_string()],
+            "协议可选值由引擎声明，别处不许自立一份"
+        );
+        assert!(
+            !f.ui,
+            "api_format 由宿主 ai / ai_fallback 段呈现，harness 表单不重复露出"
+        );
+        assert_eq!(f.default, "openai", "默认协议必须是 openai —— 旧行为不许变");
+    }
+
+    /// v0.5：备用 LLM（故障切换）是 `AppConfig` 上的 `Option<LlmConfig>`。默认 `None` 时
+    /// toml **整段省略**，于是它根本不出现在 `schema()` 里 —— 这既是"不配备用就等于没这个
+    /// 功能"的凭据，也顺带保证宿主表单不会渲染出一堆空白的备用字段。
+    ///
+    /// 这条一旦变红，说明有人把 `llm_fallback` 从 `Option` 改成了带默认值的必填段：
+    /// 那时它就会进 schema，`FORM_HIDDEN` 里那条 `llm_fallback` 前缀规则必须同时还在。
+    #[test]
+    fn the_fallback_llm_segment_never_leaks_into_the_harness_form() {
+        let leaked: Vec<_> = schema()
+            .into_iter()
+            .filter(|s| s.path.starts_with("llm_fallback"))
+            .map(|s| s.path)
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "默认 None 的备用 LLM 不该出现在 schema 里（漏了会白占表单）: {leaked:?}"
+        );
+        // 兜底：万一将来它进了 schema，隐藏表也要盖住整段
+        assert!(
+            is_hidden("llm_fallback.base_url"),
+            "FORM_HIDDEN 必须用前缀盖住 llm_fallback.*，否则备用段会漏进 harness 表单"
+        );
     }
 
     /// 值按**目标位置的类型**转换：数字串进数字键、真假词进布尔键、分隔符串进列表键。

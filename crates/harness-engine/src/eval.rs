@@ -579,7 +579,7 @@ async fn run_raw_arm(
         llm::ChatMessage::user(spec.task.clone()),
     ];
     // JSON 模式：系统提示要求"只输出一个 JSON 对象"，与 plan/generate 的调用方式一致
-    let out = llm::chat(&cfg.llm, &msgs, true).await?;
+    let out = llm::chat(&cfg.llm, cfg.llm_fallback.as_ref(), &msgs, true).await?;
     r.tokens_in = out.usage.prompt_tokens;
     r.tokens_out = out.usage.completion_tokens;
     let files = parse_raw_files(&out.content)?;

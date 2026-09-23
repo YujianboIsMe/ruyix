@@ -323,6 +323,7 @@ pub async fn run_all(
         );
         let res = llm::chat(
             llm_cfg,
+            app_cfg.llm_fallback.as_ref(),
             &[
                 ChatMessage::system(plan::GEN_SYSTEM),
                 ChatMessage::user(user),

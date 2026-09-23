@@ -373,6 +373,10 @@ pub fn known_models() -> &'static [(&'static str, ModelCaps)] {
 ///   否则就是换了协议却搜不了（flash 实测如此）；
 /// - `on`：强行开（自建兼容端点自己认这个参数时用，**不看能力表**）。
 pub fn web_search_on(cfg: &LlmConfig) -> bool {
+    // anthropic 协议不支持服务端联网检索（语义不成立），一律关。
+    if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
+        return false;
+    }
     match cfg.web_search.trim().to_ascii_lowercase().as_str() {
         "on" => true,
         "auto" => is_deepseek_endpoint(cfg) && model_caps(&cfg.model).web_search,
@@ -424,13 +428,164 @@ fn responses_parts(
     (url, body)
 }
 
-/// 一种协议的全部差异：端点、请求体、以及把响应解析成 [`RawReply`] 的函数。
+/// 鉴权方式：OpenAI 兼容用 `Bearer`；Anthropic 用 `x-api-key` + `anthropic-version`。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthScheme {
+    Bearer,
+    Anthropic,
+}
+
+/// 一种协议的全部差异：端点、请求体、把响应解析成 [`RawReply`] 的函数，以及鉴权方式。
 /// 抽成别名不只是为了可读性 —— 内联这个元组会被 clippy 判 `very_complex_type`。
 type Protocol = (
     String,
     serde_json::Value,
     fn(&str) -> Result<RawReply, String>,
+    AuthScheme,
 );
+
+// ---- Anthropic Messages 协议（`/v1/messages`） ----
+// 与 OpenAI 兼容协议的主要差异：鉴权用 `x-api-key` + `anthropic-version` 头；system 是
+// 顶层字段（不在 messages 里）；没有 `response_format`（JSON 靠提示词保证）；不支持服务端
+// 联网检索（见 `web_search_on` 对 anthropic 直接返回 false）。
+
+#[derive(Deserialize, Default)]
+struct AnthropicResp {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    content: Vec<AnthropicContent>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Deserialize, Default)]
+struct AnthropicContent {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize, Default)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
+fn anthropic_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/messages") {
+        base.to_string()
+    } else if base.ends_with("/v1") {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    }
+}
+
+fn anthropic_models_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    }
+}
+
+fn anthropic_parts(
+    cfg: &LlmConfig,
+    messages: &[ChatMessage],
+    _json_mode: bool,
+) -> (String, serde_json::Value) {
+    let url = anthropic_url(&cfg.base_url);
+    // 把 system 抽出来放顶层；其余按 user/assistant 入 messages。
+    // anthropic 的 messages 只接受这两种角色，出现 system 会被 400 打回。
+    let mut system_text = String::new();
+    let mut msgs: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        match m.role.as_str() {
+            "system" => {
+                if !system_text.is_empty() {
+                    system_text.push('\n');
+                }
+                system_text.push_str(&m.content);
+            }
+            "user" => msgs.push(serde_json::json!({ "role": "user", "content": m.content })),
+            "assistant" => {
+                msgs.push(serde_json::json!({ "role": "assistant", "content": m.content }))
+            }
+            other => msgs.push(serde_json::json!({ "role": other, "content": m.content })),
+        }
+    }
+    let mut body = serde_json::json!({
+        "model": cfg.model,
+        "messages": msgs,
+        "max_tokens": cfg.max_tokens,
+        "temperature": cfg.temperature,
+        "stream": false,
+    });
+    if !system_text.is_empty() {
+        body["system"] = serde_json::json!(system_text);
+    }
+    // 注意：anthropic 没有 response_format。JSON 模式靠提示词要求，这里不加任何字段，
+    // 否则会被 400 打回（`unknown field 'response_format'`）。
+    (url, body)
+}
+
+fn extract_anthropic(text: &str) -> Result<RawReply, String> {
+    let parsed: AnthropicResp = serde_json::from_str(text).map_err(|e| {
+        format!(
+            "解析 Anthropic 响应失败: {e}；原文片段: {}",
+            crate::exec::clip(text, 500)
+        )
+    })?;
+    let content = parsed
+        .content
+        .iter()
+        .filter(|c| c.kind == "text")
+        .map(|c| c.text.as_str())
+        .collect::<String>();
+    let finish_reason = match parsed.stop_reason.as_deref() {
+        Some("max_tokens") => Some("length".to_string()),
+        Some("end_turn") | Some("stop_sequence") => Some("stop".to_string()),
+        _ => None,
+    };
+    let usage = parsed
+        .usage
+        .map(|u| Usage {
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.input_tokens + u.output_tokens,
+        })
+        .unwrap_or_default();
+    Ok(RawReply {
+        content,
+        usage,
+        model: parsed.model,
+        finish_reason,
+        web_queries: Vec::new(),
+    })
+}
+
+/// 按 `api_format` 选择整套协议：anthropic → `/v1/messages`；否则按 `web_search_on`
+/// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判（它会跳过联网）。
+fn request_plan(cfg: &LlmConfig, messages: &[ChatMessage], json_mode: bool) -> Protocol {
+    if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
+        let (u, b) = anthropic_parts(cfg, messages, json_mode);
+        (u, b, extract_anthropic, AuthScheme::Anthropic)
+    } else if web_search_on(cfg) {
+        let (u, b) = responses_parts(cfg, messages, json_mode);
+        (u, b, extract_responses, AuthScheme::Bearer)
+    } else {
+        let (u, b) = chat_parts(cfg, messages, json_mode);
+        (u, b, extract_chat, AuthScheme::Bearer)
+    }
+}
 
 fn extract_chat(text: &str) -> Result<RawReply, String> {
     let parsed: ApiResp = serde_json::from_str(text).map_err(|e| {
@@ -509,13 +664,20 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
     })
 }
 
-/// 带重试的一次对话调用。
+/// 带重试的一次对话调用；失败时若配了**备用 LLM** 且错误属于"可用性故障"则自动切换。
 ///
-/// 走哪套协议由 `web_search_on` 决定：开了联网就走 `/responses`（服务端检索），
-/// 否则走原来的 `/chat/completions`。**两条路共用同一套重试与错误分类** ——
-/// 分叉只在请求体与解析函数上，不在重试语义上。
+/// 协议选择由 `request_plan` 决定（`api_format` → anthropic；否则 `web_search_on` →
+/// `/responses` 或 `/chat/completions`）。**三套协议共用同一套重试与错误分类** ——
+/// 分叉只在请求体 / 解析 / 鉴权上。
+///
+/// 故障切换语义（详见 `doc/需求-LLM网关与多协议-v0.5.md`）：
+/// - 无备用（`fallback = None`）：与旧版逐字节一致 —— 3 次重试、完整超时、同样的错误文案。
+/// - 有备用（弹性模式）：主用 2 次、单次超时封顶 `min(timeout_secs, 30s)`（避免主用僵尸
+///   挂死 300s 还不切）；主用失败且 `is_switchable_error` 为真才切备用；鉴权 / 配额 /
+///   参数错误不切（重试也没用），直接返回主用错误。
 pub async fn chat(
     cfg: &LlmConfig,
+    fallback: Option<&LlmConfig>,
     messages: &[ChatMessage],
     json_mode: bool,
 ) -> Result<ChatOutcome, String> {
@@ -525,38 +687,97 @@ pub async fn chat(
         );
     }
 
-    let (url, body, extract): Protocol = if web_search_on(cfg) {
-        let (u, b) = responses_parts(cfg, messages, json_mode);
-        (u, b, extract_responses)
+    let (out, last_err) = attempt_loop(cfg, messages, json_mode, fallback.is_some()).await;
+    if let Some(o) = out {
+        return Ok(o);
+    }
+
+    // 主用已失败。两条"不切"的先挡住 —— 都在 return 里把**主用的原始错误**原样抛出去，
+    // 不包装成"切换失败"，否则用户看到的是一句含糊的话，而不是"key 错了"。
+    if !is_switchable_error(&last_err) {
+        return Err(last_err);
+    }
+    let Some(fb) = fallback else {
+        return Err(last_err);
+    };
+    if fb.api_key.trim().is_empty() {
+        return Err(format!(
+            "主用 LLM 不可用（{last_err}），但备用 LLM 未配置 API Key，无法切换"
+        ));
+    }
+
+    let (fb_out, fb_err) = attempt_loop(fb, messages, json_mode, true).await;
+    match fb_out {
+        Some(o) => {
+            observe_failover(cfg, fb, messages);
+            Ok(o)
+        }
+        None => Err(format!(
+            "主用 LLM 不可用已切换备用，但备用也失败：{fb_err}\n（主用错误：{last_err}）"
+        )),
+    }
+}
+
+/// 对单个配置跑带重试的调用循环，返回 `(成功结果, 底层最后错误文案)`。
+///
+/// `resilient`：弹性模式（主用已配备用、或本就是备用）时收窄 —— 最多 2 次尝试、单次请求
+/// 超时封顶 30s。非弹性（无备用）时 3 次、完整超时，**文案与旧版完全一致**
+/// （"DeepSeek 调用失败（已重试 3 次）: ..."），保证旧行为不动。
+async fn attempt_loop(
+    cfg: &LlmConfig,
+    messages: &[ChatMessage],
+    json_mode: bool,
+    resilient: bool,
+) -> (Option<ChatOutcome>, String) {
+    let (url, body, extract, auth) = request_plan(cfg, messages, json_mode);
+    let max_attempts: u32 = if resilient { 2 } else { 3 };
+    // 弹性模式把单次请求超时封顶 30s：主用僵尸挂死时不会干等 timeout_secs 才切备用
+    let req_timeout = if resilient {
+        cfg.timeout_secs.min(30)
     } else {
-        let (u, b) = chat_parts(cfg, messages, json_mode);
-        (u, b, extract_chat)
+        cfg.timeout_secs
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(cfg.timeout_secs))
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(req_timeout))
         .build()
-        .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+    {
+        Ok(c) => c,
+        Err(e) => return (None, format!("构建 HTTP 客户端失败: {e}")),
+    };
 
     let started = Instant::now();
     let started_ms = crate::observe::current().map(|t| t.now()).unwrap_or(0);
     let mut last_err = String::new();
 
-    for attempt in 1..=3u32 {
-        let resp = client
+    for attempt in 1..=max_attempts {
+        let req = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await;
+            .json(&body);
+        let req = match auth {
+            AuthScheme::Anthropic => req
+                .header("x-api-key", cfg.api_key.trim())
+                .header("anthropic-version", "2023-06-01"),
+            AuthScheme::Bearer => {
+                req.header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+            }
+        };
+        let resp = req.send().await;
 
         match resp {
             Ok(r) => {
                 let status = r.status();
                 let text = r.text().await.unwrap_or_default();
                 if status.is_success() {
-                    let raw = extract(&text)?;
+                    let raw = match extract(&text) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            last_err = e;
+                            observe_llm_fail(cfg, messages, attempt, &last_err, started_ms);
+                            continue;
+                        }
+                    };
                     if raw.content.trim().is_empty() {
                         // 空内容多是模型波动或被 max_tokens 截断：按可重试错误走重试循环
                         last_err = if raw.finish_reason.as_deref() == Some("length") {
@@ -576,7 +797,7 @@ pub async fn chat(
                         };
                         // 记一次 LLM 调用：**这是"模型输出错了"唯一能复盘的地方**
                         observe_llm(cfg, messages, &out, attempt, "ok", None, started_ms);
-                        return Ok(out);
+                        return (Some(out), String::new());
                     }
                 } else {
                     let detail =
@@ -585,15 +806,21 @@ pub async fn chat(
                     if status.as_u16() == 401 || status.as_u16() == 403 {
                         let msg = format!("DeepSeek 鉴权失败(HTTP {status}): {detail}");
                         observe_llm_fail(cfg, messages, attempt, &msg, started_ms);
-                        return Err(msg);
+                        return (None, msg);
                     }
                     if status.as_u16() == 402 {
-                        return Err(format!("DeepSeek 账户余额/额度问题(HTTP 402): {detail}"));
+                        return (
+                            None,
+                            format!("DeepSeek 账户余额/额度问题(HTTP 402): {detail}"),
+                        );
                     }
                     // 400：请求格式错；422：请求体能解析但字段不合法（例如往
                     // /chat/completions 塞了 web_search 工具）—— 都是"重试也一样错"
                     if status.as_u16() == 400 || status.as_u16() == 422 {
-                        return Err(format!("DeepSeek 请求被拒绝(HTTP {status}): {detail}"));
+                        return (
+                            None,
+                            format!("DeepSeek 请求被拒绝(HTTP {status}): {detail}"),
+                        );
                     }
                     last_err = format!("HTTP {status}: {detail}");
                 }
@@ -603,13 +830,14 @@ pub async fn chat(
             }
         }
 
-        if attempt < 3 {
+        if attempt < max_attempts {
             // 用 tokio 的异步 sleep：在 tokio worker 上 std::thread::sleep 会霸占线程
             tokio::time::sleep(Duration::from_millis(800 * attempt as u64)).await;
         }
     }
 
-    Err(format!("DeepSeek 调用失败（已重试 3 次）: {last_err}"))
+    let wrapped = format!("DeepSeek 调用失败（已重试 {max_attempts} 次）: {last_err}");
+    (None, wrapped)
 }
 
 /// 哪些 `chat` 错误是"重试也不会好"的确定性失败（缺 Key / 鉴权 / 余额 / 参数被拒）。
@@ -625,6 +853,22 @@ pub fn is_fatal_error(e: &str) -> bool {
     ]
     .iter()
     .any(|m| e.contains(m))
+}
+
+/// 主用失败是否值得切备用：仅"可用性故障"，不含鉴权 / 配额 / 参数等确定性失败。
+///
+/// `is_fatal_error` 命中（未配置 / 鉴权 / 余额 / 额度 / 请求被拒绝 / 客户端构建失败）
+/// 一律不算 —— 那些重试也没用，且备用多半同样错。其余网络 / 5xx / 429 / 超时 / 重试耗尽
+/// 才切备用（详见 `doc/需求-LLM网关与多协议-v0.5.md`）。
+pub fn is_switchable_error(e: &str) -> bool {
+    if is_fatal_error(e) {
+        return false;
+    }
+    e.contains("网络错误")
+        || e.contains("HTTP 5")
+        || e.contains("HTTP 429")
+        || e.contains("超时")
+        || e.contains("重试")
 }
 
 fn api_error_message(text: &str) -> Option<String> {
@@ -703,22 +947,45 @@ fn observe_llm_fail(
     );
 }
 
+/// 记一次故障切换：主用不可用、已切到备用并成功拿到回复。
+fn observe_failover(primary: &LlmConfig, fb: &LlmConfig, messages: &[ChatMessage]) {
+    let a = crate::observe::attrs(&[
+        ("primary_model", primary.model.as_str()),
+        ("fallback_model", fb.model.as_str()),
+        ("fallback_endpoint", fb.base_url.as_str()),
+        ("messages", &messages.len().to_string()),
+    ]);
+    crate::observe::span_once("llm-failover", "switched-to-backup", "ok", 0, a);
+}
+
 /// 连通性 + 鉴权自检：拿模型列表，比"跑一个真实任务才发现 key 错"友好得多。
+///
+/// 协议感知：anthropic 走 `/v1/models` + `x-api-key` + `anthropic-version`；否则
+/// `/models` + Bearer。响应体都是 `data:[{id}]`，解析共用。
 pub async fn probe(cfg: &LlmConfig) -> Result<Vec<String>, String> {
     if cfg.api_key.trim().is_empty() {
-        return Err("尚未配置 DeepSeek API Key".into());
+        return Err("尚未配置 API Key".into());
     }
-    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    let (url, auth) = if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
+        (anthropic_models_url(&cfg.base_url), AuthScheme::Anthropic)
+    } else {
+        (
+            format!("{}/models", cfg.base_url.trim_end_matches('/')),
+            AuthScheme::Bearer,
+        )
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
-        .send()
-        .await
-        .map_err(|e| format!("网络错误: {e}"))?;
+    let req = client.get(&url).header("Content-Type", "application/json");
+    let req = match auth {
+        AuthScheme::Anthropic => req
+            .header("x-api-key", cfg.api_key.trim())
+            .header("anthropic-version", "2023-06-01"),
+        AuthScheme::Bearer => req.header("Authorization", format!("Bearer {}", cfg.api_key.trim())),
+    };
+    let resp = req.send().await.map_err(|e| format!("网络错误: {e}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -963,6 +1230,157 @@ mod tests {
             escape_raw_controls(spaced),
             spaced,
             "字符串外的空白是分隔符，不许动"
+        );
+    }
+
+    // ---- anthropic 协议（F2） ----
+
+    fn cfg_anthropic() -> LlmConfig {
+        LlmConfig {
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: "sk-ant-xxx".to_string(),
+            model: "claude-sonnet-4".to_string(),
+            api_format: "anthropic".to_string(),
+            ..LlmConfig::default()
+        }
+    }
+
+    #[test]
+    fn anthropic_url_normalizes_common_variants() {
+        assert_eq!(
+            anthropic_url("https://api.anthropic.com"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        // 用户可能直接粘完整 endpoint
+        assert_eq!(
+            anthropic_url("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        // 尾斜杠被清理
+        assert_eq!(
+            anthropic_url("https://example.com/anthropic/v1/"),
+            "https://example.com/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn anthropic_parts_extracts_system_and_excludes_it_from_messages() {
+        let cfg = cfg_anthropic();
+        let msgs = vec![
+            ChatMessage::system("你是严谨的助手"),
+            ChatMessage::user("最近的消息"),
+            ChatMessage::assistant("好的"),
+        ];
+        let (url, body) = anthropic_parts(&cfg, &msgs, true);
+        assert!(url.ends_with("/v1/messages"));
+        // system 提到顶层，且不在 messages 里（anthropic 的 messages 只认 user/assistant）
+        assert_eq!(body["system"], "你是严谨的助手");
+        assert!(body.get("messages").is_some());
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][1]["role"], "assistant");
+        // anthropic 没有 response_format，加了会被 400 打回
+        assert!(
+            body.get("response_format").is_none(),
+            "anthropic 不该带 response_format"
+        );
+        // 多段 system 用换行拼接
+        let multi = vec![
+            ChatMessage::system("第一段"),
+            ChatMessage::system("第二段"),
+            ChatMessage::user("问"),
+        ];
+        let (_, b2) = anthropic_parts(&cfg, &multi, true);
+        assert_eq!(b2["system"], "第一段\n第二段");
+    }
+
+    /// 语料取自 Anthropic Messages API 文档示例结构（content 为 [{type:text,...}]）。
+    #[test]
+    fn extract_anthropic_yields_text_usage_and_finish_reason() {
+        let raw = r#"{
+          "id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4",
+          "content":[{"type":"text","text":"{\"answer\":42}"},
+                     {"type":"tool_use","name":"x","input":{}}],
+          "stop_reason":"end_turn",
+          "usage":{"input_tokens":123,"output_tokens":45}
+        }"#;
+        let r = extract_anthropic(raw).unwrap();
+        // 只拼接 text 片段，tool_use 不进正文
+        assert_eq!(r.content, "{\"answer\":42}");
+        assert_eq!(r.usage.prompt_tokens, 123);
+        assert_eq!(r.usage.completion_tokens, 45);
+        assert_eq!(r.usage.total_tokens, 168);
+        assert_eq!(r.model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(r.finish_reason.as_deref(), Some("stop"));
+        assert!(r.web_queries.is_empty(), "anthropic 协议无服务端联网检索");
+    }
+
+    #[test]
+    fn anthropic_max_tokens_maps_to_length_finish_reason() {
+        let raw = r#"{"type":"message","stop_reason":"max_tokens",
+            "content":[{"type":"text","text":"半截"}],
+            "usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let r = extract_anthropic(raw).unwrap();
+        assert_eq!(r.finish_reason.as_deref(), Some("length"));
+        assert_eq!(r.content, "半截");
+    }
+
+    #[test]
+    fn web_search_is_off_for_anthropic_even_when_auto() {
+        let mut cfg = cfg_anthropic();
+        cfg.web_search = "auto".into();
+        assert!(!web_search_on(&cfg), "anthropic 协议不支持服务端联网检索");
+        // openai 格式 + auto 在 DeepSeek 端点上仍应开（回归旧行为）
+        let openai = cfg_at("https://api.deepseek.com", "auto");
+        assert!(web_search_on(&openai));
+    }
+
+    // ---- 故障切换（F1） ----
+
+    #[test]
+    fn is_switchable_error_only_matches_availability_failures() {
+        // 可用性故障 → 切备用
+        assert!(is_switchable_error("网络错误: error trying to connect"));
+        assert!(is_switchable_error(
+            "DeepSeek 调用失败（已重试 3 次）: HTTP 503: 服务不可用"
+        ));
+        assert!(is_switchable_error("HTTP 429: 限流"));
+        assert!(is_switchable_error("HTTP 500: internal"));
+        assert!(is_switchable_error("请求超时"));
+
+        // 确定性失败 → 不切（重试也没用，且备用多半同样错）
+        assert!(!is_switchable_error("尚未配置 DeepSeek API Key"));
+        assert!(!is_switchable_error(
+            "DeepSeek 鉴权失败(HTTP 401): 无效密钥"
+        ));
+        assert!(!is_switchable_error(
+            "DeepSeek 账户余额/额度问题(HTTP 402): 余额不足"
+        ));
+        assert!(!is_switchable_error(
+            "DeepSeek 请求被拒绝(HTTP 400): 参数错误"
+        ));
+        assert!(!is_switchable_error(
+            "DeepSeek 请求被拒绝(HTTP 422): 字段不合法"
+        ));
+        assert!(!is_switchable_error("构建 HTTP 客户端失败: ..."));
+    }
+
+    #[test]
+    fn chat_with_no_fallback_is_identical_to_old_behavior() {
+        // 无备用时签名多一个参数，但行为与旧版一致：缺 Key 立即报错
+        let cfg = LlmConfig::default();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let err = rt.block_on(chat(&cfg, None, &[ChatMessage::user("hi")], false));
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err().contains("尚未配置"),
+            "缺 Key 必须立即报错，不切备用"
         );
     }
 }

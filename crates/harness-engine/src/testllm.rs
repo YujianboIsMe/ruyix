@@ -138,6 +138,7 @@ mod tests {
         for (i, expect) in ["第一句", "第二句"].iter().enumerate() {
             let out = block_on(crate::llm::chat(
                 &cfg,
+                None,
                 &[crate::llm::ChatMessage::user("你好")],
                 true,
             ))

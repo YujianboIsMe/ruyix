@@ -3428,7 +3428,7 @@ pub async fn run_with_ask(
             continue;
         }
 
-        let reply = match llm::chat(&cfg.llm, &msgs, true).await {
+        let reply = match llm::chat(&cfg.llm, cfg.llm_fallback.as_ref(), &msgs, true).await {
             Ok(r) => {
                 llm_failures = 0;
                 r

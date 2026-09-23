@@ -419,7 +419,7 @@ pub async fn run(
             };
         }
         sink.log("info", format!("[reflect] 第 {step} 轮复核"));
-        let reply = match llm::chat(&llm_cfg, &msgs, true).await {
+        let reply = match llm::chat(&llm_cfg, cfg.llm_fallback.as_ref(), &msgs, true).await {
             Ok(r) => r,
             Err(e) => {
                 return ReflectOutcome {

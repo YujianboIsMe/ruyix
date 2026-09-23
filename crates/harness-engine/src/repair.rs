@@ -419,6 +419,7 @@ pub(crate) fn list_dir(dir: &Path, rel: &str, depth: usize, count: &mut usize, o
 #[allow(clippy::too_many_arguments)]
 pub async fn propose(
     llm_cfg: &LlmConfig,
+    fallback: Option<&LlmConfig>,
     task: &str,
     package: &str,
     attempt: u32,
@@ -438,6 +439,7 @@ pub async fn propose(
     );
     let out = llm::chat(
         llm_cfg,
+        fallback,
         &[ChatMessage::system(REPAIR_SYSTEM), ChatMessage::user(user)],
         true,
     )
