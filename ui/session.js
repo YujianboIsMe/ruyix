@@ -503,6 +503,102 @@
     return "reviewed";
   }
 
+  // ============================================
+  // 执行轨迹（v0.0.5）：agent 在跑什么，一行一条
+  //
+  // 为什么要有它：引擎一直在发 `agent://log`（每次工具调用一条 `第 N 轮 <tool> ✓ <摘要>`）
+  // 与 `agent://stage`（阶段通告），原先的监听**只改 `ph.text` 且不重渲染** ——
+  // 运行中的气泡于是永远停在初始的 "…"，用户完全看不到 agent 在干什么。
+  // 现在统一进这份轨迹：一次思考 / 一次调用 / 一条告警各占一行，一行显示不全用省略号收尾
+  // （`title` 里给全文），并跟着助手消息落盘（`SessionMsg.trace`，否则重开就丢）。
+  // ============================================
+
+  /** 轨迹行的 kind → 图标。未知 kind 一律按 think 画（不假装认得）。 */
+  const TRACE_ICON = { think: "💭", do: "⚙", fail: "⚠", done: "✅" };
+  /** 气泡里最多画几行（更早的折起来 —— 一轮 run 有几十条时，气泡不能被日志撑爆） */
+  const TRACE_SHOW = 24;
+  /** 最多存几行（落盘体积闸；超出丢最老的） */
+  const TRACE_KEEP = 200;
+
+  /** 一条轨迹 → 一行（换行会破坏"一行一条"，所以在这里先压平）。
+   *  `kind` 只认清单里的四个（`hasOwnProperty`，**不走原型链**）：它会被持久化、
+   *  从盘上的会话文件读回来，所以是**输入不是常量** —— 实测 `TRACE_ICON[t.kind]` 这种
+   *  真值判断会被 `kind: "constructor"` 命中，图标格里漏出 `function Object() { [native code] }`，
+   *  class 也拼成 `session-trace-row--constructor`。 */
+  function traceRowHtml(t) {
+    const kind = Object.prototype.hasOwnProperty.call(TRACE_ICON, t.kind) ? t.kind : "think";
+    const text = String(t.text ?? "").replace(/\s+/g, " ").trim();
+    return `<div class="session-trace-row session-trace-row--${kind}">` +
+      `<span class="session-trace-tag">${TRACE_ICON[kind]}</span>` +
+      `<span class="session-trace-text" title="${esc(text)}">${esc(text)}</span></div>`;
+  }
+
+  /**
+   * 轨迹小节。`live` = 这条消息正在跑（此时即便还没有一条事件也占位，
+   * 否则首个事件到达时连落点都没有）。
+   */
+  function traceHtml(m, live) {
+    const rows = m.trace ?? [];
+    if (!rows.length && !live) return "";
+    const shown = rows.slice(-TRACE_SHOW);
+    const folded = rows.length - shown.length;
+    // "未显示"而不是"已收起"：超出 TRACE_KEEP 的是**真丢了**，说成"收起"就成了谎
+    const more = folded > 0
+      ? `<div class="session-trace-more">${L(`… 更早 ${folded} 条未显示`, `… ${folded} earlier lines not shown`)}</div>`
+      : "";
+    const body = shown.length
+      ? shown.map(traceRowHtml).join("")
+      : `<div class="session-trace-row session-trace-row--think">` +
+        `<span class="session-trace-tag">${TRACE_ICON.think}</span>` +
+        `<span class="session-trace-text">${L("正在准备…", "Preparing…")}</span></div>`;
+    return `<div class="session-trace" data-trace-live="${live ? "1" : "0"}">` +
+      `<div class="session-trace-head">${L("思考 · 执行", "Thinking · Steps")}</div>` +
+      more + body + `</div>`;
+  }
+
+  /**
+   * 引擎日志 → 轨迹的一行。分类只按**日志自己说的事**，不猜：
+   *   收尾（"完成，共 N 轮"）→ done；warn/error 或 ✗ → fail；✓ → do（一次调用）；
+   *   其余（阶段判定 / 检索 / 折叠 / 提问）→ think。
+   */
+  function traceFromLog(level, msg) {
+    const text = String(msg ?? "").replace(/^\[agent\]\s*/, "").replace(/\s+/g, " ").trim();
+    if (!text) return null;
+    if (/完成，共 \d+ 轮/.test(text)) return { kind: "done", text };
+    if (level === "warn" || level === "error" || text.includes("✗")) return { kind: "fail", text };
+    if (text.includes("✓")) return { kind: "do", text };
+    return { kind: "think", text };
+  }
+
+  /** 进行中 run 的消息容器（runWrap 优先，tab 查回来兜底 —— 事件可能晚于切 tab） */
+  function runMsgsEl() {
+    const wrap = runWrap ?? (state?.tabs ?? [])
+      .find((t) => t._isSession && t._session === runSession)?._sessionEl;
+    return wrap?.querySelector("[data-msgs]") ?? null;
+  }
+
+  /**
+   * 进行中气泡重渲染。事件只改消息对象上的数据，DOM 一律走这条（与 fillMsgs
+   * 同一套渲染函数，避免两处 HTML 长歪），并滚到底 —— 新的一行要在视野里。
+   */
+  function rerenderRun() {
+    const el = runMsgsEl();
+    if (!runSession || !el) return;
+    el.innerHTML = runSession.messages.map(msgHtml).join("");
+    el.scrollTop = el.scrollHeight;
+  }
+
+  /** 事件 → 轨迹追加一行（一行一条，超出 TRACE_KEEP 丢最老的） */
+  function pushTrace(kind, text) {
+    const ph = runningPlaceholder;
+    const line = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (!ph || !line) return;
+    const list = ph.trace ?? (ph.trace = []);
+    list.push({ kind, text: line });
+    if (list.length > TRACE_KEEP) list.splice(0, list.length - TRACE_KEEP);
+    rerenderRun();
+  }
+
   // Agent 输出是 markdown：markdown-it 渲染（vendor 自 ui/markdown-it.min.js，
   // html:false —— 产物里的原生 HTML 一律转义，与 esc 同一安全底线）
   const md = window.markdownit
@@ -520,6 +616,7 @@
       return `<div class="session-msg session-msg--system">${esc(m.text)}</div>`;
     }
     const mine = m.role === "user";
+    const live = !mine && m === runningPlaceholder;
     const meta = [];
     if (m.run_id) meta.push(`<a class="session-run-id" data-run="${esc(m.run_id)}">${esc(m.run_id)}</a>`);
     if (m.status) {
@@ -530,9 +627,11 @@
     const bubble = mine
       ? `<div class="session-bubble">${esc(m.text)}</div>`
       : `<div class="session-bubble session-bubble--md">${mdHtml(m.text)}</div>`;
-    return `<div class="session-msg ${mine ? "session-msg--user" : "session-msg--agent"}">` +
+    // 有轨迹的消息放宽一点宽度：轨迹是日志，路径/命令比对话正文长，78% 会一路省略号
+    const wide = !mine && (live || (m.trace ?? []).length) ? " session-msg--trace" : "";
+    return `<div class="session-msg ${mine ? "session-msg--user" : "session-msg--agent"}${wide}">` +
       bubble +
-      (mine ? "" : gateHtml(m) + askHtml(m)) +
+      (mine ? "" : gateHtml(m) + askHtml(m) + traceHtml(m, live)) +
       (meta.length ? `<div class="session-meta">${meta.join(" ")}</div>` : "") +
       `</div>`;
   }
@@ -910,8 +1009,8 @@
 
   /**
    * 验证/复核事件 → 进行中的助手气泡实时更新。
-   * runningPlaceholder 是正在进行的那条消息对象；事件只改它的数据，DOM 由这里重渲染
-   * （与 fillMsgs 同一套渲染函数，避免两处 HTML 长歪）。
+   * runningPlaceholder 是正在进行的那条消息对象；事件只改它的数据、**不碰 DOM**，
+   * 重渲染统一走 rerenderRun（与 fillMsgs 同一套渲染函数，避免两处 HTML 长歪）。
    */
   function appendGate(payload, kind) {
     const ph = runningPlaceholder;
@@ -924,11 +1023,7 @@
       ph.reflect.push(payload);
     }
     ph.status = gateStatus(ph);
-    const wrap = (state?.tabs ?? []).find((t) => t._isSession && t._session === runSession)?._sessionEl;
-    const el = wrap?.querySelector("[data-msgs]");
-    if (!el) return;
-    el.innerHTML = runSession.messages.map(msgHtml).join("");
-    el.scrollTop = el.scrollHeight;
+    rerenderRun();
   }
 
   async function sendMessage(s, wrap, text) {
@@ -950,7 +1045,12 @@
       return;
     }
     setBusy(true);
-    const placeholder = { role: "assistant", text: L("…", "…"), ts: nowHms(), run_id: null, status: null };
+    // 占位气泡的正文在 run 结束前保持这句话不动 —— 实时进展由下面的轨迹小节承载
+    // （原先把日志一行行写进 text 又不重渲染，于是永远停在 "…"）
+    const placeholder = {
+      role: "assistant", text: L("正在执行…", "Working…"),
+      ts: nowHms(), run_id: null, status: null,
+    };
     s.messages.push(placeholder);
     runningPlaceholder = placeholder;
     runSession = s;
@@ -1077,22 +1177,30 @@
 
   function attach() {
     $("session-new-btn")?.addEventListener("click", () => newSession());
-    // 引擎事件流 → 进行中的助手气泡实时显示阶段进度
+    // 引擎事件流 → 进行中的助手气泡的**执行轨迹**（一行一条；思考与调用交错但保持时序，
+    // 拆成两段会把"什么时候想到、什么时候做"的真实顺序打乱）
     try {
       const listen = window.__TAURI__?.event?.listen;
       if (listen) {
         listen("agent://stage", (ev) => {
           const p = ev.payload ?? {};
-          const ph = runningPlaceholder;
-          if (ph) ph.text = `${p.stage ?? ""} ${p.status ?? ""} ${p.detail ?? ""}`.trim() || ph.text;
+          const detail = String(p.detail ?? "").trim();
+          pushTrace("think", detail || [p.stage, p.status].filter(Boolean).join(" "));
         });
         listen("agent://log", (ev) => {
           const p = ev.payload ?? {};
-          if (p.level === "ok" && runningPlaceholder) runningPlaceholder.text = String(p.msg ?? "");
+          const line = traceFromLog(p.level, p.msg);
+          if (line) pushTrace(line.kind, line.text);
         });
         // 规划完成的瞬间 → 大纲区出现任务列表；随后 step 事件推进三态
         listen("agent://plan", (ev) => {
           if (runSession) setPlanSteps(runSession, ev.payload);
+          const steps = ev.payload?.steps ?? [];
+          if (steps.length) {
+            const names = steps.map((x) => x.title || "").join(" → ");
+            pushTrace("think", L(`列了 ${steps.length} 步计划：${names}`,
+              `planned ${steps.length} step(s): ${names}`));
+          }
         });
         listen("agent://step", (ev) => {
           if (runSession) applyStepEvent(runSession, ev.payload ?? {});

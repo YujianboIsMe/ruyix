@@ -146,6 +146,20 @@
  *                     判晚了 anthropic 请求会被当成 OpenAI 端点包成 `/responses`；
  *                     ④合法值声明在引擎 `ENUM_KEYS` 且 `FORM_HIDDEN` 藏掉它（单源在宿主 ai 段）；
  *                     ⑤新增文案中英 parity（缺英文键界面会直接显示键名）。
+ *   U41 session-trace  会话气泡要**看得见 agent 在干什么**（v0.0.5）：引擎一直在发
+ *                     `agent://log`（每次工具调用一条 `第 N 轮 <tool> ✓ <摘要>`）与 `agent://stage`，
+ *                     但原先的监听只改 `ph.text` 且不重渲染 —— 运行中的气泡于是永远停在 "…"。
+ *                     四环：①两个事件必须被**渲染**成"一行一条"的轨迹（不是只监听）；
+ *                     ②"一行显示不全用省略号"靠 `.session-trace-text` 的 nowrap+overflow+
+ *                     text-overflow 三条声明同时在场，缺一条就退化成折行或撑宽；③轨迹要跟着
+ *                     助手消息落盘（`SessionMsg.trace` 不声明就被 serde 抹掉，且必须有 default
+ *                     否则老会话读不回来）；④回放一遍真事件路径，断言渲染出来的行、kind 分类、
+ *                     落盘载荷里的 trace —— 顺带把"日志把气泡正文覆盖掉"那个老病钉死。
+ *   U42 session-trace-layout-real  轨迹的**真实几何**：Node 桩量不到"看起来是一行、
+ *                     显示不下用省略号收尾"（没有布局引擎），所以挂一张真浏览器探针
+ *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
+ *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
+ *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
  */
 
 "use strict";
@@ -1950,7 +1964,10 @@ async function runServiceChecks() {
     },
   };
 
-  const saved = ["window", "document", "state", "setInterval", "clearInterval", "I18N"]
+  // getTauriInvoke 必须一并还原：它是**全局约定**（`getInvoke()` 优先取它），
+  // 漏还原就等于给后面所有场景静默换掉 invoke 实现 —— 实测 U41 因此拿到别人桩的 null
+  const saved = ["window", "document", "state", "setInterval", "clearInterval", "I18N",
+    "getTauriInvoke"]
     .map((k) => [k, globalThis[k]]);
   Object.assign(globalThis, sandbox);
   try {
@@ -2213,6 +2230,32 @@ function runEditorLayoutProbe() {
 }
 
 /**
+ * U42 session-trace-layout-real：轨迹的**真实几何**（真浏览器）。
+ *
+ * U41 证明得了"代码里写了 nowrap/overflow/text-overflow"，证明不了"看起来是一行 + 省略号"
+ * —— 那是布局引擎的事。所以把真 index.html + styles.css + session.js 丢进无头 Edge，
+ * 跑起来再逐元素量（折行 / 溢出 / 横向滚动条 / 图标是否被挤到另一行）。
+ * 本机没 Edge/Chrome 时该脚本自行 SKIP。
+ */
+function runSessionTraceLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "session-trace-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U42 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|session-trace-layout|轨迹行)/.test(l))
+    .join(" ⏐ ");
+  check("U42", "session-trace-layout-real",
+    r.status === 0,
+    "轨迹几何探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
+/**
  * U30 proc-log-replay：输出面板回放 —— 真加载 ui/service.js + ui/proc-log.js，配上假 xterm
  * 与假后端，走一遍"服务表点输出 → 增量跟随 → 进程退出收尾"。
  *
@@ -2345,7 +2388,10 @@ async function runProcLogChecks() {
     },
   };
 
-  const saved = ["window", "document", "state", "setInterval", "clearInterval", "I18N"]
+  // getTauriInvoke 必须一并还原：它是**全局约定**（`getInvoke()` 优先取它），
+  // 漏还原就等于给后面所有场景静默换掉 invoke 实现 —— 实测 U41 因此拿到别人桩的 null
+  const saved = ["window", "document", "state", "setInterval", "clearInterval", "I18N",
+    "getTauriInvoke"]
     .map((k) => [k, globalThis[k]]);
   Object.assign(globalThis, sandbox);
   try {
@@ -2873,6 +2919,199 @@ async function runAnthropicFormatChecks() {
     `缺 i18n 键（中/英须同步）: ${lackI18n.join(", ")}`);
 }
 
+/**
+ * styles.css 里某个选择器的规则体（先剥注释 —— 注释里提一句 `.foo` 不该算数，
+ * 这条纪律是编辑器那边"用一句含类名的注释骗过门禁"抓出来的）。
+ */
+function cssRule(css, sel) {
+  const code = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const i = code.indexOf(sel + " {");
+  if (i < 0) return "";
+  const j = code.indexOf("}", i);
+  return j < 0 ? "" : code.slice(i + sel.length, j);
+}
+
+/**
+ * U41 session-trace：会话气泡的执行轨迹 —— 静态契约 + 真事件回放 + 落盘往返。
+ *
+ * 回放方式：微型 DOM stub + `window.__TAURI__` 桩（`event.listen` 收下回调、
+ * `core.invoke` 按命令给应答，`agent_reply` 故意**永不兑现** —— 那正是"跑着呢"这一帧），
+ * 真的走 `sendMessage` → 事件回调 → 渲染 → 落盘，而不是另抄一份渲染逻辑来断言。
+ */
+async function runSessionTraceChecks() {
+  // ---- 静态契约：三处缺一不可 ----
+  const sessJs = read("ui/session.js");
+  const css = read("ui/styles.css");
+  const sessRs = read("src-tauri/src/agent/sessions.rs");
+
+  check("U41", "trace-render",
+    sessJs.includes("function traceRowHtml") && sessJs.includes("function traceHtml") &&
+      sessJs.includes("function pushTrace"),
+    "session.js 缺执行轨迹的渲染/追加函数（事件被监听却没人画 = 气泡继续停在「…」）");
+
+  const rule = cssRule(css, ".session-trace-text");
+  check("U41", "trace-ellipsis",
+    rule.includes("white-space: nowrap") && rule.includes("overflow: hidden") &&
+      rule.includes("text-overflow: ellipsis"),
+    "`.session-trace-text` 少了 nowrap/overflow/text-overflow 之一：" +
+      "「一行显示不全就用省略号」会退化成折行或把气泡撑宽");
+
+  check("U41", "trace-persist",
+    /pub trace: Vec<TraceSnap>/.test(sessRs) && /pub struct TraceSnap\b/.test(sessRs),
+    "sessions.rs 未声明 SessionMsg.trace / TraceSnap —— 结构体不声明，落盘往返就把它抹掉");
+  check("U41", "trace-persist",
+    /#\[serde\(default, skip_serializing_if = "Vec::is_empty"\)\]\s*\n\s*pub trace: Vec<TraceSnap>/
+      .test(sessRs),
+    "trace 字段缺 default（老会话读不回来）或缺 skip_serializing_if（每个旧文件都被改写一遍）");
+
+  // ---- 真事件回放 ----
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+  const handlers = new Map();   // agent://* → 回调
+  const calls = [];             // {cmd, args}
+  let finishReply = null;       // 兑现 agent_reply = 这一轮跑完
+  const core = {
+    invoke(cmd, args) {
+      calls.push({ cmd, args });
+      if (cmd === "agent_reply") {
+        return new Promise((res) => { finishReply = res; }); // 挂着 = 还在跑
+      }
+      if (cmd === "agent_session_new") {
+        return Promise.resolve({
+          id: "sess_trace", title: "", created_at: "t", updated_at: "t", messages: [],
+        });
+      }
+      if (cmd === "agent_session_list") return Promise.resolve([]);
+      if (cmd === "agent_env_probe") return Promise.resolve(null);
+      return Promise.resolve({});
+    },
+  };
+  const sandbox = {
+    window: { SessionUI: null, state: { tabs: [], currentProject: null } },
+    document: {
+      getElementById: el,
+      createElement: (tag) => makeEl("<" + tag + ">"),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    },
+    state: { tabs: [], currentProject: { path: "C:/probe" } },
+    // 真机链路是 getInvoke() → getTauriInvoke()（main.js）→ window.__TAURI__.core.invoke
+    // —— 按同一条链铺桩，免得测的是"另一条路"（而且不还回去就会污染后面的场景）
+    getTauriInvoke: () => core.invoke.bind(core),
+    renderTabs() {}, switchTab() {}, closeTab() {}, setStatus() {},
+    setTimeout(fn) { fn(); return 0; },
+    clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
+  };
+  sandbox.window.state = sandbox.state;
+  sandbox.window.__TAURI__ = {
+    event: {
+      listen(name, cb) { handlers.set(name, cb); return Promise.resolve(() => {}); },
+    },
+    core,
+  };
+
+  const saved = ["window", "document", "setTimeout", "clearTimeout", "setInterval",
+    "clearInterval", "state", "getTauriInvoke", "renderTabs", "switchTab", "closeTab",
+    "setStatus"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(sessJs)();
+    const SessionUI = sandbox.window.SessionUI;
+    SessionUI.attach();
+    const s = await SessionUI.newSession(false);
+    const wrap = SessionUI.ensureChatEl(sandbox.state.tabs[0]);
+    // 发送后**不 await**：agent_reply 先挂着，这一帧就是"跑着呢"
+    const running = SessionUI.sendMessage(s, wrap, "把会话气泡变成看得见的执行轨迹");
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    const ph = s.messages[s.messages.length - 1];
+    check("U41", "trace-live-frame",
+      ph && ph.role === "assistant" && ph.text === "正在执行…" && handlers.has("agent://log"),
+      `占位气泡/监听未就位（role=${ph?.role} text=${JSON.stringify(ph?.text)}）`);
+
+    const msgs = wrap.querySelector("[data-msgs]");
+    check("U41", "trace-slot",
+      msgs.innerHTML.includes("session-trace") && msgs.innerHTML.includes("正在准备"),
+      "跑起来的那一刻气泡里没有轨迹小节（用户又只能看见三个点）");
+
+    // 真事件：阶段 → 计划 → 一次成功调用（长行）→ 一次失败调用 → 收尾
+    const LONG = "ui/session.js（905-1145）" + "很长的补充说明".repeat(12);
+    const fire = (name, payload) => handlers.get(name)({ payload });
+    fire("agent://stage", { stage: "agent", status: "start", detail: "工具循环（最多 40 轮，写入策略：Confirm）" });
+    fire("agent://plan", { steps: [{ id: 1, title: "读现有渲染" }, { id: 2, title: "加轨迹" }] });
+    fire("agent://log", { level: "info", msg: "[agent] 第 1 轮 read ✓ " + LONG });
+    fire("agent://log", { level: "warn", msg: "[agent] 第 2 轮 write ✗ 锚点在文件里出现 2 次" });
+    fire("agent://log", { level: "ok", msg: "[agent] 完成，共 2 轮" });
+
+    const html = msgs.innerHTML;
+    check("U41", "trace-rows",
+      html.includes("session-trace-row--think") && html.includes("session-trace-row--do") &&
+        html.includes("session-trace-row--fail") && html.includes("session-trace-row--done"),
+      "四类轨迹行没都画出来（think/do/fail/done 各一种图标与配色）");
+    check("U41", "trace-log-prefix",
+      html.includes("第 1 轮 read ✓") && !html.includes("[agent] 第 1 轮"),
+      "工具行没剥掉 `[agent] ` 前缀（那是日志前缀，不是给用户看的内容）");
+    check("U41", "trace-long-title",
+      html.includes(`title="第 1 轮 read ✓ ${LONG}"`),
+      "长行的全文没进 title —— 省略号收尾后用户就再也看不到完整路径了");
+    check("U41", "trace-plan-line",
+      html.includes("列了 2 步计划：读现有渲染 → 加轨迹"),
+      "plan 事件没进轨迹（模型亲口说的计划是最像「思考」的一手事实）");
+
+    // 老病：日志把气泡正文覆盖掉。正文必须原样留着，过程只进轨迹。
+    check("U41", "trace-text-intact",
+      ph.text === "正在执行…" && !html.includes(`<div class="session-bubble session-bubble--md"><p>第 1 轮`),
+      "日志行把助手气泡的正文覆盖了（原先就是这条路径让气泡变成日志滚动条）");
+
+    const kinds = (ph.trace ?? []).map((t) => t.kind).join(",");
+    check("U41", "trace-kinds",
+      kinds === "think,think,do,fail,done",
+      `轨迹分类/时序不对（实际 ${kinds || "空"}）—— 期望 阶段、计划、调用、失败、收尾`);
+
+    // ---- 收尾：让 agent_reply 兑现，走完 finally（答复回填 + 落盘）----
+    finishReply({ answer: "改好了：气泡下面多了一块轨迹", verifications: [], reflections: [], asks: [] });
+    await running;
+    const after = msgs.innerHTML;
+    check("U41", "trace-after-run",
+      ph.text === "改好了：气泡下面多了一块轨迹" && after.includes("session-trace-row--do") &&
+        !after.includes('data-trace-live="1"'),
+      "跑完之后轨迹不该消失（只是从 live 变成静态块），正文要换成真答复");
+
+    const save = calls.filter((c) => c.cmd === "agent_session_save").pop();
+    let savedTrace = null;
+    try {
+      savedTrace = JSON.parse(save.args.sessionJson).messages.pop().trace;
+    } catch {
+      savedTrace = null;
+    }
+    check("U41", "trace-saved",
+      Array.isArray(savedTrace) && savedTrace.length === 5 && savedTrace[2].kind === "do",
+      "轨迹没进落盘载荷 —— 重开会话看不到这轮干了什么（这就是 U15d 那条纪律）");
+
+    // 越界 kind：`kind` 是**会被持久化、从盘上的会话文件读回来**的字符串（输入不是常量）。
+    // 用 `TRACE_ICON[t.kind]` 这种真值判断会顺着**原型链**命中 `constructor` 之类 ——
+    // 于是图标那一格被塞进函数源码、class 拼成 `session-trace-row--constructor`。
+    ph.trace.push({ kind: "constructor", text: "越界 kind 该按 think 画" });
+    SessionUI.openSession(s); // 复用已开 tab → fillMsgs 全量重渲染（不用再造一个事件）
+    check("U41", "trace-kind-whitelist",
+      !msgs.innerHTML.includes("native code") &&
+        msgs.innerHTML.includes("越界 kind 该按 think 画") &&
+        msgs.innerHTML.includes("session-trace-row--think"),
+      "白名单外的 kind 没被挡住：原型链上的名字（constructor 等）会被当成合法 kind，" +
+        "图标格里漏出函数源码、class 也拼成垃圾");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -2889,13 +3128,18 @@ async function main() {
     ["U38", "open-project-args", runOpenProjectArgsChecks],
     ["U39", "failover-config", runFailoverChecks],
     ["U40", "anthropic-format", runAnthropicFormatChecks],
+    ["U41", "session-trace", runSessionTraceChecks],
+    ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
   ];
   for (const [id, name, fn] of scenarios) {
     try {
       await fn();
     } catch (err) {
-      const line = err && err.stack ? err.stack.split("\n")[0] : String(err);
-      check(id, name, false, `场景崩溃: ${line}`);
+      // 只印第一行会藏掉出事的位置（场景一崩就得重跑一遍才能定位）→ 连调用点一起给
+      const where = err && err.stack
+        ? err.stack.split("\n").slice(1, 9).map((s) => s.trim()).join(" ⏐ ")
+        : "";
+      check(id, name, false, `场景崩溃: ${(err && err.message) || err}｜${where}`);
     }
   }
 

@@ -3145,6 +3145,74 @@ html, body {
   color: #569cd6;
 }
 
+/* 执行轨迹（v0.0.5）：agent 在跑什么 —— 一行一条，一行显示不全用省略号收尾。
+   它有轨迹时消息盒放宽到 94%：轨迹装的是路径 / 命令 / 报错原文，比对话正文长，
+   留在 78% 里会一路省略号（`session-msg--trace` 由 msgHtml 按有无轨迹挂上）。 */
+.session-msg--trace {
+  max-width: 94%;
+}
+
+.session-trace {
+  margin-top: 6px;
+  border-left: 2px solid var(--border-color);
+  padding: 4px 0 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 宽度恒取容器宽、不随内容缩：父级是 align-items:flex-start 的 flex 列，不 stretch
+     的话短句会缩成一条窄条（长短不齐）。长行不靠它兜 —— 实测摘掉 stretch 也不溢出，
+     兜住长行的是下面那条 max-width:100%（配合 .session-trace-text 的 overflow:hidden）。 */
+  align-self: stretch;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.session-trace-head {
+  opacity: 0.75;
+}
+
+.session-trace[data-trace-live="1"] .session-trace-head {
+  color: #569cd6;
+  opacity: 1;
+}
+
+.session-trace-more {
+  opacity: 0.6;
+}
+
+.session-trace-row {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.session-trace-tag {
+  flex: 0 0 auto;
+}
+
+/* 一行一条：nowrap 禁折行 → 溢出 → 省略号；全文在 title 里（hover 可见）。
+   三条缺一不可，且 `overflow: hidden` 在这里干两件事：除了裁掉溢出，它还把 flex 子项的
+   `min-width: auto` 解析成 0（规范如此）—— 所以这里**不需要**再写 min-width: 0。
+   实测（scripts/session-trace-layout.js）：摘掉 overflow 后长行既不溢出也不再省略，
+   消息区直接长出 10px 横向滚动条。 */
+.session-trace-text {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-trace-row--fail .session-trace-text {
+  color: #f48771;
+}
+
+.session-trace-row--done .session-trace-text {
+  color: #4ec9b0;
+}
+
 /* 产物写回面板（差异预览 + 勾选 + 确认写入） */
 .session-apply {
   margin-top: 6px;

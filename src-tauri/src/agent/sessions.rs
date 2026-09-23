@@ -59,6 +59,19 @@ pub struct AskSnap {
     pub ts: String,
 }
 
+/// agent 工具循环的**执行轨迹**一行（v0.0.5 UI）：一次思考 / 一次调用 / 一条告警。
+///
+/// 为什么跟着消息存：工具循环不落 RunRecord（`run_id` 恒空，理由见 [`SessionMsg::plan`]），
+/// 轨迹只活在内存里的话，重开会话又是"一条光秃秃的答复 + 不知道它干了什么"。
+/// `kind` 只影响图标与配色（think | do | fail | done），`text` 是一行原文 ——
+/// 行宽由前端用省略号收尾，所以这里**不做截断**：数据要留全文，显示才按窗口裁。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TraceSnap {
+    /// think（引擎/模型的判定）| do（一次调用）| fail（告警/失败）| done（收尾）
+    pub kind: String,
+    pub text: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionMsg {
     /// "user" | "assistant" | "system"
@@ -89,6 +102,9 @@ pub struct SessionMsg {
     /// 本轮的提问（v0.8：需求歧义问了什么、用户怎么答的）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ask: Vec<AskSnap>,
+    /// 本轮的执行轨迹（v0.0.5 UI：跑的时候实时刷、跑完跟着消息存档）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<TraceSnap>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -226,6 +242,7 @@ mod tests {
                     verify: vec![],
                     reflect: vec![],
                     ask: vec![],
+                    trace: vec![],
                 })
                 .collect(),
         }
@@ -252,6 +269,7 @@ mod tests {
             verify: vec![],
             reflect: vec![],
             ask: vec![],
+            trace: vec![],
         });
         save(&s, &root).unwrap();
 
@@ -336,6 +354,7 @@ mod tests {
                     verify: vec![],
                     reflect: vec![],
                     ask: vec![],
+                    trace: vec![],
                 },
                 SessionMsg {
                     role: "assistant".into(),
@@ -347,6 +366,7 @@ mod tests {
                     verify: vec![],
                     reflect: vec![],
                     ask: vec![],
+                    trace: vec![],
                 },
             ],
         };
@@ -458,6 +478,20 @@ mod tests {
                     state: "answered".into(),
                     ts: "t4".into(),
                 }],
+                trace: vec![
+                    TraceSnap {
+                        kind: "think".into(),
+                        text: "工具循环（最多 40 轮，写入策略：Confirm）".into(),
+                    },
+                    TraceSnap {
+                        kind: "do".into(),
+                        text: "第 1 轮 read ✓ ui/session.js（905-1145）".into(),
+                    },
+                    TraceSnap {
+                        kind: "fail".into(),
+                        text: "第 2 轮 write ✗ 锚点在文件里出现 2 次".into(),
+                    },
+                ],
             }],
         };
         save(&s, &root).unwrap();
@@ -485,6 +519,13 @@ mod tests {
         assert_eq!(m.ask[0].state, "answered");
         assert_eq!(m.ask[0].answer.as_deref(), Some("用户另一台电脑"));
         assert_eq!(m.ask[0].options.len(), 2, "选项要留着（UI 要能复现问题卡）");
+        // v0.0.5：执行轨迹同一条纪律 —— 结构体不声明就被 serde 抹掉，
+        // 重开会话看到的就只剩一条答复，用户想看"它当时在干什么"再也回不来
+        assert_eq!(m.trace.len(), 3, "执行轨迹丢了");
+        assert_eq!(m.trace[0].kind, "think");
+        assert_eq!(m.trace[1].kind, "do");
+        assert_eq!(m.trace[1].text, "第 1 轮 read ✓ ui/session.js（905-1145）");
+        assert_eq!(m.trace[2].kind, "fail");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -498,6 +539,7 @@ mod tests {
         assert!(msg.run_id.is_none());
         assert!(msg.verify.is_empty());
         assert!(msg.reflect.is_empty());
+        assert!(msg.trace.is_empty(), "老消息的轨迹该是空的，不是解析失败");
         // 老会话序列化回去不许凭空长出字段（否则每个旧文件都被改写一遍）
         let back = serde_json::to_string(&msg).unwrap();
         assert!(!back.contains("plan"), "空计划不该写进 JSON: {back}");
