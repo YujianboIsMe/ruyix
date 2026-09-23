@@ -104,6 +104,34 @@ cargo clippy             # Lint
 cargo fmt                # Format
 ```
 
+### 详细调试日志（`--debug`）
+
+排查"模型这一轮为什么跑偏"（典型症状：`第 N 轮输出无法解析：未知能力 ""`）要看**模型的原始
+返回**和**完整提示词**，常规日志只有一行摘要 —— 于是加了这个启动开关：
+
+```bash
+ruyix.exe --debug                     # 绿色版
+cargo run -p ruyix -- --debug         # 开发（工作区有两个 member，必须带 -p）
+# 别名：-d / -v / --verbose
+```
+
+- 落盘位置**固定且可写死进文档**：`~/.ruyix/code/debug.log`（追加；每次启动写一段会话头）。
+  **必须落盘而不是只打 stdout**：正式版是 Windows GUI 子系统（`main.rs` 首行
+  `cfg_attr(not(debug_assertions), windows_subsystem = "windows")`），**没有控制台**，
+  `println!` 的输出会被丢掉。
+- 每次 LLM 调用记三段，缺一不可：
+  1. **请求** —— 端点 / 鉴权方式 / `json_mode` / 请求体 JSON（含工具声明、`response_format`）
+     / 模型实际看到的消息；
+  2. **原始响应体** —— **解析前**就落盘。顺序不能反：解析失败时这段原文本是唯一证据；
+  3. **解析结果** —— `finish_reason` 带注解（`length` = 被 `max_tokens` 截断，**不是**格式问题，
+     两种病的纠偏方向相反）。
+- 常规运行日志行（`[info] [agent] 第 N 轮 …`）**同时**进这个文件 —— 排查时要的就是把它和
+  原始返回放在同一个文件里对着看。
+- 实现：引擎 `crates/harness-engine/src/debug.rs`（全局开关 + 落盘 + **写入层脱敏**，复用
+  `observe::redact`）；埋点在 `llm.rs::attempt_loop` 与 `pipeline.rs::log_observing`。
+- **关闭时是纯 no-op**：默认关，常规运行的输出、行为、开销一字不变。
+- 单条上限 `DEBUG_CAP`（20 万字符），超限**留痕**而不是静默截断。
+
 ## Key Constraints
 
 - Rust edition **2024** — requires Rust 1.85+

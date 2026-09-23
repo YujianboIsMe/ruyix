@@ -27,9 +27,16 @@ use crate::{exec, generate, kb, lint, observe, plan, repair, verify, workspace};
 // ============================================
 
 /// 观测日志（trace/logs.jsonl）+ stdout。GUI 的 Sink 会在它之外再补一个 emit。
+///
+/// `--debug` 打开时，这一行**同时**进详细日志文件（[`crate::debug`]）—— 正式版是
+/// Windows GUI 子系统、没有控制台，`println!` 的输出会被丢掉；而排查"模型这一轮为什么
+/// 跑偏"恰恰要把这几行轮次日志和模型的**原始返回**放在同一个文件里对着看。
+/// 这里只落盘、不再打印（stdout 由下面那行负责），避免 dev 下同一行出现两遍。
 pub fn log_observing(level: &str, msg: &str) {
     observe::log(level, "", msg);
-    println!("[{level}] {msg}");
+    let line = format!("[{level}] {msg}");
+    crate::debug::mirror(&line);
+    println!("{line}");
 }
 
 /// 阶段边界：开/关一个 span，并按状态打一行日志。

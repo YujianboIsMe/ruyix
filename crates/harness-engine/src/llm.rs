@@ -156,7 +156,60 @@ struct MsgBody {
 /// 这不是把解析放松成猜：合法 JSON 的字符串里不可能出现裸控制字符，所以这个转换只可能把
 /// 「不合法」修成「模型想说的」，动不了任何已经合法的输入。
 pub fn extract_json_object(raw: &str) -> String {
-    escape_raw_controls(&extract_json_object_inner(raw))
+    let (cleaned, _) = strip_model_markup(raw);
+    escape_raw_controls(&extract_json_object_inner(&cleaned))
+}
+
+/// 剥掉**模型自带协议**的标记（DSML = DeepSeek Markup Language 这类原生工具调用语法）。
+///
+/// 本引擎的协议是"动作写在 content 的 JSON 里"，**从不发 `tools`**。但被原生工具调用语法
+/// 训练过的模型会时不时改用**它自己那一套**：参数写对了（比如 `{"cmd": "…"}`），外面却裹着
+/// 它的尖括号标记 —— 服务端没收到 `tools`，就不会把它解析进 `tool_calls`，整段原样落进
+/// content。实测（2026-09-21，第 5 轮）：content 是那行命令 JSON + 三行闭合标记，
+/// 模型其实已经算出了正确命令，却因为标记挂在 JSON 后面被当成"输出无法解析"，白烧一轮。
+///
+/// 判定只有一条：**尖括号里成对竖线出现两处**的，都是模型自带标记。竖线有全角
+/// （`｜`，U+FF5C，DeepSeek 模板原样）与半角（`|`，有的网关会换）两种，都认。
+/// 两处的形状是实测出来的：DSML 的标签是"竖线对 + `DSML` + 竖线对 + 标签名（可带属性）"，
+/// 模板自带的句首/句尾标记是"竖线对 + 少量文字 + 竖线对"。
+/// 要求**两处**而不是一处，是不误伤的根据 —— JSON 里的竖线是单根管道
+/// （`netstat -ano | findstr 8083` 这种命令），构不成"尖括号里两对竖线"。
+///
+/// 分两条正则，是因为两种标签的**可信度不同**：
+/// ① 带 `DSML` 字样的：连属性里的引号一起放行（`name="execute"` 就在标签里），
+///    有那个字样的几乎不可能是别的东西；
+/// ② 模板自带的短标记：不许出现引号，长度也卡死 —— 引号是 JSON 字符串的常见内容，
+///    不卡它会拿"字符串值里恰好长成那样的一小段"去剪，那是在改模型的正文。
+///
+/// 返回 `(清理后的文本, 剥掉了几处)`：计数给错误文本用（见 `agent::markup_note`）——
+/// **只剥不说是治不好的**，标记被静默剪掉后模型看到的只是"无法解析"，它会原样重发。
+pub fn strip_model_markup(raw: &str) -> (String, usize) {
+    let mut text = raw.to_string();
+    let mut n = 0usize;
+    for re in markup_regexes() {
+        let hits = re.find_iter(&text).count();
+        if hits == 0 {
+            continue;
+        }
+        n += hits;
+        text = re.replace_all(&text, "").into_owned();
+    }
+    (text, n)
+}
+
+/// 剥标记用的两条常量正则（编译一次，进程内复用）。
+fn markup_regexes() -> &'static [regex::Regex; 2] {
+    static RE: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        [
+            // ① 带 DSML 字样的标签：`<` / `</` 之后就是竖线对，然后是 DSML、再一对竖线，后面到 `>` 为止
+            regex::Regex::new("(?i)</?[|｜]{2}\\s*DSML[|｜]{2}[^>]{0,80}>")
+                .expect("DSML 标签正则写错了（常量正则，构建期就该发现）"),
+            // ② 模板自带的短标记：形状同上，但**不许有引号/换行**，长度也卡死
+            regex::Regex::new("</?[|｜]{2}[^>\"\\n]{0,32}[|｜]{2}[^>\"\\n]{0,32}>")
+                .expect("模板标记正则写错了（常量正则，构建期就该发现）"),
+        ]
+    })
 }
 
 /// 把**字符串字面量内部**的裸控制字符转义掉（换行 / 回车 / 制表符，其余 < 0x20 走 `u00XX` 形式）。
@@ -730,6 +783,8 @@ async fn attempt_loop(
     resilient: bool,
 ) -> (Option<ChatOutcome>, String) {
     let (url, body, extract, auth) = request_plan(cfg, messages, json_mode);
+    // `--debug`：先记下这次请求的全貌（端点 / 协议 / 请求体 / 模型实际看到的消息）
+    dump_request(cfg, &url, auth, &body, messages, json_mode);
     let max_attempts: u32 = if resilient { 2 } else { 3 };
     // 弹性模式把单次请求超时封顶 30s：主用僵尸挂死时不会干等 timeout_secs 才切备用
     let req_timeout = if resilient {
@@ -769,16 +824,29 @@ async fn attempt_loop(
             Ok(r) => {
                 let status = r.status();
                 let text = r.text().await.unwrap_or_default();
+                // `--debug`：**原始响应体先落盘、再解析**。顺序不能反 —— 解析失败时
+                // 这段原文本就是唯一证据，而"解析失败"那条日志必须能往上翻到它。
+                crate::debug::note(&format!(
+                    "===== LLM 原始响应体 =====\nHTTP      : {status}\n字节      : {}\n{}",
+                    text.len(),
+                    text
+                ));
                 if status.is_success() {
                     let raw = match extract(&text) {
                         Ok(v) => v,
                         Err(e) => {
+                            crate::debug::note(&format!(
+                                "===== LLM 响应解析失败（第 {attempt} 次尝试，原始响应体见上）=====\n{e}"
+                            ));
                             last_err = e;
                             observe_llm_fail(cfg, messages, attempt, &last_err, started_ms);
                             continue;
                         }
                     };
                     if raw.content.trim().is_empty() {
+                        // 空内容这条最需要 `finish_reason`：`length` 是截断、其余是模型波动，
+                        // 处置方式不同 —— 所以这条分支也要记解析结果。
+                        dump_reply(cfg, &raw, attempt);
                         // 空内容多是模型波动或被 max_tokens 截断：按可重试错误走重试循环
                         last_err = if raw.finish_reason.as_deref() == Some("length") {
                             "模型返回了空内容（finish_reason=length，疑似被 max_tokens 截断，可在设置里调大）".to_string()
@@ -787,6 +855,8 @@ async fn attempt_loop(
                         };
                         observe_llm_fail(cfg, messages, attempt, &last_err, started_ms);
                     } else {
+                        // `--debug`：解析器**实际拿到**的结构化结果
+                        dump_reply(cfg, &raw, attempt);
                         let out = ChatOutcome {
                             content: raw.content,
                             usage: raw.usage,
@@ -877,6 +947,77 @@ fn api_error_message(text: &str) -> Option<String> {
         .get("message")?
         .as_str()
         .map(|s| s.to_string())
+}
+
+// ---------------------------------------------------------------- `--debug` 详细日志
+//
+// 与上面的 `observe_llm` 分工不同，不是重复：
+// - `observe` 写**给机器看**的 jsonl 摘要（头部 + 截断）——长期留档，写全量会把任务
+//   原文和代码灌进 trace；
+// - `debug` 写**给人看**的完整全貌（完整提示词 + 原始响应体 + 解析结果）——排查
+//   "这一轮为什么跑偏"时恰恰只有全量有用，所以默认关、按需 `--debug` 打开。
+//
+// 请求段与消息段分两次 `note`：拼成一段的话，超长提示词会先吃掉 `DEBUG_CAP` 的额度，
+// 把后面的消息与结果段顶掉。
+
+/// 记一次请求的全貌。仅 `--debug` 开启时有效。
+fn dump_request(
+    cfg: &LlmConfig,
+    url: &str,
+    auth: AuthScheme,
+    body: &serde_json::Value,
+    messages: &[ChatMessage],
+    json_mode: bool,
+) {
+    if !crate::debug::enabled() {
+        return;
+    }
+    crate::debug::note(&format!(
+        "===== LLM 请求 =====\n端点        : {url}\n模型        : {}\n鉴权        : {}\njson_mode   : {json_mode}\ntemperature : {}   max_tokens: {}   超时: {}s\n消息数      : {}\n----- 请求体（实际发出去的 JSON，含工具声明 / response_format）-----\n{}",
+        cfg.model,
+        match auth {
+            AuthScheme::Anthropic => "anthropic（x-api-key + anthropic-version）",
+            AuthScheme::Bearer => "bearer（Authorization）",
+        },
+        cfg.temperature,
+        cfg.max_tokens,
+        cfg.timeout_secs,
+        messages.len(),
+        serde_json::to_string_pretty(body).unwrap_or_else(|e| format!("<请求体序列化失败：{e}>")),
+    ));
+
+    let mut s = String::from("----- 消息（模型实际看到的内容）-----");
+    for m in messages {
+        s.push_str(&format!("\n### [{}]\n{}\n", m.role, m.content));
+    }
+    crate::debug::note(&s);
+}
+
+/// 记解析后的结构化结果。仅 `--debug` 开启时有效。
+///
+/// `finish_reason` 摆在最显眼处并加了注解：它是**区分"格式烂"与"被 max_tokens 截断"
+/// 的唯一线索**，而这两种病的纠偏方向完全相反（改提示词 vs 调大预算）。
+fn dump_reply(cfg: &LlmConfig, raw: &RawReply, attempt: u32) {
+    if !crate::debug::enabled() {
+        return;
+    }
+    crate::debug::note(&format!(
+        "===== LLM 解析结果 =====\n第 {} 次尝试\nmodel        : {}\nfinish_reason: {:?}{}\ntokens       : prompt {} + completion {} = {}\nweb_queries  : {:?}\ncontent      : {} 字符\n----- content -----\n{}",
+        attempt,
+        raw.model.as_deref().unwrap_or(&cfg.model),
+        raw.finish_reason,
+        if raw.finish_reason.as_deref() == Some("length") {
+            "  ← 被 max_tokens 截断，输出没写完（不是格式问题）"
+        } else {
+            ""
+        },
+        raw.usage.prompt_tokens,
+        raw.usage.completion_tokens,
+        raw.usage.total_tokens,
+        raw.web_queries,
+        raw.content.chars().count(),
+        raw.content,
+    ));
 }
 
 /// 记一次成功的 LLM 调用。
@@ -1184,6 +1325,54 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&got).unwrap();
         assert_eq!(v["n"], 1);
         assert!(v["note"].as_str().unwrap().contains("含"));
+    }
+
+    /// 模型自带协议标记（DSML）必须**在抠 JSON 之前**被剥掉。
+    ///
+    /// 实测（2026-09-21 第 5 轮）：content 是「命令 JSON + 三行闭合标记」，标记挂在 JSON 后面
+    /// ——抠出来的字符串里混进标记，整轮被判"输出无法解析"，而模型其实已经算对了那条命令。
+    /// 竖线用 `\u{ff5c}`（全角，U+FF5C，DeepSeek 模板原样）转义写，源码里不留不可见字符。
+    #[test]
+    fn leaked_dsml_markup_is_stripped_before_extracting_json() {
+        let bar = "\u{ff5c}";
+        let leaked = [
+            r#"                      {"cmd": "if exist a\\node_modules (echo NM_EXISTS) & netstat -ano | findstr \"8083\""}"#,
+            &format!("</{0}{0}DSML{0}{0} parameter>", bar),
+            &format!("</{0}{0}DSML{0}{0} invoke>", bar),
+            &format!("</{0}{0}DSML{0}{0} calls>", bar),
+        ]
+        .join("\n");
+
+        let got = extract_json_object(&leaked);
+        let v: serde_json::Value = serde_json::from_str(&got).expect("剥掉标记后应当可解析");
+        assert!(
+            v["cmd"]
+                .as_str()
+                .unwrap()
+                .contains("netstat -ano | findstr"),
+            "{got}"
+        );
+        assert!(!got.contains("DSML"), "标记一枚都不该剩: {got}");
+        assert_eq!(strip_model_markup(&leaked).1, 3, "三处闭合标记都要计数");
+    }
+
+    /// 半角竖线变体（有的网关把全角换成 `|`）与**整段**裹住动作的形状都要能剥干净。
+    #[test]
+    fn full_call_envelope_with_ascii_bars_is_stripped_too() {
+        let raw = "<||DSML|| tool_calls><||DSML|| invoke name=\"execute\">\
+                   {\"cmd\":\"ls\"}</||DSML|| invoke></||DSML|| tool_calls>";
+        let (clean, n) = strip_model_markup(raw);
+        assert_eq!(n, 4, "开闭标签都要算: {clean}");
+        assert_eq!(clean, "{\"cmd\":\"ls\"}");
+    }
+
+    /// 反例（误报回归）：JSON 里的竖线是**单根管道**（`netstat -ano | findstr`），字符串里还有
+    /// 尖括号 —— 一个字符都不许动。判定只看"尖括号里有没有成对竖线"这个形状。
+    #[test]
+    fn a_lone_pipe_or_angle_bracket_survives_untouched() {
+        let raw = "{\"tool\":\"execute\",\"args\":{\"cmd\":\"netstat -ano | findstr \\\"8083\\\"\"},\"note\":\"a < b > c\"}";
+        assert_eq!(strip_model_markup(raw).1, 0, "合法 JSON 里没有标记");
+        assert_eq!(extract_json_object(raw), raw);
     }
 
     #[test]

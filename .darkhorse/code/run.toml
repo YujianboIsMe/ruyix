@@ -1,7 +1,0 @@
-[run]
-"target0.cmd" = "cargo run"
-"target0.name" = "🛻跑跑"
-"target1.cmd" = "cargo run"
-"target1.name" = "Cargo.toml"
-"target2.cmd" = 'node D:\Projects\Rust\darkhorse-code\ui\command.js'
-"target2.name" = "command.js"

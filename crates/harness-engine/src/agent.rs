@@ -444,7 +444,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 {"tool":"plan","args":{"steps":[{"title":"短标题","detail":"做什么","files":["相对路径"]}]}}，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
 规则：
-1. 每轮只输出一个 JSON 对象（一次能力调用，或最终答复），不要输出解释文字、不要 markdown 代码块包裹。
+1. 每轮只输出一个 JSON 对象（一次能力调用，或最终答复），不要输出解释文字、不要 markdown 代码块包裹。本引擎**不走 tools 协议**（没有函数调用通道）：不要输出任何工具调用标记（DSML 之类），能力名只写在 JSON 的 `tool` 字段里。
 2. 回答关于本项目的问题前，先 read 相关文件/目录 —— 不要凭空猜测项目内容。
 3. 改代码：先 read 拿到现状。改已有文件用 write + edits 只传改动；新建文件、或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 改动能验证就验证：execute 跑编译/测试（如 cargo test、python -m pytest、npm test），失败就继续修。
@@ -857,10 +857,41 @@ fn get_str(v: &serde_json::Value, key: &str) -> Result<String, String> {
 /// 这条留给测试断言"批关掉时该拒就拒"。（`Action` 只在本模块用，别把内部枚举泄成 pub）
 #[cfg(test)]
 fn parse_action(raw: &str) -> Result<Action, String> {
-    let json = llm::extract_json_object(raw);
-    let v: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("输出不是合法 JSON: {e}；片段: {}", clip(&json, 200)))?;
-    parse_one(&v)
+    let (v, markup) = json_of(raw)?;
+    parse_one(&v).map_err(|e| markup_note(e, markup))
+}
+
+/// 单动作与批动作的**公共前段**：剥掉模型自带的协议标记 → 抠 JSON → 解成 `Value`。
+///
+/// 剥标记要对着 `raw` 做、也只做在这里：`extract_json_object` 是全仓唯一的抠 JSON 收口点，
+/// 模型自带的那套标记（[`llm::strip_model_markup`]）在进解析器之前就剪掉，
+/// 于是 plan / generate / repair / reflect / eval 那些调用方一起受益，不用各自记得过滤。
+fn json_of(raw: &str) -> Result<(serde_json::Value, usize), String> {
+    let (clean, markup) = llm::strip_model_markup(raw);
+    let json = llm::extract_json_object(&clean);
+    serde_json::from_str::<serde_json::Value>(&json)
+        .map(|v| (v, markup))
+        .map_err(|e| {
+            markup_note(
+                format!("输出不是合法 JSON: {e}；片段: {}", clip(&json, 200)),
+                markup,
+            )
+        })
+}
+
+/// 解析错误 + "你发的是自带协议标记"这句。
+///
+/// **只剥不说是治不好的**：标记被静默剪掉之后，模型看到的只是"无法解析"，而它自己认为
+/// 明明发出来了（在它那套协议里是合法的），于是换个说法重发同一坨 —— 实测就是这么烧掉一轮的。
+/// 把"剥了几处"写进错误文本，它才知道要换形状。
+fn markup_note(err: String, markup: usize) -> String {
+    if markup == 0 {
+        return err;
+    }
+    format!(
+        "{err}（本次输出里检测到 {markup} 处模型自带的工具调用标记，已剥掉 —— 本引擎不走 tools 协议：\
+         动作只写在 content 的 JSON 里，能力名放 `tool` 字段、参数放 `args`，不要再发那种标记）"
+    )
 }
 
 /// 一轮模型输出 → 动作清单（1 个或多个）。
@@ -872,16 +903,24 @@ fn parse_action(raw: &str) -> Result<Action, String> {
 /// 而是把上限报回去让它拆批。`allow_batch = false` 时批协议整体关闭 —— 一行回滚，
 /// 与提示词里教不教这个形状由同一个开关决定（不虚报能力）。
 fn parse_actions(raw: &str, max: usize, allow_batch: bool) -> Result<Vec<Action>, String> {
-    let json = llm::extract_json_object(raw);
-    let v: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("输出不是合法 JSON: {e}；片段: {}", clip(&json, 200)))?;
+    let (v, markup) = json_of(raw)?;
+    parse_actions_value(&v, max, allow_batch).map_err(|e| markup_note(e, markup))
+}
+
+/// 批协议本体：`Value` → 动作清单（语义见 [`parse_actions`]）。拆出来只为了让
+/// "剥标记 → 抠 JSON → 报错加注脚"那一段各有一处，不被打成两份。
+fn parse_actions_value(
+    v: &serde_json::Value,
+    max: usize,
+    allow_batch: bool,
+) -> Result<Vec<Action>, String> {
     // 批的两件外衣：actions / calls（模型两种都写过，认全了省一轮）
     let Some(arr) = v
         .get("actions")
         .or_else(|| v.get("calls"))
         .and_then(|x| x.as_array())
     else {
-        return Ok(vec![parse_one(&v)?]);
+        return Ok(vec![parse_one(v)?]);
     };
     if !allow_batch {
         return Err("本轮不允许批量调用：请每轮只发一个调用（actions 已关闭）".into());
@@ -1032,6 +1071,15 @@ fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
             }
             Ok(Action::Plan(steps))
         }
+        // 空名字 = 外层没有 `tool`：这不是"能力不认识"，是**形状不对**。两种常见来源：
+        // 只发了 args 那一层（`{"cmd": "…"}`），或把动作写进了模型自带的工具调用标记里
+        // （后者见 `llm::strip_model_markup` —— 标记已被剥掉，剩下的正是这坨裸 args）。
+        // 报"未知能力 \"\"" 对模型毫无指向性，它只会换个说法重发同一坨；这里直接说缺什么。
+        "" => Err(format!(
+            "这不是动作对象：外层缺 `tool` 字段（收到的是参数对象 {}）。形状要写成 \
+             {{\"tool\":\"execute\",\"args\":{{\"cmd\":\"…\"}}}} —— 能力名在外层 tool、参数放 args 里",
+            clip(&v.to_string(), 160)
+        )),
         other => Err(format!(
             "未知能力 {other:?}（原子能力只有 read / write / execute / connect 四种，外加 plan 清单、ask_user 提问，或输出 final）"
         )),

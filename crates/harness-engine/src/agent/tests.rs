@@ -62,6 +62,88 @@ fn parse_action_covers_all_tools() {
     ));
 }
 
+/// 模型自带协议标记（DSML）泄露：标记被剥掉之后，**裹在里面的动作要照样认出来** ——
+/// 实测 2026-09-21 第 5 轮，模型把参数 JSON 裹在它自己那套工具调用标记里，引擎只报一句
+/// "未知能力"，模型换了个说法重发同一坨，白烧一轮（剥标记见 `llm::strip_model_markup`）。
+#[test]
+fn dsml_markup_around_an_action_is_stripped_not_reported_as_unknown() {
+    let bar = "\u{ff5c}";
+    let leak = [
+        r#"{"actions":[{"tool":"execute","args":{"cmd":"netstat -ano | findstr \"8083\""}}]}"#,
+        &format!("</{0}{0}DSML{0}{0} calls>", bar),
+    ]
+    .join("\n");
+    let acts = parse_actions(&leak, 8, true).expect("剥掉标记后应当解析成动作");
+    assert!(matches!(&acts[0], Action::Execute(c, _) if c.contains("findstr")));
+}
+
+/// 只发了 args 那一层（`{"cmd": …}`）：报错要指向**外层缺 `tool`**，而不是"未知能力 \"\""——
+/// 后者对模型毫无指向性（那次白烧一轮的直接原因）。
+#[test]
+fn args_only_object_is_told_to_wrap_it_in_a_tool_field() {
+    let err = parse_action(r#"{"cmd": "dir"}"#).unwrap_err();
+    assert!(err.contains("缺 `tool`"), "{err}");
+    assert!(!err.contains("未知能力"), "缺 tool 不该报成未知能力: {err}");
+}
+
+/// 端到端复刻那次失败：模型把动作**只发了参数那一层**出来，后面挂着它自己的协议闭合标记
+/// （实测 2026-09-21 第 5 轮的原样：`{"cmd": …}` + 三行闭合标记，模型把工具名丢在自己的标记里）。
+///
+/// 判据放在**回灌给模型的那句话**上 —— 这是本轮唯一能改的东西：旧的报错是"未知能力 \"\""，
+/// 模型看不出自己错在哪，只会换个说法重发；现在必须同时给到两条指向：
+/// ① 外层缺 `tool`（连带着把它发的参数原样贴回去）② 检测到你发的是自带协议标记、已剥掉。
+/// 然后模型照形状重发一轮，动作落地 —— 这才叫"烧一轮换一次纠正"，而不是原地打转。
+#[test]
+fn a_headless_dsml_call_gets_told_what_is_missing_and_recovers() {
+    let d = TempDir::new("dsml-recover");
+    let bar = "\u{ff5c}";
+    let leaked = [
+        r#"{"cmd": "echo e2e"}"#,
+        &format!("</{0}{0}DSML{0}{0} parameter>", bar),
+        &format!("</{0}{0}DSML{0}{0} invoke>", bar),
+        &format!("</{0}{0}DSML{0}{0} calls>", bar),
+    ]
+    .join("\n");
+    let llm = crate::testllm::fake_llm(vec![
+        leaked,
+        r#"{"tool":"write","args":{"path":"nm.txt","content":"ok"}}"#.into(),
+        r#"{"final":"写好了"}"#.into(),
+    ]);
+    let cfg = ask_cfg(&llm);
+
+    let out = block_on(run_with_ask(
+        &cfg,
+        &d.0,
+        "写一个文件",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &NoAsker,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect("run 不该失败");
+
+    // ① 形状纠正：指到"外层缺 tool"，并把模型刚发的那坨参数原样贴回去
+    let feedback = llm.request(1);
+    assert!(feedback.contains("缺 `tool`"), "{feedback}");
+    assert!(
+        feedback.contains("echo e2e"),
+        "要把它自己发的参数贴回去：{feedback}"
+    );
+    // ② 协议纠正：告诉它"你那套标记被剥了"，否则它不知道自己错在哪。
+    // 断言用"已剥掉"而不是"工具调用标记"—— 后者在系统提示词里也有（规则 1 刚加了同一句话），
+    // 拿它当判据会被提示词本身满足，等于没测这条注脚。
+    assert!(
+        feedback.contains("已剥掉"),
+        "必须点明是模型自带的工具调用标记被剥掉：{feedback}"
+    );
+    // 落在磁盘上的事实：纠正之后动作真的跑了
+    assert_eq!(std::fs::read_to_string(d.0.join("nm.txt")).unwrap(), "ok");
+    assert!(out.answer.contains("写好了"), "{}", out.answer);
+    assert_eq!(llm.count(), 3, "泄露一轮 → 纠正后一轮 → 交付");
+}
+
 /// connect 的三形态：省略 action = list；call 要 server+tool；send 要 agent+text
 #[test]
 fn parse_action_covers_connect() {
