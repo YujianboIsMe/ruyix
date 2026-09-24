@@ -1243,6 +1243,8 @@ fn unit_table(line: &str) -> Vec<u32> {
 /// O(片段数 × 行长)。保留它是给 `slow_reference`（本来就是刻意写慢的参照）和测试用的
 /// —— 两份实现互相独立，单位一旦搞错，等价性测试就会红。所以只在测试构建里编译。
 #[cfg(test)]
+// 只被已门禁的用例用到：纯净模式下留着就是死代码
+#[cfg(feature = "preinstalled")]
 fn utf16_offset(line: &str, byte_off: usize) -> usize {
     if line.is_ascii() {
         return byte_off;
@@ -2210,6 +2212,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "preinstalled")]
     use arborium::Highlighter;
 
     /// `--debug` 的识别：**整词相等**、未知参数忽略。
@@ -2217,6 +2220,8 @@ mod tests {
     /// 反向验证过：把实现换成宽松匹配（`a.contains("debug")`），`--debugx` 与
     /// "路径里含 debug" 这两条立刻变红 —— 这条测试是能红的，不是摆设。
     #[test]
+    // 依赖 arborium / 那两个 helper：纯净模式里它们不存在（编进去会 unresolved import）
+    #[cfg(feature = "preinstalled")]
     fn debug_flag_matches_whole_words_only() {
         let f = |v: &[&str]| parse_debug_flag(v.iter().copied());
         assert!(f(&["ruyix.exe", "--debug"]));
@@ -2234,6 +2239,9 @@ mod tests {
     }
 
     /// tree-sitter 跑一遍，转成 build_line_highlights 吃的 (start, end, tag)
+    // 只有预装模式才编进了 arborium：纯净模式下这两个 helper 没有调用者
+    // （用它们的用例也被同一条件门禁，见文件末的测试模块）
+    #[cfg(feature = "preinstalled")]
     fn themed_spans(lang: &str, src: &str) -> Vec<(u32, u32, &'static str)> {
         let mut highlighter = Highlighter::new();
         let spans = highlighter.highlight_spans(lang, src).expect("高亮失败");
@@ -2252,6 +2260,9 @@ mod tests {
     /// 片段语义（切点 / 排序 / 去重）与生产实现各自独立写一遍，两边都错成同一个样子
     /// 才会通过，所以它同时也是"没把语义顺手改歪"的参照。偏移换算同理：这里用逐字符
     /// 数一遍的朴素写法，生产路径用按行建一次的查表版。
+    // 只有预装模式才编进了 arborium：纯净模式下这两个 helper 没有调用者
+    // （用它们的用例也被同一条件门禁，见文件末的测试模块）
+    #[cfg(feature = "preinstalled")]
     fn slow_reference(code: &str, spans: &[(u32, u32, &'static str)]) -> HighlightPayload {
         fn line_byte_offset(source: &str, line_number: usize) -> usize {
             if line_number <= 1 {
@@ -2330,6 +2341,8 @@ mod tests {
 
     /// 线性重写必须与旧实现**逐字节相同**。
     /// 覆盖的形态：空文件 / 只有换行 / 无尾换行 / CRLF / 跨行块注释 / 跨行字符串 /
+    // 依赖 arborium/arborium_theme 的用例：纯净模式没有它们
+    #[cfg(feature = "preinstalled")]
     /// 以及一份有规模的源码（让 span 数量和跨行覆盖接近真实文件）。
     #[test]
     fn highlight_output_is_unchanged_by_the_linear_rewrite() {
@@ -2377,6 +2390,8 @@ mod tests {
     /// 判据用**包含性**而不是逐字相等：去重会按 `covered` 裁剪片段，而裁出来的片段一定是
     /// 原捕获的子集（`max(start, covered) ≥ start` 且 `end` 不变），所以"落在同 tag 的原始
     /// 捕获内"对正确输出恒成立；单位写错时切出来的字节范围会**越出**原捕获 ——
+    // 依赖 arborium/arborium_theme 的用例：纯净模式没有它们
+    #[cfg(feature = "preinstalled")]
     /// 修前的 `;` 就是这样（报 13..14，按码元解释切出来是 `/`，落进旁边的捕获）。
     #[test]
     fn span_offsets_are_utf16_units() {
@@ -2474,6 +2489,8 @@ mod tests {
     /// **复杂度金丝雀**：有人再把"逐行重扫全文件"写回来，这条必须转红。
     ///
     /// 判据用**比值**而不是绝对耗时 —— 机器快慢不影响结论。阈值放到 3 倍是刻意留的
+    // 依赖 arborium/arborium_theme 的用例：纯净模式没有它们
+    #[cfg(feature = "preinstalled")]
     /// 余量（实测余量在 10 倍以上），避免慢机器 / CI 上假红。
     #[test]
     fn highlight_does_not_rescan_the_file_per_line() {
@@ -2512,6 +2529,8 @@ mod tests {
 
     /// SQL 语法高亮：验证 lang-sql feature 启用后 arborium 能识别 "sql" 语言
     #[test]
+    // 依赖 arborium / 那两个 helper：纯净模式里它们不存在（编进去会 unresolved import）
+    #[cfg(feature = "preinstalled")]
     fn sql_highlight_works() {
         let mut highlighter = Highlighter::new();
         let spans = highlighter
@@ -2520,6 +2539,8 @@ mod tests {
         assert!(!spans.is_empty(), "SQL 高亮应返回 span");
     }
 
+    // 依赖 arborium/arborium_theme 的用例：纯净模式没有它们
+    #[cfg(feature = "preinstalled")]
     /// Java 语法高亮：验证 lang-java feature 启用后 arborium 能识别 "java" 语言
     #[test]
     fn java_highlight_works() {
@@ -2584,6 +2605,8 @@ mod tests {
     // ============================================
 
     /// 一段有规模的真源码：400 行、每行都有 span、还带中文注释（顺带覆盖多字节行）。
+    // 只被已门禁的用例用到：纯净模式下留着就是死代码（clippy 会红）
+    #[cfg(feature = "preinstalled")]
     fn sample_source() -> String {
         let mut src = String::new();
         for i in 0..400 {
@@ -2594,6 +2617,8 @@ mod tests {
         src
     }
 
+    // 依赖 arborium / 那两个 helper：纯净模式里它们不存在（编进去会 unresolved import）
+    #[cfg(feature = "preinstalled")]
     fn payload_of(lang: &str, src: &str) -> HighlightPayload {
         let spans = themed_spans(lang, src);
         build_line_highlights(src, &spans, &[]).expect("构建载荷失败")
@@ -2605,6 +2630,8 @@ mod tests {
     /// 会吃掉末尾空行、前端 `split("\n")` 不吃 —— 拿后端的行拼 textarea 的值，就会把
     /// "以换行结尾的文件"的末尾换行弄丢。有人为了"省前端一次 split"把它加回来，这条要红。
     #[test]
+    // 依赖 arborium（或依赖了依赖它的 helper）：纯净模式里不存在
+    #[cfg(feature = "preinstalled")]
     fn highlight_payload_does_not_echo_the_source_text() {
         let src = "fn main() {\n    let secret = \"UNIQUE_MARKER_9f3a\";\n}\n";
         let json = serde_json::to_string(&payload_of("rust", src)).unwrap();
@@ -2623,6 +2650,8 @@ mod tests {
     /// 判据用**比值**，和复杂度金丝雀同一个路子：机器、内容都不影响结论。
     /// 旧形状在同一份片段上现搭出来比 —— 这样比的只是"编码"，不是"高亮质量"。
     #[test]
+    // 依赖 arborium（或依赖了依赖它的 helper）：纯净模式里不存在
+    #[cfg(feature = "preinstalled")]
     fn highlight_payload_is_much_smaller_than_the_legacy_shape() {
         let src = sample_source();
         let payload = payload_of("rust", &src);
@@ -2659,6 +2688,8 @@ mod tests {
     /// 载荷形状：行号即下标、每行是 3 的倍数、下标落在名表内、片段升序且不重叠。
     /// 前端**直接顺序切片**渲染（不做排序/重叠检查），所以这些前提必须由后端保证。
     #[test]
+    // 依赖 arborium / 那两个 helper：纯净模式里它们不存在（编进去会 unresolved import）
+    #[cfg(feature = "preinstalled")]
     fn highlight_payload_shape_is_dense_and_flat() {
         let src = sample_source();
         let payload = payload_of("rust", &src);
@@ -2690,6 +2721,8 @@ mod tests {
     }
 
     /// `Tok` 必须覆盖高亮器**实际会产出**的每个名字。
+    // 依赖 arborium/arborium_theme 的用例：纯净模式没有它们
+    #[cfg(feature = "preinstalled")]
     /// 漏一个的后果不是报错，而是那一类片段从此没有颜色（`from_name` 返回 `None` 被丢弃）。
     #[test]
     fn tok_table_covers_every_name_the_highlighter_produces() {
@@ -2771,6 +2804,18 @@ mod tests {
             overridden_highlighter("cobol", "(x) @variable").is_err(),
             "没有解析器的语言必须报错"
         );
+    }
+
+    /// **纯净模式的定义**：没有内置解析器 ⇒ 任何语言都返回空片段 ⇒ 前端按纯文本渲染。
+    ///
+    /// 这条判据的价值不在"函数返回空"，而在**它必须是有意的**：纯净模式最容易出的错是
+    /// "高亮没了但界面不说"，用户只会觉得程序坏了。所以这条路必须有一个测试盯着它。
+    #[test]
+    #[cfg(not(feature = "preinstalled"))]
+    fn pure_mode_has_no_highlighter_at_all() {
+        let spans = highlight_spans("rust", "let x = 1;\n", None, None, &[]).expect("不该报错");
+        assert!(spans.is_empty(), "纯净模式不该产出任何片段：{spans:?}");
+        assert!(detect_language("a.rs").is_none(), "纯净模式没有内置探测表");
     }
 
     /// 每个内置 token 名都必须在**预装插件的主题**里有 `.tok-<name>`。
