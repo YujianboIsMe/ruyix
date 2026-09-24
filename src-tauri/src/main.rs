@@ -2733,6 +2733,46 @@ mod tests {
     /// 枚举化之后"表里有的 tag 却没人给它配色"是**新的**一类坏：以前未知名字至少还会
     /// 拼出一个类名（配不配上色另说），现在得显式确认每个枚举值都真能画出颜色。
     /// 反向读源码而不是靠人记 —— 加枚举值忘了配色时这条会红。
+    /// **query 覆盖（法子 2）真的生效**：拿一份只有一条模式的 `highlights.scm` 换掉编译进来的
+    /// 那份，结果必须**变**（片段数骤减 + 出现我们指定的 token 名）。
+    ///
+    /// 为什么必须测"结果变了"而不是"函数返回 Ok"：`with_store` 那条路只要 store 里没插进去，
+    /// 或者插进去的名字对不上语言别名，仍然会"成功"返回一份**和原来一模一样**的高亮 ——
+    /// 插件作者会以为自己写的 query 生效了。所以判据是**差异**，不是返回码。
+    #[test]
+    #[cfg(feature = "preinstalled")]
+    fn plugin_query_override_actually_changes_tags() {
+        let src = "let x = 1;\nlet y = 2;\n";
+        let base = highlight_spans("rust", src, None, None, &[]).expect("默认高亮");
+        let over = highlight_spans("rust", src, Some("(identifier) @variable"), None, &[])
+            .expect("覆盖 query 之后的高亮");
+        assert!(
+            over.iter().any(|(_, _, tag)| *tag == "variable"),
+            "覆盖后应当出现 variable 片段：{over:?}"
+        );
+        assert!(
+            over.len() < base.len(),
+            "覆盖一份只有一条模式的 query 之后片段数应当**变少**（默认 {} → 覆盖后 {}）——\
+             数量没变说明覆盖根本没进 store",
+            base.len(),
+            over.len()
+        );
+    }
+
+    /// 覆盖失败要**明确报错**，不能静默退回默认 query（那会让插件作者以为自己的 scm 生效了）。
+    #[test]
+    #[cfg(feature = "preinstalled")]
+    fn broken_query_override_reports_instead_of_silently_falling_back() {
+        assert!(
+            overridden_highlighter("rust", "(this is not a query").is_err(),
+            "写坏的 scm 必须报错"
+        );
+        assert!(
+            overridden_highlighter("cobol", "(x) @variable").is_err(),
+            "没有解析器的语言必须报错"
+        );
+    }
+
     /// 每个内置 token 名都必须在**预装插件的主题**里有 `.tok-<name>`。
     ///
     /// v1.0.0 起这份主题不再躺在 `ui/styles.css` 里，而是插件的一部分
