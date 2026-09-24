@@ -194,6 +194,38 @@ const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 
 /**
+ * 引擎 agent 模块的**全部生产源码**：`agent.rs` + `src/agent/*.rs`（`tests.rs` 除外）。
+ *
+ * 为什么不只读 `agent.rs`：主循环本体（`run_with_ask`，780 行）搬去了
+ * `crates/harness-engine/src/agent/tool_loop.rs`。门禁若钉死单个文件名，一次合法的文件切分
+ * 就会把 8 条契约判红 —— 那是在报「文件挪了」，不是在报「契约破了」。契约的对象是**模块**，
+ * 所以按模块读。`tests.rs` 排除在外：免得某条契约被测试里的字符串凑上。
+ */
+function readEngineAgent() {
+  const files = ["crates/harness-engine/src/agent.rs"];
+  const dir = path.join(ROOT, "crates/harness-engine/src/agent");
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir).sort()) {
+      if (f.endsWith(".rs") && f !== "tests.rs") {
+        files.push(`crates/harness-engine/src/agent/${f}`);
+      }
+    }
+  }
+  return files.map(read).join("\n");
+}
+
+/**
+ * 按 `\n` 取整行切片（`indexOf("\n}\n")` 之类）时必须用这个读法：**行尾归一**。
+ *
+ * 本机 `core.autocrlf=true`：工作树是 CRLF，仓库里的 blob 是 LF。前导锚点（`\nfunction foo(`）
+ * 在 CRLF 上照样命中（`\r` 落在 `\n` 之前），但**整行**锚点 `\n}\n` 永远不命中 ——
+ * 于是同一个断言「在写它的那台机器上绿、在 CRLF 工作树上红」，报的还是
+ * 「定位不到源码（切片锚点失效）」，看起来像前端代码坏了。实测 U33 / U34 各红一条。
+ * 规规矩矩是归一，不是把锚点改写成 CRLF（那样换个平台又反着红）。
+ */
+const readLf = (p) => read(p).replace(/\r\n/g, "\n");
+
+/**
  * main.js 是否**真正**把 state 导出到 window（顶层 const 不挂 window，
  * 面板模块读的 window.state 全靠这一行）。行锚定 —— 否则注释里写一句同样文本也会算通过。
  */
@@ -350,7 +382,7 @@ function runStaticChecks() {
       !it.cls.includes("file-only") && !it.cls.includes("folder-only"),
       `[${action}] 挂了 file-only/folder-only —— 文件和文件夹上都要能看到它（class="${it.cls}"）`);
   }
-  const ctxMainJs = read("ui/main.js");
+  const ctxMainJs = readLf("ui/main.js");
   check("U33", "ctx-copy-path",
     /case\s+"copy-path":/.test(ctxMainJs) && /case\s+"copy-full-path":/.test(ctxMainJs),
     "main.js 的右键 switch 没有 copy-path / copy-full-path 两个分支");
@@ -617,8 +649,8 @@ function runStaticChecks() {
 
   // U16 agent-loop：会话 = 工具循环（Read/Write/Execute/Connect 四原语），不做问答/任务预分类。
   // 三环：session.js 走 agent_reply 并带模式与历史；mod.rs 调 engine::agent::run 并接连接器；
-  // 引擎 agent.rs 定义四原语 + 终止协议 + 破坏性命令拒绝；connect.rs 落 MCP/A2A 两条真实通路。
-  const intentRs = read("crates/harness-engine/src/agent.rs");
+  // 引擎 agent 模块定义四原语 + 终止协议 + 破坏性命令拒绝；connect.rs 落 MCP/A2A 两条真实通路。
+  const intentRs = readEngineAgent();
   check("U16", "agent-loop",
     has(sessionJs, '"agent_reply"') && has(sessionJs, "history, mode, projectRoot") &&
       has(agentModRs, "engine::agent::run") &&
@@ -2292,7 +2324,7 @@ function runSessionTraceLayoutProbe() {
  *      "计划为空 ⇒ 隐藏"是这条单子最初的错法：右键最左标签看不到【关闭左侧】，被当成缺功能报上来。
  */
 async function runTabContextMenuChecks() {
-  const mainSrc = read("ui/main.js");
+  const mainSrc = readLf("ui/main.js");
   const start = mainSrc.indexOf("function closePlan(ids, targetId, mode) {");
   const end = mainSrc.indexOf("\nfunction setupContextMenu(", start);
   check("U45", "tab-context-menu", start >= 0 && end > start,
@@ -2945,7 +2977,7 @@ async function runExternalLinkChecks() {
  * toRelativePath / copyToClipboard / handleContextCopyPath 源码（切片 + new Function），不另抄一份。
  */
 async function runContextMenuChecks() {
-  const mainSrc = read("ui/main.js");
+  const mainSrc = readLf("ui/main.js");
   const start = mainSrc.indexOf("function toRelativePath(fullPath) {");
   const anchor = mainSrc.indexOf("async function handleContextCopyPath(");
   const end = anchor >= 0 ? mainSrc.indexOf("\n}\n", anchor) : -1;
