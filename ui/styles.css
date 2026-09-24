@@ -1069,9 +1069,22 @@ html, body {
   background: #000;
 }
 
+/* 终端视图（**只限 id**：`.terminal-view` 这个类会话面板也在用，别误伤它）：
+   唯一的滚动容器是 xterm 自己的 `.xterm-viewport`（回滚缓冲）——
+   这里再 auto 一次就会长出第二根滚动条（同一个毛病在编辑器那边已经出过一次，见 U32）。 */
+#terminal-view {
+  overflow: hidden;
+}
+
 .terminal-container {
   flex: 1;
-  min-width: fit-content;
+  /* 旧值是 `min-width: fit-content`：容器被**撑到 xterm 那一块固定像素的宽度**，窗口变小时
+     它不肯缩 → ResizeObserver 收不到尺寸变化 → 终端永远停在创建时那 100×24，外层还多出横向
+     滚动条（用户报的"终端大小不随窗口变化"就是这个）。改成 0：尺寸只由 flex 布局决定 ——
+     布局定"能有多大"，`fitTerminal()` 定"终端实际用多少"。 */
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   padding: 4px;
 }
 

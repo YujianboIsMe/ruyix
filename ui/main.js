@@ -577,6 +577,8 @@ function switchTab(tabId) {
       container.innerHTML = "";
       tab._term.open(container);
       tab._term.focus();
+      // 切回来时容器尺寸可能已经不是当初那个了（面板拖动 / 窗口改过大小），再适配一次
+      fitTerminal(tab);
     }
     return;
   }
@@ -3081,6 +3083,96 @@ async function spawnInNewWindow(name, cmd) {
   }
 }
 
+/**
+ * 终端自适应（模拟终端必须跟着窗口变）。
+ *
+ * 病根：`new Terminal({rows:24, cols:100})` 只在创建时定死尺寸，之后**没有任何 resize 路径**
+ * —— 前端从不调用后端已有的 `pty_resize`，也没有观察容器尺寸。于是 `.xterm-screen` 永远是
+ * 100×24 的像素块（fontSize 13 → 763×368），窗口再大也只用左下角一块，窗口变小还会把外层撑出
+ * 横向滚动条；PTY 的 winsize 也是旧的，shell 按旧宽度折行 → `ls` 输出错位。
+ *
+ * 三段拆开，各管一件事：量单元格（[`cellMetrics`]）→ 算行列（[`fitDims`]，纯函数，好测）→
+ * 落尺寸（[`fitTerminal`]：同时改 xterm 与 PTY）。
+ */
+
+/** 单元格像素尺寸。优先问 xterm 自己的 render service（FitAddon 也是这么拿的），
+ *  拿不到就量它维护的单字符测量元素。两条都没有就返回 null —— 量不出来就别乱改尺寸。 */
+function cellMetrics(term) {
+  const cell = term?._core?._renderService?.dimensions?.css?.cell;
+  if (cell && cell.width > 0 && cell.height > 0) {
+    return { w: cell.width, h: cell.height };
+  }
+  const el = term?.element?.querySelector?.(".xterm-char-measure-element");
+  if (el) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return { w: r.width, h: r.height };
+  }
+  return null;
+}
+
+/** 可容纳的行列数（纯函数）。至少 2 列 1 行：0 会让 xterm 抛错，把终端直接搞死。 */
+function fitDims(availW, availH, cell) {
+  const cols = Math.max(2, Math.floor(availW / cell.w));
+  const rows = Math.max(1, Math.floor(availH / cell.h));
+  return { cols, rows };
+}
+
+/** 把某个终端标签调整到容器大小。**幂等**：行列没变就什么都不做（避免无谓的 SIGWINCH 重绘）。
+ *  返回 true 表示这次真的改了尺寸。 */
+function fitTerminal(tab) {
+  const term = tab && tab._term;
+  const container = document.getElementById("terminal-container");
+  if (!term || !container || !container.isConnected) return false;
+  const cell = cellMetrics(term);
+  if (!cell) return false;
+  // 可用像素 = 容器尺寸 − `.xterm` 自己的 padding − 回滚条宽度（都量，不猜）
+  const box = container.getBoundingClientRect();
+  let padW = 0;
+  let padH = 0;
+  if (term.element && typeof getComputedStyle === "function") {
+    const cs = getComputedStyle(term.element);
+    padW = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    padH = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  }
+  const vp = term.element?.querySelector?.(".xterm-viewport");
+  const scrollbar = vp ? Math.max(0, vp.offsetWidth - vp.clientWidth) : 0;
+  const availW = box.width - padW - scrollbar;
+  const availH = box.height - padH;
+  // 标签页被切走时容器是 display:none（尺寸为 0）：这时**别动**，等切回来再量
+  if (availW <= 0 || availH <= 0) return false;
+  const { cols, rows } = fitDims(availW, availH, cell);
+  if (cols === term.cols && rows === term.rows) return false;
+  term.resize(cols, rows);
+  // **PTY 也要跟着改**：不改的话 shell 仍按旧宽度折行（`ls` 的输出会错位）。
+  // 注意 Tauri 的 invoke 形参名：后端是 `tab_id`，JS 侧必须写 `tabId`。
+  const invoke = getTauriInvoke();
+  if (invoke && tab.id) {
+    Promise.resolve(invoke("pty_resize", { tabId: tab.id, rows, cols })).catch(() => {});
+  }
+  return true;
+}
+
+/** 尺寸变化 → 重新适配。容器是共用的一个，所以只盯**当前激活的**终端标签。
+ *  ResizeObserver 覆盖了窗口缩放、面板拖动、标签切换（容器尺寸都会变）。 */
+let terminalFitObserver = null;
+let terminalFitTimer = null;
+function scheduleTerminalFit() {
+  if (terminalFitTimer) clearTimeout(terminalFitTimer);
+  // 拖拽窗口时尺寸事件很密：延迟一点，等停下来再算（每次 resize 都会让 shell 重画）
+  terminalFitTimer = setTimeout(() => {
+    terminalFitTimer = null;
+    const tab = state.tabs.find((t) => t.id === state.activeTabId && t._isTerminal);
+    if (tab) fitTerminal(tab);
+  }, 60);
+}
+function watchTerminalResize() {
+  if (terminalFitObserver || typeof ResizeObserver !== "function") return;
+  const container = document.getElementById("terminal-container");
+  if (!container) return;
+  terminalFitObserver = new ResizeObserver(() => scheduleTerminalFit());
+  terminalFitObserver.observe(container);
+}
+
 async function spawnTerminal(name, cmd) {
   const invoke = getTauriInvoke();
   if (!invoke) {
@@ -3137,6 +3229,11 @@ async function spawnTerminal(name, cmd) {
 
     // 保存 xterm 实例到 tab
     tab._term = term;
+
+    // **打开就按容器实际大小定一次尺寸**，并开始盯尺寸变化（见 fitTerminal）：
+    // 不这么做，终端就停在构造时的 100×24，窗口多大都只用左下角一块。
+    fitTerminal(tab);
+    watchTerminalResize();
 
     // 用户输入 → PTY
     term.onData((data) => {

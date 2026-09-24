@@ -155,6 +155,11 @@
  *                     助手消息落盘（`SessionMsg.trace` 不声明就被 serde 抹掉，且必须有 default
  *                     否则老会话读不回来）；④回放一遍真事件路径，断言渲染出来的行、kind 分类、
  *                     落盘载荷里的 trace —— 顺带把"日志把气泡正文覆盖掉"那个老病钉死。
+ *   U43 terminal-layout-real  模拟终端的**真实几何**：`.xterm-screen` 的像素尺寸、"容器缩小时
+ *                     终端跟不跟"、PTY 的 winsize 有没有同步 —— 桩里根本量不到。真机上出过事故
+ *                     （终端永远停在 100×24、窗口怎么变都不动）⇒ 挂真浏览器探针
+ *                     `scripts/terminal-layout.js`（真 index.html + styles.css + xterm.js +
+ *                     main.js，用**真的 xterm**走"宽屏 → 缩小 → 放大"）。
  *   U42 session-trace-layout-real  轨迹的**真实几何**：Node 桩量不到"看起来是一行、
  *                     显示不下用省略号收尾"（没有布局引擎），所以挂一张真浏览器探针
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
@@ -2256,6 +2261,34 @@ function runSessionTraceLayoutProbe() {
 }
 
 /**
+ * U43 terminal-layout-real：模拟终端**真实几何**（真浏览器 + 真 xterm）。
+ *
+ * U32/U42 证明得了"编辑器/轨迹的几何"，证明不了终端那一块：`.xterm-screen` 的像素尺寸、
+ * "容器缩小时终端跟不跟"、PTY 的 winsize 有没有跟着改 —— 全都只存在于布局引擎里。
+ * 真机上出过一次事故（用户报）：终端永远停在创建时那 100×24（763×368px），窗口怎么变都不动，
+ * 因为①没有 resize 路径②容器被 `min-width: fit-content` 撑住不让缩。
+ * 探针在无头 Edge 里用**真的 xterm** 走一遍"宽屏 → 缩小 → 放大"，见 scripts/terminal-layout.js。
+ * 本机没 Edge/Chrome 时该脚本自行 SKIP（"没跑"与"通过"必须能分辨）。
+ */
+function runTerminalLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "terminal-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U43 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|terminal-layout|宽屏|窄屏)/.test(l))
+    .join(" ⏐ ");
+  check("U43", "terminal-layout-real",
+    r.status === 0,
+    "终端几何探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
+/**
  * U30 proc-log-replay：输出面板回放 —— 真加载 ui/service.js + ui/proc-log.js，配上假 xterm
  * 与假后端，走一遍"服务表点输出 → 增量跟随 → 进程退出收尾"。
  *
@@ -3130,6 +3163,7 @@ async function main() {
     ["U40", "anthropic-format", runAnthropicFormatChecks],
     ["U41", "session-trace", runSessionTraceChecks],
     ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
+    ["U43", "terminal-layout-real", runTerminalLayoutProbe],
   ];
   for (const [id, name, fn] of scenarios) {
     try {
