@@ -26,10 +26,10 @@ fn key_from_ai_toml() -> String {
         return String::new();
     };
     for line in text.lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == "api_key" {
-                return v.trim().trim_matches('"').to_string();
-            }
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == "api_key"
+        {
+            return v.trim().trim_matches('"').to_string();
         }
     }
     String::new()
