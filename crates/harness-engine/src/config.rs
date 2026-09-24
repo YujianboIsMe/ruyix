@@ -37,14 +37,13 @@ fn d_cmd_timeout() -> u64 {
 fn d_test_timeout() -> u64 {
     300
 }
+/// 运行目录的默认值 = **空**。
+///
+/// 引擎**没有自己的家**：宿主（IDE）在 `config_bridge` 里注入 `<便携根>/global/runs`。
+/// 旧默认值是融合前的老血统（`~/.darkhorse/...`）—— 那等于绕过 IDE 往用户主目录写，
+/// 与"删文件夹即净"直接冲突（v1.0.0 R9 / A7 就是钉这一条）。
 fn d_workspace() -> String {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".darkhorse")
-        .join("harness")
-        .join("runs")
-        .to_string_lossy()
-        .to_string()
+    String::new()
 }
 fn d_max_context() -> usize {
     24_000
@@ -658,7 +657,7 @@ pub struct KbConfig {
     /// 追加来源（GUI 里加的来源落在 `kb.json`，这里给脚本化/无 GUI 的场景）
     #[serde(default)]
     pub roots: Vec<String>,
-    /// 知识库根目录（空 = `<配置目录>/darkhorse-harness/kb`）
+    /// 知识库根目录（空 = 宿主没注入 → 落临时目录）
     #[serde(default)]
     pub dir: String,
     #[serde(default = "d_kb_top_k")]
@@ -939,8 +938,8 @@ impl Default for AppConfig {
 
 /// 知识库根目录：注册表 `kb.json` 与每个来源的索引库都放这里。
 ///
-/// 与 `HARNESS_LINT_DIR` 同一套做法：允许环境变量覆盖（**测试靠它隔离**，
-/// 不然单测会往用户真实的 `%APPDATA%` 里写东西）。
+/// 与 `HARNESS_LINT_DIR` 同一套做法：允许环境变量覆盖（**测试靠它隔离**）。
+/// 宿主没注入时的兜底落临时目录 —— 引擎不再探测 `%APPDATA%` / 家目录（v1.0.0 R9）。
 pub fn kb_dir(cfg: &KbConfig) -> PathBuf {
     if let Ok(v) = std::env::var("HARNESS_KB_DIR")
         && !v.trim().is_empty()
@@ -951,30 +950,44 @@ pub fn kb_dir(cfg: &KbConfig) -> PathBuf {
     if !raw.is_empty() {
         return PathBuf::from(raw);
     }
-    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("darkhorse-harness").join("kb")
+    std::env::temp_dir().join("ruyix").join("kb")
 }
 
-/// 相对 workspace_root 的展开（配置里可能写 `~` 或相对路径）
+/// 运行目录（agent 沙箱产物）。三种形态，**默认不再摸用户主目录**：
+///
+/// - 空（默认）→ `%TEMP%/ruyix/runs`：宿主没注入时的兜底，引擎单独跑（单测 / eval）够用，
+///   而且落临时目录、跑完不留东西；
+/// - `~/...` → 展开到用户家目录：**这是用户自己写的**，照做（全仓唯一展开 `~` 的地方）；
+/// - 相对路径 → 同样落临时根。绝不静默落到家目录 —— "悄悄写到别处"正是这一版要消灭的行为。
 pub fn runs_root(cfg: &AppConfig) -> PathBuf {
     let raw = cfg.workspace_root.trim();
     if raw.is_empty() {
-        return PathBuf::from(d_workspace());
+        return fallback_runs_root();
     }
-    let expanded = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(rest)
-    } else {
-        PathBuf::from(raw)
-    };
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(expanded)
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        return expand_home(rest);
     }
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        p
+    } else {
+        fallback_runs_root().join(p)
+    }
+}
+
+/// 宿主没注入（或只给了相对路径）时的兜底：**临时目录**。
+fn fallback_runs_root() -> PathBuf {
+    std::env::temp_dir().join("ruyix").join("runs")
+}
+
+/// `~/` 的展开（唯一实现）。读环境变量而不是引入 `dirs`：引擎不该有能力"自己找系统位置"，
+/// 那条能力只有宿主的 `paths.rs` 该有（宿主侧由静态门禁钉住）。
+fn expand_home(rest: &str) -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(rest)
 }
 
 /// 环境变量优先于配置：方便脚本化调用 / 不把 key 落盘。
@@ -1230,7 +1243,16 @@ mod tests {
         assert_eq!(cfg.llm.base_url, "https://api.deepseek.com");
         assert!(cfg.llm.model.starts_with("deepseek"));
         assert!(cfg.verify.test_timeout_secs > cfg.verify.cmd_timeout_secs);
-        assert!(!cfg.workspace_root.is_empty());
+        assert!(
+            cfg.workspace_root.is_empty(),
+            "默认必须为空 —— 宿主注入是运行目录的唯一来源"
+        );
+        let fallback = runs_root(&cfg);
+        assert!(
+            fallback.is_absolute() && fallback.starts_with(std::env::temp_dir()),
+            "兜底必须落临时目录，不许碰家目录：{}",
+            fallback.display()
+        );
         // 计划即执行默认开：关着的时候大纲进度只能靠"声明文件是否落地"推断，
         // 实测 run agent-20260920-142405 8 步判出 6 个"跳过"（4 步其实做了一半以上）。
         // 引擎自己知道每步的终态，那才该是默认路径。这条断言就是"默认值是它"的凭据。
@@ -1257,12 +1279,19 @@ mod tests {
     #[test]
     fn tilde_workspace_root_expands_to_home() {
         let cfg = AppConfig {
-            workspace_root: "~/.darkhorse/harness/runs".into(),
+            workspace_root: "~/ruyix-runs-probe".into(),
             ..AppConfig::default()
         };
         let p = runs_root(&cfg);
         assert!(p.is_absolute(), "{p:?}");
-        assert!(p.ends_with("runs"), "{p:?}");
+        assert!(p.ends_with("ruyix-runs-probe"), "{p:?}");
+        // `~/` 必须展开到家目录（全仓唯一展开 `~` 的地方）
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            assert!(p.starts_with(home), "`~/` 应展开到家目录：{p:?}");
+        }
     }
 
     #[test]

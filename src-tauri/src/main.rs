@@ -8,6 +8,7 @@ mod config;
 mod git;
 mod instance;
 mod mcp;
+mod paths;
 mod pty;
 mod runner;
 
@@ -58,17 +59,13 @@ where
         .any(|a| matches!(a.as_ref(), "--debug" | "-d" | "--verbose" | "-v"))
 }
 
-/// 详细日志的落盘位置：`~/.ruyix/code/debug.log`。
+/// 详细日志的落盘位置：`<便携根>/global/logs/debug.log`（v1.0.0 起）。
 ///
 /// 刻意**不放在项目目录**：开关是启动参数，那一刻还不知道会打开哪个项目；
-/// 放在全局配置同目录下，路径固定、好找 —— 正式版没有控制台，日志路径必须能被
-/// 文档和用户事先知道，否则"开了开关找不到文件"等于没有这个功能。
+/// 放在根内固定位置、好找 —— 正式版没有控制台，日志路径必须能被文档和用户事先知道，
+/// 否则"开了开关找不到文件"等于没有这个功能。
 fn debug_log_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ruyix")
-        .join("code")
-        .join("debug.log")
+    paths::current().debug_log()
 }
 
 // ============================================
@@ -1724,6 +1721,10 @@ fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWind
 // ============================================
 
 fn main() {
+    // ---- 便携根（**唯一解析点**）。必须在一切之前：debug 日志落点、配置目录、引擎运行
+    // 目录、WebView2 数据目录全都从它派生 —— 晚一步就会有东西按"旧的家"落盘。
+    let root_paths = paths::init_auto();
+
     // ---- 详细日志开关（`--debug`）。必须在一切之前：Builder 起来之后引擎随时可能开跑，
     // 那时再设开关，前几轮就已经漏掉了。
     if parse_debug_flag(std::env::args()) {
@@ -1731,14 +1732,15 @@ fn main() {
         harness_engine::debug::set_path(log_path.clone());
         harness_engine::debug::set_enabled(true);
         harness_engine::debug::note(&format!(
-            "\n########## ruyix 详细日志会话 ##########\n开始时间 : {}\n进程号   : {}\n落盘     : {}\n包含     : 完整提示词 / 原始响应体 / 解析结果，以及与终端一致的运行日志行\n说明     : 仅在 `--debug` 启动时产生；常规运行一个字都不多写",
+            "\n########## ruyix 详细日志会话 ##########\n开始时间 : {}\n进程号   : {}\n便携根   : {}\n落盘     : {}\n包含     : 完整提示词 / 原始响应体 / 解析结果，以及与终端一致的运行日志行\n说明     : 仅在 `--debug` 启动时产生；常规运行一个字都不多写",
             harness_engine::workspace::now_human(),
             std::process::id(),
+            root_paths.root().display(),
             log_path.display()
         ));
     }
 
-    let config_mgr = Mutex::new(config::ConfigManager::new());
+    let config_mgr = Mutex::new(config::ConfigManager::new(root_paths.global_dir()));
     let pty_mgr = Mutex::new(pty::PtyManager::new());
 
     let app = tauri::Builder::default()

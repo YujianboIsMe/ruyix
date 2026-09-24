@@ -1,9 +1,9 @@
 //! plan-only 端到端冒烟（融合计划 P4 验收工具，也是 P5「引擎 CLI」的雏形）。
 //!
 //! 真调 LLM 跑完整规划阶段：Key 走环境变量 `DEEPSEEK_API_KEY`（引擎纪律：
-//! 环境变量优先、不落盘）；run 产物落在 `~/.ruyix/code/agent/runs/`（与 ruyix
-//! GUI 同一目录，跑完后面板历史列表可见）。刻意不读 `%APPDATA%` 下的实验室
-//! 遗留配置 —— 冒烟要的是确定性。
+//! 环境变量优先、不落盘）；run 产物落在引擎默认运行目录（`%TEMP%/ruyix/runs` ——
+//! 引擎不再摸用户主目录，要固定位置就设 `harness.workspace_root`）。刻意不读
+//! `%APPDATA%` 下的实验室遗留配置 —— 冒烟要的是确定性。
 //!
 //! 用法：
 //! ```text
@@ -11,7 +11,6 @@
 //! ```
 
 use harness_engine::{config, pipeline};
-use std::path::PathBuf;
 
 /// 最小 Sink：事件直接打 stdout（GUI 场景由 ruyix 侧 AgentSink 接管）。
 struct PrintSink;
@@ -35,17 +34,9 @@ fn main() {
         "实现一个 word_count 函数：统计英文文本中每个单词的出现次数，并补齐单元测试".into()
     });
 
-    // 默认值（DeepSeek 端点 + ruyix 运行目录）+ 纯环境变量覆盖，不读任何配置文件
+    // 默认值（DeepSeek 端点 + 运行目录落临时目录）+ 纯环境变量覆盖，不读任何配置文件
     let mut cfg = config::AppConfig::default();
     config::apply_env_overrides(&mut cfg);
-    cfg.workspace_root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ruyix")
-        .join("code")
-        .join("agent")
-        .join("runs")
-        .to_string_lossy()
-        .to_string();
 
     if cfg.llm.api_key.trim().is_empty() {
         eprintln!("未配置 LLM Key：请设置环境变量 DEEPSEEK_API_KEY（不落盘）");
@@ -53,7 +44,9 @@ fn main() {
     }
     println!(
         "model={} · base_url={} · runs_root={}",
-        cfg.llm.model, cfg.llm.base_url, cfg.workspace_root
+        cfg.llm.model,
+        cfg.llm.base_url,
+        config::runs_root(&cfg).display()
     );
 
     // 引擎只依赖 tokio 的基础 rt（单线程即可，LLM 调用是纯 IO）

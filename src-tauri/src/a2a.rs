@@ -7,7 +7,7 @@
 //! - 流式 tasks/subscribe（SSE）留待后续 —— 第一版用轮询，简单可靠
 //!
 //! 传输是 JSON-RPC 2.0 over HTTP POST（无新增依赖，复用 reqwest）。
-//! 配置：`~/.ruyix/code/a2a.toml`（全局）+ `<root>/.ruyix/code/a2a.toml`（项目，
+//! 配置：`<便携根>/global/a2a.toml`（全局）+ `<便携根>/projects/<key>/a2a.toml`（项目，
 //! 同名覆盖），与 mcp.toml 同一套结构化文件惯例。
 
 use serde::{Deserialize, Serialize};
@@ -48,17 +48,12 @@ pub struct A2aAgentCfg {
 }
 
 fn global_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ruyix")
-        .join("code")
-        .join("a2a.toml")
+    crate::paths::current().global_dir().join("a2a.toml")
 }
 
 fn project_path(project_root: &str) -> std::path::PathBuf {
-    std::path::Path::new(project_root)
-        .join(".ruyix")
-        .join("code")
+    crate::paths::current()
+        .project_dir(project_root)
         .join("a2a.toml")
 }
 

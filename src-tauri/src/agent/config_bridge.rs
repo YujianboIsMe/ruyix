@@ -66,12 +66,8 @@ fn read(mgr: &ConfigManager, key: &str, project_root: Option<&str>) -> Option<St
 
 /// ruyix 集成的默认值（区别于引擎实验室默认值，见 D3）
 pub fn ruyix_workspace_root() -> String {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ruyix")
-        .join("code")
-        .join("agent")
-        .join("runs")
+    crate::paths::current()
+        .runs_root()
         .to_string_lossy()
         .to_string()
 }
@@ -113,7 +109,7 @@ fn apply_engine_keys(cfg: &mut engine::config::AppConfig, raw: &[(String, String
     if !configured("sandbox.mode") {
         cfg.sandbox.mode = "prefer".to_string();
     }
-    // D5：运行目录落在 ruyix 名下，不与旧 harness 共享
+    // D5：运行目录落进**便携根**（`<exe 同目录>/global/runs`），不与旧 harness 共享
     if !configured("workspace_root") {
         cfg.workspace_root = ruyix_workspace_root();
     }
@@ -280,13 +276,14 @@ mod tests {
 
     #[test]
     fn empty_values_yield_ruyix_defaults_not_engine_defaults() {
+        crate::paths::set_test_root(r"D:\tmp-ruyix-root");
         let cfg = bridge(&[]);
         // D3：IDE 要开箱即用 → prefer（引擎实验室默认是 require）
         assert_eq!(cfg.sandbox.mode, "prefer");
-        // D5：运行目录落在 ruyix 名下，不与旧 harness 共享
+        // D5：运行目录落进**便携根**（`<exe 同目录>/global/runs`），不与旧 harness 共享
         // （PathBuf::join 在 Windows 上是反斜杠，先归一再断言）
         let normalized_root = cfg.workspace_root.replace('\\', "/");
-        assert!(normalized_root.contains(".ruyix/code/agent/runs"));
+        assert_eq!(normalized_root, "D:/tmp-ruyix-root/global/runs");
         // kb 默认关闭（附录 C）
         assert!(!cfg.kb.enabled);
         // 不配 key 时保持空串（命令层据此走"未配置"状态而非报错）

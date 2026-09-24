@@ -231,13 +231,10 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new() -> Self {
-        Self::new_with_dir(
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ruyix")
-                .join("code"),
-        )
+    /// `global_dir` 由调用方注入（宿主 = `paths::current().global_dir()`）。
+    /// 这里**不许再自己找家** —— 那正是 v1.0.0 P1 收敛掉的东西。
+    pub fn new(global_dir: PathBuf) -> Self {
+        Self::new_with_dir(global_dir)
     }
 
     /// 使用指定配置目录（测试用）
@@ -841,9 +838,8 @@ impl ConfigManager {
 
     /// 加载项目的 learn.lua，文件不存在返回空字符串
     pub fn load_lua_script(&self, project_root: &str) -> Result<String, String> {
-        let path = std::path::Path::new(project_root)
-            .join(".ruyix")
-            .join("code")
+        let path = crate::paths::current()
+            .project_dir(project_root)
             .join("learn.lua");
         if !path.exists() {
             return Ok(String::new());
@@ -853,9 +849,7 @@ impl ConfigManager {
 
     /// 追加 Lua 代码到 learn.lua
     pub fn append_lua_script(&self, project_root: &str, lua_code: &str) -> Result<(), String> {
-        let dir = std::path::Path::new(project_root)
-            .join(".ruyix")
-            .join("code");
+        let dir = crate::paths::current().project_dir(project_root);
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
         let path = dir.join("learn.lua");
         let entry = format!("\n{}\n", lua_code.trim());
@@ -908,7 +902,8 @@ impl ConfigManager {
 
     fn resolve_project_dir(&self, project_root: Option<&str>) -> Result<PathBuf, String> {
         match project_root {
-            Some(root) if !root.is_empty() => Ok(PathBuf::from(root).join(".ruyix").join("code")),
+            // 项目作用域配置 = 该项目的状态桶（`<便携根>/projects/<key>/`，与项目数据同一个桶）
+            Some(root) if !root.is_empty() => Ok(crate::paths::current().project_dir(root)),
             Some(_) => Err("项目路径为空字符串".to_string()),
             None => Err("未打开项目，无法使用项目配置 (-p)".to_string()),
         }

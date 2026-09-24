@@ -4,8 +4,8 @@
 //! A2A（a2a.rs）、**工具**（本模块：命令行命令白名单，如 pandoc / pdflatex /
 //! graphviz）、**SKILL**（本模块：可注入 prompt 的 markdown 技能文档）。
 //!
-//! 持久化沿用结构化文件惯例（全局 `~/.ruyix/code/*.toml` + 项目
-//! `<root>/.ruyix/code/*.toml`，条目按名合并、项目覆盖全局同名）：
+//! 持久化沿用结构化文件惯例（全局 `<便携根>/global/*.toml` + 项目
+//! `<便携根>/projects/<key>/*.toml`，条目按名合并、项目覆盖全局同名）：
 //! - 工具：`tools.toml`（`[[tools]]`）
 //! - SKILL：`skills.toml`（`[[skills]]`，markdown 正文内联 `content`）
 
@@ -24,18 +24,11 @@ fn default_true() -> bool {
 }
 
 fn global_path(file: &str) -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ruyix")
-        .join("code")
-        .join(file)
+    crate::paths::current().global_dir().join(file)
 }
 
 fn project_path(project_root: &str, file: &str) -> std::path::PathBuf {
-    Path::new(project_root)
-        .join(".ruyix")
-        .join("code")
-        .join(file)
+    crate::paths::current().project_dir(project_root).join(file)
 }
 
 // ============================================
@@ -311,6 +304,7 @@ mod tests {
     fn tool_file_roundtrip_and_merge() {
         let dir = std::env::temp_dir().join(format!("ruyix-cap-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::set_test_root(&dir);
         let ppath = project_path(dir.to_str().unwrap(), "tools.toml");
         write_list(
             &ppath,
@@ -341,6 +335,7 @@ mod tests {
     fn skill_roundtrip_with_multiline_content() {
         let dir = std::env::temp_dir().join(format!("ruyix-skill-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::set_test_root(&dir);
         let path = project_path(dir.to_str().unwrap(), "skills.toml");
         let s = SkillCfg {
             name: "pdf-build".into(),

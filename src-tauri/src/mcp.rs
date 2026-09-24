@@ -5,8 +5,8 @@
 //! 协议面只实现工具子集：initialize → tools/list → tools/call（resources/prompts
 //! 留待后续）。零新增依赖：子进程 std::process，序列化 serde_json。
 //!
-//! 配置持久化沿用结构化文件惯例：全局 `~/.ruyix/code/mcp.toml`，项目级
-//! `<root>/.ruyix/code/mcp.toml`，条目按名字合并（项目覆盖全局同名）。
+//! 配置持久化沿用结构化文件惯例：全局 `<便携根>/global/mcp.toml`，项目级
+//! `<便携根>/projects/<key>/mcp.toml`，条目按名字合并（项目覆盖全局同名）。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,17 +50,12 @@ fn default_true() -> bool {
 }
 
 fn global_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ruyix")
-        .join("code")
-        .join("mcp.toml")
+    crate::paths::current().global_dir().join("mcp.toml")
 }
 
 fn project_path(project_root: &str) -> std::path::PathBuf {
-    std::path::Path::new(project_root)
-        .join(".ruyix")
-        .join("code")
+    crate::paths::current()
+        .project_dir(project_root)
         .join("mcp.toml")
 }
 
@@ -515,6 +510,7 @@ mod tests {
     fn project_file_roundtrip() {
         let dir = std::env::temp_dir().join(format!("ruyix-mcp-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::set_test_root(&dir);
         write_file_servers(
             &project_path(dir.to_str().unwrap()),
             &[server("fs", "mcp-fs"), server("git", "mcp-git")],
