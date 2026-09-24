@@ -444,7 +444,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 plan(steps=[{"title":"短标题","detail":"做什么","files":["相对路径"]}])，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
 规则：
-1. 每轮用**工具调用**表达动作（可以一轮发多个互不依赖的）。**不要把动作写进 content** —— 本引擎严格只认工具调用，content 里的动作一律**不执行**（只会被退回来重发一轮）；也不要输出解释文字、不要 markdown 代码块包裹，更不要输出任何工具调用标记（DSML 之类）。content 只留给用户的文字，交付也走 final 工具。
+1. 每轮用**工具调用**表达动作（可以一轮发多个互不依赖的）。**不要把动作写进 content** —— 本引擎严格只认工具调用，content 里的动作一律**不执行**（只会被退回来重发一轮）；也不要输出解释文字、不要 markdown 代码块包裹，更不要输出任何工具调用标记（DSML 之类）。content 只留给用户的文字，交付也走 final 工具。历史里助手消息中形如 `〔已发出调用〕…` 的是**引擎记的流水**（记录你上几轮发过什么），它**不是**发送格式，别照着它把调用写进 content。
 2. 回答关于本项目的问题前，先 read 相关文件/目录 —— 不要凭空猜测项目内容。
 3. 改代码：先 read 拿到现状。改已有文件用 write + edits 只传改动；新建文件、或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 改动能验证就验证：execute 跑编译/测试（如 cargo test、python -m pytest、npm test），失败就继续修。
@@ -961,17 +961,45 @@ fn parse_tool_calls(
     Ok(out)
 }
 
-/// 工具轮**回显给模型**的那条 assistant 消息。
+/// 工具轮**回显给模型**的那条 assistant 消息（**流水文字，不是 JSON 信封**）。
 ///
 /// 工具轮的 `content` 天生是空的（动作全在 `tool_calls` 里）。若原样回显空消息，模型下一轮
-/// 就看不见自己刚发过什么 —— 于是把**它自己发的那串调用**原样写回去（`arguments` 一字不改，
-/// 截断/畸形也照原样，让模型自己看出来问题）。形状是 JSON，与老协议的历史写法同族。
+/// 就看不见自己刚发过什么 —— 所以要把它自己发的那串调用记回来（`arguments` 一字不改，
+/// 截断/畸形也照原样，让模型自己看出问题）。
+///
+/// ⚠ **这里绝对不能写成 JSON 信封**（曾经的写法是 `{"tool_calls":[{"name":…,"arguments":…}]}`）。
+/// 那是一个"看起来可以发送"的形状，而模型真的会照抄：
+/// - 真跑 `agent-…` 那次 73 轮里 **2 轮**被它带偏（`finish_reason=stop`、`tool_calls=0`、
+///   content 就是那个信封）；
+/// - 2026-09-24 新会话第 6 轮**又中一次**（用户原话"我看模型返回的没有问题啊"——
+///   动作意图和参数都对，只是发在了 content 通道）。
+///
+/// 病因在回显自己：我们在历史里反复摆一个"能发的 JSON"，模型就学着用它发。所以回显只给
+/// **流水文字**（带 `〔已发出调用〕` 前缀 + `name(键=值)`），一眼看得出是"引擎记的账"：
+/// 抄了也没用 —— 那是散文，同样不执行，但不会再被误当成协议的一部分。
 pub(crate) fn tool_calls_echo(calls: &[llm::ToolCall]) -> String {
-    let list: Vec<serde_json::Value> = calls
-        .iter()
-        .map(|c| serde_json::json!({ "name": c.function.name, "arguments": c.function.arguments }))
-        .collect();
-    serde_json::json!({ "tool_calls": list }).to_string()
+    let mut s = String::from("〔已发出调用〕");
+    for (i, c) in calls.iter().enumerate() {
+        if i > 0 {
+            s.push('；');
+        }
+        let raw = c.function.arguments.trim();
+        // 参数摊平成 `键=值`（与系统提示词里教工具时的写法同族），
+        // 而不是把 JSON 原样贴回来 —— 少一个可被复制的信封。
+        let shown = match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(o)) => o
+                .iter()
+                .map(|(k, v)| match v {
+                    serde_json::Value::String(t) => format!("{k}=\"{}\"", clip(t, 120)),
+                    other => format!("{k}={}", clip(&other.to_string(), 120)),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => clip(raw, 160),
+        };
+        s.push_str(&format!("{}({shown})", c.function.name));
+    }
+    s
 }
 
 /// 一轮模型输出 → 动作清单（1 个或多个）。
@@ -2072,6 +2100,21 @@ pub(crate) fn content_channel_error(raw: &str, strikes: usize, tools_hint: &str)
     } else {
         String::new()
     };
+    // 抄了**回显流水**（历史里那种带 tool_calls 键的信封）—— 单独一句话，因为病因在**我们自己的
+    // 回显**上：泛泛说"没有工具调用"治不了它（真跑 73 轮里 2 轮被它带偏；2026-09-24 新会话
+    // 第 6 轮又中一次，用户原话"我看模型返回的没有问题啊"）。
+    // 话术里**不引用那个信封本身** —— 引用等于又教一遍。
+    let copied_record = parsed
+        .as_ref()
+        .map(|v| v.get("tool_calls").is_some() || v.get("toolCalls").is_some())
+        .unwrap_or(false);
+    if copied_record {
+        return format!(
+            "你把**历史里那行流水**抄进了 content —— 那是引擎记的账（形如 `〔已发出调用〕…`），\
+             是**记录**、不是发送格式{mark_note}。发送动作只有一条路：**直接用工具调用**\
+             （{tools_hint}）。例：要 read 一个文件，就调 read 工具，别把它写成 content 里的 JSON。"
+        );
+    }
     match named {
         Some(what) if strikes <= 1 => format!(
             "你把动作写进了 content（`{what}`）—— **形状是对的，通道错了**：本引擎严格只认工具调用，\

@@ -190,8 +190,17 @@ fn tool_calls_round_runs_and_the_model_sees_its_own_call() {
     // 第 2 轮：模型看得到自己发过什么 + 拿得到读到的内容
     let req2 = llm.request(1);
     assert!(
-        req2.contains("tool_calls"),
-        "工具轮的 content 是空的，必须把它的调用回显回去: {req2}"
+        req2.contains("〔已发出调用〕"),
+        "工具轮的 content 是空的，必须把它的调用记回去（流水文字，不是 JSON 信封）: {req2}"
+    );
+    assert!(
+        req2.contains("read(path="),
+        "回显要写清调了什么、参数是什么: {req2}"
+    );
+    assert!(
+        !req2.contains("\"tool_calls\""),
+        "回显**不能**是 JSON 信封：那是个「能发」的形状，模型会照抄进 content（真跑 73 轮里 2 轮 + \
+         新会话第 6 轮就是这么坏的）: {req2}"
     );
     assert!(req2.contains("a.txt"), "观察结果要带上文件内容: {req2}");
 }
@@ -288,6 +297,39 @@ fn strict_mode_refuses_content_actions_and_names_them() {
     );
     assert!(out.answer.contains("写好了"), "{}", out.answer);
     assert_eq!(llm.count(), 3, "content 被拒 → 工具调用 → 交付");
+}
+
+/// **抄了回显流水**：模型把历史里那条流水（如今是 `〔已发出调用〕…`；从前是 JSON 信封）
+/// 直接写进 content —— 2026-09-24 新会话第 6 轮的原样复刻（`finish_reason=stop`、`tool_calls=0`）。
+/// 必须被拒、**不执行**，且纠正话术要**点名这个病因**（泛泛说"没有工具调用"治不了它），
+/// 但**不能把那个信封抄回去**（引用等于又教一遍）。
+#[test]
+fn a_copied_record_is_refused_and_named_without_quoting_it() {
+    let raw = r#"{"tool_calls":[{"arguments":"{\"path\": \"a.txt\"}","name":"read"}]}"#;
+    let msg = content_channel_error(raw, 1, MAIN_TOOLS_HINT);
+    assert!(msg.contains("流水"), "要点名是抄了流水：{msg}");
+    assert!(msg.contains("记录"), "{msg}");
+    assert!(msg.contains("工具调用"), "{msg}");
+    assert!(
+        !msg.contains("\"tool_calls\""),
+        "不许把信封抄回去（引用等于又教一遍）：{msg}"
+    );
+
+    // 端到端：被拒的那一轮**不执行**，改成真工具调用才跑
+    let d = TempDir::new("copied-record");
+    d.write("a.txt", "AAA");
+    let llm = crate::testllm::fake_llm_raw(vec![
+        raw.into(),
+        crate::testllm::tool_script(&[("read", serde_json::json!({"path": "a.txt"}))]),
+        crate::testllm::tool_script(&[("final", serde_json::json!({"answer": "读完了"}))]),
+    ]);
+    let cfg = ask_cfg(&llm);
+    let out = run_loop(&cfg, &d.0);
+
+    let fb = llm.request(1);
+    assert!(fb.contains("流水"), "回灌要指出病因：{fb}");
+    assert!(out.answer.contains("读完了"), "{}", out.answer);
+    assert_eq!(llm.count(), 3, "抄流水一轮被拒 → 真工具调用 → 交付");
 }
 
 /// 真跑里那几轮的形状（2026-09-24 cloud-shop 启动前后端）逐一复刻：引擎必须**认出**并
