@@ -4239,8 +4239,11 @@ async function autoOpenLastProject() {
 
 function setStatus(message, level = "info") {
   const el = document.querySelector("#statusbar .status-item");
+  // 后端来的错误文案是中文，这里**唯一**收口翻一次（见 ui/errors.js 与 ui-smoke U52）：
+  // 显示层是唯一收口，所以翻译放这里就够 —— 不必让 168 处调用点各自记得翻。
+  const shown = window.BackendMsg ? BackendMsg.translate(message) : message;
   if (el) {
-    el.textContent = message;
+    el.textContent = shown;
     el.style.color = level === "error" ? "#f48771" : "";
     // 1.5 秒后恢复默认颜色
     if (level === "error") {

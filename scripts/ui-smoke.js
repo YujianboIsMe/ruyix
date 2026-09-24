@@ -193,6 +193,9 @@
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
  *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
+ *   U52 backend-msg-i18n 后端消息在英文界面不露中文（bug 1/2 的收尾门禁）：逐条扫后端源码里
+ *                    会返回给前端的 Err 中文文案，要求 ui/errors.js 的规则能覆盖；
+ *                    并核对翻译层真接上了显示收口（setStatus）
  *   U51 terminal-targets 终端目标**可添加**（bug 4 的回归门禁）：面板有添加入口、用户条目由 get_term_targets
  *                    渲染、增删改全部走命令系统（面板不直接写配置）、后端与运行目标共用同一份扫描器、
  *                    中英文案齐备
@@ -3824,6 +3827,123 @@ async function runTerminalTargetChecks() {
   );
 }
 
+/**
+ * U52 backend-msg-i18n（bug 1/2 的收尾门禁）：**后端来的消息在英文界面下不露中文**。
+ *
+ * 后端（Rust）有 200 多条中文错误文案，带插值、散在宿主与引擎两处。把它们改成"错误码 + 参数"
+ * 是一大改，所以翻译落在**显示层唯一收口**（`setStatus`，见 `ui/errors.js`）。
+ * 代价是"这张表会腐烂" —— 没人会记得加了新错误就去补一条翻译，而腐烂**没有任何症状**
+ * （只在英文界面下偶尔冒出一句中文）。
+ *
+ * 所以这条门禁按后端源码**逐条**要求：每个会返回给前端的 `Err(...)` 中文文案，
+ * 都必须能被翻译规则覆盖（`translate(原文) !== 原文`）。漏一条就红，并把它打出来。
+ * 扫描口径与 ui/errors.js 顶部注释一致：只看非测试代码里的 `Err(` / `map_err` / `ok_or` / `bail!`，
+ * 跳过日志与断言（那两类不进界面）。
+ */
+async function runBackendMsgChecks() {
+  // 页面里加载 ui/errors.js，拿它的 translate
+  const win = { I18N: { t: (k) => k, getLang: () => "zh-CN" } };
+  const saved = [["window", globalThis.window]];
+  Object.assign(globalThis, { window: win });
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/errors.js"))();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+  const api = win.BackendMsg;
+  check(
+    "U52",
+    "backend-msg-module",
+    !!api && typeof api.translate === "function",
+    "ui/errors.js 没导出 BackendMsg.translate（被改名 / 没被 index.html 加载？）"
+  );
+  if (!api) return;
+
+  // 收口必须真的接上
+  check(
+    "U52",
+    "backend-msg-hooked",
+    has(readLf("ui/main.js"), "BackendMsg.translate(") &&
+      has(readLf("ui/index.html"), "errors.js"),
+    "翻译层没接上显示收口（setStatus）或页面没加载 errors.js —— 表再全也不会生效"
+  );
+
+  // 逐条扫后端源码里的 Err 文案
+  const ROOTS = ["src-tauri/src", "crates/harness-engine/src"];
+  const files = [];
+  const walk = (dir) => {
+    let ents = [];
+    try {
+      ents = fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of ents) {
+      const rel = dir + "/" + e.name;
+      if (e.isDirectory()) walk(rel);
+      else if (e.name.endsWith(".rs") && !e.name.endsWith("tests.rs")) files.push(rel);
+    }
+  };
+  ROOTS.forEach(walk);
+
+  const CJK = /[\u4e00-\u9fff]/;
+  const ERR_CTX = /\bErr\(|map_err|ok_or|bail!/;
+  const SKIP = /\b(log|println|eprintln|debug|info|warn|error|trace)!\s*\(|sink\.log|assert/;
+  const missing = [];
+  for (const f of files) {
+    let src = readLf(f);
+    const cut = src.indexOf("#[cfg(test)]");
+    if (cut > 0) src = src.slice(0, cut);
+    src.split("\n").forEach((line, i) => {
+      const s = line.trim();
+      if (s.startsWith("//") || SKIP.test(line) || !ERR_CTX.test(line)) return;
+      for (const m of line.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+        const lit = m[1];
+        if (!CJK.test(lit)) continue;
+        if (api.translate(lit) === lit) missing.push(`${f}:${i + 1}  ${lit.slice(0, 72)}`);
+      }
+    });
+  }
+  check(
+    "U52",
+    "backend-msg-covered",
+    missing.length === 0,
+    `这些后端文案翻不出来（英文界面下会露中文）：共 ${missing.length} 条\n      ` +
+      missing.slice(0, 40).join("\n      ") +
+      (missing.length > 40 ? `\n      …还有 ${missing.length - 40} 条` : "")
+  );
+
+  // 行为断言：几条最常见的必须真翻对（表在、但规则写歪了也是病）
+  const samples = [
+    ["保存失败: permission denied", "save failed: permission denied"],
+    ["文件不存在: D:\\x.md", "file not found: D:\\x.md"],
+    ["路径不是目录，请输入项目文件夹路径", "path is not a directory — please pick a project folder"],
+    ["[ai] 由专门功能管理，不能通过配置表单写入", null],
+    // 复合句：前半句是我方文案（U49 管），后半句是后端的 —— 两截都要各归其位。
+    // ⚠ 这里**不能**按"最后一个冒号"去切：`translate` 是**从左往右**找第一个能翻干净的分界，
+    //   取最后一个会把后端那句里的冒号当成我方/后端的边界（这条断言第一版就是这么写错的）。
+    [
+      "工具列表刷新失败: 创建目录失败: access denied",
+      "工具列表刷新失败: create the directory failed: access denied",
+    ],
+  ];
+  const wrong = [];
+  for (const [raw, want] of samples) {
+    const got = api.translate(raw);
+    if (want !== null && got !== want) wrong.push(`「${raw}」→「${got}」期望「${want}」`);
+    if (want === null && CJK.test(got) && raw.includes(": ")) {
+      // 复合句：前半句是我方的（会由 U49 管），后半句是后端的 —— 后半句必须被翻掉
+      const tail = raw.slice(raw.lastIndexOf(": ") + 2);
+      if (api.translate(tail) === tail) wrong.push(`「${raw}」的后半句没被翻：「${tail}」`);
+    }
+  }
+  check("U52", "backend-msg-samples", wrong.length === 0, "翻译结果不对：\n      " + wrong.join("\n      "));
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -3851,6 +3971,7 @@ async function main() {
     ["U49", "i18n-no-hardcoded-cjk", runI18nSweepChecks],
     ["U50", "pane-exclusive", runPaneExclusiveChecks],
     ["U51", "terminal-targets", runTerminalTargetChecks],
+    ["U52", "backend-msg-i18n", runBackendMsgChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {
