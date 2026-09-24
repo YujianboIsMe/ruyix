@@ -2693,12 +2693,21 @@ fn render_start(proj: &Path, out: &crate::proc::StartOutcome) -> String {
             ),
             Some(tail.clone()),
         ),
-        StartKind::NotReady { evidence, tail } => (
+        StartKind::NotReady {
+            evidence,
+            tail,
+            hint,
+        } => (
             format!(
                 "⚠ 进程还活着，但就绪判据在窗口内没命中 handle={} pid={} 用时 {secs:.1}s\n\
                  判据最后一次：{evidence}\n\
-                 （判据没命中 ≠ 启动失败：慢启动很常见。看下面的日志尾，分辨它在启动还是卡住了。）",
-                i.handle, i.pid
+                 （判据没命中 ≠ 启动失败：慢启动很常见。看下面的日志尾，分辨它在启动还是卡住了。）{}",
+                i.handle,
+                i.pid,
+                match hint {
+                    Some(h) => format!("\n{h}"),
+                    None => String::new(),
+                }
             ),
             Some(tail.clone()),
         ),

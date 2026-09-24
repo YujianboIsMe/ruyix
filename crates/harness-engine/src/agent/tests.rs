@@ -2031,6 +2031,60 @@ fn the_start_note_says_what_happens_at_run_end() {
     assert_eq!(stopped.len(), 2, "收尾：两个都收掉，测试不留孤儿");
 }
 
+/// A（v0.11）：就绪判据与启动命令**自相矛盾**时，引擎**不起进程**、当面把证据摆给模型。
+/// 真跑代价：那次 73 轮里 6 次"全停全起"，就是因为判据在等另一个端口 —— 判据永远命不中。
+#[test]
+fn a_self_contradicting_ready_criterion_is_refused_with_evidence() {
+    let _g = crate::proc::table_lock();
+    let d = TempDir::new("conflict-criterion");
+    let cfg = AppConfig::default();
+    let spec = crate::proc::StartSpec {
+        cmd: "cd web && npm run dev -- --port 5174 --strictPort".into(),
+        ready_cmd: Some(r#"netstat -ano | findstr ":5173""#.into()),
+        ready_timeout_secs: Some(3),
+        keep_alive: true,
+    };
+    let err = tool_exec_bg(&d.0, &cfg, &spec).expect_err("必须当面拒");
+    assert!(err.contains("自相矛盾"), "{err}");
+    assert!(
+        err.contains("5174") && err.contains("5173"),
+        "两边的端口都要摆出来：{err}"
+    );
+    assert!(err.contains("没有执行"), "要说清「没起」：{err}");
+    assert!(
+        crate::proc::listing_for(&d.0).is_empty(),
+        "拒了就不该有托管进程"
+    );
+}
+
+/// A 的第二条腿（v0.11）：判据没命中但进程活着时，观察里必须带**「判据错在哪」**的对比证据
+/// —— 只回"没就绪"，模型的下一个动作就是重启。
+#[test]
+fn a_missed_criterion_carries_the_port_comparison() {
+    let _g = crate::proc::table_lock();
+    let d = TempDir::new("miss-evidence");
+    let cfg = AppConfig::default();
+    // 进程活着但**不监听任何端口** → 走"没有任何新端口"那一支（可复现、与平台无关）
+    let sleeper = if cfg!(windows) {
+        "ping -n 30 127.0.0.1"
+    } else {
+        "sleep 30"
+    };
+    let spec = crate::proc::StartSpec {
+        cmd: sleeper.into(),
+        ready_cmd: Some(r#"netstat -ano | findstr ":65533" | findstr "LISTENING""#.into()),
+        ready_timeout_secs: Some(1),
+        keep_alive: false,
+    };
+    let note = tool_exec_bg(&d.0, &cfg, &spec).expect("判据没命中不等于启动失败");
+    assert!(note.contains("没命中"), "{note}");
+    assert!(note.contains("判据为什么没命中"), "必须给对比证据：{note}");
+    assert!(note.contains("启动前在听的端口"), "{note}");
+    assert!(note.contains("启动后新出现的端口"), "{note}");
+    let (stopped, _) = crate::proc::shutdown_for(&d.0, false);
+    assert_eq!(stopped.len(), 1, "收尾：别留孤儿");
+}
+
 /// **端到端回归**（用户报的 bug 原样复刻）：模型后台起了服务、没声明 keep_alive，
 /// 看到就绪就 final 报「服务已启动」—— 而 run 一结束引擎就把它收掉，用户 netstat 一看是空的。
 /// 现在：交付前对账打回一次；模型带 keep_alive 重启后，那个服务必须**活过 run 结束**。

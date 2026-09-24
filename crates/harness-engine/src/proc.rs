@@ -113,8 +113,13 @@ pub enum StartKind {
         tail: String,
         last_probe: Option<String>,
     },
-    /// 窗口内判据未命中，但进程还活着（可能在慢启动）
-    NotReady { evidence: String, tail: String },
+    /// 窗口内判据未命中，但进程还活着（可能在慢启动）。`hint` = 引擎对出来的
+    /// **"判据错在哪"**（前后对比 LISTENING 端口得来，见 [`ready_miss_note`]）。
+    NotReady {
+        evidence: String,
+        tail: String,
+        hint: Option<String>,
+    },
     /// 没给判据，起完就返回
     Started,
 }
@@ -328,6 +333,234 @@ fn probe_ready(cwd: &Path, cmd: &str) -> ProbeResult {
         hit: out.passed(),
         detail,
     }
+}
+
+// ============================================================
+// 判据自相矛盾：**当面拒**（v0.11）
+// ============================================================
+
+/// 从一条命令 / 一条判据里抽出**端口数字**。
+///
+/// 只认**强标记**，宁漏不误伤 —— 这个函数的输出会被用来**拒绝一次启动**，
+/// 而"误伤一条合法命令"的代价高于"放过一条写错判据的"：
+///
+/// | 认 | 例子 |
+/// |---|---|
+/// | 冒号形式 | `:8083`、`127.0.0.1:5173`、`findstr ":5173"`、`[::]:8083` |
+/// | `--port` / `-p` / `port=` / `PORT=` | `--port 5174`、`--port=5174`、`PORT=8083` |
+///
+/// **不认**裸数字（这是关键）：`pom.xml`、`app-0.0.1-SNAPSHOT.jar`、`2026-09-24`、
+/// `mysql:5.7` 里那一堆数字都不是端口，认了就会把正常命令判成"矛盾"。
+/// 要 ≥2 位、且值 ≤ 65535（端口 80/443 是 2-3 位，够用；`0.0.1` 拆出来是 1 位，自然落选）。
+pub fn ports_in(s: &str) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let push = |n: u32, out: &mut Vec<u16>| {
+        if (1..=65535).contains(&n) {
+            let n = n as u16;
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    };
+    // 从 i 开始读连续数字（最多 5 位）→ (值, 结束下标)
+    let digits_at = |i: usize| -> (Option<u32>, usize) {
+        let mut j = i;
+        let mut v: u32 = 0;
+        while j < chars.len() && chars[j].is_ascii_digit() && j - i < 5 {
+            v = v * 10 + (chars[j] as u8 - b'0') as u32;
+            j += 1;
+        }
+        (if j > i { Some(v) } else { None }, j)
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        // ① 冒号后的数字：`端口:8083` 这种写法（也覆盖 `[::]:8083`）
+        if chars[i] == ':' {
+            let (v, j) = digits_at(i + 1);
+            if let Some(v) = v {
+                // 版本号 `mysql:5.7` 会是 `:5` + `.7` → 位数不够 + 后跟点，两种都落选
+                let next = chars.get(j).copied().unwrap_or(' ');
+                if j - i > 2 && next != '.' && !next.is_ascii_digit() && next != '-' {
+                    push(v, &mut out);
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        // ② `--port` / `-p` / `port=` / `PORT=` 后面的数字
+        let rest: String = chars[i..].iter().take(7).collect();
+        let lower = rest.to_ascii_lowercase();
+        let hit = lower.starts_with("--port")
+            || lower.starts_with("port=")
+            || lower.starts_with("port ")
+            || lower.starts_with("port:")
+            || lower.starts_with("_port=")
+            || (lower.starts_with("-p") && !lower.starts_with("-pl"));
+        if hit {
+            let mut j = i + 1;
+            while j < chars.len() && !chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            let (v, k) = digits_at(j);
+            if let Some(v) = v {
+                push(v, &mut out);
+                i = k;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.sort_unstable();
+    out
+}
+
+/// **判据与命令自相矛盾 → 拒绝这次启动**（判断依据是纯机械的：两串里抽出来的端口号）。
+///
+/// 为什么要有它（真跑代价，2026-09-24 cloud-shop 那次）：模型用
+/// `mvn … spring-boot:run`（后端）配 `ready_cmd: netstat … findstr ":5173"`（前端的端口），
+/// **判据永远不可能命中** → 引擎如实回"⚠ 还挺着但没就绪" → 模型不信、去侦察、然后"全停重来"、
+/// 再配上错的判据 …… 一次 run 里 **6 次全停全起、73 轮，用户看到的是"只启动了前端"**。
+/// 引擎完全不需要知道"8083 是后端、5173 是前端"：**命令里写了端口、判据里写了端口、
+/// 两边完全不相交**，这就是一条自相矛盾的判据 —— 白等一整个超时，然后必然误判。
+///
+/// 两个边界（都不拒）：
+/// - 任一侧**没抽出端口** → 不判（`mvn spring-boot:run` 的端口在配置里，判据等 8083 完全合法）；
+/// - 两侧有交集 → 不判（多端口服务、写了两个候选端口都算正常）。
+pub fn ready_port_conflict(cmd: &str, ready_cmd: &str, wait_secs: u64) -> Option<String> {
+    let cmd_ports = ports_in(cmd);
+    let ready_ports = ports_in(ready_cmd);
+    if cmd_ports.is_empty() || ready_ports.is_empty() {
+        return None;
+    }
+    if ready_ports.iter().any(|p| cmd_ports.contains(p)) {
+        return None;
+    }
+    let list = |v: &[u16]| {
+        v.iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(" 或 ")
+    };
+    Some(format!(
+        "❌ 这条命令没有执行：**就绪判据与启动命令自相矛盾**，它永远不会命中。\n\
+         启动命令里的端口：{}\n就绪判据里的端口：{}\n\
+         两侧完全不相交 —— 这条判据等的是**别的服务**的端口，白等 {wait_secs}s 之后只会拿到\
+         \"没就绪\"，然后你会以为服务没起来。\n\
+         请二选一后重发：\n\
+         ① 把判据改成匹配本次启动的端口（例：`netstat -ano | findstr \":<上面的端口>\"`）；\n\
+         ② 把命令改成监听判据里的端口（若那个端口已被占用，先解决占用 —— 用 `netstat -ano | findstr \":<端口>\"` 看是谁）。",
+        list(&cmd_ports),
+        list(&ready_ports)
+    ))
+}
+
+/// 解析 `netstat -ano` 的输出，取出**所有处于 LISTENING 的本地端口**。
+///
+/// 纯函数，好测：只认含 `LISTENING` 的行，取本地地址列里**最后一个冒号**之后的数字
+/// （`0.0.0.0:5173` / `[::]:8083` / `[::1]:5173` / `127.0.0.1:5173` 都覆盖）。
+pub fn listening_ports(netstat_out: &str) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    for line in netstat_out.lines() {
+        if !line.to_ascii_uppercase().contains("LISTENING") {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let Some(addr) = it.next() else { continue };
+        // 本地地址列（第一列）；有的是 "TCP"，那就取下一列
+        let addr = if addr.eq_ignore_ascii_case("TCP") || addr.eq_ignore_ascii_case("UDP") {
+            match it.next() {
+                Some(a) => a,
+                None => continue,
+            }
+        } else {
+            addr
+        };
+        if let Some(port) = addr.rsplit(':').next()
+            && let Ok(p) = port.parse::<u16>()
+            && !out.contains(&p)
+        {
+            out.push(p);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// 取当前所有 LISTENING 端口（**尽力而为**：拿不到就返回空，绝不让它拖垮一次启动）。
+fn listening_ports_now(cwd: &Path) -> Vec<u16> {
+    let out = exec::run_line(cwd, "netstat -ano", Duration::from_secs(5));
+    listening_ports(&format!("{}\n{}", out.stdout, out.stderr))
+}
+
+/// 判据没命中但进程还活着时，**把"判据错在哪"摆成证据**（[`StartKind::NotReady`] 的 hint）。
+///
+/// 三个分支各对应一种真实病因（2026-09-24 那次 run 三个都出现过）：
+/// - **判据端口 ≠ 本次新增的监听端口** → 判据写错了端口 ⇒ **明确说"不要重启"**（这是最毒的一支：
+///   模型拿到"没就绪"就去重启，重启还是错的判据，于是 6 次全停全起）；
+/// - **判据端口确实在监听** → 判据的**匹配写法**有问题（引号/大小写/格式）；
+/// - **没有任何新端口** → 服务可能真没起来，或它本来就不监听端口（那就别用端口判据）。
+pub fn ready_miss_note(ready_cmd: &str, before: &[u16], after: &[u16], waited_secs: f64) -> String {
+    let ready_ports = ports_in(ready_cmd);
+    let new_ports: Vec<u16> = after
+        .iter()
+        .copied()
+        .filter(|p| !before.contains(p))
+        .collect();
+    let fmt = |v: &[u16]| {
+        if v.is_empty() {
+            "（无）".to_string()
+        } else {
+            v.iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    };
+    // "启动前在听的端口"只是背景（一台机器几十个），**限长**：这段文字要进模型上下文，
+    // 有用的是"新出现了什么"（下面那行），不是全量清单。超过 16 个就只报数量。
+    let fmt_capped = |v: &[u16]| {
+        if v.len() > 16 {
+            format!("共 {} 个（太长就不列了）", v.len())
+        } else {
+            fmt(v)
+        }
+    };
+    let head = format!(
+        "**判据为什么没命中**（本次启动前后对比了 LISTENING 端口，{waited_secs:.1}s 窗口）：\n\
+         启动前在听的端口：{}\n启动后新出现的端口：{}",
+        fmt_capped(before),
+        fmt(&new_ports)
+    );
+    if new_ports.is_empty() {
+        return format!(
+            "{head}\n→ 没有任何新端口：服务可能**真的**还在启动或已卡住（看日志尾），\
+             也可能它本来就不监听端口 —— 那就不该用端口当判据。"
+        );
+    }
+    if ready_ports.is_empty() {
+        return format!(
+            "{head}\n→ 判据里没有端口（可能是 HTTP/文件判据）：上面那些新端口里如果有它，\
+             说明服务起来了、是**判据写法**的问题。"
+        );
+    }
+    if ready_ports.iter().any(|p| new_ports.contains(p)) {
+        return format!(
+            "{head}\n→ 判据等的端口 **{}** 确实已经在监听 —— 服务起来了，是**判据写法**没匹配上\
+             （引号 / 大小写 / 匹配串格式）。换成 `netstat -ano | findstr \":<端口>\"`，\
+             或直接用 `{{\"op\":\"status\",\"handle\":\"…\"}}`，不要重启。",
+            fmt(&ready_ports)
+        );
+    }
+    format!(
+        "{head}\n→ **判据写错了端口**：判据在等 {}，而这次启动新在听的是 {} —— 服务其实起来了，\
+         只是**不是**判据等的那个端口。**不要重启**（重启还是同一条错判据）：把判据换成正确的端口，\
+         或直接 `{{\"op\":\"status\",\"handle\":\"…\"}}` / 读日志尾确认后继续。",
+        fmt(&ready_ports),
+        fmt(&new_ports)
+    )
 }
 
 fn clip_tail(s: &str, max: usize) -> String {
@@ -565,6 +798,20 @@ pub fn start(
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("创建托管目录失败（{}）：{e}", dir.display()))?;
 
+    // ⓪ **判据与命令自相矛盾 → 当面拒**（v0.11）：两侧都写明了端口、且**完全不相交**时，
+    //    这条判据永远不可能命中 —— 白等一整个超时，然后必然误判成"没起来"，模型于是重启、
+    //    再配上错的判据、自我强化（真跑：一次 run 里 6 次"全停全起"、73 轮）。
+    //    放在最前面：它最便宜（纯字符串）也最决定性，而且**不需要任何 app 知识**。
+    if let Some(rc) = &spec.ready_cmd
+        && let Some(msg) = ready_port_conflict(
+            &spec.cmd,
+            rc,
+            spec.ready_timeout_secs.unwrap_or(default_ready_secs),
+        )
+    {
+        return Err(msg);
+    }
+
     // ① 判据在启动之前就已命中 → 这次的就绪是假的，别起
     if let Some(rc) = &spec.ready_cmd {
         let p = probe_ready(proj, rc);
@@ -615,6 +862,14 @@ pub fn start(
             ));
         }
     }
+
+    // 判据没命中时要给"判据错在哪"的证据（见 [`ready_miss_note`]）：先记下**启动前**在听的端口。
+    // 尽力而为（拿不到就是空），只在有就绪判据时取 —— 没有判据就没有"没命中"这回事。
+    let ports_before = if spec.ready_cmd.is_some() {
+        listening_ports_now(proj)
+    } else {
+        Vec::new()
+    };
 
     let handle = next_handle();
     let log_path = dir.join(format!("{handle}.log"));
@@ -697,11 +952,22 @@ pub fn start(
                 }
                 if started.elapsed() >= ready_timeout {
                     let tail = read_log_tail(&log_path, LOG_TAIL_LINES);
+                    // **判据为什么没命中**：对比启动前后的 LISTENING 端口，把病因摆出来。
+                    // 这一句是这次改造的核心收益 —— 只回"没就绪"，模型的下一个动作就是重启
+                    // （真跑：6 次全停全起、73 轮）；告诉它"判据等 5173，你新在听的是 8083"，
+                    // 它才可能改成对的判据。
+                    let hint = ready_miss_note(
+                        rc,
+                        &ports_before,
+                        &listening_ports_now(proj),
+                        started.elapsed().as_secs_f64(),
+                    );
                     return Ok(StartOutcome {
                         info: info_of(&handle)?,
                         kind: StartKind::NotReady {
                             evidence: p.detail,
                             tail,
+                            hint: Some(hint),
                         },
                         waited_ms: started.elapsed().as_millis(),
                     });
@@ -976,6 +1242,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(proj);
     }
 
+    // ============================================================
+    // v0.11：判据自相矛盾 → 当面拒（A）
+    // ============================================================
+
+    /// 端口抽取只认**强标记**：`pom.xml`、`0.0.1-SNAPSHOT.jar`、日期都不是端口 ——
+    /// 这个函数会被用来**拒绝一次启动**，误伤比放过贵得多。
+    #[test]
+    fn ports_in_only_reads_strong_markers() {
+        assert_eq!(
+            ports_in("npm run dev -- --port 5174 --strictPort"),
+            vec![5174]
+        );
+        assert_eq!(ports_in("--port=8083"), vec![8083]);
+        assert_eq!(ports_in("PORT=8083"), vec![8083]);
+        assert_eq!(ports_in(r#"netstat -ano | findstr ":5173""#), vec![5173]);
+        assert_eq!(ports_in("curl -s http://127.0.0.1:8083/health"), vec![8083]);
+        assert_eq!(ports_in("--port 5174 --port 5173"), vec![5173, 5174]);
+        // 不认：真实语料里的 pom.xml / 版本号 / 日期 / 长度不像端口
+        assert!(ports_in("mvn -f cloud-shop-admin/pom.xml spring-boot:run").is_empty());
+        assert!(ports_in("java -jar target/app-0.0.1-SNAPSHOT.jar").is_empty());
+        assert!(ports_in("netstat -ano | findstr LISTENING").is_empty());
+        assert!(ports_in("mysql:5.7").is_empty());
+        assert!(ports_in("git log --since=2026-09-24").is_empty());
+    }
+
+    /// A｜判据自相矛盾 → 拒，并把两边的端口都摆出来（含真跑那次的原始参数）。
+    #[test]
+    fn conflicting_ready_ports_are_refused_with_evidence() {
+        let msg = ready_port_conflict(
+            "cd cloud-shop-admin-web && npm run dev -- --port 5174 --strictPort",
+            r#"netstat -ano | findstr ":5173" | findstr "LISTENING""#,
+            120,
+        )
+        .expect("端口完全不相交，必须拒");
+        assert!(msg.contains("自相矛盾"), "{msg}");
+        assert!(
+            msg.contains("5174") && msg.contains("5173"),
+            "两边的端口都要摆出来：{msg}"
+        );
+        assert!(msg.contains("120s"), "白等多久要说清：{msg}");
+
+        // 一致 → 不拒
+        assert!(
+            ready_port_conflict(
+                "npm run dev -- --port 5174",
+                r#"netstat -ano | findstr ":5174""#,
+                120
+            )
+            .is_none()
+        );
+        // 命令侧没有端口（端口在配置里）→ 不判：`mvn spring-boot:run` + 等 8083 完全合法
+        assert!(ready_port_conflict("mvn spring-boot:run", r#"findstr ":8083""#, 180).is_none());
+        // 命令侧多个端口但**与判据有交集** → 不拒
+        assert!(
+            ready_port_conflict(
+                "node server.js --port 3000 --port 8080",
+                r#"netstat -ano | findstr ":8080""#,
+                60
+            )
+            .is_none()
+        );
+        // 判据是 HTTP/文件这种没有端口的 → 不判
+        assert!(
+            ready_port_conflict(
+                "npm run dev -- --port 5174",
+                "curl -f http://localhost/health",
+                60
+            )
+            .is_none()
+        );
+    }
+
+    /// `start()` 在最前面就拒：**不 spawn、不占 handle、不写日志**。
+    #[test]
+    fn a_conflicting_criterion_is_refused_before_spawning() {
+        let p = tmp_proj("conflict");
+        let s = StartSpec {
+            cmd: "cd web && npm run dev -- --port 5174 --strictPort".into(),
+            ready_cmd: Some(r#"netstat -ano | findstr ":5173""#.into()),
+            ready_timeout_secs: Some(3),
+            keep_alive: true,
+        };
+        let err = start(&p, &s, 8, 30).expect_err("必须拒");
+        assert!(err.contains("自相矛盾"), "{err}");
+        assert!(listing_for(&p).is_empty(), "拒了就不该有托管进程");
+        let logs: Vec<String> = std::fs::read_dir(log_dir(&p))
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(logs.is_empty(), "拒了就不该建日志文件：{logs:?}");
+        cleanup(&p);
+    }
+
+    /// netstat 解析（夹具取自本机真输出）。
+    #[test]
+    fn listening_ports_parses_real_netstat() {
+        let raw = "\
+  TCP    0.0.0.0:5173           0.0.0.0:0              LISTENING       36584
+  TCP    0.0.0.0:5174           0.0.0.0:0              LISTENING       8300
+  TCP    [::]:8083              [::]:0                 LISTENING       35432
+  TCP    127.0.0.1:49670        0.0.0.0:0              ESTABLISHED     1234
+  UDP    0.0.0.0:5353           *:*                                    5678";
+        assert_eq!(listening_ports(raw), vec![5173, 5174, 8083]);
+    }
+
+    /// 判据没命中的三种病因各说清（"判据写错了端口"那支要明确说**不要重启**）。
+    #[test]
+    fn ready_miss_note_names_the_three_causes() {
+        // ① 判据端口 ≠ 本次新增监听（真跑的病因）→ 不要重启
+        let n = ready_miss_note(r#"findstr ":5173""#, &[5173], &[5173, 8083], 90.0);
+        assert!(n.contains("判据写错了端口"), "{n}");
+        assert!(n.contains("不要重启"), "{n}");
+        assert!(n.contains("8083"), "{n}");
+        // ② 判据端口确实在监听 → 是判据**写法**的问题
+        let n = ready_miss_note(r#"findstr ":5173""#, &[], &[5173], 90.0);
+        assert!(n.contains("判据写法"), "{n}");
+        assert!(n.contains("不要重启"), "{n}");
+        // ③ 没有任何新端口 → 服务可能真没起来
+        let n = ready_miss_note(r#"findstr ":5173""#, &[], &[], 90.0);
+        assert!(n.contains("没有任何新端口"), "{n}");
+        // 判据本身没端口（HTTP/文件）→ 只摆事实，不冤枉判据
+        let n = ready_miss_note("curl -f http://localhost/health", &[], &[8083], 90.0);
+        assert!(n.contains("判据里没有端口"), "{n}");
+        // "启动前在听的端口"限长（这段文字要进模型上下文：一台机器几十个端口，只报数量）
+        let many: Vec<u16> = (8000..8020).collect();
+        let n = ready_miss_note(r#"findstr ":5173""#, &many, &[8083], 90.0);
+        assert!(n.contains("共 20 个"), "{n}");
+        assert!(!n.contains("8000 8001"), "太长就不该整段贴出来：{n}");
+    }
+
     #[test]
     fn ready_predicate_hits_and_reports_the_matching_line() {
         let _g = table_lock();
@@ -1076,11 +1475,16 @@ mod tests {
         s.ready_timeout_secs = Some(1);
         let out = start(&proj, &s, 4, 5).expect("应当起来");
         match &out.kind {
-            StartKind::NotReady { evidence, .. } => {
+            StartKind::NotReady { evidence, hint, .. } => {
                 assert!(
                     evidence.contains("exit="),
                     "要带判据最后一次的结果: {evidence}"
                 );
+                // v0.11：还得告诉它**判据为什么没命中**（对比启动前后的 LISTENING 端口）——
+                // 只回"没就绪"，模型的下一个动作就是重启（真跑：6 次全停全起、73 轮）。
+                let h = hint.as_ref().expect("没就绪必须带「判据错在哪」");
+                assert!(h.contains("启动前在听的端口"), "{h}");
+                assert!(h.contains("启动后新出现的端口"), "{h}");
             }
             other => panic!("应当是 NotReady，实际 {other:?}"),
         }

@@ -38,11 +38,52 @@ fn marker_probe(marker: &Path) -> String {
     }
 }
 
+/// 子模式：**真监听一个端口**（日志里那个"后端/前端"的替身），永不退出。
+/// 用自己当替身是为了不依赖 python / java / maven —— 任何平台都能跑出同一份结论。
+///
+/// 两种传端口的方式都要能解析，因为演示要区分两种启动命令：
+/// - `--serve --port 18100` → **命令里带端口标记**（引擎抽得出来 → 判据矛盾时能当面拒）；
+/// - `--serve 18099` → **命令里没有可识别的端口**（端口由配置决定，就像 `mvn spring-boot:run`）
+///   → 引擎无从判定，只能靠"没命中时的对比证据"。
+fn serve_args(args: &[String]) -> Option<u16> {
+    if !args.iter().any(|a| a == "--serve") {
+        return None;
+    }
+    for (i, a) in args.iter().enumerate() {
+        if a == "--port" || a == "-p" {
+            return args.get(i + 1).and_then(|s| s.parse().ok());
+        }
+        if a == "--serve"
+            && let Some(p) = args.get(i + 1).and_then(|s| s.parse().ok())
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn serve(port: u16) {
+    let l = std::net::TcpListener::bind(("0.0.0.0", port)).expect("绑端口失败（可能已被占用）");
+    println!("child: LISTENING on {port}");
+    loop {
+        if l.accept().is_ok() {}
+    }
+}
+
+/// 端口判据 —— **真跑里的原样写法**（`netstat -ano | findstr ":端口" | findstr "LISTENING"`）。
+fn netstat_probe(port: u16) -> String {
+    format!("netstat -ano | findstr \":{port}\" | findstr \"LISTENING\"")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--hold" {
         let secs = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
         hold(Path::new(&args[2]), secs);
+        return;
+    }
+    if let Some(port) = serve_args(&args) {
+        serve(port);
         return;
     }
 
@@ -141,5 +182,88 @@ fn main() {
         Err(e) => println!("{e}"),
     }
 
-    println!("\n完成：三个出口、判据即命令、重复启动守卫、项目级收尾 —— 都验过了。");
+    // ⑦ v0.11：**判据与命令自相矛盾 → 当面拒**（命令里带可识别端口标记的情形）。
+    //    复刻真跑那次的形状：命令写着一个端口、判据却在等另一个 —— 判据永远命不中，
+    //    白等一整个超时之后必然误判成"没起来"。真跑代价：一次 run 里 6 次"全停全起"、73 轮。
+    println!("\n--- ⑦ 判据与命令自相矛盾（应被拒，且不该起进程）---");
+    let conflicting = proc::StartSpec {
+        cmd: format!("\"{me}\" --serve --port 18100"),
+        ready_cmd: Some(netstat_probe(18999)),
+        ready_timeout_secs: Some(5),
+        keep_alive: false,
+    };
+    match proc::start(&proj, &conflicting, 4, 60) {
+        Ok(o) => println!("⚠️ 不该成功：handle={}", o.info.handle),
+        Err(e) => println!("{}", e.trim_end()),
+    }
+
+    // ⑧ v0.11：**命令里没有可识别的端口**（端口由配置决定 —— 就像 `mvn … spring-boot:run`）
+    //    ＋判据是别的服务的端口 → 引擎**不能拒**（那是误伤），但判据没命中时必须给出
+    //    **判据错在哪**的对比证据。真跑就是死在这一句没给：模型拿到"没就绪"→ 重启 →
+    //    还是同一条错判据 → 自我强化。
+    println!("\n--- ⑧ 判据没命中：给出「判据错在哪」的对比证据 ---");
+    let mismatched = proc::StartSpec {
+        cmd: format!("\"{me}\" --serve 18099"), // 真监听 18099，但命令里没有端口标记
+        ready_cmd: Some(netstat_probe(18999)),  // 永远命不中：判据在等另一个端口
+        ready_timeout_secs: Some(4),
+        keep_alive: false,
+    };
+    let mut wrong_handle = None;
+    match proc::start(&proj, &mismatched, 4, 60) {
+        Ok(o) => {
+            wrong_handle = Some(o.info.handle.clone());
+            match &o.kind {
+                proc::StartKind::NotReady { hint, .. } => {
+                    println!(
+                        "出口=NotReady（进程还活着 —— 不是启动失败）handle={}",
+                        o.info.handle
+                    );
+                    println!("{}", hint.clone().unwrap_or_default());
+                }
+                other => println!("出口={other:?}（预期 NotReady）"),
+            }
+        }
+        Err(e) => println!("{e}"),
+    }
+
+    // ⑨ 阳性对照：先收掉 ⑧ 那个（否则判据在启动前就已命中，会被①号守卫拒），
+    //    再拿**同一条命令**配**正确**的判据 → 应当 Ready（证明闸门没误伤、happy path 没坏）
+    println!("\n--- ⑨ 阳性对照：同一条命令 + 正确的判据（应 Ready）---");
+    if let Some(h) = &wrong_handle {
+        match proc::stop(h) {
+            Ok(i) => println!("先收掉 ⑧ 那个：handle={} state={}", i.handle, i.state),
+            Err(e) => println!("{e}"),
+        }
+    }
+    let good = proc::StartSpec {
+        cmd: format!("\"{me}\" --serve 18099"),
+        ready_cmd: Some(netstat_probe(18099)),
+        ready_timeout_secs: Some(15),
+        keep_alive: false,
+    };
+    match proc::start(&proj, &good, 4, 60) {
+        Ok(o) => {
+            println!(
+                "handle={} pid={} 等了 {:?}",
+                o.info.handle,
+                o.info.pid,
+                Duration::from_millis(o.waited_ms as u64)
+            );
+            match &o.kind {
+                proc::StartKind::Ready { evidence } => println!("出口=Ready，证据：{evidence}"),
+                other => println!("出口={other:?}（预期 Ready）"),
+            }
+        }
+        Err(e) => println!("{}", e.trim_end()),
+    }
+    let (stopped, kept) = proc::shutdown_for(&proj, false);
+    println!(
+        "\n收尾：收掉 {} 个、留下 {} 个（不留孤儿）",
+        stopped.len(),
+        kept.len()
+    );
+
+    println!(
+        "\n完成：三个出口、判据即命令、重复启动守卫、项目级收尾、**判据自相矛盾守卫** —— 都验过了。"
+    );
 }
