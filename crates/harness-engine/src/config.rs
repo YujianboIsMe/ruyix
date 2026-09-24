@@ -88,7 +88,7 @@ pub struct LlmConfig {
     /// 训练过 —— 它把调用写成 DSML 标记吐进 content，服务端没收到 `tools` 就不会解析进
     /// `tool_calls`，于是"明明算对了的命令"变成一整轮作废（实测真跑 **5/16 轮**）。
     /// 4 臂 × 8 轮对照：声明 `tools` 的两臂**零泄露、6/8 走标准 `tool_calls`**，且与
-    /// `response_format=json_object` 不冲突（见 `doc/问题-DSML标记泄露.md`）。
+    /// `response_format=json_object` 不冲突（见 `doc/v0.x/问题-DSML标记泄露.md`）。
     ///
     /// 关掉它 = 逐字回到老行为（一行回滚），代价是泄露率与"白烧一轮"一起回来。
     /// 只覆盖 `/chat/completions`：`/responses` 与 anthropic 两条路的工具形态不同，
@@ -239,7 +239,7 @@ fn d_reflect_max_steps() -> usize {
 /// Agent 循环的质量门禁（v0.3）：机械验证。
 ///
 /// 触发是**事实驱动**的（这一轮有没有改动），不是任务分类 —— 分类是预测，
-/// 会误判；"有没有写文件"不会。见 `doc/需求-Agent-验证与反思-v0.3.md`。
+/// 会误判；"有没有写文件"不会。见 `doc/v0.x/需求-Agent-验证与反思-v0.3.md`。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GateConfig {
     /// 改动后跑语法层（窄验证）

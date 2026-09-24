@@ -441,7 +441,7 @@ harness.lint.package_dir        path   默认 <ruyix 仓>/tools/lint（HARNESS_L
 harness.lint.max_repair_rounds  u32    默认 2
 harness.kb.enabled              bool   默认 false（不改变现有行为）
 harness.kb.top_k / token_budget / per_source_limit / min_score  同 engine KbConfig 默认
-# v0.3 质量门禁（工具循环；见 doc/需求-Agent-验证与反思-v0.3.md）
+# v0.3 质量门禁（工具循环；见 doc/v0.x/需求-Agent-验证与反思-v0.3.md）
 harness.gate.narrow             bool   默认 true（改动后跑语法层）
 harness.gate.full               bool   默认 true（交付前跑全量：语法 + 单测 + 规约）
 harness.gate.max_full_attempts  u32    默认 3（连续失败几次后按预算放行，答复写明"未通过"）

@@ -489,7 +489,7 @@ pub async fn run(
 
         // ② read：**工具调用优先**（工具轮的 content 天生是空的），content 形态作兼容 ——
         // 复核是只读的辅助环节，降级代价高（结论会变成 unknown），所以两条都收；
-        // 但话术改成先教工具调用（模型学的是新词汇，见 `doc/需求-工具协议改造-v0.0.6.md` §6）。
+        // 但话术改成先教工具调用（模型学的是新词汇，见 `doc/v0.x/需求-工具协议改造-v0.0.6.md` §6）。
         msgs.push(ChatMessage::assistant(if reply.tool_calls.is_empty() {
             reply.content.clone()
         } else {

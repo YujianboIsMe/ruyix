@@ -17,7 +17,7 @@ pub struct ChatMessage {
     pub content: String,
     /// 工具协议：assistant 消息里**原样回显**的 tool_calls。
     ///
-    /// 本引擎用一种**混合**形态（详见 `doc/需求-工具协议改造-v0.0.6.md`）：请求里声明 `tools`
+    /// 本引擎用一种**混合**形态（详见 `doc/v0.x/需求-工具协议改造-v0.0.6.md`）：请求里声明 `tools`
     /// 让模型把动作发进 `tool_calls`（这是治 DSML 泄露的关键 —— 实测声明后 4 臂对照里
     /// 零泄露、6/8 走标准调用），但**自己不在这条消息链上做 tool 记账**：下一轮把动作以
     /// 我们自己的 JSON 形状回显（模型看得懂，且与老协议的历史写法一致），观察结果照旧走
@@ -125,7 +125,7 @@ pub struct ChatOutcome {
     ///
     /// 与 `content` **并列**：`final` 之前的每一轮，模型要么给工具调用、要么（老习惯）把
     /// 动作写在 content 的 JSON 里 —— 两条路都要认，因为实测声明 `tools` 之后仍有 2/8 轮
-    /// 走老形状（见 `doc/问题-DSML标记泄露.md` 的 4 臂对照）。
+    /// 走老形状（见 `doc/v0.x/问题-DSML标记泄露.md` 的 4 臂对照）。
     pub tool_calls: Vec<ToolCall>,
 }
 
@@ -512,7 +512,7 @@ pub const TOOL_NAMES_ALL: &[&str] = &[
 /// 引擎原先从不声明 `tools`，动作全靠"content 里的 JSON"这条约定。但 DeepSeek 这类模型被
 /// **原生工具调用语法**训练过：它会把自己的调用写成 DSML 标记吐进 content，而服务端没收到
 /// `tools` 就**不会**把它解析进 `tool_calls` —— 于是"模型明明算对了的命令"变成一整轮作废
-/// （实测真跑 **5/16 轮**，见 `doc/问题-DSML标记泄露.md`）。4 臂 × 8 轮对照里，声明 `tools`
+/// （实测真跑 **5/16 轮**，见 `doc/v0.x/问题-DSML标记泄露.md`）。4 臂 × 8 轮对照里，声明 `tools`
 /// 的两臂**零泄露、6/8 走标准 `tool_calls`**，且与 `response_format=json_object` 不冲突。
 ///
 /// ## 与 [`crate::agent::parse_one`] 的契约（改一处必须看另一处）
@@ -1122,7 +1122,7 @@ pub fn is_fatal_error(e: &str) -> bool {
 ///
 /// `is_fatal_error` 命中（未配置 / 鉴权 / 余额 / 额度 / 请求被拒绝 / 客户端构建失败）
 /// 一律不算 —— 那些重试也没用，且备用多半同样错。其余网络 / 5xx / 429 / 超时 / 重试耗尽
-/// 才切备用（详见 `doc/需求-LLM网关与多协议-v0.5.md`）。
+/// 才切备用（详见 `doc/v0.x/需求-LLM网关与多协议-v0.5.md`）。
 pub fn is_switchable_error(e: &str) -> bool {
     if is_fatal_error(e) {
         return false;

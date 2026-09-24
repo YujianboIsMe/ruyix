@@ -3,7 +3,7 @@
 状态：已批复（2026-09-19，P1–P6 全部按推荐）→ 已实施（见文末「实施记录」）
 归属版本：v0.3（ruyix Agent 会话链路）
 提出日期：2026-09-19
-关联：[融合计划-Agent集成-v0.2.md](融合计划-Agent集成-v0.2.md)（四原语工具循环 + 附录 D）、[capability.md](capability.md)
+关联：[融合计划-Agent集成-v0.2.md](融合计划-Agent集成-v0.2.md)（四原语工具循环 + 附录 D）、[capability.md](../capability.md)
 
 ## 背景
 

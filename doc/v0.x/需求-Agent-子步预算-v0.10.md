@@ -87,7 +87,7 @@ Object.assign(s, saved);            // ← 元凶
 | `crates/harness-engine/src/config.rs` | `d_step_max_steps()` 24 → 96（附推导与兜底说明）；字段文档补默认值 |
 | `src-tauri/src/agent/config_bridge.rs` | 两条默认值断言 24 → 96（并写明理由） |
 | `crates/harness-engine/src/step_agent.rs` | 批读用例的注释不再引用过期的 24 |
-| `doc/需求-Agent-批量调用-v0.7.md` | 那句"只有 24 轮"标注已由 v0.10 提到 96 |
+| `doc/v0.x/需求-Agent-批量调用-v0.7.md` | 那句"只有 24 轮"标注已由 v0.10 提到 96 |
 | `ui/session.js` | `persist()` 回显只同步元数据；四处落盘改 `await` |
 | `scripts/ui-smoke.js` | 新增 U29（两条契约 + 文件头清单） |
 
