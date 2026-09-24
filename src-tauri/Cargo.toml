@@ -23,8 +23,16 @@ dirs = "6"
 # MCP 客户端的请求/响应匹配与超时（tauri 自带的 tokio 不直接暴露给业务代码）
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 portable-pty = "0.8"
-arborium = { version = "2", default-features = false, features = ["lang-python", "lang-rust", "lang-html", "lang-css", "lang-javascript", "lang-markdown", "lang-sql", "lang-java"] }
-arborium-theme = "2"
+# 内置解析器（tree-sitter）：**可选依赖** —— 纯净模式（--no-default-features）下整个不编进来，
+# 于是"语法高亮"这件事在那枚二进制里完全由插件提供（见 src/plugin.rs / src/preinstalled.rs）。
+arborium = { version = "2", default-features = false, optional = true, features = ["lang-python", "lang-rust", "lang-html", "lang-css", "lang-javascript", "lang-markdown", "lang-sql", "lang-java"] }
+arborium-theme = { version = "2", optional = true }
+# query 覆盖（插件的 highlights.scm）要这两样：GrammarConfig / CompiledGrammar
+# 公开在 arborium-highlight（arborium 自己的 store/highlighter 是私有的，但它 re-export 了
+# GrammarStore 与 Highlighter::with_store）。
+arborium-highlight = { version = "2", optional = true }
+# query 覆盖（插件的 highlights.scm）要这两样：GrammarConfig / CompiledGrammar
+# GrammarStore 与 Highlighter::with_store）。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 base64 = "0.22"
@@ -32,5 +40,11 @@ walkdir = "2"
 sha2 = "0.10"
 
 [features]
-default = ["custom-protocol"]
+# 两种编译模式（见 doc/highlight-plugins.md）：
+#   preinstalled（默认）＝ 内置解析器 + 预装高亮插件（首启物化到 plugins/highlight/ruyix-builtin/）
+#   pure          ＝ 一个解析器都不编、一个插件都不预装（plugins/ 由用户自己填）
+# 纯净构建：cargo build --no-default-features --features custom-protocol
+default = ["custom-protocol", "preinstalled"]
 custom-protocol = ["tauri/custom-protocol"]
+preinstalled = ["dep:arborium", "dep:arborium-theme", "dep:arborium-highlight"]
+pure = []

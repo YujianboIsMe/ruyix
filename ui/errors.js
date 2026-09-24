@@ -191,6 +191,12 @@
   const EXACT = {
     "空命令": "empty command",
     "空路径": "empty path",
+    "路径为空": "empty path",
+    "读不到主题 {}：{e}": "cannot read the theme {}: {e}",
+    "插件的 highlights.scm 编译失败：{e}":
+      "the plugin's highlights.scm failed to compile: {e}",
+    "插件给了 query 覆盖，但 `{other}` 没有内置解析器":
+      "the plugin supplies a query override but `{other}` has no built-in parser",
     "未执行": "not executed",
     "连不上 fs": "cannot reach the fs",
     "路径不是文件": "path is not a file",

@@ -1163,61 +1163,14 @@ html, body {
   z-index: 10;
 }
 
-/* --- 语法高亮颜色 (VS Code Dark+ 风格) --- */
+/* --- 语法高亮配色：**在插件里**，不在这里 ---
+   颜色 v1.0.0 起属于预装插件 plugins/highlight/ruyix-builtin/theme.css
+   （纯净模式下根本不存在）。运行时唯一来源是插件下发的 CSS
+   （注入 <style id="plugin-theme">）—— 换主题 = 改那个文件后重开，不用重编译。 */
 
-.tok-comment { color: #6a9955; font-style: italic; }
-.tok-string { color: #ce9178; }
-.tok-keyword { color: #569cd6; }
-.tok-function { color: #dcdcaa; }
-.tok-type { color: #4ec9b0; }
-.tok-number { color: #b5cea8; }
-.tok-operator { color: #d4d4d4; }
-.tok-property { color: #9cdcfe; }
-.tok-variable { color: #9cdcfe; }
-.tok-constant { color: #4fc1ff; }
-.tok-punctuation { color: #d4d4d4; }
-.tok-parameter { color: #9cdcfe; }
-.tok-constructor { color: #4ec9b0; }
-.tok-label { color: #569cd6; }
-.tok-namespace { color: #4ec9b0; }
-.tok-escape { color: #d7ba7d; }
-.tok-regexp { color: #d16969; }
-.tok-decorator { color: #dcdcaa; }
-.tok-attribute { color: #9cdcfe; }
-.tok-include { color: #569cd6; }
-.tok-boolean { color: #569cd6; }
-.tok-repeat { color: #569cd6; }
-.tok-conditional { color: #569cd6; }
-.tok-exception { color: #569cd6; }
-.tok-storageclass { color: #569cd6; }
-.tok-struct { color: #4ec9b0; }
-.tok-enum-member { color: #4fc1ff; }
-.tok-field { color: #9cdcfe; }
-.tok-text { color: #d4d4d4; }
-.tok-title { color: #dcdcaa; }
-.tok-literal { color: #ce9178; }
-.tok-uri { color: #d4d4d4; text-decoration: underline; }
-.tok-strong { font-weight: bold; }
-.tok-emphasis { font-style: italic; }
-.tok-tag { color: #569cd6; }
-.tok-tag-delimiter { color: #808080; }
-.tok-selector { color: #d7ba7d; }
-.tok-id { color: #d7ba7d; }
-.tok-class { color: #4ec9b0; }
-.tok-unit { color: #b5cea8; }
-.tok-attr-value { color: #ce9178; }
-.tok-doctype { color: #808080; }
-.tok-entity { color: #4ec9b0; }
 /* TOK_TABLE 里"曾经没配色"的 7 个：高亮器能产出它们（markdown 的 link/strikethrough、
    Rust 的 macro、ERROR 节点等），缺了就是渲染成默认色、看起来像高亮丢了。
    门禁 U32/Rust `every_tag_has_a_css_class` 保证这两处永远对得上。 */
-.tok-macro { color: #dcdcaa; }
-.tok-link { color: #4fc1ff; text-decoration: underline; }
-.tok-strikethrough { text-decoration: line-through; }
-.tok-diff-add { color: #b5cea8; }
-.tok-diff-delete { color: #d16969; }
-.tok-embedded { color: #d4d4d4; }
-.tok-error { color: #d16969; }
 
 /* --- 自定义弹窗 --- */
 
@@ -3015,7 +2968,6 @@ html, body {
 .a2a-state-line--err {
   color: #f48771;
 }
-
 
 /* 能力面板子标签（MCP / A2A / 工具 / 技能） */
 .cap-sub-tabs {

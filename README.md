@@ -20,6 +20,20 @@ ruyix/                  ← 解压即用；卸载 = 删掉这个文件夹
   `git status` 里只有你自己的改动。
 - **删文件夹即卸载**：没有注册表、没有服务、没有藏在 `%APPDATA%` 里的第二份数据。
 
+### 两种编译模式：预装 / 纯净（1.0.0）
+
+**语法高亮在 ruyix 里是一枚插件**（`plugins/highlight/ruyix-builtin/`）：语言表、扩展名、图标、
+token 配色全在插件里，IDE 只提供把它跑起来的机制。所以有两种编法：
+
+| 模式 | 怎么打 | 里面有什么 |
+|---|---|---|
+| **预装**（默认） | `node scripts/package-portable.js` | 内置 tree-sitter 解析器（8 门语言）+ 首启把 `ruyix-builtin` 物化进 `plugins/highlight/` |
+| **纯净** | `node scripts/package-portable.js --mode pure` | **一个解析器都不编、一个插件都不预装**；`plugins/` 空着，由你放自己的插件 |
+
+纯净模式下没有插件认领的文件按**纯文本**显示，状态栏会直说原因（明确的降级，不是故障）。
+两种模式的差异由 `node scripts/highlight-modes-probe.mjs` 跑**真 exe** 验证；
+插件格式 / 留痕位置 / 信任边界（`dll:`、`service:` 本版本不开）见 `doc/highlight-plugins.md`。
+
 ### 下载与安装（1.0.0）
 
 - **发行包**：`ruyix-1.0.0-win-x64.zip`（约 9 MB）—— 解压到任意可写目录（例如 `D:\ruyix`），

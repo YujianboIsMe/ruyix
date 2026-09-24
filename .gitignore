@@ -17,6 +17,8 @@ Cargo.lock
 # Added by cargo
 
 /target
+# 纯净模式（--no-default-features）的独立构建目录，见 doc/highlight-plugins.md
+/target-pure/
 /.idea
 
 # 本地微调环境（WSL 脚本、日志与产物）

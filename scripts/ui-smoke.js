@@ -3635,7 +3635,138 @@ async function runI18nSweepChecks() {
 }
 
 /**
+ * U53 highlight-plugins（v1.0.0 语法高亮插件化的前端判据）。
+ *
+ * 三条正面判据 + 两次回放：
+ *   ① **配色不在编译期**：`ui/styles.css` / `ui/index.html` 里不许再有 `.tok-*` 规则
+ *      —— 它们只可能来自插件下发的 CSS。这条是"高亮已经是插件"的反证法。
+ *   ② **扩展名解析不在前端**：`highlight_code` 必须把 `path` 交给后端 ——
+ *      否则"插件声明了 ext=[\"tsx\"] 而前端还不认识"这类硬编码死角会一直存在。
+ *   ③ **降级要说话**：注册表空（纯净模式 / 插件被删）时状态栏必须给一句人话，
+ *      而不是让用户以为"高亮坏了"。
+ */
+async function runHighlightPluginChecks() {
+  // ---- ① 静态：编译期不许留配色
+  const css = readLf("ui/styles.css");
+  const tokInCss = css.split("\n").filter((l) => /^\s*\.tok-[a-z0-9-]+\s*\{/.test(l));
+  check("U53", "theme-not-in-stylesheet", tokInCss.length === 0,
+    `ui/styles.css 里还有 ${tokInCss.length} 条 .tok-* 规则（配色应属于插件）`);
+  const html = readLf("ui/index.html");
+  check("U53", "theme-not-in-html", !/\.tok-[a-z0-9-]+\s*\{/.test(html),
+    "index.html 里出现了 .tok-* 规则");
+
+  // ---- ② 静态：语言的唯一来源在后端
+  const mjs = readLf("ui/main.js");
+  check("U53", "language-resolved-server-side",
+    mjs.includes('invoke("highlight_plugins")') && mjs.includes("path: tab?.path || null"),
+    "前端没有向插件注册表要语言表，或没把 path 交给后端解析语言");
+
+  // ---- ③ 回放两轮：空注册表要降级并说话；有插件要有 CSS + 图标
+  const scenarios = [
+    {
+      name: "no-plugin-degrades-and-says-so",
+      payload: { mode: "pure", builtin: false, langs: [], css: "", plugins: [], notes: [] },
+      wantCss: false,
+      wantStatus: true,
+      icon: null,
+    },
+    {
+      name: "plugin-supplies-theme-and-icons",
+      payload: {
+        mode: "preinstalled",
+        builtin: true,
+        langs: [{ plugin: "ruyix-builtin", id: "python", ext: ["py", "mylang"], icon: "🧪", grammar: "builtin" }],
+        css: ".tok-keyword { color: #569cd6; }\n.tok-error { color: #d16969; }",
+        plugins: [{ id: "ruyix-builtin", name: "ruyix 内置高亮", version: "1.0.0", langs: 8 }],
+        notes: [],
+      },
+      wantCss: true,
+      wantStatus: false,
+      icon: "🧪",
+    },
+  ];
+
+  for (const sc of scenarios) {
+    const store = new Map();
+    const status = { textContent: "", style: {} };
+    const mkEl = (id) => {
+      const e = {
+        id,
+        style: {},
+        dataset: {},
+        textContent: "",
+        innerHTML: "",
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        addEventListener() {},
+        appendChild() {},
+        setAttribute() {},
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        scrollTo() {},
+      };
+      store.set(id, e);
+      return e;
+    };
+    status.id = "status-text";
+    store.set("status-text", status);
+    const head = { children: [], appendChild(c) { this.children.push(c); } };
+    const sandboxWin = {
+      I18N: { t: (k) => k, init: async () => {}, getLang: () => "zh-CN", setLang: async () => {} },
+      __TAURI__: { core: { invoke: async () => sc.payload } },
+      addEventListener() {},
+      matchMedia: () => ({ matches: false, addEventListener() {} }),
+    };
+    const sandboxDoc = {
+      getElementById: (id) => store.get(id) || mkEl(id),
+      querySelector: (sel) => (String(sel).includes("status") ? status : null),
+      querySelectorAll: () => [],
+      addEventListener() {},
+      createElement: () => mkEl("_style"),
+      head,
+      body: mkEl("body"),
+      documentElement: mkEl("html"),
+    };
+    const scope = { window: sandboxWin, document: sandboxDoc, console };
+    sandboxWin.document = sandboxDoc;
+    sandboxWin.state = undefined;
+    try {
+      new Function(
+        "window",
+        "document",
+        "console",
+        // main.js 里的 L() 引用的是**裸全局** I18N（不是 window.I18N），
+        // 而 new Function 的自由变量走的是本进程的 globalThis —— 所以显式当形参传进去。
+        "I18N",
+        readLf("ui/main.js") +
+          "\n;window.__probe = { loadHighlightPlugins, fileIcon, get state() { return state; } };"
+      )(sandboxWin, sandboxDoc, console, sandboxWin.I18N);
+      await sandboxWin.__probe.loadHighlightPlugins();
+      // 桩的 getElementById 对任何 id 都会造一个元素 ⇒ main.js 会认为 <style> 已存在、
+      // 只往那个元素上写 textContent（不再 appendChild）。所以两个地方都要看。
+      const injected = String(
+        store.get("plugin-theme")?.textContent || head.children[0]?.textContent || ""
+      );
+      check("U53", `${sc.name}:theme-injected`, sc.wantCss ? injected.includes(".tok-keyword") : injected === "",
+        `注入的 CSS 长度 ${injected.length}`);
+      const said = String(status.textContent || "");
+      console.log(`      [diag] ${sc.name}:` +
+        ` langs=${sandboxWin.__probe.state?.highlightPlugins?.langs?.length} head=${head.children.length} styleText=${JSON.stringify(String(store.get("plugin-theme")?.textContent || "").slice(0, 40))} css=${JSON.stringify(String(sc.payload.css || "").slice(0, 20))}`);
+      check("U53", `${sc.name}:status-speaks`, sc.wantStatus ? said.length > 0 : said === "",
+        `状态栏=${said.slice(0, 60)}`);
+      if (sc.icon) {
+        // 用**静态兜底表里没有的**扩展名：否则这条会从兜底表拿到图标，变成假 PASS
+        const got = sandboxWin.__probe.fileIcon("x.mylang");
+        check("U53", `${sc.name}:icon-from-registry`, got === sc.icon, `fileIcon("x.mylang")=${got}`);
+      }
+    } catch (err) {
+      check("U53", `${sc.name}:no-throw`, false, String(err).slice(0, 200));
+    }
+  }
+}
+
+/**
  * U50 pane-exclusive（bug 3 的回归）：编辑区面板**互斥** —— 同一时刻只许一块可见。
+ * U53 highlight-plugins —— 语法高亮插件化的前端判据（配色只在插件里 / 语言解析在后端 / 降级要说话）
  *
  * 为什么这条判据值得单独存在：bug 3 的症状（打开配置后切项目，`#config-view` 只剩一半宽度、
  * 还被挤到右边）本质是**两块面板同时显示** —— `#editor-body` 是 flex 行，两块都是 `flex:1`，
@@ -3970,6 +4101,7 @@ async function main() {
     ["U48", "bucket-panel", runBucketPanelChecks],
     ["U49", "i18n-no-hardcoded-cjk", runI18nSweepChecks],
     ["U50", "pane-exclusive", runPaneExclusiveChecks],
+  ["U53", "highlight-plugins", runHighlightPluginChecks],
     ["U51", "terminal-targets", runTerminalTargetChecks],
     ["U52", "backend-msg-i18n", runBackendMsgChecks],
   ];

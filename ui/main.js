@@ -24,9 +24,48 @@ window.state = state;
 // 初始化
 // ============================================
 
+/**
+ * 载入高亮插件（v1.0.0 的语法高亮**就是**插件）：
+ * 主题 CSS 由插件下发并注入 `<style>`；语言/扩展名/图标给前端建表。
+ *
+ * 为什么 CSS 走"注入"而不是留在 `styles.css` 里：那样"配色"就还是编译期的一部分 ——
+ * 换主题要重编译，纯净模式下也删不掉。现在的契约是：**样式只可能来自插件**，
+ * 一条 `.tok-*` 都没有 = 纯文本显示（这就是纯净模式的正常样子，不是故障）。
+ */
+async function loadHighlightPlugins() {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    const payload = await invoke("highlight_plugins");
+    state.highlightPlugins = payload || { langs: [] };
+    let el = document.getElementById("plugin-theme");
+    if (!el) {
+      el = document.createElement("style");
+      el.id = "plugin-theme";
+      document.head.appendChild(el);
+    }
+    el.textContent = payload?.css || "";
+    if (!String(payload?.css || "").trim()) {
+      // 零配色 = 没有插件认领（纯净模式 / 插件目录被清空）。**说出来**，否则用户只会觉得"高亮坏了"。
+      setStatus(
+        L(
+          `语法高亮：没有插件提供配色（模式 ${payload?.mode || "?"}；插件目录 <便携根>/plugins/highlight/）`,
+          `syntax highlighting: no plugin provides colors (mode ${payload?.mode || "?"}; see <root>/plugins/highlight/)`
+        )
+      );
+    }
+  } catch (err) {
+    // 读不到就当没有插件：**降级不是崩**（高亮丢了不影响读写文件）
+    state.highlightPlugins = { langs: [] };
+    console.warn("[highlight] 插件注册表读取失败:", err);
+  }
+}
+
 async function initApp() {
   // 初始化多语言
   await I18N.init();
+  // 高亮插件：主题 CSS + 语言表（失败即降级为纯文本，见 loadHighlightPlugins）
+  await loadHighlightPlugins();
 
   // 应用已保存的语言（翻译 HTML 中的硬编码文案）
   refreshI18nUI();
@@ -1292,7 +1331,13 @@ async function highlightAndRender(tab, language) {
   try {
     // 快照：请求返回时若内容已变化，丢弃过期的高亮结果
     const snapshot = tab.content;
-    const payload = await invoke("highlight_code", { language, code: snapshot });
+    // 语言解析在 Rust 侧（插件声明的扩展名优先，其次内置探测）：这里把 path 一并给它，
+    // 于是"插件加了 ext = [\"tsx\"]，前端却还不认识它"这种硬编码死角不存在了。
+    const payload = await invoke("highlight_code", {
+      language: language || "",
+      path: tab?.path || null,
+      code: snapshot,
+    });
     if (tab.content !== snapshot) return;
     tab._highlighted = payload;
     tab._language = language;
@@ -1382,6 +1427,12 @@ function fileIcon(name) {
   if (full === ".gitignore" || full === "gitignore") return "🚫";
 
   const ext = name.split(".").pop()?.toLowerCase();
+  // **插件优先**：插件给的语言图标是权威（它才知道自己认领了哪些扩展名）；
+  // 下面的静态表是"没有插件认领时"的兜底（图片、配置、无扩展名那些本来就不归高亮管）。
+  const fromPlugin = state.highlightPlugins?.langs?.find((l) =>
+    (l.ext || []).includes(ext)
+  )?.icon;
+  if (fromPlugin) return fromPlugin;
   const iconMap = {
     py: "🐍",
     rs: "🦀",

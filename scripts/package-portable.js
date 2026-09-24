@@ -9,6 +9,8 @@
 // 用法：
 //   node scripts/package-portable.js              # 构建 + 组包 + 打 zip + 自校验
 //   node scripts/package-portable.js --no-build   # 跳过构建（用已有 target/release/ruyix.exe）
+//   node scripts/package-portable.js --mode pure  # 纯净模式：无内置解析器、无预装插件
+//                                               #（产物 target-pure/release/ruyix.exe，zip 名带 -pure）
 //
 // 中间目录用 `RUYIX_HOME` 指向临时目录跑一次自检式启动？**不**：组包不动开发机的家 —— 只组装文件，
 // 不运行 exe（要验"解压即用"就手工解压跑一次，那件事由 `scripts/portable-root-probe.mjs` 覆盖）。
@@ -28,8 +30,25 @@ const VERSION = (() => {
   return conf.version;
 })();
 const STAGE = path.join(DIST, NAME);
-const ZIP = path.join(DIST, `${NAME}-${VERSION}-win-x64.zip`);
+const ZIP = path.join(
+  DIST,
+  `${NAME}-${VERSION}-win-x64${MODE === "pure" ? "-pure" : ""}.zip`
+);
 const NO_BUILD = process.argv.includes("--no-build");
+// 两种编译模式（见 doc/highlight-plugins.md）：
+//   preinstalled（默认）＝ 内置高亮解析器 + 预装高亮插件（首启物化到 plugins/highlight/）
+//   pure               ＝ 一个解析器都不编、一个插件都不预装（plugins/ 空着交给用户）
+const MODE = (() => {
+  const i = process.argv.indexOf("--mode");
+  const m = i >= 0 ? process.argv[i + 1] : "preinstalled";
+  if (m !== "preinstalled" && m !== "pure") {
+    console.error(`[package] --mode 只认 preinstalled / pure，收到 ${m}`);
+    process.exit(2);
+  }
+  return m;
+})();
+// 纯净模式用独立 target 目录：两套特性的编译缓存互相顶掉的话，切模式每次都要全量重编
+const TARGET_DIR = MODE === "pure" ? "target-pure" : "target";
 
 const log = (m) => console.log(`[package] ${m}`);
 const fail = (m) => {
@@ -56,11 +75,27 @@ function copyFile(from, to) {
 if (NO_BUILD) {
   log("跳过构建（--no-build）");
 } else {
-  log("cargo tauri build --no-bundle ...（便携形态不做安装器）");
-  run("cargo", ["tauri", "build", "--no-bundle"]);
+  if (MODE === "pure") {
+    // 纯净模式绕开 tauri CLI（它主要管打包），直接 cargo：少一个会漂移的中间层
+    log("cargo build --release --no-default-features --features custom-protocol（纯净模式）");
+    run("cargo", [
+      "build",
+      "-p",
+      "ruyix",
+      "--release",
+      "--no-default-features",
+      "--features",
+      "custom-protocol",
+      "--target-dir",
+      TARGET_DIR,
+    ]);
+  } else {
+    log("cargo tauri build --no-bundle ...（便携形态不做安装器）");
+    run("cargo", ["tauri", "build", "--no-bundle"]);
+  }
 }
 
-const exe = path.join(ROOT, "target", "release", `${NAME}.exe`);
+const exe = path.join(ROOT, TARGET_DIR, "release", `${NAME}.exe`);
 if (!fs.existsSync(exe)) fail(`找不到 ${exe}`);
 log(`exe = ${exe}（${(fs.statSync(exe).size / 1048576).toFixed(1)} MB）`);
 
@@ -69,7 +104,8 @@ fs.rmSync(STAGE, { recursive: true, force: true });
 fs.mkdirSync(STAGE, { recursive: true });
 copyFile(exe, path.join(STAGE, `${NAME}.exe`));
 
-// 预置目录与说明：用户拿到 zip 时就是这份形态（也可以只拷 exe，首启会自己长出来）
+// 预置目录与说明：用户拿到 zip 时就是这份形态（也可以只拷 exe，首启会自己长出来）。
+// 两种模式的差别只在 exe 本身与 plugins/ 里有没有预装插件 —— 布局一个字不差。
 //
 // 说明文本与程序首启写的那份是**同一批文件**（`src-tauri/templates/*.md`，
 // Rust 侧用 `include_str!` 读进去）。两处各写一份文案，迟早会漂移。

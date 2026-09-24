@@ -9,6 +9,8 @@ mod git;
 mod instance;
 mod mcp;
 mod paths;
+mod plugin;
+mod preinstalled;
 mod pty;
 mod runner;
 
@@ -168,8 +170,22 @@ enum Tok {
     Error,
 }
 
-/// 名字 ↔ 枚举的**唯一来源**。`from_name` / `name` 都查这张表，不各写一份 match ——
-/// 两份 match 迟早会有一份忘了改。
+/// 内置 token 名（`TOK_TABLE` 的名字那一列）。插件通过 `token_map` 引入的新名不在这里。
+/// 单独给一个函数是为了**别处不用复制这张表**（插件加载器要拿它判断"这是个新名"）。
+pub fn builtin_token_names() -> Vec<&'static str> {
+    TOK_TABLE.iter().map(|(n, _)| *n).collect()
+}
+
+/// 这个名字是不是内置的（内置 = 主题里一定有它的配色，插件不必自带 CSS）。
+pub fn is_builtin_token(name: &str) -> bool {
+    TOK_TABLE.iter().any(|(n, _)| *n == name)
+}
+
+/// 名字 ↔ 语义的**唯一来源**（`TOK_TABLE`）。
+///
+/// 为什么表里还带一个枚举值：它让这张表有归属、不是"一串没有类型的字符串"；
+/// 而**解析**走 [`resolve_token_name`] —— 它还要认插件通过 `token_map` 引入的新名字
+/// （枚举是个闭集，装不下插件的新名），所以载荷里传的是**名字**而不是枚举。
 const TOK_TABLE: &[(&str, Tok)] = &[
     ("keyword", Tok::Keyword),
     ("function", Tok::Function),
@@ -199,22 +215,6 @@ const TOK_TABLE: &[(&str, Tok)] = &[
     ("embedded", Tok::Embedded),
     ("error", Tok::Error),
 ];
-
-impl Tok {
-    /// 表外的名字 → `None`（丢弃该 span）。与旧版 `.and_then(tag_to_name)` 的行为一致。
-    fn from_name(name: &str) -> Option<Tok> {
-        TOK_TABLE.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
-    }
-
-    /// CSS 类名后缀。
-    fn name(self) -> &'static str {
-        TOK_TABLE
-            .iter()
-            .find(|(_, t)| *t == self)
-            .map(|(n, _)| *n)
-            .expect("Tok 的每个取值都必须在 TOK_TABLE 里")
-    }
-}
 
 /// `highlight_code` 的返回载荷。两处是刻意的：
 ///
@@ -635,6 +635,46 @@ fn lua_translate(
     }
 }
 
+/// 载入插件注册表（全局 + 项目级）并把结果写进 `<根>/global/logs/plugins.jsonl`。
+///
+/// 为什么**成功也要留痕**：出问题时第一个要回答的是"这台机器上到底加载了哪些插件"，
+/// 而"没加载成功"与"根本没装"在界面上长得一样（与 `env install` 同一套纪律）。
+fn reload_plugins(
+    plugins_root: &Path,
+    root: &Path,
+    current_project: Option<String>,
+) -> plugin::Registry {
+    let project_plugins = current_project.as_deref().map(|p| {
+        paths::current()
+            .project_bucket(p, "plugins")
+            .join(plugin::PLUGIN_SUBDIR)
+    });
+    let builtin = preinstalled::builtin_available();
+    let reg = plugin::Registry::load(
+        &plugins_root.join(plugin::PLUGIN_SUBDIR),
+        project_plugins.as_deref(),
+        builtin,
+    );
+    if let Err(e) = plugin::log_records(
+        &root.join("global").join("logs"),
+        &reg,
+        preinstalled::mode(),
+    ) {
+        eprintln!("[plugin] 写留痕失败: {e}");
+    }
+    println!(
+        "[plugin] 模式={} 内置解析器={} 插件={} 语言={}",
+        preinstalled::mode(),
+        builtin,
+        reg.plugins.len(),
+        reg.plugins.iter().map(|p| p.langs.len()).sum::<usize>()
+    );
+    for n in &reg.notes {
+        println!("[plugin] {n}");
+    }
+    reg
+}
+
 #[tauri::command]
 fn path_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()
@@ -650,29 +690,180 @@ fn rename_path(from: String, to: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn highlight_code(language: String, code: String) -> Result<HighlightPayload, String> {
+async fn highlight_code(
+    language: String,
+    path: Option<String>,
+    code: String,
+    plugins: tauri::State<'_, Mutex<plugin::Registry>>,
+) -> Result<HighlightPayload, String> {
+    // 注册表是**启动时（或切项目时）**载入的：语言解析与"这门语言有没有被插件动过"都在这里问。
+    // 取完立刻放锁 —— 高亮是 CPU 密集活儿，别攥着锁干。
+    let (language, scm, tmap, extra) = {
+        let reg = plugins.lock().map_err(|e| e.to_string())?;
+        let language = resolve_language(&reg, &language, path.as_deref());
+        let scm = language
+            .as_deref()
+            .and_then(|l| reg.highlights_override(l))
+            .map(|(_, t)| t.to_string());
+        let tmap = language.as_deref().and_then(|l| reg.token_map_for(l));
+        (
+            language,
+            scm,
+            tmap,
+            reg.extra_token_names(&builtin_token_names()),
+        )
+    };
+    // **没有语言 = 纯文本**（不是错误）：插件没认领这个扩展名、内置探测也不认识它 ——
+    // 前端拿到的是一份空片段载荷，照常渲染（单色），这和"纯净模式"是同一套降级路径。
+    let Some(language) = language else {
+        return Ok(HighlightPayload {
+            tags: Vec::new(),
+            lines: Vec::new(),
+        });
+    };
+
     // 在后台线程中执行 CPU 密集的语法高亮，避免阻塞异步运行时
     tauri::async_runtime::spawn_blocking(move || {
-        use arborium::Highlighter;
-
-        let mut highlighter = Highlighter::new();
-        let spans = highlighter
-            .highlight_spans(&language, &code)
-            .map_err(|e| e.to_string())?;
-
-        let themed: Vec<(u32, u32, &str)> = spans
-            .iter()
-            .filter_map(|s| {
-                arborium_theme::tag_for_capture(&s.capture)
-                    .and_then(arborium_theme::tag_to_name)
-                    .map(|name| (s.start, s.end, name))
-            })
-            .collect();
-
-        build_line_highlights(&code, &themed)
+        let themed = highlight_spans(&language, &code, scm.as_deref(), tmap.as_ref(), &extra)?;
+        build_line_highlights(&code, &themed, &extra)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 这门文件用什么语言高亮：**插件的扩展名表优先**，其次内置探测（`arborium::detect_language`，
+/// 112 门语言的表），都没有就是 `None`（⇒ 纯文本）。
+///
+/// 为什么要收在 Rust：以前这份 ext→语言 的 map 写死在 `ui/main.js` 里 —— 那是**插件化要消灭的
+/// 三处硬编码之一**（插件声明了 `ext = ["tsx"]`，前端却还不认识它）。收进来之后，
+/// "哪个扩展名归哪门语言"只有一处（插件的清单），前端不再需要那张表。
+///
+/// `language` 参数非空时优先（调用方明确指定，例如会话里贴一段代码）。
+fn resolve_language(reg: &plugin::Registry, language: &str, path: Option<&str>) -> Option<String> {
+    let asked = language.trim();
+    if !asked.is_empty() {
+        return Some(asked.to_string());
+    }
+    let path = path?;
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if let Some(l) = reg.lang_for_ext(ext) {
+        return Some(l.id.clone());
+    }
+    detect_language(path).map(|s| s.to_string())
+}
+
+/// 内置探测（预装模式才有 arborium 的那张 112 门语言的表）。
+#[cfg(feature = "preinstalled")]
+fn detect_language(path: &str) -> Option<&'static str> {
+    arborium::detect_language(path)
+}
+
+/// 纯净模式没有探测表。**这不是"忘了实现"**：纯净模式的定义就是"一个解析器都不编进来"，
+/// 想高亮就靠插件（插件的 ext 表照样生效 —— 见 [`resolve_language`] 的第一段）。
+#[cfg(not(feature = "preinstalled"))]
+fn detect_language(_path: &str) -> Option<&'static str> {
+    None
+}
+
+/// 源码 → 片段（`(起始字节, 结束字节, token 名)`）。**高亮的唯一缝**。
+///
+/// 分成三种来源（见 `doc/v0.x/需求-高亮插件化-v0.14.md` §四）：
+/// - 预装模式：内置 arborium 解析器；若插件给了 `highlights.scm` 覆盖，就用它换掉编译进来的那份；
+/// - 插件 `token_map`：按 **capture 名**优先命中（插件的意图比我们的名表更权威）；
+/// - 纯净模式：**没有解析器** ⇒ 返回空片段 ⇒ 前端按纯文本渲染（这是编译模式差异，不是故障）。
+#[cfg(feature = "preinstalled")]
+fn highlight_spans(
+    language: &str,
+    code: &str,
+    scm_override: Option<&str>,
+    token_map: Option<&std::collections::BTreeMap<String, String>>,
+    extra: &[&'static str],
+) -> Result<Vec<(u32, u32, &'static str)>, String> {
+    use arborium::Highlighter;
+
+    let mut highlighter = match scm_override {
+        None => Highlighter::new(),
+        Some(scm) => overridden_highlighter(language, scm)?,
+    };
+    let spans = highlighter
+        .highlight_spans(language, code)
+        .map_err(|e| e.to_string())?;
+
+    Ok(spans
+        .iter()
+        .filter_map(|s| {
+            // ① 插件映射优先（按 capture 名，例：`function.call` → `function`）
+            let mapped: Option<&'static str> = token_map
+                .and_then(|m| m.get(&s.capture))
+                .and_then(|name| extra.iter().find(|n| **n == name.as_str()).copied());
+            // ② 否则走内置名表（arborium-theme 把 capture 归一到我们的 27 个名字）
+            let name = mapped.or_else(|| {
+                arborium_theme::tag_for_capture(&s.capture).and_then(arborium_theme::tag_to_name)
+            });
+            name.map(|n| (s.start, s.end, n))
+        })
+        .collect())
+}
+
+/// 纯净模式：没有内置解析器。**返回空片段**（= 前端纯文本渲染），不是报错 ——
+/// 用户装了插件（未来 dll/service 两条路）才有颜色，这是纯净模式的定义。
+#[cfg(not(feature = "preinstalled"))]
+fn highlight_spans(
+    _language: &str,
+    _code: &str,
+    _scm_override: Option<&str>,
+    _token_map: Option<&std::collections::BTreeMap<String, String>>,
+    _extra: &[&'static str],
+) -> Result<Vec<(u32, u32, &'static str)>, String> {
+    Ok(Vec::new())
+}
+
+/// query 覆盖（法子 2）：拿插件那份 `highlights.scm` 重建这门语言的 grammar。
+///
+/// 为什么值得开这个口子：**"什么算关键字"就是一份文本** —— 换配色语义、修某门语言的高亮，
+/// 甚至给内嵌语言（HTML 里的 JS/CSS）加规则，都不用重编译 ruyix。
+#[cfg(feature = "preinstalled")]
+fn overridden_highlighter(language: &str, scm: &str) -> Result<arborium::Highlighter, String> {
+    use arborium::Highlighter;
+    use arborium_highlight::{CompiledGrammar, GrammarConfig};
+    use std::sync::Arc;
+
+    // 这门语言要能**构造**出来才谈得上覆盖：只有编译进来的那 8 门有解析器。
+    let lang = match language {
+        "python" => arborium::lang_python::language().into(),
+        "rust" => arborium::lang_rust::language().into(),
+        "html" => arborium::lang_html::language().into(),
+        "css" => arborium::lang_css::language().into(),
+        "javascript" => arborium::lang_javascript::language().into(),
+        "markdown" => arborium::lang_markdown::language().into(),
+        "sql" => arborium::lang_sql::language().into(),
+        "java" => arborium::lang_java::language().into(),
+        other => return Err(format!("插件给了 query 覆盖，但 `{other}` 没有内置解析器")),
+    };
+    let compiled = CompiledGrammar::new(GrammarConfig {
+        language: lang,
+        highlights_query: scm,
+        injections_query: "",
+        locals_query: "",
+    })
+    .map_err(|e| format!("插件的 highlights.scm 编译失败：{e}"))?;
+
+    // 用一份**带覆盖的** store 建 highlighter：内置那 8 门仍在 store 里，只换掉这一门。
+    let store = Arc::new(arborium::GrammarStore::new());
+    store.insert(language, Arc::new(compiled));
+    Ok(Highlighter::with_store(store))
+}
+
+/// 插件里有哪些语言 / 什么颜色 / 加载时被拒绝了什么（前端的扩展名与图标表、主题 CSS 都从这来）。
+#[tauri::command]
+fn highlight_plugins(
+    plugins: tauri::State<'_, Mutex<plugin::Registry>>,
+) -> Result<serde_json::Value, String> {
+    let reg = plugins.lock().map_err(|e| e.to_string())?;
+    Ok(reg.to_json(preinstalled::mode()))
 }
 
 /// 是否有其他实例正在运行（第二实例不自动打开上次项目）
@@ -1080,9 +1271,18 @@ fn utf16_offset(line: &str, byte_off: usize) -> usize {
 /// 片段语义（切点、排序、去重）与旧实现相同（`slow_reference` + 等价性测试钉住），
 /// 但有两处**刻意不同**：输出换成紧凑载荷（见 `HighlightPayload`），
 /// 偏移单位从**字节**换成 **UTF-16 码元**（见 `unit_table`，前端 `slice()` 的单位）。
+/// 认一个 token 名：内置名（TOK_TABLE）或插件引入的新名（extra，加载时已校验自带 CSS）。
+fn resolve_token_name(name: &str, extra: &[&'static str]) -> Option<&'static str> {
+    if let Some((n, _)) = TOK_TABLE.iter().find(|(n, _)| *n == name) {
+        return Some(n);
+    }
+    extra.iter().find(|n| **n == name).copied()
+}
+
 fn build_line_highlights(
     code: &str,
-    spans: &[(u32, u32, &str)],
+    spans: &[(u32, u32, &'static str)],
+    extra: &[&'static str],
 ) -> Result<HighlightPayload, String> {
     let lines: Vec<&str> = code.lines().collect();
 
@@ -1097,10 +1297,14 @@ fn build_line_highlights(
     }
 
     // 二分定位每个 span 覆盖的行区间，再按行切分（跨行的注释/字符串会横跨多行）
-    let mut per_line: Vec<Vec<(usize, usize, Tok)>> = vec![Vec::new(); lines.len()];
+    // 片段里存的**是 token 名而不是枚举**：插件可以通过 `token_map` 引入新名字，
+    // 而枚举是个闭集（27 个变体），装不下插件的新名。名字是 `&'static str`（插件名在加载时
+    // leak 成 'static，见 `plugin::Registry::extra_token_names`）。
+    let mut per_line: Vec<Vec<(usize, usize, &'static str)>> = vec![Vec::new(); lines.len()];
     for &(start, end, tag) in spans {
-        // 名字 → 枚举在这里就做掉：下游全是 Copy 的小整数，不再碰字符串
-        let Some(tok) = Tok::from_name(tag) else {
+        // 名字校验在这里做掉：内置名走 TOK_TABLE；插件引入的新名在 extra 里
+        //（加载时已校验过"自带 CSS"）。认不出的名字直接丢 —— 它渲染出来会是没有配色的 span。
+        let Some(tok) = resolve_token_name(tag, extra) else {
             continue;
         };
         let (s, e) = (start as usize, end as usize);
@@ -1161,10 +1365,11 @@ fn build_line_highlights(
                 continue; // 防御：切点落在同一个字符内部，退化成空片段
             }
             // 名表按首次出现顺序收集；重复出现的只留下来一次
-            let idx = match tags.iter().position(|t| *t == tok.name()) {
+            // 名表按首次出现顺序收集；重复出现的只留下来一次
+            let idx = match tags.iter().position(|t| *t == tok) {
                 Some(i) => i,
                 None => {
-                    tags.push(tok.name());
+                    tags.push(tok);
                     tags.len() - 1
                 }
             };
@@ -1835,12 +2040,33 @@ fn main() {
     let config_mgr = Mutex::new(config::ConfigManager::new(root_paths.global_dir()));
     let pty_mgr = Mutex::new(pty::PtyManager::new());
 
+    // ---- 高亮插件：先物化预装的那份（纯净模式什么都不写），再扫插件目录载入注册表。
+    // 项目级插件按**当前项目**算，所以切项目时要重载（见 `reload_plugins`）。
+    let plugins_root = root_paths.plugins_dir();
+    let materialized = preinstalled::materialize(&plugins_root);
+    if !materialized.is_empty() {
+        println!(
+            "[plugin] 预装高亮插件已物化（{} 个文件）：{:?}",
+            materialized.len(),
+            materialized
+        );
+    }
+    let plugin_reg = Mutex::new(reload_plugins(
+        &plugins_root,
+        root_paths.root(),
+        config_mgr
+            .lock()
+            .map(|c| c.load_projects().current)
+            .unwrap_or(None),
+    ));
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(config_mgr)
         .manage(mcp::McpManager::new())
         .manage(pty_mgr)
         .manage(agent::AgentState::new())
+        .manage(plugin_reg)
         .setup(|app| {
             // 主窗口在这里建（不是 tauri.conf.json 的 app.windows）——
             // 只有 Rust 侧的 Builder 挂得上 on_navigation，也就是外链的道闸，详见 build_main_window
@@ -1888,6 +2114,7 @@ fn main() {
             update_project,
             delete_project,
             get_run_targets,
+            highlight_plugins,
             get_term_targets,
             run_target,
             proc_list,
@@ -2007,7 +2234,7 @@ mod tests {
     }
 
     /// tree-sitter 跑一遍，转成 build_line_highlights 吃的 (start, end, tag)
-    fn themed_spans(lang: &str, src: &str) -> Vec<(u32, u32, String)> {
+    fn themed_spans(lang: &str, src: &str) -> Vec<(u32, u32, &'static str)> {
         let mut highlighter = Highlighter::new();
         let spans = highlighter.highlight_spans(lang, src).expect("高亮失败");
         spans
@@ -2015,7 +2242,7 @@ mod tests {
             .filter_map(|s| {
                 arborium_theme::tag_for_capture(&s.capture)
                     .and_then(arborium_theme::tag_to_name)
-                    .map(|name| (s.start, s.end, name.to_string()))
+                    .map(|name| (s.start, s.end, name))
             })
             .collect()
     }
@@ -2025,7 +2252,7 @@ mod tests {
     /// 片段语义（切点 / 排序 / 去重）与生产实现各自独立写一遍，两边都错成同一个样子
     /// 才会通过，所以它同时也是"没把语义顺手改歪"的参照。偏移换算同理：这里用逐字符
     /// 数一遍的朴素写法，生产路径用按行建一次的查表版。
-    fn slow_reference(code: &str, spans: &[(u32, u32, &str)]) -> HighlightPayload {
+    fn slow_reference(code: &str, spans: &[(u32, u32, &'static str)]) -> HighlightPayload {
         fn line_byte_offset(source: &str, line_number: usize) -> usize {
             if line_number <= 1 {
                 return 0;
@@ -2046,9 +2273,9 @@ mod tests {
             let line_start = line_byte_offset(code, line_idx + 1);
             let line_end = line_start + line_text.len();
 
-            let mut line_spans: Vec<(usize, usize, Tok)> = Vec::new();
+            let mut line_spans: Vec<(usize, usize, &'static str)> = Vec::new();
             for &(start, end, tag) in spans {
-                let Some(tok) = Tok::from_name(tag) else {
+                let Some(tok) = resolve_token_name(tag, &[]) else {
                     continue;
                 };
                 let s = start as usize;
@@ -2082,10 +2309,10 @@ mod tests {
                 if unit_start >= unit_end {
                     continue;
                 }
-                let idx = match tags.iter().position(|t| *t == tok.name()) {
+                let idx = match tags.iter().position(|t| *t == tok) {
                     Some(i) => i,
                     None => {
-                        tags.push(tok.name());
+                        tags.push(tok);
                         tags.len() - 1
                     }
                 };
@@ -2127,11 +2354,9 @@ mod tests {
 
         for src in &sources {
             for lang in ["rust", "javascript", "python", "markdown"] {
-                let owned = themed_spans(lang, src);
-                let spans: Vec<(u32, u32, &str)> =
-                    owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+                let spans = themed_spans(lang, src);
 
-                let linear = build_line_highlights(src, &spans).unwrap();
+                let linear = build_line_highlights(src, &spans, &[]).unwrap();
                 let reference = slow_reference(src, &spans);
                 assert_eq!(
                     serde_json::to_string(&linear).unwrap(),
@@ -2158,10 +2383,8 @@ mod tests {
         // 中文（3 字节 / 1 码元）+ emoji（4 字节 / 2 码元、且在补充平面）：
         // "按字节当码元"与"按 char 个数当码元"两种错法各覆盖一次
         let src = "let s = \"中文\"; // 注释\nlet t = \"a\"; // 🚀 起飞\nfn f() {}\n";
-        let owned = themed_spans("rust", src);
-        let raw: Vec<(u32, u32, &str)> =
-            owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
-        let payload = build_line_highlights(src, &raw).unwrap();
+        let raw = themed_spans("rust", src);
+        let payload = build_line_highlights(src, &raw, &[]).unwrap();
         let lines: Vec<&str> = src.lines().collect();
 
         let mut line_starts = vec![0usize];
@@ -2260,12 +2483,10 @@ mod tests {
                 "fn f{i}(x: i32) -> i32 {{\n    // note {i}\n    x + {i}\n}}\n"
             ));
         }
-        let owned = themed_spans("rust", &src);
-        let spans: Vec<(u32, u32, &str)> =
-            owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+        let spans = themed_spans("rust", &src);
 
         let t0 = std::time::Instant::now();
-        let linear = build_line_highlights(&src, &spans).unwrap();
+        let linear = build_line_highlights(&src, &spans, &[]).unwrap();
         let d_linear = t0.elapsed().as_secs_f64();
 
         let t1 = std::time::Instant::now();
@@ -2350,7 +2571,7 @@ mod tests {
         }
 
         // 端到端：行级高亮结果应携带 span（前端据此渲染 <span class="tok-*">）
-        let payload = build_line_highlights(src, &themed).expect("构建行级高亮失败");
+        let payload = build_line_highlights(src, &themed, &[]).expect("构建行级高亮失败");
         assert_eq!(payload.lines.len(), 6, "6 行源码应生成 6 行高亮");
         assert!(
             payload.lines.iter().any(|l| !l.is_empty()),
@@ -2374,10 +2595,8 @@ mod tests {
     }
 
     fn payload_of(lang: &str, src: &str) -> HighlightPayload {
-        let owned = themed_spans(lang, src);
-        let spans: Vec<(u32, u32, &str)> =
-            owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
-        build_line_highlights(src, &spans).expect("构建载荷失败")
+        let spans = themed_spans(lang, src);
+        build_line_highlights(src, &spans, &[]).expect("构建载荷失败")
     }
 
     /// **载荷里不许出现文件正文。**
@@ -2491,11 +2710,11 @@ mod tests {
             ("java", "public class A { int f(int x) { return x; } }\n"),
         ];
 
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for (lang, src) in corpus {
             for (_, _, name) in themed_spans(lang, src) {
                 assert!(
-                    Tok::from_name(&name).is_some(),
+                    is_builtin_token(name),
                     "{lang} 产出了表外的 tag `{name}`：这一类片段会静默失去颜色。\
                      加进 TOK_TABLE，并补上 .tok-{name} 的样式"
                 );
@@ -2514,50 +2733,46 @@ mod tests {
     /// 枚举化之后"表里有的 tag 却没人给它配色"是**新的**一类坏：以前未知名字至少还会
     /// 拼出一个类名（配不配上色另说），现在得显式确认每个枚举值都真能画出颜色。
     /// 反向读源码而不是靠人记 —— 加枚举值忘了配色时这条会红。
+    /// 每个内置 token 名都必须在**预装插件的主题**里有 `.tok-<name>`。
+    ///
+    /// v1.0.0 起这份主题不再躺在 `ui/styles.css` 里，而是插件的一部分
+    /// （`plugins/highlight/ruyix-builtin/theme.css`）：**语法高亮作为预装插件**的判据就在这里 ——
+    /// 名字表在代码里、颜色在插件里，两边对不上就是"渲染成默认色、看起来像高亮丢了"。
     #[test]
     fn every_tag_has_a_css_class() {
-        let css = include_str!("../../ui/styles.css");
-
-        // **先去掉注释**：注释里提一句 `.tok-macro` 不该算数，否则门禁会被一句说明骗过
-        // （这正是反向验证抓出来的：把规则换成一句含类名的注释，门禁照过）。
-        let mut code = String::with_capacity(css.len());
-        let mut rest = css;
-        while let Some(i) = rest.find("/*") {
-            code.push_str(&rest[..i]);
-            match rest[i + 2..].find("*/") {
-                Some(j) => rest = &rest[i + 2 + j + 2..],
-                None => {
-                    rest = "";
-                    break;
-                }
-            }
-        }
-        code.push_str(rest);
-
-        let mut declared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut rest = code.as_str();
-        while let Some(i) = rest.find(".tok-") {
-            let tail = &rest[i + 5..];
-            let end = tail
-                .find(|c: char| !(c.is_ascii_lowercase() || c == '-'))
-                .unwrap_or(tail.len());
-            // 只有"类名后面跟 `{`"才算真声明（选择器列表 `.a, .tok-b {` 也认）
-            if tail[end..].trim_start().starts_with('{') {
-                declared.insert(tail[..end].to_string());
-            }
-            rest = &tail[end..];
-        }
-
-        let missing: Vec<&str> = TOK_TABLE
+        let theme = include_str!("../../plugins/highlight/ruyix-builtin/theme.css");
+        let names: Vec<&str> = builtin_token_names();
+        let missing: Vec<&str> = names
             .iter()
-            .map(|(n, _)| *n)
-            .filter(|n| !declared.contains(*n))
+            .copied()
+            .filter(|n| !theme.contains(&format!(".tok-{n} {{")))
             .collect();
         assert!(
             missing.is_empty(),
-            "下列 tag 没有 CSS 规则（会渲染成默认色，看起来像「高亮丢了」）：{missing:?}；\
-             TOK_TABLE 里声明的名字必须与 styles.css 的 .tok-* 对得上"
+            "预装插件主题里缺这些 `.tok-*` 规则：{missing:?}\n\
+             （高亮器能产出它们，缺了就是渲染成默认色 —— 改主题时别忘了同步）"
         );
+    }
+
+    /// 预装插件的清单必须覆盖内置的 8 门语言（否则"预装了但少一半语言"没人发现）。
+    #[test]
+    fn preinstalled_plugin_covers_builtin_languages() {
+        let manifest = include_str!("../../plugins/highlight/ruyix-builtin/plugin.toml");
+        for lang in [
+            "python",
+            "rust",
+            "html",
+            "css",
+            "javascript",
+            "markdown",
+            "sql",
+            "java",
+        ] {
+            assert!(
+                manifest.contains(&format!("id = \"{lang}\"")),
+                "预装插件清单里没有 {lang}：解析器编进来了却没人认领"
+            );
+        }
     }
 
     // ============================================
