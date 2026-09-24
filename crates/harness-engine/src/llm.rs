@@ -497,7 +497,15 @@ pub fn web_search_on(cfg: &LlmConfig) -> bool {
     }
 }
 
-/// 声明给模型的工具 —— **表驱动**：加一个能力 = 加一行，不动 match 臂。
+/// 全部工具名（**必须与 [`TOOL_DECLS`] 一行不改地对齐** —— 契约单测同时断言两边）。
+///
+/// 拆出它是因为 `tools` 现在按**调用方需要的子集**声明：主循环给全套，复核员只给 `read`
+/// （它只能读，给了 `write` 等于把只读约束交给模型自觉）。
+pub const TOOL_NAMES_ALL: &[&str] = &[
+    "read", "write", "execute", "connect", "plan", "ask_user", "final",
+];
+
+/// 声明给模型的工具（表驱动）。
 ///
 /// ## 为什么非要有它（这次的病根）
 ///
@@ -516,8 +524,17 @@ pub fn web_search_on(cfg: &LlmConfig) -> bool {
 /// `final` 不是"第五个能力"：它是**交付动作**（老协议里是 `{"final":"…"}` 这个字段），
 /// 所以这里跟在四种能力后面单独说明。
 pub fn tool_decls() -> Vec<serde_json::Value> {
+    tool_decls_for(TOOL_NAMES_ALL)
+}
+
+/// 只声明**指定的**那几个工具（顺序按表里的顺序，认不出的名字直接忽略）。
+///
+/// 子集不是可选的锦上添花：复核员只许 `read`、步骤执行体没有 `connect` —— 声明面就是权限面，
+/// 给谁多声明一个工具，等于把一条能力交到它的自觉上。
+pub fn tool_decls_for(names: &[&str]) -> Vec<serde_json::Value> {
     TOOL_DECLS
         .iter()
+        .filter(|(n, _, _)| names.iter().any(|w| w.eq_ignore_ascii_case(n)))
         .map(|(name, desc, params)| {
             serde_json::json!({
                 "type": "function",
@@ -577,7 +594,7 @@ fn chat_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
-    tools: bool,
+    tool_names: &[&str],
 ) -> (String, serde_json::Value) {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({
@@ -590,10 +607,10 @@ fn chat_parts(
     if json_mode {
         body["response_format"] = serde_json::json!({ "type": "json_object" });
     }
-    // 标准工具协议（`tools` 由调用方显式传，见 [`chat`] 的文档）：**这是治 DSML 泄露的那一步**
-    // —— 声明之后模型的原生调用进了 `tool_calls`，而不是被截头后落进 content。
-    if tools {
-        body["tools"] = serde_json::Value::Array(tool_decls());
+    // 标准工具协议（`tool_names` 由调用方显式给，见 [`chat_with_tools`]）：**这是治 DSML 泄露
+    // 的那一步** —— 声明之后模型的原生调用进了 `tool_calls`，而不是被截头后落进 content。
+    if !tool_names.is_empty() {
+        body["tools"] = serde_json::Value::Array(tool_decls_for(tool_names));
     }
     (url, body)
 }
@@ -773,14 +790,14 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
 /// 按 `api_format` 选择整套协议：anthropic → `/v1/messages`；否则按 `web_search_on`
 /// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判（它会跳过联网）。
 ///
-/// `tools` 只对 `/chat/completions` 生效：`/responses` 与 anthropic 两条路的工具形态是另一套
+/// `tool_names` 只对 `/chat/completions` 生效：`/responses` 与 anthropic 两条路的工具形态是另一套
 /// （`function_call` 项 / `tool_use` 块），本次改造不碰它们（各自 `extract_*` 里的注释说明了
 /// 为什么），所以这里不往下传。
 fn request_plan(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
-    tools: bool,
+    tool_names: &[&str],
 ) -> Protocol {
     if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
         let (u, b) = anthropic_parts(cfg, messages, json_mode);
@@ -789,7 +806,7 @@ fn request_plan(
         let (u, b) = responses_parts(cfg, messages, json_mode);
         (u, b, extract_responses, AuthScheme::Bearer)
     } else {
-        let (u, b) = chat_parts(cfg, messages, json_mode, tools);
+        let (u, b) = chat_parts(cfg, messages, json_mode, tool_names);
         (u, b, extract_chat, AuthScheme::Bearer)
     }
 }
@@ -873,24 +890,8 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
     })
 }
 
-/// 带重试的一次对话调用；失败时若配了**备用 LLM** 且错误属于"可用性故障"则自动切换。
-///
-/// 协议选择由 `request_plan` 决定（`api_format` → anthropic；否则 `web_search_on` →
-/// `/responses` 或 `/chat/completions`）。**三套协议共用同一套重试与错误分类** ——
-/// 分叉只在请求体 / 解析 / 鉴权上。
-///
-/// 故障切换语义（详见 `doc/需求-LLM网关与多协议-v0.5.md`）：
-/// - 无备用（`fallback = None`）：与旧版逐字节一致 —— 3 次重试、完整超时、同样的错误文案。
-/// - 有备用（弹性模式）：主用 2 次、单次超时封顶 `min(timeout_secs, 30s)`（避免主用僵尸
-///   挂死 300s 还不切）；主用失败且 `is_switchable_error` 为真才切备用；鉴权 / 配额 /
-///   参数错误不切（重试也没用），直接返回主用错误。
-///
-/// `tools = true` 时**这次调用**会声明工具（`chat/completions` 才认；另两条协议忽略它）。
-/// 为什么是**每次调用的参数**而不是配置项：工具语义只属于**工具循环**（agent 主循环与
-/// 步骤执行体）。plan / generate / repair / reflect / eval 那几处是"单发一次、拿 structured
-/// JSON 回来"的生成调用，它们没有"工具"这个语义 —— 给它们声明工具，模型会去调工具、
-/// content 变空，而它们的解析器只认 content，等于自己把自己打瘸。所以能力要显式传，
-/// 不给隐式默认（`LlmConfig.tool_protocol` 只是 agent 那一侧的开关）。
+/// 带重试的一次对话调用（**声明全套工具**）；失败时若配了**备用 LLM** 且错误属于"可用性故障"
+/// 则自动切换。只声明子集的场景用 [`chat_with_tools`]。
 pub async fn chat(
     cfg: &LlmConfig,
     fallback: Option<&LlmConfig>,
@@ -898,13 +899,36 @@ pub async fn chat(
     json_mode: bool,
     tools: bool,
 ) -> Result<ChatOutcome, String> {
+    let names: &[&str] = if tools { TOOL_NAMES_ALL } else { &[] };
+    chat_with_tools(cfg, fallback, messages, json_mode, names).await
+}
+
+/// 与 [`chat`] 相同，但**声明哪几个工具由调用方点名**（空切片 = 不声明工具）。
+///
+/// `tools = true` 时**这次调用**会声明工具（`chat/completions` 才认；另两条协议忽略它）。
+/// 为什么是**每次调用的参数**而不是配置项：工具语义只属于**工具循环**（agent 主循环与
+/// 步骤执行体）。plan / generate / repair / reflect / eval 那几处是"单发一次、拿 structured
+/// JSON 回来"的生成调用，它们没有"工具"这个语义 —— 给它们声明工具，模型会去调工具、
+/// content 变空，而它们的解析器只认 content，等于自己把自己打瘸。所以能力要显式传，
+/// 不给隐式默认（`LlmConfig.tool_protocol` 只是 agent 那一侧的开关）。
+///
+/// 为什么点名而不是一个 bool：**声明面就是权限面** —— 复核员只许 `read`（它的活儿就是读文件），
+/// 步骤执行体没有 `connect`。给谁多声明一个工具，等于把一条能力交到它的自觉上。
+pub async fn chat_with_tools(
+    cfg: &LlmConfig,
+    fallback: Option<&LlmConfig>,
+    messages: &[ChatMessage],
+    json_mode: bool,
+    tool_names: &[&str],
+) -> Result<ChatOutcome, String> {
     if cfg.api_key.trim().is_empty() {
         return Err(
             "尚未配置 DeepSeek API Key（设置面板里填，或设环境变量 DEEPSEEK_API_KEY）".into(),
         );
     }
 
-    let (out, last_err) = attempt_loop(cfg, messages, json_mode, tools, fallback.is_some()).await;
+    let (out, last_err) =
+        attempt_loop(cfg, messages, json_mode, tool_names, fallback.is_some()).await;
     if let Some(o) = out {
         return Ok(o);
     }
@@ -923,7 +947,7 @@ pub async fn chat(
         ));
     }
 
-    let (fb_out, fb_err) = attempt_loop(fb, messages, json_mode, tools, true).await;
+    let (fb_out, fb_err) = attempt_loop(fb, messages, json_mode, tool_names, true).await;
     match fb_out {
         Some(o) => {
             observe_failover(cfg, fb, messages);
@@ -944,10 +968,10 @@ async fn attempt_loop(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
-    tools: bool,
+    tool_names: &[&str],
     resilient: bool,
 ) -> (Option<ChatOutcome>, String) {
-    let (url, body, extract, auth) = request_plan(cfg, messages, json_mode, tools);
+    let (url, body, extract, auth) = request_plan(cfg, messages, json_mode, tool_names);
     // `--debug`：先记下这次请求的全貌（端点 / 协议 / 请求体 / 模型实际看到的消息）
     dump_request(cfg, &url, auth, &body, messages, json_mode);
     let max_attempts: u32 = if resilient { 2 } else { 3 };
@@ -1444,12 +1468,8 @@ mod tests {
         );
 
         // 关掉就退回原链路：路径、字段、json 模式全都回到 /chat/completions 那一套
-        let (url2, body2) = chat_parts(
-            &cfg_at("https://api.deepseek.com", "off"),
-            &msgs,
-            true,
-            false,
-        );
+        let (url2, body2) =
+            chat_parts(&cfg_at("https://api.deepseek.com", "off"), &msgs, true, &[]);
         assert!(url2.ends_with("/chat/completions"));
         assert!(body2["messages"].is_array());
         assert_eq!(body2["response_format"]["type"], "json_object");
@@ -1590,6 +1610,19 @@ mod tests {
             );
         }
         assert_eq!(names.len(), 7, "表里多了没被解析器认识的名字：{names:?}");
+        // 名字清单与表**必须一一对齐**（子集声明按名字过滤：漏一个就是静默少声明一个工具）
+        assert_eq!(
+            names,
+            TOOL_NAMES_ALL
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "TOOL_NAMES_ALL 与 TOOL_DECLS 漂移了"
+        );
+        // 子集声明：复核员只给 read，就**只能**看到 read（声明面 = 权限面）
+        let only_read = tool_decls_for(&["read"]);
+        assert_eq!(only_read.len(), 1);
+        assert_eq!(only_read[0]["function"]["name"], "read");
         // 每条 parameters 都得是合法 JSON Schema（表里存的是 JSON 源串，写错这里就炸）
         for t in &decls {
             let params = &t["function"]["parameters"];

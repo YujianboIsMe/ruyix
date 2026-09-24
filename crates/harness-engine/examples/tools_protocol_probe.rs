@@ -15,7 +15,7 @@
 //! 若 content 里出现模型自带的工具调用标记 → 说明这份 prompt/声明没压住，得回去看 A/B。
 use harness_engine::agent::AGENT_SYSTEM;
 use harness_engine::config::LlmConfig;
-use harness_engine::llm::{ChatMessage, chat};
+use harness_engine::llm::{ChatMessage, chat, chat_with_tools};
 
 fn key_from_ai_toml() -> String {
     let p = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
@@ -84,5 +84,34 @@ fn main() {
     println!(
         "\n判定：tool_calls>0 = 工具协议主路生效；=0 但 content 是动作 JSON = 兼容层；\
          content 里出现自带标记 = 这份 prompt 没压住，回去看 A/B"
+    );
+
+    // ---- 场景 2：复核员（**只声明 read**）----
+    // 这一路原来是 DSML 泄露的第二个现场（两次真跑各漏一次：content = `{"path": …}` + 三行
+    // 自带标记 → 复核解析失败 → 结论 unknown）。这里复验：声明子集之后它走不走工具协议。
+    let msgs2 = vec![
+        ChatMessage::system(harness_engine::reflect::REFLECT_SYSTEM),
+        ChatMessage::user(
+            "产物评审：本次改了 cloud-shop-admin-web/vite.config.js（代理目标 8080 → 8083）。\
+             请判断是否破坏调用方，必要时读相关文件，然后只输出一个 JSON 结论。",
+        ),
+    ];
+    let out2 = rt
+        .block_on(chat_with_tools(&cfg, None, &msgs2, true, &["read"]))
+        .expect("调用失败");
+    println!("\n== 复核员场景（只声明 read）==");
+    println!("finish_reason: {:?}", out2.finish_reason);
+    println!("tool_calls   : {}", out2.tool_calls.len());
+    for c in &out2.tool_calls {
+        println!("  · {}({})", c.function.name, c.function.arguments);
+    }
+    println!("content      : {} 字符", out2.content.chars().count());
+    println!(
+        "content 片段   : {}",
+        out2.content.chars().take(160).collect::<String>()
+    );
+    println!(
+        "判定：tool_calls>0 且 content 里没有自带标记 = 复核那一路也不再漏；\
+         若 content 是 path+参数 + 标记 → 这条路还没修好"
     );
 }

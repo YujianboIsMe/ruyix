@@ -46,7 +46,7 @@ pub const REFLECT_SYSTEM: &str = r#"你是 ruyix 的复核员：**独立于**干
   **不许因为没有 URL 就判 unsupported，也不许要求它把网页抓下来再答一遍。**
 
 可用工具（只有这一个）：
-- read 读项目文件：{"tool":"read","args":{"path":"相对路径"}} —— 判断"是否破坏调用方"这类问题必须自己去读，不许凭空推测。
+- read 读项目文件：**调用 read 工具**（read(path="相对路径")）—— 判断"是否破坏调用方"这类问题必须自己去读，不许凭空推测。
 
 结论按这个形状直接输出（不要包裹代码块，不要多余文字）：
 {"verdict":"ok|suspect","summary":"一句话","findings":[{"severity":"high|medium|low","claim":"问题一句话","evidence":"文件:行 或 命令输出片段；没证据就写 unknown","verdict":"supported|unsupported|unknown","suggest":"建议怎么改"}]}
@@ -376,6 +376,41 @@ fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
+/// **工具调用形态的 read**（标准协议）→ 回灌给模型的观察；`None` = 这一轮不是工具调用。
+///
+/// 为什么必须有这条：复核员的活儿就是**去 read 核对证据**，而它面对的是被原生工具调用语法
+/// 训练过的模型 —— 不给它 `read` 工具，它就把调用写进 content（实测两次真跑各漏一次：
+/// content = `{"path": "…vite.config.js"}` + 三行自带标记 → 复核解析失败 → `结论：unknown`，
+/// 等于把质检环节废掉）。声明 `read` 之后这类意图进 `tool_calls`，与主循环同一条通道。
+///
+/// 只认 `read`：复核是只读角色，别的工具一律打回（`read` 之外没有第二个合法名字）。
+fn read_via_tool_calls(calls: &[llm::ToolCall], proj: &Path, sink: &dyn Sink) -> Option<String> {
+    let c = calls.first()?; // 复核没有批量语义：一轮一个就够，多个也只处理第一个
+    let err = |msg: String| Some(format!("{{\"ok\":false,\"error\":{}}}", json_str(&msg)));
+    let name = c.function.name.trim().to_ascii_lowercase();
+    if name != "read" {
+        return err(format!("复核只允许 read，收到 {name:?}"));
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(c.function.arguments.trim()) else {
+        return err("read 的参数不是合法 JSON".into());
+    };
+    let Some(path) = args
+        .get("path")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    else {
+        return err("read 缺少 path".into());
+    };
+    match read_project_file(proj, path) {
+        Ok(text) => {
+            sink.log("info", format!("[reflect] read {path}"));
+            Some(format!("{{\"ok\":true,\"result\":{}}}", json_str(&text)))
+        }
+        Err(e) => err(e),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ReflectOutcome {
     pub reflection: Reflection,
@@ -419,15 +454,21 @@ pub async fn run(
             };
         }
         sink.log("info", format!("[reflect] 第 {step} 轮复核"));
-        let reply = match llm::chat(&llm_cfg, cfg.llm_fallback.as_ref(), &msgs, true, false).await {
-            Ok(r) => r,
-            Err(e) => {
-                return ReflectOutcome {
-                    reflection: degraded(format!("复核模型调用失败：{e}")),
-                    usage,
-                };
-            }
-        };
+        // **只声明 `read`**（工具协议的严格形态）：复核是只读角色，声明面就是权限面 ——
+        // 给它 write/execute 等于把只读约束交给模型自觉；不给它任何工具，它想读文件时
+        // 只能把调用写进 content（那就是两次真跑各漏一次的原因）。
+        let reply =
+            match llm::chat_with_tools(&llm_cfg, cfg.llm_fallback.as_ref(), &msgs, true, &["read"])
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return ReflectOutcome {
+                        reflection: degraded(format!("复核模型调用失败：{e}")),
+                        usage,
+                    };
+                }
+            };
         usage.add(&reply.usage);
 
         // ① 结论优先（模型可以直接给 verdict，不必先 read）
@@ -446,18 +487,33 @@ pub async fn run(
             };
         }
 
-        // ② 只读工具：read；别的工具一律打回
-        msgs.push(ChatMessage::assistant(reply.content.clone()));
-        let nudge = match parse_read(&reply.content) {
-            Ok(Some(path)) => match read_project_file(inp.project_root, &path) {
-                Ok(text) => {
-                    sink.log("info", format!("[reflect] read {path}"));
-                    format!("{{\"ok\":true,\"result\":{}}}", json_str(&text))
-                }
+        // ② read：**工具调用优先**（工具轮的 content 天生是空的），content 形态作兼容 ——
+        // 复核是只读的辅助环节，降级代价高（结论会变成 unknown），所以两条都收；
+        // 但话术改成先教工具调用（模型学的是新词汇，见 `doc/需求-工具协议改造-v0.0.6.md` §6）。
+        msgs.push(ChatMessage::assistant(if reply.tool_calls.is_empty() {
+            reply.content.clone()
+        } else {
+            crate::agent::tool_calls_echo(&reply.tool_calls)
+        }));
+        let nudge = match read_via_tool_calls(&reply.tool_calls, inp.project_root, sink) {
+            Some(obs) => obs,
+            None => match parse_read(&reply.content) {
+                Ok(Some(path)) => match read_project_file(inp.project_root, &path) {
+                    Ok(text) => {
+                        sink.log("info", format!("[reflect] read {path}"));
+                        format!("{{\"ok\":true,\"result\":{}}}", json_str(&text))
+                    }
+                    Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_str(&e)),
+                },
+                Ok(None) => format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    json_str(
+                        "请只做两件事之一：调用 read 工具去看文件，\
+                         或直接给出 {\"verdict\":\"ok|suspect\",…} 结论。"
+                    )
+                ),
                 Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_str(&e)),
             },
-            Ok(None) => "{\"ok\":false,\"error\":\"请只输出两种情况之一：{\\\"tool\\\":\\\"read\\\",\\\"args\\\":{\\\"path\\\":\\\"相对路径\\\"}} 去看文件，或直接给出 {\\\"verdict\\\":\\\"ok|suspect\\\",…} 结论。\"}".to_string(),
-            Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_str(&e)),
         };
         msgs.push(ChatMessage::user(nudge));
     }
@@ -651,8 +707,43 @@ mod tests {
             let raw = format!(r#"{{"tool":"{bad}","args":{{"path":"a.py","content":"x"}}}}"#);
             assert!(parse_read(&raw).is_err(), "复核不该允许 {bad}");
         }
-        assert!(REFLECT_SYSTEM.contains("{\"tool\":\"read\""));
+        assert!(REFLECT_SYSTEM.contains("调用 read 工具"));
         assert!(REFLECT_SYSTEM.contains("只有这一个"));
+    }
+
+    /// 工具调用形态的 read（标准协议）：读得到就回灌、别的工具打回、参数不全报清楚、
+    /// 不是工具轮就返回 `None`（交给 content 那条兼容路）。
+    #[test]
+    fn tool_call_read_reads_and_refuses_other_tools() {
+        struct Quiet;
+        impl Sink for Quiet {}
+
+        let dir = std::env::temp_dir().join(format!("reflect-toolread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "print(1)\n").unwrap();
+
+        let call = |name: &str, args: &str| crate::llm::ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: crate::llm::ToolCallFn {
+                name: name.into(),
+                arguments: args.into(),
+            },
+        };
+        let obs = read_via_tool_calls(&[call("read", r#"{"path":"a.py"}"#)], &dir, &Quiet).unwrap();
+        assert!(obs.contains("print(1)"), "要回灌读到的内容：{obs}");
+        assert!(obs.starts_with("{\"ok\":true"), "{obs}");
+
+        let obs = read_via_tool_calls(&[call("write", "{}")], &dir, &Quiet).unwrap();
+        assert!(obs.contains("只允许 read"), "只读角色不许调别的：{obs}");
+
+        let obs = read_via_tool_calls(&[call("read", "{}")], &dir, &Quiet).unwrap();
+        assert!(obs.contains("缺少 path"), "参数不全要说清楚：{obs}");
+
+        // 不是工具轮：None（content 那条路自己处理，别把普通回合也当成 read）
+        assert!(read_via_tool_calls(&[], &dir, &Quiet).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 纪律 3（不阻断）：复核跑不成只降级，绝不把整个 run 判死。
