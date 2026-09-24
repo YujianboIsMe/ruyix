@@ -19,11 +19,12 @@
 //! 子步骤自报事件会撞掉父的 index。步骤进度由父循环在派发前/返回后统一发。
 
 use crate::agent::{
-    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, StepAction, VerifyOutcome,
-    WriteBody, WriteSpec, batch_hint, batch_json_result, batch_waves_for_step, flush_write_disk,
-    json_result, narrow_verify, parse_failure_feedback, parse_step_actions, parse_step_tool_calls,
-    policy_system_note, proc_op_name, read_group, resolve_write, staged_execute_note,
-    tool_calls_echo, tool_exec_bg, tool_execute, tool_proc, write_edits_ok_text, write_ok_text,
+    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, STEP_TOOLS_HINT, StepAction,
+    VerifyOutcome, WriteBody, WriteSpec, batch_hint, batch_json_result, batch_waves_for_step,
+    content_channel_error, flush_write_disk, json_result, narrow_verify, parse_failure_feedback,
+    parse_step_actions, parse_step_tool_calls, policy_system_note, proc_op_name, read_group,
+    resolve_write, staged_execute_note, tool_calls_echo, tool_exec_bg, tool_execute, tool_proc,
+    write_edits_ok_text, write_ok_text,
 };
 use crate::config::AppConfig;
 use crate::discover;
@@ -552,6 +553,8 @@ pub async fn run_step(
         user.push_str(&format!("\n\n{}", batch_hint(cfg.agent.batch_max, false)));
     }
     let mut msgs = vec![ChatMessage::system(STEP_SYSTEM), ChatMessage::user(user)];
+    // content 通道连续被拒的次数（严格模式：第 1 次讲清道理，之后只说短话）
+    let mut content_strikes: usize = 0;
 
     for round in 1..=max_steps {
         if is_cancelled(cancel) {
@@ -617,14 +620,24 @@ pub async fn run_step(
         };
         usage.add(&reply.usage);
 
-        // 两条协议都要认（与主循环同一套纪律，v0.0.6）：工具调用（主路）优先，
-        // content 里的 JSON 作兼容层 —— 子步骤拿到的也是同一份工具声明，不认它就会白烧轮次。
+        // **严格模式**：动作只认工具调用（与主循环同一条纪律）；content 通道一律不执行 ——
+        // 但要"认出来再拒"（见 [`content_channel_error`]），只报"无法解析"模型会换包装重发。
         let via_tools = !reply.tool_calls.is_empty();
-        let mut actions = match if via_tools {
+        if !via_tools && cfg.llm.tool_protocol {
+            content_strikes += 1;
+        }
+        let parsed = if via_tools {
             parse_step_tool_calls(&reply.tool_calls, cfg.agent.batch_max, cfg.agent.batch)
+        } else if cfg.llm.tool_protocol {
+            Err(content_channel_error(
+                &reply.content,
+                content_strikes,
+                STEP_TOOLS_HINT,
+            ))
         } else {
             parse_step_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
-        } {
+        };
+        let mut actions = match parsed {
             Ok(a) => a,
             Err(e) => {
                 sink.log(
@@ -634,6 +647,7 @@ pub async fn run_step(
                 msgs.push(ChatMessage::user(parse_failure_feedback(
                     &e,
                     reply.finish_reason.as_deref(),
+                    cfg.llm.tool_protocol,
                 )));
                 continue;
             }

@@ -56,7 +56,73 @@ impl FakeLlm {
 /// 起一个最小 OpenAI 兼容服务：第 i 个请求回 `script[i]`，并把请求体留档给断言看。
 /// 剧本演完就收工 —— 之后多出来的请求会拿到连接失败，让"循环多跑了一轮"暴露成
 /// 测试失败，而不是被静默吞掉。
+///
+/// **动作类剧本按工具协议发出**：条目若是老协议形状的动作（`{"tool":…}` /
+/// `{"actions":[…]}` / `{"calls":[…]}` / `{"final":…}`），会先翻译成一条 `tool_calls` 响应。
+/// 原因：严格模式下 content 通道**不执行**（`llm.tool_protocol` 默认开），测试要验的是主路；
+/// 翻译让上百条既有脚本一行不改就继续有效。
+///
+/// 想"就发这个 content"（兼容层、散文、畸形 JSON、DSML 泄露样本那些用例）用 [`fake_llm_raw`]。
 pub fn fake_llm(script: Vec<String>) -> FakeLlm {
+    fake_llm_raw(
+        script
+            .iter()
+            .map(|e| legacy_entry_as_tool_call(e))
+            .collect(),
+    )
+}
+
+/// 老协议形状的剧本条目 → `tool_calls` 响应条目（认不出就原样返回）。
+fn legacy_entry_as_tool_call(entry: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(entry.trim()) else {
+        return entry.to_string();
+    };
+    let items: Vec<&serde_json::Value> = match &v {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Object(o) => match o.get("actions").or_else(|| o.get("calls")) {
+            Some(serde_json::Value::Array(a)) => a.iter().collect(),
+            _ => vec![&v],
+        },
+        _ => return entry.to_string(),
+    };
+    let mut list: Vec<serde_json::Value> = Vec::with_capacity(items.len());
+    for (i, it) in items.iter().enumerate() {
+        let Some((name, args)) = tool_name_and_args(it) else {
+            return entry.to_string(); // 有一条认不出：整条原样发，别悄悄改剧本
+        };
+        list.push(serde_json::json!({
+            "id": format!("call_{}", i + 1),
+            "type": "function",
+            "function": { "name": name, "arguments": serde_json::to_string(&args).unwrap() }
+        }));
+    }
+    if list.is_empty() {
+        return entry.to_string();
+    }
+    serde_json::json!({ "tool_calls": list }).to_string()
+}
+
+/// 老协议形状的动作 → （工具名，参数）
+fn tool_name_and_args(v: &serde_json::Value) -> Option<(String, serde_json::Value)> {
+    if let Some(name) = v.get("tool").and_then(|x| x.as_str()) {
+        let args = v
+            .get("args")
+            .or_else(|| v.get("arguments"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        return Some((name.to_string(), args));
+    }
+    if let Some(ans) = v.get("final").and_then(|x| x.as_str()) {
+        return Some(("final".into(), serde_json::json!({ "answer": ans })));
+    }
+    if v.get("answer").is_some() && v.as_object().map(|o| o.len() == 1).unwrap_or(false) {
+        return Some(("final".into(), v.clone()));
+    }
+    None
+}
+
+/// 剧本**原样**当 content 回话（不做任何翻译）—— 兼容层/兜底/畸形输出的用例用这个。
+pub fn fake_llm_raw(script: Vec<String>) -> FakeLlm {
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定假 LLM 端口");
     let addr = listener.local_addr().unwrap();
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

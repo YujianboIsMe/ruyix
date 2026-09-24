@@ -124,24 +124,32 @@ fn a_headless_dsml_call_gets_told_what_is_missing_and_recovers() {
     ))
     .expect("run 不该失败");
 
-    // ① 形状纠正：指到"外层缺 tool"，并把模型刚发的那坨参数原样贴回去
+    // ① **认出形状再拒**（严格模式）：它发的是 execute 的参数对象，得点名说出来 ——
+    //    真跑那五轮里引擎只回一句"外层缺 tool"，模型根本不知道自己哪一处错了。
     let feedback = llm.request(1);
-    assert!(feedback.contains("缺 `tool`"), "{feedback}");
     assert!(
-        feedback.contains("echo e2e"),
-        "要把它自己发的参数贴回去：{feedback}"
+        feedback.contains("execute 的参数"),
+        "要点名它发的是哪个工具的参数：{feedback}"
     );
-    // ② 协议纠正：告诉它"你那套标记被剥了"，否则它不知道自己错在哪。
-    // 断言用"已剥掉"而不是"工具调用标记"—— 后者在系统提示词里也有（规则 1 刚加了同一句话），
+    assert!(
+        feedback.contains("通道错了") || feedback.contains("只认工具调用"),
+        "要说清「形状对、通道错」：{feedback}"
+    );
+    assert!(
+        !feedback.contains("不执行") || feedback.contains("content"),
+        "要把「content 不执行」讲明白：{feedback}"
+    );
+    // ② 模型自带的标记被剥掉这件事必须点明，否则它不知道自己错在哪。
+    // 断言用"已剥掉"而不是"工具调用标记"—— 后者在系统提示词里也有（规则 1 有同一句话），
     // 拿它当判据会被提示词本身满足，等于没测这条注脚。
     assert!(
         feedback.contains("已剥掉"),
         "必须点明是模型自带的工具调用标记被剥掉：{feedback}"
     );
-    // 落在磁盘上的事实：纠正之后动作真的跑了
+    // 落在磁盘上的事实：拒掉那一轮之后，正规工具调用让动作真的跑了
     assert_eq!(std::fs::read_to_string(d.0.join("nm.txt")).unwrap(), "ok");
     assert!(out.answer.contains("写好了"), "{}", out.answer);
-    assert_eq!(llm.count(), 3, "泄露一轮 → 纠正后一轮 → 交付");
+    assert_eq!(llm.count(), 3, "content 一轮被拒 → 工具调用一轮 → 交付");
 }
 
 /// 跑一轮工具循环：无提问通道、无连接器、Apply 策略、静默 sink —— 工具协议那几条用例共用。
@@ -248,11 +256,90 @@ fn batch_off_refuses_several_tool_calls() {
     assert!(req2.contains("不允许批量调用"), "{req2}");
 }
 
-/// 一行回滚：`llm.tool_protocol = false` → 请求里**一个字都不提**工具，老协议照旧能跑
+/// **严格模式**：content 里的动作**不执行** —— 拒掉、点名、给一句能照做的纠正；改走工具调用才跑。
 #[test]
-fn tool_protocol_switch_off_sends_no_tools_field() {
-    let d = TempDir::new("tools-off");
-    let llm = crate::testllm::fake_llm(vec![r#"{"final":"老路也能交付"}"#.into()]);
+fn strict_mode_refuses_content_actions_and_names_them() {
+    let d = TempDir::new("strict-refuse");
+    let llm = crate::testllm::fake_llm_raw(vec![
+        // 第 1 轮：老协议形状的 write（content 通道）→ 目标文件必须**从未**出现
+        // （用另一个文件名：后面那一轮工具调用会写 b.txt，同名字就分不清是谁写的了）
+        r#"{"tool":"write","args":{"path":"never.txt","content":"BBB"}}"#.into(),
+        // 第 2 轮：同一个动作改走工具调用 → 落盘
+        crate::testllm::tool_script(&[(
+            "write",
+            serde_json::json!({"path": "b.txt", "content": "BBB"}),
+        )]),
+        crate::testllm::tool_script(&[("final", serde_json::json!({"answer": "写好了"}))]),
+    ]);
+    let cfg = ask_cfg(&llm);
+    let out = run_loop(&cfg, &d.0);
+
+    assert!(
+        !d.0.join("never.txt").exists(),
+        "严格模式下 content 通道的动作一个字节都不许落盘"
+    );
+    let fb = llm.request(1);
+    assert!(fb.contains("write"), "要点名它发的是 write：{fb}");
+    assert!(fb.contains("工具调用"), "{fb}");
+    assert_eq!(
+        std::fs::read_to_string(d.0.join("b.txt")).unwrap(),
+        "BBB",
+        "改走工具调用之后才落盘"
+    );
+    assert!(out.answer.contains("写好了"), "{}", out.answer);
+    assert_eq!(llm.count(), 3, "content 被拒 → 工具调用 → 交付");
+}
+
+/// 真跑里那几轮的形状（2026-09-24 cloud-shop 启动前后端）逐一复刻：引擎必须**认出**并
+/// **拒掉**，而不是回一句"外层缺 tool"让模型继续换包装瞎猜（那次连烧五轮）。
+#[test]
+fn the_real_run_shapes_are_each_named_and_refused() {
+    let cases: &[(&str, &str)] = &[
+        // 第 13 轮：只剩 final 的参数对象
+        (r#"{"answer": "前后端都已启动"}"#, "final"),
+        // 第 14/15/17 轮：工具名 + 老键名
+        (
+            r#"{"tool":"final","args":{"answer":"前后端都已启动"}}"#,
+            "final",
+        ),
+        // 第 16 轮：协议的字段名
+        (
+            r#"{"name":"final","arguments":{"answer":"前后端都已启动"}}"#,
+            "final",
+        ),
+        // 外层漏了名字、只剩 arguments 包装
+        (r#"{"arguments":{"answer":"前后端都已启动"}}"#, "final"),
+        // json_mode 截头后只剩参数
+        (r#"{"cmd":"netstat -ano | findstr :8083"}"#, "execute"),
+        (r#"{"path":"cloud-shop-admin-web/vite.config.js"}"#, "read"),
+    ];
+    for (raw, want) in cases {
+        let msg = content_channel_error(raw, 1, MAIN_TOOLS_HINT);
+        assert!(msg.contains(want), "「{raw}」该被点名成 {want}：{msg}");
+        assert!(msg.contains("工具调用"), "{msg}");
+        assert!(msg.contains("不执行"), "{msg}");
+        assert!(!msg.contains("外层缺"), "不许再回那句没有指向性的话：{msg}");
+    }
+    // 第 2 次起只说短话（"提示一次即拒"）
+    let short = content_channel_error(r#"{"path":"a.txt"}"#, 2, MAIN_TOOLS_HINT);
+    assert!(short.contains("第 2 次"), "{short}");
+    assert!(short.len() < 200, "第 2 次要短：{short}");
+    // 步骤执行体的名单不许出现它没有的能力（父子提示词各自自洽）
+    let step = content_channel_error(r#"{"cmd":"ls"}"#, 1, STEP_TOOLS_HINT);
+    assert!(
+        !step.contains("connect") && !step.contains("plan"),
+        "{step}"
+    );
+}
+
+/// 一行回滚：`llm.tool_protocol = false` → 请求里不提工具，content 通道恢复执行（老协议）。
+#[test]
+fn rollback_switch_restores_the_content_channel() {
+    let d = TempDir::new("strict-off");
+    let llm = crate::testllm::fake_llm_raw(vec![
+        r#"{"tool":"write","args":{"path":"b.txt","content":"BBB"}}"#.into(),
+        r#"{"final":"老路也能交付"}"#.into(),
+    ]);
     let mut cfg = ask_cfg(&llm);
     cfg.llm.tool_protocol = false;
     let out = run_loop(&cfg, &d.0);
@@ -261,27 +348,12 @@ fn tool_protocol_switch_off_sends_no_tools_field() {
         !llm.request(0).contains("\"tools\""),
         "关掉开关就不该声明工具"
     );
+    assert_eq!(
+        std::fs::read_to_string(d.0.join("b.txt")).unwrap(),
+        "BBB",
+        "回滚之后 content 通道要照旧执行"
+    );
     assert!(out.answer.contains("老路也能交付"), "{}", out.answer);
-}
-
-/// 混合态（实测 6/8 工具协议 + 2/8 老协议）：同一趟里两种形状都要能接住
-#[test]
-fn tool_round_and_legacy_json_round_both_work() {
-    let d = TempDir::new("tools-mixed");
-    d.write("a.txt", "AAA");
-    let llm = crate::testllm::fake_llm(vec![
-        // 第 1 轮：标准工具协议
-        crate::testllm::tool_script(&[("read", serde_json::json!({"path": "a.txt"}))]),
-        // 第 2 轮：老协议（content 里的 JSON），模型偶尔还会这么发
-        r#"{"tool":"write","args":{"path":"b.txt","content":"BBB"}}"#.into(),
-        r#"{"final":"都做完了"}"#.into(),
-    ]);
-    let cfg = ask_cfg(&llm);
-    let out = run_loop(&cfg, &d.0);
-
-    assert_eq!(llm.count(), 3, "工具轮 + 老协议轮 + 交付");
-    assert_eq!(std::fs::read_to_string(d.0.join("b.txt")).unwrap(), "BBB");
-    assert!(out.answer.contains("都做完了"), "{}", out.answer);
 }
 
 /// connect 的三形态：省略 action = list；call 要 server+tool；send 要 agent+text
@@ -381,21 +453,35 @@ fn staged_execute_note_gated_by_mode_and_changes() {
 /// 反馈自己仍必须是合法 JSON（老实现裸拼会碎）
 #[test]
 fn parse_feedback_distinguishes_truncation() {
-    let trunc = parse_failure_feedback("EOF while parsing an object", Some("length"));
+    let trunc = parse_failure_feedback("EOF while parsing an object", Some("length"), true);
     assert!(trunc.contains("max_tokens 截断"));
     assert!(trunc.contains("精简"));
     assert!(serde_json::from_str::<serde_json::Value>(&trunc).is_ok());
 
     // 报错文本里带引号和花括号（parse_action 的真实输出形态）
-    let messy = parse_failure_feedback("输出不是合法 JSON: ...；片段: {\"tool\":\"plan\",", None);
+    let messy = parse_failure_feedback(
+        "输出不是合法 JSON: ...；片段: {\"tool\":\"plan\",",
+        None,
+        false,
+    );
     assert!(messy.contains("请重新只输出一个 JSON 对象"));
     assert!(serde_json::from_str::<serde_json::Value>(&messy).is_ok());
 
     // stop 是正常收笔，不算截断
-    let stop = parse_failure_feedback("烂格式", Some("stop"));
+    let stop = parse_failure_feedback("烂格式", Some("stop"), false);
     assert!(stop.contains("请重新只输出一个 JSON 对象"));
     assert!(!stop.contains("max_tokens"));
     assert!(serde_json::from_str::<serde_json::Value>(&stop).is_ok());
+
+    // **严格模式（tools=true）不能说"请重新只输出一个 JSON 对象"** —— 那句话把模型推回
+    // content 通道，而严格模式恰恰不执行 content；两条提示打架正是五轮空转的成因。
+    let strict = parse_failure_feedback("烂格式", Some("stop"), true);
+    assert!(strict.contains("工具调用"), "{strict}");
+    assert!(
+        !strict.contains("只输出一个 JSON 对象"),
+        "严格模式不许再教老协议：{strict}"
+    );
+    assert!(serde_json::from_str::<serde_json::Value>(&strict).is_ok());
 }
 
 #[test]

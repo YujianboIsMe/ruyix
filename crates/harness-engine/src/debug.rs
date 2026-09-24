@@ -218,7 +218,7 @@ mod tests {
         set_enabled(true);
         set_path(p.clone());
 
-        let llm = crate::testllm::fake_llm(vec![r#"{"tool":"final"}"#.into()]);
+        let llm = crate::testllm::fake_llm_raw(vec![r#"{"tool":"final"}"#.into()]);
         let cfg = crate::config::LlmConfig {
             base_url: llm.base_url.clone(),
             api_key: "smoke".into(),

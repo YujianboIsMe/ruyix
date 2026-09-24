@@ -444,7 +444,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 plan(steps=[{"title":"短标题","detail":"做什么","files":["相对路径"]}])，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
 规则：
-1. 每轮用**工具调用**表达动作：可以发一个，也可以一轮发多个互不依赖的（批量，见后续提示）。不要输出解释文字、不要 markdown 代码块包裹；**也不要把动作写成 content 里的 JSON**（那是老协议，只在兼容时才认），更不要输出任何工具调用标记（DSML 之类）。
+1. 每轮用**工具调用**表达动作（可以一轮发多个互不依赖的）。**不要把动作写进 content** —— 本引擎严格只认工具调用，content 里的动作一律**不执行**（只会被退回来重发一轮）；也不要输出解释文字、不要 markdown 代码块包裹，更不要输出任何工具调用标记（DSML 之类）。content 只留给用户的文字，交付也走 final 工具。
 2. 回答关于本项目的问题前，先 read 相关文件/目录 —— 不要凭空猜测项目内容。
 3. 改代码：先 read 拿到现状。改已有文件用 write + edits 只传改动；新建文件、或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 改动能验证就验证：execute 跑编译/测试（如 cargo test、python -m pytest、npm test），失败就继续修。
@@ -941,22 +941,8 @@ fn parse_tool_calls(
                 )
             })?
         };
-        // 交付动作：`final({answer})` —— 它不是"第五种能力"，是收尾（老协议里是 final 字段）
-        if name == "final" {
-            let answer = args
-                .get("answer")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if answer.is_empty() {
-                return Err(
-                    "final 的 answer 为空 —— 交付要写清结论、改了哪些文件、验证结果".into(),
-                );
-            }
-            out.push(Action::Final(answer));
-            continue;
-        }
+        // 交付动作走 `parse_one` 的统一入口：`final` 现在是一条正式的工具名，
+        // 键名 `answer` / `final` 与裸串都认（见 [`final_answer`]）。
         let v = serde_json::json!({ "tool": name, "args": args });
         let a = parse_one(&v).map_err(|e| format!("第 {} 个工具调用：{e}", i + 1))?;
         match &a {
@@ -1052,8 +1038,47 @@ fn parse_actions_value(
     Ok(out)
 }
 
+/// 从 final 的参数里取答复：两条通道的键名（`answer` / `final`）与裸串都认。
+///
+/// 为什么键名都要认：工具协议的 schema 里叫 `answer`，老协议字段叫 `final`，而模型混写时
+/// 这两种都可能出现（真跑日志里都有）。
+fn final_answer(args: &serde_json::Value) -> Result<String, String> {
+    let text = args
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| {
+            args.get("answer")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+        })
+        .or_else(|| args.get("final").and_then(|x| x.as_str()).map(String::from))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Err("final 的 answer 为空 —— 交付要写清结论、改了哪些文件、验证结果".into());
+    }
+    Ok(text)
+}
+
 /// 单个动作对象 → `Action`（final 也在这里认）
 fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
+    // 先取"名字"和"参数"——两条通道的键名不同，这里统一（工具协议：`tool` + `arguments`；
+    // 老协议：`tool` + `args`；模型混写时还会出 `name` + `arguments`，真跑里实测出现过）。
+    let name = v
+        .get("tool")
+        .or_else(|| v.get("name"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let args = v
+        .get("args")
+        .or_else(|| v.get("arguments"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    // 交付（final）先认：它在工具协议里是**工具**，在老协议里是**字段**，模型走错通道时还会
+    // 换包装写法（一次真跑里出现过 4 种，见 [`content_channel_error`] 的文档）。
     if let Some(f) = v.get("final").and_then(|x| x.as_str()) {
         let text = f.trim().to_string();
         if text.is_empty() {
@@ -1061,13 +1086,20 @@ fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
         }
         return Ok(Action::Final(text));
     }
-    let tool = v
-        .get("tool")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    let args = v.get("args").cloned().unwrap_or(serde_json::Value::Null);
+    if name == "final" {
+        return Ok(Action::Final(final_answer(&args)?));
+    }
+    // 只剩参数对象（`{"answer": "…"}`）：四种能力里只有 final 认 `answer` 这个键，所以无歧义 ——
+    // 认它不是为了执行（严格模式下 content 通道本来就不执行），而是为了**认出形状**、
+    // 给模型一句指向明确的纠正，而不是干巴巴的"外层缺 tool"。
+    if name.is_empty()
+        && args.is_null()
+        && v.get("answer").is_some()
+        && v.as_object().map(|o| o.len() == 1).unwrap_or(false)
+    {
+        return Ok(Action::Final(final_answer(v)?));
+    }
+    let tool = name;
     match tool.as_str() {
         "read" => parse_read(&args),
         // write 两副面孔：content（整份）或 edits（锚点）。形状判断在 parse_write 里一处收口 ——
@@ -1996,15 +2028,149 @@ pub(crate) fn parse_step_tool_calls(
         .collect())
 }
 
-/// 解析失败的回灌消息（JSON 字符串，直接作为 user 消息）。
+/// 本轮实际声明的工具名（严格模式的纠正话术里要点名"请用这些工具"）。
+///
+/// **父子两份名单必须各自自洽**：步骤执行体只有三种能力 + 交付，广告了它没有的工具
+/// 等于让它去找一个不存在的能力（与 `batch_hint(.., has_plan=false)` 同一条纪律）。
+pub(crate) const MAIN_TOOLS_HINT: &str =
+    "read / write / execute / connect / plan / ask_user / final";
+pub(crate) const STEP_TOOLS_HINT: &str = "read / write / execute / final";
+
+/// 动作 → 工具名（日志与纠正话术里用；必须与 `llm::TOOL_DECLS` 的名字一致）。
+fn action_name(a: &Action) -> &'static str {
+    match a {
+        Action::Final(_) => "final",
+        Action::Plan(_) => "plan",
+        Action::Read(_) => "read",
+        Action::Write(_) => "write",
+        Action::Execute(..) | Action::ExecBg(_) | Action::Proc(..) => "execute",
+        Action::Connect(_) => "connect",
+        Action::Ask(_) => "ask_user",
+    }
+}
+
+/// **严格模式的唯一处置**：content 通道里的动作一律**不执行**，换成一句指向明确的拒绝。
+///
+/// 为什么不能只说"无法解析"：实测真跑（cloud-shop 启动前后端，2026-09-24）第 13–17 轮，模型把
+/// 同一个 `final` 答复换了 **4 种包装**反复发 —— 裸 `{"answer":…}`、
+/// `{"tool":"final","args":{…}}`（两次）、`{"name":"final","arguments":{…}}` —— 而引擎每轮只回
+/// 一句"请重新只输出一个 JSON 对象"，等于**把它按回**它已经在用的那条通道，于是连烧五轮；
+/// 那五轮里答复内容一次比一次完整，纯粹死在"形状对、通道错"。所以这里必须**认出它想调哪个
+/// 工具**再说话。
+///
+/// `tools_hint`：本轮实际声明了哪些工具（主循环 7 个、步骤执行体 4 个）—— 广告不存在的工具
+/// 正是"父子提示词各自自洽"那条纪律防的事，所以名单由调用方给，不写死。
+/// `strikes`：连续第几次走错通道（第 1 次讲清道理，第 2 次起只说一句短话）。
+pub(crate) fn content_channel_error(raw: &str, strikes: usize, tools_hint: &str) -> String {
+    let (clean, markup) = crate::llm::strip_model_markup(raw);
+    let parsed = serde_json::from_str::<serde_json::Value>(clean.trim()).ok();
+    let named = parsed.as_ref().and_then(recognize_tool);
+    let mark_note = if markup > 0 {
+        format!(
+            "（另：本次输出里有 {markup} 处模型自带的工具调用标记，已剥掉 —— 那种标记不要再发）"
+        )
+    } else {
+        String::new()
+    };
+    match named {
+        Some(what) if strikes <= 1 => format!(
+            "你把动作写进了 content（`{what}`）—— **形状是对的，通道错了**：本引擎严格只认工具调用，\
+             content 一律不执行{mark_note}。请用同名工具发它（可用：{tools_hint}）；一轮可以发多个\
+             互不依赖的调用。content 只留给用户的文字，交付也走 final 工具。"
+        ),
+        Some(_) => format!(
+            "又是 content（第 {strikes} 次）：本引擎只认工具调用，content 不执行{mark_note}。\
+             请直接调用 {tools_hint} 之一。"
+        ),
+        None => format!(
+            "content 里没有可执行的工具调用{mark_note}。本引擎严格只认工具调用：动作请调 {tools_hint}；\
+             如果你是要交付，请调用 final 工具（不要把答复写成 content 里的 JSON）。"
+        ),
+    }
+}
+
+/// **认出 content 里那坨东西想调哪个工具**（只为把拒绝理由说清，**永不用于执行**）。
+///
+/// 三层认法，逐层放宽（真跑日志里每一层都出现过）：
+/// 1. 按动作解析（`parse_one`）—— `{"tool":"final",…}` / `{"final":…}` / `{"answer":…}`；
+/// 2. 按**参数形状**认（[`args_shape_tool`]）—— `{"cmd":…}` / `{"path":…}`（json_mode 把信封头截掉后就剩这些）；
+/// 3. 再往里一层 —— `{"arguments":{"answer":…}}`（外层漏了名字）。
+fn recognize_tool(v: &serde_json::Value) -> Option<String> {
+    if let Some(a) = v.as_array()
+        && !a.is_empty()
+    {
+        return Some(format!("一批 {} 个调用（顶层数组）", a.len()));
+    }
+    if let Ok(a) = parse_one(v) {
+        return Some(action_name(&a).to_string());
+    }
+    if let Some(t) = args_shape_tool(v) {
+        return Some(format!("{t} 的参数"));
+    }
+    if let Some(inner) = v.get("args").or_else(|| v.get("arguments"))
+        && inner.is_object()
+    {
+        if let Ok(a) = parse_one(inner) {
+            return Some(format!("{} 的参数", action_name(&a)));
+        }
+        if let Some(t) = args_shape_tool(inner) {
+            return Some(format!("{t} 的参数"));
+        }
+    }
+    None
+}
+
+/// **参数形状 → 工具名**（只用于把拒绝理由说清楚，**永不用于执行**）。
+///
+/// 为什么需要它：`json_mode` 会把模型自带信封的头部（含工具名）截掉，content 里就只剩一坨参数
+/// （实测：`{"cmd": …}`、`{"path": …}`、`{"answer": …}`）。这几种形状在四种能力的协议内是**唯一解**
+/// —— `cmd` 只有 execute 认、`path` 单独出现只可能是 read（write 必须有内容）—— 所以拿它来
+/// **描述**"你发的是谁"，不是"替模型决定做什么"：说清之后本轮照样拒、由模型自己用工具重发。
+fn args_shape_tool(v: &serde_json::Value) -> Option<&'static str> {
+    let o = v.as_object()?;
+    let has = |k: &str| o.contains_key(k);
+    if has("cmd") || has("op") || has("handle") {
+        return Some("execute");
+    }
+    if has("path") && (has("content") || has("edits")) {
+        return Some("write");
+    }
+    if has("path") {
+        return Some("read");
+    }
+    if has("steps") {
+        return Some("plan");
+    }
+    if has("question") {
+        return Some("ask_user");
+    }
+    if has("action") || has("server") || has("agent") {
+        return Some("connect");
+    }
+    None
+}
+
+/// 解析失败 → 回灌给模型的一句话（`parse_failure_feedback` 的正文）。
+///
 /// 两种病两种药：截断（finish_reason=length）叫模型**写短**，格式烂才叫它重发。
 /// 错误文本一律经 serde 编码 —— parse_action 的报错带着 JSON 片段，裸拼会把
 /// 引号漏进字符串值，让这条反馈自己变成非法 JSON。
-pub(crate) fn parse_failure_feedback(err: &str, finish_reason: Option<&str>) -> String {
+///
+/// `tools = true`（严格模式）时**不能再说"请重新只输出一个 JSON 对象"**：那句话把模型推回
+/// content 通道，而严格模式恰恰不执行 content —— 两条提示互相打架正是那五轮空转的成因。
+pub(crate) fn parse_failure_feedback(
+    err: &str,
+    finish_reason: Option<&str>,
+    tools: bool,
+) -> String {
     let hint = if finish_reason == Some("length") {
         format!(
             "你的上一条输出被 max_tokens 截断了（finish_reason=length），不是格式问题：{err}。\
              请精简后重发：plan 的 detail 每条一句话、必要时减少 steps，不要重复刚才的长输出。"
+        )
+    } else if tools {
+        format!(
+            "你的上一条输出无法解析：{err}。请改用**工具调用**表达动作，不要再把动作写进 content。"
         )
     } else {
         format!("你的上一条输出无法解析：{err}。请重新只输出一个 JSON 对象。")
@@ -3374,6 +3540,8 @@ pub async fn run_with_ask(
     // "选哪一步"本身还要烧一轮。模型的调整能力由"干预轮"补回来 —— 只有子步骤失败时，
     // 才把控制权交回模型一次。
     let mut plan_cursor: usize = 0;
+    // content 通道连续被拒的次数（严格模式的"提示一次即拒"：第 1 次讲清道理，之后只说短话）。
+    let mut content_strikes: usize = 0;
     let mut plan_resets: u32 = 0;
     let mut intervene = false;
     // 已完成步骤的引擎侧事实（跨步骤唯一通道：子步骤输入包里的那一行）
@@ -3634,16 +3802,26 @@ pub async fn run_with_ask(
                 ),
             );
         }
-        // 两条协议都要认（实测：声明 `tools` 之后**仍有 2/8 轮**走老形状 —— 见
-        // `doc/问题-DSML标记泄露.md` 的 4 臂对照）：
-        //   ① 标准工具协议：动作在 `reply.tool_calls` 里（主路，v0.0.6 起）
-        //   ② 兼容层：动作在 content 的 JSON 里（老协议，模型偶尔还会用）
+        // **严格模式（`llm.tool_protocol`，默认开）：动作只认工具调用。** content 里那一套一律
+        // **不执行** —— 但要"认出来再拒"：只回"无法解析"没有指向性，模型会换包装重发
+        // （真跑第 13–17 轮连烧五次就是这么来的，见 [`content_channel_error`]）。
+        // `tool_protocol = false` 才回到老协议的兼容通道（那时 content 里的动作照执行）。
         let via_tools = !reply.tool_calls.is_empty();
-        let mut actions = match if via_tools {
+        if !via_tools && cfg.llm.tool_protocol {
+            content_strikes += 1;
+        }
+        let parsed = if via_tools {
             parse_tool_calls(&reply.tool_calls, cfg.agent.batch_max, cfg.agent.batch)
+        } else if cfg.llm.tool_protocol {
+            Err(content_channel_error(
+                &reply.content,
+                content_strikes,
+                MAIN_TOOLS_HINT,
+            ))
         } else {
             parse_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
-        } {
+        };
+        let mut actions = match parsed {
             Ok(a) => a,
             Err(e) => {
                 // 解析失败不终止：把错误告诉模型让它重出（消耗轮次预算，防死循环）。
@@ -3662,12 +3840,13 @@ pub async fn run_with_ask(
                 msgs.push(ChatMessage::user(parse_failure_feedback(
                     &e,
                     reply.finish_reason.as_deref(),
+                    cfg.llm.tool_protocol,
                 )));
                 continue;
             }
         };
-        // 迁移期的观测点：这一轮的动作是从哪条协议来的。"兼容层"出现的比例就是迁移进度
-        // （实测第一天 6/8 走工具协议、2/8 走兼容层），也是判断能不能收敛、要不要回滚的依据。
+        // 迁移期的观测点：这一轮的动作是从哪条协议来的。`兼容层`只可能出现在
+        // `tool_protocol=false`（回滚）那一侧 —— 严格模式下 content 通道在上一段就被拒了。
         sink.log(
             "info",
             format!(
@@ -3675,7 +3854,7 @@ pub async fn run_with_ask(
                 if via_tools {
                     "工具调用（标准协议）"
                 } else {
-                    "content 里的 JSON（兼容层）"
+                    "content 里的 JSON（兼容层，tool_protocol=false）"
                 },
                 actions.len()
             ),
