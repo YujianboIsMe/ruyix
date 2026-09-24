@@ -19,12 +19,12 @@
 //! 子步骤自报事件会撞掉父的 index。步骤进度由父循环在派发前/返回后统一发。
 
 use crate::agent::{
-    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, STEP_TOOLS_HINT, StepAction,
-    VerifyOutcome, WriteBody, WriteSpec, batch_hint, batch_json_result, batch_waves_for_step,
-    content_channel_error, flush_write_disk, json_result, narrow_verify, parse_failure_feedback,
-    parse_step_actions, parse_step_tool_calls, policy_system_note, proc_op_name, read_group,
-    resolve_write, staged_execute_note, tool_calls_echo, tool_exec_bg, tool_execute, tool_proc,
-    write_edits_ok_text, write_ok_text,
+    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, STEP_TOOL_NAMES,
+    STEP_TOOLS_HINT, StepAction, VerifyOutcome, WriteBody, WriteSpec, batch_hint,
+    batch_json_result, batch_waves_for_step, content_channel_error, flush_write_disk, json_result,
+    narrow_verify, parse_failure_feedback, parse_step_actions, parse_step_tool_calls,
+    policy_system_note, proc_op_name, read_group, resolve_write, staged_execute_note,
+    tool_calls_echo, tool_exec_bg, tool_execute, tool_proc, write_edits_ok_text, write_ok_text,
 };
 use crate::config::AppConfig;
 use crate::discover;
@@ -588,12 +588,22 @@ pub async fn run_step(
             "info",
             format!("[step {}] 第 {round} 轮（预算 {max_steps}）", inp.index),
         );
-        let reply = match llm::chat(
+        // **声明面就是权限面**：只声明这一步真能执行的四个工具。
+        // 用 `llm::chat` 会声明全七个（read/write/execute/**connect/plan/ask_user**/final）——
+        // 模型一试那三个就被 `to_step_action` 打回（Unsupported），白烧一轮；
+        // 而且与 `STEP_SYSTEM` 里那句"引擎已声明 read / write / execute / final 四个工具"自相矛盾。
+        // 工具协议关掉时走 content 通道：一个都不声明（空切片 = 请求里不发 tools 字段）。
+        let step_tools: &[&str] = if cfg.llm.tool_protocol {
+            STEP_TOOL_NAMES
+        } else {
+            &[]
+        };
+        let reply = match llm::chat_with_tools(
             &cfg.llm,
             cfg.llm_fallback.as_ref(),
             &msgs,
             true,
-            cfg.llm.tool_protocol,
+            step_tools,
         )
         .await
         {
@@ -1409,6 +1419,95 @@ mod tests {
         let second = llm.request(1);
         for content in ["AAA", "BBB", "CCC"] {
             assert!(second.contains(content), "缺 {content}：{second}");
+        }
+    }
+
+    /// **声明面就是权限面**：子步只声明它真能执行的四个工具。
+    ///
+    /// 旧实现走 `llm::chat`（= 声明全七个），于是 `STEP_SYSTEM` 里那句"引擎已声明
+    /// read / write / execute / final 四个工具"是**假的**：模型能从 `tools` 字段里看到
+    /// connect / plan / ask_user，一试就被 `to_step_action` 打回（`Unsupported`），白烧一轮。
+    /// 判据直接看**请求体** —— 那才是服务端看到的东西。
+    #[test]
+    fn a_step_declares_only_the_tools_it_can_execute() {
+        let dir = temp_project("step-tools-decl");
+        std::fs::write(dir.join("a.txt"), "AAA").unwrap();
+        let llm = fake_llm(vec![
+            r#"{"tool":"read","args":{"path":"a.txt"}}"#.into(),
+            r#"{"final":"看完了"}"#.into(),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看一眼", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "看一眼",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        let req: serde_json::Value = serde_json::from_str(&llm.request(0)).expect("请求体是 JSON");
+        let names: Vec<String> = req["tools"]
+            .as_array()
+            .expect("工具协议开着就必须声明 tools")
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap_or("").to_string())
+            .collect();
+        let want: Vec<String> = crate::llm::TOOL_NAMES_ALL
+            .iter()
+            .filter(|n| STEP_TOOL_NAMES.contains(n))
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(
+            names, want,
+            "子步只该拿到它能执行的那几个（顺序按 TOOL_DECLS）"
+        );
+        for bad in ["connect", "plan", "ask_user"] {
+            assert!(
+                !names.iter().any(|n| n == bad),
+                "子步不该被声明 {bad}（它执行不了，试了只会白烧一轮）：{names:?}"
+            );
+        }
+    }
+
+    /// 契约：`STEP_TOOL_NAMES`（请求里声明的）必须与 `STEP_TOOLS_HINT`（话术里写的）一字不差，
+    /// 且不含父循环独有的那三个。**两处分开写正是本单漏洞的来源** —— 这条把"记得改两处"
+    /// 变成"改坏了就红"。
+    #[test]
+    fn step_tool_names_match_the_hint_and_exclude_parent_only_ones() {
+        assert_eq!(
+            STEP_TOOL_NAMES,
+            &["read", "write", "execute", "final"],
+            "声明表变了要同时改 STEP_SYSTEM 与 STEP_TOOLS_HINT"
+        );
+        assert_eq!(
+            STEP_TOOLS_HINT.split(" / ").collect::<Vec<_>>(),
+            STEP_TOOL_NAMES.to_vec(),
+            "话术（STEP_TOOLS_HINT）与声明（STEP_TOOL_NAMES）必须一字不差地对齐"
+        );
+        for bad in ["connect", "plan", "ask_user"] {
+            assert!(
+                !STEP_TOOL_NAMES.contains(&bad),
+                "子步没有 {bad} —— 它的 messages 是干净上下文，一问就破了「一轮 = 一步」"
+            );
+        }
+        // 每个声明名都必须真在工具表里（漂移 = 声明一个不存在的工具，模型会照着幻觉）
+        for n in STEP_TOOL_NAMES {
+            assert!(
+                crate::llm::TOOL_NAMES_ALL.contains(n),
+                "声明了工具表里没有的 {n}"
+            );
         }
     }
 }

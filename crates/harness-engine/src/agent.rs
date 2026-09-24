@@ -2064,6 +2064,15 @@ pub(crate) const MAIN_TOOLS_HINT: &str =
     "read / write / execute / connect / plan / ask_user / final";
 pub(crate) const STEP_TOOLS_HINT: &str = "read / write / execute / final";
 
+/// 步骤执行体**声明给模型的工具**（= 它真能执行的那几个）。
+///
+/// 与 [`STEP_TOOLS_HINT`] 是同一件事的两种形态，必须一字不差地对齐 —— 本单的病就是它俩分家：
+/// `STEP_SYSTEM` 里写着"引擎已声明 read / write / execute / final 四个工具"，
+/// 而请求走的是 `llm::chat`（**全七个**），模型于是能从 `tools` 字段里看到
+/// `connect` / `plan` / `ask_user`，一试就被 [`to_step_action`] 打回，白烧一轮。
+/// **声明面就是权限面**：单一真相是 [`to_step_action`] 的那四支，这条 const 由契约测试钉死。
+pub(crate) const STEP_TOOL_NAMES: &[&str] = &["read", "write", "execute", "final"];
+
 /// 动作 → 工具名（日志与纠正话术里用；必须与 `llm::TOOL_DECLS` 的名字一致）。
 fn action_name(a: &Action) -> &'static str {
     match a {
