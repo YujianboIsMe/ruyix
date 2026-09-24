@@ -3633,6 +3633,9 @@ function renderTreeEntry(entry, container, depth) {
   node.style.paddingLeft = depth * 16 + "px";
   node.dataset.path = entry.path;
   node.dataset.isDir = entry.is_dir;
+  // **悬停显示全名 / 完整路径**：行按可视宽度排、长名走省略号（导航区不做横向滚动 ——
+  // 试过两版横滚都被否：钉住按钮会压字、内容撑宽会抖），被省略号吃掉的部分只能靠 title 补。
+  node.title = entry.path || entry.name;
 
   // 图标（目录用单图标，文件用文件图标）
   const icon = document.createElement("span");
