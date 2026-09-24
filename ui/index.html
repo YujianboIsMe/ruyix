@@ -277,6 +277,10 @@
               <div id="editor-gutter" class="editor-gutter"></div>
               <div id="editor-code-container" class="editor-code-container">
                 <div id="editor-code-backdrop" class="editor-code-backdrop"></div>
+                <!-- 宽行只读视图（v0.13）的**流内**高度来源：那一路把 textarea 整个移出布局
+                     （它装着几十万字符的单行，留在流里就是让浏览器去排版那一行），
+                     于是全文高度必须另有元素给出。普通模式恒为 0，对正常文件零影响。 -->
+                <div id="editor-flow-spacer" class="editor-flow-spacer"></div>
                 <!-- wrap="off" 必须有：textarea 默认软换行，长行会在它内部折成两行，
                      而 backdrop 按「一行」画 —— 光标就会和高亮文字错开。
                      关掉之后 textarea 的可视行数恒等于逻辑行数。 -->

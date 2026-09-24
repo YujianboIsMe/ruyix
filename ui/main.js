@@ -462,6 +462,8 @@ function tabIcon(t) {
   if (t._isTerminal) return "🖥️";
   if (t._isService) return "🔌";
   if (t._isProcLog) return "📜";
+  // 宽行只读视图：换一把锁 —— 一眼看出"这个文件只是给你看，不给改"
+  if (t._wideReadOnly) return "🔒";
   return fileIcon(t.name);
 }
 
@@ -692,7 +694,11 @@ function hideEditor() {
     ta.value = "";
     // 清掉显式高度：下一次装载会重新给。留着旧文件的高度 = 空编辑器也撑出长滚动条
     ta.style.height = "";
+    // 宽行只读视图把 textarea 藏了起来，切走时必须放回来（否则下一个文件没有输入面）
+    ta.style.display = "";
   }
+  const flowSpacer = document.getElementById("editor-flow-spacer");
+  if (flowSpacer) flowSpacer.style.height = "";
   editorModel = null;
 }
 
@@ -720,6 +726,18 @@ const EDITOR_VPAD = 16;
 const EDITOR_OVERSCAN = 24;
 /** 量不到视口高度时（测试桩 / 元素处于 display:none）按这个算 */
 const EDITOR_FALLBACK_VH = 600;
+/**
+ * 超长行触发「宽行只读视图」的阈值（**视觉列**，尺子是 editorVisualCols）。
+ * 2000 列 ≈ 15.6k px —— 正常代码最长行不过几百列，2000 列已经是"压缩文件"的地盘。
+ * 实测的边界（v0.13）：ui/xterm.js 283,404 字节只有 2 行，最长行 283,184 列 ≈ 2.2e6 px，
+ * 打开即崩编辑器 —— 那一行同时喂给背板（一条 28 万字符的 .code-line + 十万级 span）
+ * 和 textarea（原文即 28 万字符的单行）。纵向虚拟化对它无效：它就是"可见行"。
+ */
+const EDITOR_WIDE_MAX_COLS = 2000;
+/** 宽行只读视图里一个显示段最多多少视觉列（超长行按它切块） */
+const EDITOR_WIDE_SEG_COLS = 200;
+/** 宽行只读视图顶部那条**虚拟行**的文字；它占一行高，但**不进行号**（见 paintEditorWindow） */
+const EDITOR_WIDE_BANNER = "行太宽，触发只读限制";
 
 /** 当前编辑器内容的渲染模型；null = 无内容 */
 let editorModel = null;
@@ -767,6 +785,166 @@ function editorVisualCols(s) {
     col += wide ? 2 : 1;
   }
   return col;
+}
+
+/**
+ * 内容里有没有"超长行"（视觉列 > `EDITOR_WIDE_MAX_COLS`）—— 宽行只读视图的**唯一判据**。
+ *
+ * 量**视觉列**而不是字符数：制表符最多占 4 列、全角/emoji 占 2 列，"字符数不大但列数很大"
+ * 的行一样能把编辑器打崩（尺子就是 `editorVisualCols`）。
+ *
+ * 先按字符数粗筛、再逐字符精确量：列数 ≤ 4 × 字符数（tab 也封顶 4 列），所以
+ * `字符数 ≤ MAX / 4` 的行**必不可能**触发 —— 正常文件因此几乎不付逐字符扫描的钱，
+ * 只有真的长的行才过那把尺。
+ */
+function isWideText(input) {
+  const lines = typeof input === "string" ? input.split("\n") : input || [];
+  const cheap = Math.floor(EDITOR_WIDE_MAX_COLS / 4);
+  for (const line of lines) {
+    if (!line || line.length <= cheap) continue;
+    if (lineColsExceed(line, EDITOR_WIDE_MAX_COLS)) return true;
+  }
+  return false;
+}
+
+/** 只回答"这一行的视觉列有没有超过 max"，一超就立刻返回 —— 28 万字符不必数完 */
+function lineColsExceed(line, max) {
+  let col = 0;
+  for (const ch of line) {
+    col += editorVisualCols(ch);
+    if (col > max) return true;
+  }
+  return false;
+}
+
+/**
+ * 把一行按**视觉列**切成若干显示段（宽行只读视图用）。
+ * 按**码点**走：切在代理对中间会把 emoji / 生僻字切坏。
+ */
+function splitWideLine(line, maxCols) {
+  if (!line) return [""];
+  const out = [];
+  let cur = "";
+  let cols = 0;
+  for (const ch of line) {
+    const w = editorVisualCols(ch);
+    if (cols + w > maxCols && cur) {
+      out.push(cur);
+      cur = "";
+      cols = 0;
+    }
+    cur += ch;
+    cols += w;
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
+ * 按**新的段宽**重切宽行模型（视口尺寸变了的时候用）。
+ *
+ * 为什么必须重切：显示段宽是按视口算出来的（见 editorSegCols），窗口一窄，旧段就比
+ * 容器还宽 → 横向滚动条又回来了，而且**行数与 spacer 高度也全错**（滚不到最后几行）。
+ * 素材是 `model.rawLines`（原始逻辑行）——显示段是切出来的，拿它回切不出原文。
+ */
+function recutWideModel(seg) {
+  const m = editorModel;
+  if (!m || !m.wide || !m.rawLines) return;
+  const wr = wideRowsOf(m.rawLines, seg);
+  m.texts = wr.rows;
+  m.lineOf = wr.lineOf;
+  m.total = wr.rows.length;
+  m.segCols = seg;
+  m.paintedStart = -1;
+  m.paintedEnd = -1;
+  m.widthSynced = false;
+  const spacer = document.getElementById("editor-flow-spacer");
+  if (spacer) spacer.style.height = m.total * m.lineH + m.vpad + "px";
+  paintEditorWindow();
+}
+
+/**
+ * 一个等宽字符的宽度（px）。字体链是固定的（见 styles.css 的 `.editor-code-backdrop`），
+ * 所以量一次就缓存 —— 这里量的是**真布局**（Range），不是拿字号估。
+ */
+let editorCharWPx = 0;
+function editorCharWidth() {
+  if (editorCharWPx > 0) return editorCharWPx;
+  const backdrop = document.getElementById("editor-code-backdrop");
+  if (!backdrop || typeof document.createRange !== "function") return 0;
+  try {
+    const probe = document.createElement("div");
+    probe.className = "code-line";
+    probe.style.position = "absolute";
+    probe.style.visibility = "hidden";
+    probe.style.whiteSpace = "pre";
+    probe.textContent = "a".repeat(100);
+    backdrop.appendChild(probe);
+    const range = document.createRange();
+    range.selectNodeContents(probe);
+    const w = range.getBoundingClientRect().width;
+    probe.remove();
+    if (w > 0) editorCharWPx = w / 100;
+  } catch {
+    /* 量不到就退回常量上限：宁可有一点横向滚动，也不能不渲染 */
+  }
+  return editorCharWPx;
+}
+
+/**
+ * 宽行只读视图里**一段**最多多少列 = min(常量上限, 视口放得下多少列)。
+ *
+ * 必须按视口算：显示段是 `white-space: pre`、不折行，段一旦比容器宽，`.editor-view` 立刻
+ * 长出横向滚动条（实测：固定 200 列在 560px 视口的探针里撑出 1587px 的滚动区）。
+ * 视口量不到（标签页还没显示）时退回常量上限，下一次重绘会纠正。
+ */
+function editorSegCols() {
+  const view = document.getElementById("editor-view");
+  const gutter = document.getElementById("editor-gutter");
+  const cw = editorCharWidth();
+  if (!view || !(view.clientWidth > 0) || !(cw > 0)) return EDITOR_WIDE_SEG_COLS;
+  // 可用宽度 = 视口 − 行号列宽 − 左右 padding − 亚像素余量。
+  // 两个坑都在这一行里：① 视口宽**不等于**代码区宽（行号列占掉 48px，实测 200 列/段
+  // 在 560px 视口下撑出 1587px 滚动区）；② 不能拿容器宽（`#editor-code-container`）——
+  // 它可能还挂着上一个文件留下的 min-width（内容宽），要等 syncCodeWidth 才清掉，那时已经晚了。
+  const gw = (gutter && gutter.offsetWidth) || 48;
+  const avail = view.clientWidth - gw - 32 - 2;
+  const fit = Math.floor(avail / cw);
+  return Math.max(1, Math.min(EDITOR_WIDE_SEG_COLS, fit));
+}
+
+/**
+ * 超长行 → **显示行**模型（逻辑行与显示行不再一一对应）。
+ *
+ * `lineOf[i]` 是**完整的**映射：显示行 i 属于哪个逻辑行（0 基），顶部那条虚拟横幅记 -1。
+ * 行号**从它推导**（见 paintEditorWindow）：一条逻辑行占多格时只有第一格给号、续格留空 ——
+ * 与"虚拟行不计入行号"是同一条规则，所以只需要这一个映射，不需要"编号"与"归属"两份数组
+ * （v0.13 第一版就是错在这里：只存了"要不要编号"，于是显示段拼不回原文，被探针当场抓住）。
+ */
+function wideRowsOf(texts, segCols) {
+  const rows = [EDITOR_WIDE_BANNER];
+  const lineOf = [-1];
+  const seg = segCols > 0 ? segCols : EDITOR_WIDE_SEG_COLS;
+  for (let i = 0; i < texts.length; i++) {
+    const segs = splitWideLine(texts[i], seg);
+    for (let k = 0; k < segs.length; k++) {
+      rows.push(segs[k]);
+      lineOf.push(i);
+    }
+  }
+  return { rows: rows, lineOf: lineOf };
+}
+
+/**
+ * 把"宽行只读"这个事实记到标签上（图标跟着变成 🔒）。
+ * 判定只在 `setEditorContent` 里做一次（事实落在 `editorModel.wide`），这里只负责抄给标签 ——
+ * 三个渲染入口都调它，别的入口因此没有"忘了判"的机会。
+ */
+function noteWideReadOnly(tab) {
+  const wide = !!(editorModel && editorModel.wide);
+  if (!tab || tab._wideReadOnly === wide) return;
+  tab._wideReadOnly = wide;
+  renderTabs();
 }
 
 /**
@@ -863,8 +1041,17 @@ function paintEditorWindow() {
     (m.keeper ? '<div class="code-line editor-virt-keeper">' + escapeHtml(m.keeper) + "</div>" : "");
   const cls = m.lineClass ? " " + m.lineClass : "";
   for (let i = start; i < end; i++) {
-    gutterHtml += '<div class="gutter-line">' + (i + 1) + "</div>";
-    codeHtml += '<div class="code-line' + cls + '">' + editorLineHtml(m, i) + "</div>";
+    // 行号：宽行只读视图里一条逻辑行可能占多格（显示行），只有**该行第一格**给号，
+    // 续格与顶部那条虚拟横幅都留空 —— "虚拟行不计入行号"与"续段不重复编号"是同一条规则
+    const no = m.lineOf
+      ? m.lineOf[i] < 0 || (i > 0 && m.lineOf[i] === m.lineOf[i - 1])
+        ? ""
+        : m.lineOf[i] + 1
+      : i + 1;
+    gutterHtml += '<div class="gutter-line">' + no + "</div>";
+    // 显示行 0 是那条虚拟横幅（只有 wide 模型有）：加警示类，它讲的是"为什么只读"
+    const rowCls = cls + (m.wide && i === 0 ? " editor-warn-row" : "");
+    codeHtml += '<div class="code-line' + rowCls + '">' + editorLineHtml(m, i) + "</div>";
   }
   gutterHtml += pad(botPad);
   codeHtml += pad(botPad);
@@ -893,28 +1080,66 @@ function setEditorContent(opts) {
   const texts = opts.texts || [];
   const { lineH, vpad } = editorMetrics();
   const rows = editorWindowRows(lineH);
-  editorModel = {
+  // 宽行判定在**这里**做一次：三个渲染入口（高亮 / 纯文本 / 终端输出）都走本函数，
+  // 判定放这儿就没人能"忘了判"（与"入口必须收敛"同一条纪律）。
+  const wide = isWideText(texts);
+  const model = {
     texts: texts,
     spans: opts.spans || null,
     tags: opts.tags || null,
     lineClass: opts.lineClass || "",
     total: texts.length,
     lineH: lineH,
+    vpad: vpad,
+    // 宽行只读视图的素材与账目：rawLines = **原始逻辑行**（重切段的唯一素材：显示段是切出来的，
+    // 拿它回切不出原文），segCols = 本次用的段宽（视口变化时拿它比对，决定要不要重切）
+    rawLines: null,
+    segCols: 0,
     // 只有真会开虚拟化（行数超出窗口）才需要宽度占位，小文件白算一遍没必要
     keeper: texts.length > rows ? editorWidestText(texts) : "",
     paintedStart: -1,
     paintedEnd: -1,
     // 宽度是否已按本次内容同步过（paintEditorWindow 里用，避免滚动路径重量宽）
     widthSynced: false,
+    wide: false,
+    lineOf: null,
   };
+
+  if (wide) {
+    // 宽行只读视图（v0.13）。两件事必须**同时**做 —— 少任何一半，那一行 28 万字符都还在
+    // 被浏览器排版/着色，等于白改：
+    //   ① 超长行切成显示段（每段 ≤ SEG_COLS 列）：背板那一刻不再出现 28 万字符的文本节点，
+    //      也不再出现十万级 span；
+    //   ② textarea 退出布局（见下面 ta.style.display）—— 它装着全文，留在流里就等于让
+    //      layout 去排版那条 28 万字符的单行（它的 scrollWidth 会到 2.2e6 px）。
+    // 宽度占位（keeper）这里**不给**：撑到几百万像素的那个宽度正是病根之一，
+    // 没有 keeper 时 syncCodeWidth 会把 minWidth 清掉，容器回到视口宽，横滚条消失。
+    const seg = editorSegCols();
+    const wr = wideRowsOf(texts, seg);
+    model.texts = wr.rows;
+    model.lineOf = wr.lineOf;
+    model.rawLines = texts;
+    model.segCols = seg;
+    model.total = wr.rows.length;
+    model.spans = null;
+    model.tags = null;
+    model.keeper = "";
+    model.wide = true;
+  }
+  editorModel = model;
 
   const ta = document.getElementById("editor-textarea");
   if (ta) {
     ta.value = opts.text;
-    ta.readOnly = !!opts.readOnly;
-    // 显式高度 = 全文高度：textarea 是唯一留在流内的元素，滚动高度由它给出
-    ta.style.height = texts.length * lineH + vpad + "px";
+    ta.readOnly = !!opts.readOnly || wide;
+    // wide：整个退出布局，必须 display:none —— visibility:hidden 仍会被排版，等于白改。
+    // 高度也交出去：滚动高度改由下面的流内 spacer 给。
+    ta.style.display = wide ? "none" : "";
+    ta.style.height = wide ? "" : texts.length * lineH + vpad + "px";
   }
+  // wide：全文高度由**流内** spacer 给（textarea 出去以后没人撑高，没有它滚不动）
+  const spacer = document.getElementById("editor-flow-spacer");
+  if (spacer) spacer.style.height = wide ? model.total * lineH + vpad + "px" : "";
   paintEditorWindow();
 }
 
@@ -999,6 +1224,15 @@ function setupEditorVirtualScroll() {
         editorModel.paintedStart = -1;
         // 视口变了 → 窗口行数跟着变，"要不要虚拟化/要不要宽度占位"可能翻转，重算一次宽度
         editorModel.widthSynced = false;
+        // 宽行只读视图的**段宽也是按视口算的**：视口一变就得重切，否则旧段比容器宽
+        // （横向滚动条回来），而且行数与 spacer 高度也全错（滚不到最后几行）
+        if (editorModel.wide) {
+          const seg = editorSegCols();
+          if (seg !== editorModel.segCols) {
+            recutWideModel(seg); // 它自己会重绘
+            return;
+          }
+        }
         paintEditorWindow();
       }).observe(view);
     } catch {
@@ -1010,6 +1244,13 @@ function setupEditorVirtualScroll() {
 async function highlightAndRender(tab, language) {
   const invoke = getTauriInvoke();
   if (!invoke) return;
+
+  // 宽行只读：不进 tree-sitter（理由见 renderWideReadOnly）。标签上已有标记就用标记 ——
+  // 否则每次切回来都要把 28 万字符重扫一遍才肯认账。
+  if (tab && (tab._wideReadOnly || isWideText(tab.content))) {
+    renderWideReadOnly(tab);
+    return;
+  }
 
   try {
     // 快照：请求返回时若内容已变化，丢弃过期的高亮结果
@@ -1049,11 +1290,26 @@ function renderHighlightedCode(tab) {
     text: text,
     readOnly: false,
   });
+  noteWideReadOnly(tab);
 }
 
 function renderPlainCode(tab) {
   const content = tab.content == null ? "" : String(tab.content);
   setEditorContent({ texts: content.split("\n"), spans: null, text: content, readOnly: false });
+  noteWideReadOnly(tab);
+}
+
+/**
+ * 宽行只读视图（v0.13）：超长行的出口。
+ *
+ * 为什么不走 `highlight_code`：那一行约 10 万 token，着色的收益低而代价极高
+ * （IPC 载荷 + 背板十万级 span），所以只读视图是**纯文本单色** ——
+ * 判据是"能打开、能看、能滚"，不是"能着色"。要着色就等后面那一步（横向窗口）。
+ */
+function renderWideReadOnly(tab) {
+  const content = tab && tab.content != null ? String(tab.content) : "";
+  setEditorContent({ texts: content.split("\n"), spans: null, text: content, readOnly: true });
+  noteWideReadOnly(tab);
 }
 
 function escapeHtml(s) {

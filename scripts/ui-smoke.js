@@ -166,6 +166,14 @@
  *                     "菜单里没有这一项"。契约改为**关闭项恒在、干不了的置灰禁用**；判据含
  *                     "点禁用项什么都不发生"。真 index.html + 真 styles.css + main.js 源码切片，
  *                     派发真 contextmenu 事件读 computed display。`scripts/tab-menu-layout.js`。
+ *   U47 wide-line-real  编辑器**宽行只读视图**的真实几何（真浏览器，v0.13）：打开单行 283KB 的
+ *                     文件（`ui/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
+ *                     曾把编辑器打崩 —— 背板要塞进 28 万字符的 `.code-line`（+ 十万级 span），
+ *                     textarea 里还装着同长度的单行原文；纵向虚拟化对"整个文件就是一行"无效。
+ *                     判据：阈值逐列（2000 不触发 / 2001 触发）、顶部虚拟横幅不进行号（gutter
+ *                     前三格 `[空,1,空]`）、textarea 退出布局、容器宽 ≤ 视口且无横向滚动条、
+ *                     显示段拼回原文逐行相等、视口变窄要重切段，外加**反向验证**：把阈值调大
+ *                     后旧病征必须复现（否则这门是摆设）。`scripts/editor-wide-line.js`。
  *   U44 nav-layout-real  导航栏的**真实几何**（真浏览器）。方案（用户拍板）：**不做横向滚动** ——
  *                     长名走省略号，完整路径由行上的 `title` 悬停给出（两版横滚都被否：
  *                     `max-content` 撑宽会抖、`sticky` 钉按钮会压在长路径上）。判据：短内容与
@@ -2284,6 +2292,35 @@ function runEditorLayoutProbe() {
 }
 
 /**
+ * U47 wide-line-real：宽行只读视图的**真实几何**（真浏览器 + 真 main.js）。
+ *
+ * 打开单行 283KB 的文件（`ui/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
+ * 曾把编辑器打崩：背板那一刻要塞进一条 28 万字符的 `.code-line`（高亮时还是十万级 span），
+ * textarea 里又装着同长度的单行原文 —— 而纵向虚拟化对"整个文件就是一行"完全无效
+ * （那一行永远在可视窗口里，必须整行建 DOM）。修法是**宽行只读视图**；
+ * 判据里全是只在布局引擎里存在的东西（容器宽、横向滚动条、gutter 的空号格），
+ * Node 的 DOM 桩量不到 ⇒ 交给 scripts/editor-wide-line.js。
+ * 本机没 Edge/Chrome 时该脚本自行 SKIP（"没跑"与"通过"必须能分辨）。
+ */
+function runEditorWideLineProbe() {
+  const script = path.join(ROOT, "scripts", "editor-wide-line.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 300000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U47 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|editor-wide-line|数据)/.test(l))
+    .join(" ⏐ ");
+  check("U47", "wide-line-real",
+    r.status === 0,
+    "宽行只读视图探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
+/**
  * U42 session-trace-layout-real：轨迹的**真实几何**（真浏览器）。
  *
  * U41 证明得了"代码里写了 nowrap/overflow/text-overflow"，证明不了"看起来是一行 + 省略号"
@@ -3502,6 +3539,7 @@ async function main() {
     ["U44", "nav-layout-real", runNavLayoutProbe],
     ["U45", "tab-context-menu", runTabContextMenuChecks],
     ["U46", "tab-menu-real", runTabMenuLayoutProbe],
+    ["U47", "wide-line-real", runEditorWideLineProbe],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

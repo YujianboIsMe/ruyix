@@ -1353,13 +1353,18 @@ async function openFile(path) {
 
     // 创建标签页
     const tab = { id: Date.now().toString(), name, path: file.path, content: file.content };
+    // 超长行（>2000 视觉列）先打标记：下一行 renderTabs() 就能一次把图标画成 🔒，
+    // 不留"先画成普通文件、再闪一下变锁"的中间态
+    tab._wideReadOnly = isWideText(tab.content);
     state.tabs.push(tab);
     renderTabs();
     switchTab(tab.id);
 
-    // 语法高亮：根据扩展名确定语言
+    // 语法高亮：根据扩展名确定语言；宽行走只读分块视图（不进 tree-sitter，理由见 renderWideReadOnly）
     const lang = extToLanguage(ext);
-    if (lang) {
+    if (tab._wideReadOnly) {
+      renderWideReadOnly(tab);
+    } else if (lang) {
       await highlightAndRender(tab, lang);
     } else {
       renderPlainCode(tab);

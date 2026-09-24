@@ -1064,6 +1064,28 @@ html, body {
   overflow: visible;
 }
 
+/* --- 宽行只读视图（v0.13）---
+   触发：任一行视觉列 > EDITOR_WIDE_MAX_COLS（2000 列 ≈ 15.6k px，判据见 main.js 的 isWideText）。
+   超长行在两个地方同时喂养"排版炸弹"：背板那条几十万字符的 .code-line（+ 十万级 span），
+   以及 textarea 里那条同长度的单行原文。所以视图把长行切成显示段、并让 textarea 退出布局。 */
+
+/* 全文高度的**流内**来源。宽行只读视图里 textarea（原本唯一留在流内的元素）被 display:none，
+   没有它 .editor-view 就没有可滚的高度。普通模式恒为 0 —— 对正常文件零影响。 */
+.editor-flow-spacer {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* 顶部那条**虚拟行**：占一行高，但**不进行号**（gutter 那一格画的是空号，见 paintEditorWindow）。
+   它讲的是"为什么只读"，不是文件内容，所以用警示色 + 不可选中。 */
+.code-line.editor-warn-row {
+  color: #dcdcaa;
+  background: rgba(220, 220, 170, 0.08);
+  cursor: default;
+  user-select: none;
+}
+
 /* 终端行 */
 .terminal-line {
   color: #d4d4d4;
