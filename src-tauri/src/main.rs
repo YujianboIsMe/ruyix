@@ -59,6 +59,38 @@ where
         .any(|a| matches!(a.as_ref(), "--debug" | "-d" | "--verbose" | "-v"))
 }
 
+/// 边界故障时说话的地方：**原生弹框**。
+///
+/// 为什么必须是原生的：这两条边界都在 `tauri::Builder` 之前判定（实测 builder 里失败是
+/// panic —— `app.rs:1425`，优雅不了），那一刻**还没有任何 webview** 可以承载 HTML 文案；
+/// 而 release 版是 windows 子系统、没有控制台 —— 不弹框就等于"双击了没反应"，是最坏的失败模式。
+///
+/// `RUYIX_NO_DIALOG=1` 时只打 stderr、不弹框：给自动化（判据脚本）留的口子 ——
+/// 否则模态框会让脚本挂在那里等人点确定。**它只跳过弹框，不改变判定与退出码**。
+fn native_alert(title: &str, body: &str) {
+    eprintln!("[ruyix] {title}\n{body}");
+    if std::env::var_os("RUYIX_NO_DIALOG").is_some_and(|v| !v.to_string_lossy().trim().is_empty()) {
+        return;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
+        };
+        let w = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        MessageBoxW(
+            std::ptr::null_mut(),
+            w(body).as_ptr(),
+            w(title).as_ptr(),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (title, body);
+    }
+}
+
 /// 详细日志的落盘位置：`<便携根>/global/logs/debug.log`（v1.0.0 起）。
 ///
 /// 刻意**不放在项目目录**：开关是启动参数，那一刻还不知道会打开哪个项目；
@@ -238,11 +270,29 @@ fn open_project(
         .set_current_project(&clean, &name)
         .unwrap_or_else(|_| config::default_lang());
 
+    // 项目桶自证（v1.0.0）：`<根>/projects/<key>/project.toml` —— 项目改名/移动后
+    // 旧桶成孤儿，这份文件让"这桶是谁的"一眼可见（面板据此提示，绝不自动删）。
+    let _ = paths::current().stamp_project(&clean);
+
     Ok(ProjectInfo {
         name,
         path: clean,
         lang,
     })
+}
+
+/// 项目状态桶清单（v1.0.0 孤儿面板）：key / 体积 / 自证的原始项目路径 / 那路径还在不在。
+/// 所有状态都在便携根里，用户要能**看见**并**删掉**它们 —— 这就是"绿色"的另一半。
+#[tauri::command]
+fn project_buckets() -> Vec<paths::BucketInfo> {
+    paths::current().list_buckets()
+}
+
+/// 删除一个项目状态桶（整桶）。**只在用户确认后调用**：我们绝不自动删用户的任何东西
+/// （桶里是暂存、备份、会话存档 —— 自动删等于替用户做决定）。
+#[tauri::command]
+fn project_bucket_delete(key: String) -> Result<String, String> {
+    paths::current().delete_bucket(&key)
 }
 
 #[tauri::command]
@@ -1683,11 +1733,16 @@ fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWind
     let dev_url = app.config().build.dev_url.clone();
     let nav_dev_url = dev_url.clone();
     tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-        .title("Darkhorse Code")
+        .title("ruyix")
         .inner_size(1200.0, 800.0)
         .decorations(false)
         .center()
         .devtools(true)
+        // WebView2 的用户数据目录落进**便携根**（`<根>/global/webview`）。不指定就外溢到
+        // `%LOCALAPPDATA%\com.ruyix.code`（实测 41MB）—— 那样"删文件夹即净"就不成立。
+        // 与单实例互斥体（`instance.rs`）**必须同批按根区分**：只做一半会得到
+        // "缓存被两份副本共用、第二个实例却起不来"的更坏状态（P0 实测）。
+        .data_directory(paths::current().webview_data())
         .on_navigation(move |url| match nav_verdict(url, nav_dev_url.as_ref()) {
             Nav::Allow => true,
             Nav::External => {
@@ -1725,6 +1780,27 @@ fn main() {
     // 目录、WebView2 数据目录全都从它派生 —— 晚一步就会有东西按"旧的家"落盘。
     let root_paths = paths::init_auto();
 
+    // ---- 边界判定（v1.0.0 P2）：不可写 / 临时根 → 原生弹框 + **拒绝启动**。
+    // 必须在 Builder 之前：实测 builder 里失败是 panic（`app.rs:1425`），那时弹不出人话，
+    // 而 release 版是 windows 子系统、没有控制台 ⇒ 用户看到的是"双击了没反应"。
+    if let Some((title, body)) = root_paths.root_verdict().message(root_paths.root()) {
+        native_alert(&title, &body);
+        std::process::exit(2);
+    }
+
+    // ---- 目录模板（**幂等、不覆盖**）：只放一个 exe 的空文件夹，也能长成一个能用的家。
+    // 建不出来就是"不可写"那条路（判定用的是同一个试写探针，这里只是失败时的第二次机会）。
+    let created = match root_paths.ensure_layout() {
+        Ok(v) => v,
+        Err(e) => {
+            let (title, body) = paths::RootVerdict::NotWritable
+                .message(root_paths.root())
+                .expect("NotWritable 一定有文案");
+            native_alert(&title, &format!("{body}\n\n（创建目录失败：{e}）"));
+            std::process::exit(2);
+        }
+    };
+
     // ---- 详细日志开关（`--debug`）。必须在一切之前：Builder 起来之后引擎随时可能开跑，
     // 那时再设开关，前几轮就已经漏掉了。
     if parse_debug_flag(std::env::args()) {
@@ -1732,11 +1808,17 @@ fn main() {
         harness_engine::debug::set_path(log_path.clone());
         harness_engine::debug::set_enabled(true);
         harness_engine::debug::note(&format!(
-            "\n########## ruyix 详细日志会话 ##########\n开始时间 : {}\n进程号   : {}\n便携根   : {}\n落盘     : {}\n包含     : 完整提示词 / 原始响应体 / 解析结果，以及与终端一致的运行日志行\n说明     : 仅在 `--debug` 启动时产生；常规运行一个字都不多写",
+            "\n########## ruyix 详细日志会话 ##########\n开始时间 : {}\n进程号   : {}\n便携根   : {}\n可写     : 是（试写探针通过）\nwebview  : {}\n落盘     : {}\n首启新建 : {}\n包含     : 完整提示词 / 原始响应体 / 解析结果，以及与终端一致的运行日志行\n说明     : 仅在 `--debug` 启动时产生；常规运行一个字都不多写",
             harness_engine::workspace::now_human(),
             std::process::id(),
             root_paths.root().display(),
-            log_path.display()
+            root_paths.webview_data().display(),
+            log_path.display(),
+            if created.is_empty() {
+                "（无：目录已齐）".to_string()
+            } else {
+                created.join("  ")
+            }
         ));
     }
 
@@ -1790,6 +1872,8 @@ fn main() {
             is_another_instance,
             get_last_project,
             get_projects,
+            project_buckets,
+            project_bucket_delete,
             set_project_lang,
             update_project,
             delete_project,

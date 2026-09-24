@@ -31,7 +31,10 @@ pub async fn run_with_ask(
         return Err("消息不能为空".into());
     }
     let started = Instant::now();
-    let mut ctx = Ctx::new(proj, policy);
+    // 项目状态根由宿主注入（`<便携根>/projects/<项目 key>`）：暂存 / 备份都写那儿，
+    // 一个字节都不进用户仓库。
+    let mut ctx =
+        Ctx::new(proj, policy).with_state_root(crate::config::project_state_root(cfg, proj));
     let mut plan_steps: Vec<PlanStep> = Vec::new();
     // ---- 计划执行（`step.execute_plan` 开启时）----
     // 游标在**引擎**手里：让模型每轮自选"我要做第几步"必然乱序、跳步、重复，而且

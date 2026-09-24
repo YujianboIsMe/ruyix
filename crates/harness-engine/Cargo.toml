@@ -1,6 +1,6 @@
 [package]
 name = "harness-engine"
-version = "0.1.0"
+version = "1.0.0"
 description = "darkhorse harness 引擎层 —— 规划→生成→规约→验证→自修复（零 tauri 依赖，自 ruyix 融合计划 D1/D2 迁入）"
 authors = ["醒过来摸鱼"]
 edition = "2024"

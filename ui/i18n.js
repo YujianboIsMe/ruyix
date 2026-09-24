@@ -1,5 +1,5 @@
 /**
- * Darkhorse Code — 多语言模块
+ * ruyix — 多语言模块
  * 中/英双语，配置文件: lang/zh-CN.json, lang/en.json
  */
 

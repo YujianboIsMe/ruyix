@@ -1,4 +1,4 @@
-<img src="ui/logo.svg" width="112" alt="RYX — Darkhorse Code" />
+<img src="ui/logo.svg" width="112" alt="RYX — ruyix" />
 
 # ruyix
 
@@ -19,6 +19,21 @@ ruyix/                  ← 解压即用；卸载 = 删掉这个文件夹
   验证产物 / 项目作用域配置）全落在 `projects/<项目>/` 里。跑完一轮 agent，你仓库的
   `git status` 里只有你自己的改动。
 - **删文件夹即卸载**：没有注册表、没有服务、没有藏在 `%APPDATA%` 里的第二份数据。
+
+### 下载与安装（1.0.0）
+
+- **发行包**：`ruyix-1.0.0-win-x64.zip`（约 9 MB）—— 解压到任意可写目录（例如 `D:\ruyix`），
+  双击 `ruyix.exe` 即可；随包有 README / LICENSE / `SHA256SUMS.txt` 可校验。
+- **也可以只拷 `ruyix.exe`**：丢进一个空文件夹双击，它会自己长出 `global/ projects/ plugins/`。
+- **数据位置固定下来**（脚本 / 只读介质 / 多环境）：`set RUYIX_HOME=D:\ruyix-data`。
+- **备份** = 拷走整个文件夹；**卸载** = 删掉整个文件夹。
+- **两条边界**（都有原生弹框说清原因，不会静默乱写）：放在**不可写的目录**（Program Files / 只读介质）
+  → 拒绝启动；**从压缩包里直接双击**（Windows 会把程序解到临时目录）→ 提示"必须解压后试用"。
+- 自己做包就是一条命令：`node scripts/package-portable.js`（构建 + sha256 + zip + 解压自校验）。
+
+> **本版没有迁移步骤**：0.x 的旧残留是一次性的、已清完，1.0.0 里**没有读旧路径的代码分支**。
+> 细节与已知问题见 [`doc/release-v1.0.0.md`](doc/release-v1.0.0.md)（中英双栏）。
+
 
 ### 他们的软件是这么干的
 

@@ -109,7 +109,7 @@ fn main() {
 
     // ① 后台起 + 等判据
     println!("--- ① start：后台起，并按一条命令等就绪 ---");
-    let out = match proc::start(&proj, &spec, 4, 60) {
+    let out = match proc::start(&proj, &spec, 4, 60, &proj) {
         Ok(o) => o,
         Err(e) => {
             println!("{e}");
@@ -149,7 +149,7 @@ fn main() {
     // ④ 再起一次：判据在启动**之前**就已命中 → 拒绝。这条守卫直接掐掉"孤儿占着端口、
     //    每次重启都拿到假失败"的自我强化循环。
     println!("\n--- ④ 再起一次（判据已命中，应被拒并附证据）---");
-    match proc::start(&proj, &spec, 4, 60) {
+    match proc::start(&proj, &spec, 4, 60, &proj) {
         Ok(o) => println!("⚠️ 不该成功：handle={}", o.info.handle),
         Err(e) => println!("{}", e.trim_end()),
     }
@@ -164,7 +164,7 @@ fn main() {
     // ⑥ 再起一个，然后用 shutdown_for 证明"引擎持有就引擎收"，且按**项目**划界
     println!("\n--- ⑥ 再起一个 + shutdown_for（项目级收尾）---");
     let _ = std::fs::remove_file(&marker);
-    match proc::start(&proj, &spec, 4, 60) {
+    match proc::start(&proj, &spec, 4, 60, &proj) {
         Ok(o2) => {
             println!(
                 "handle={} pid={} state={}",
@@ -192,7 +192,7 @@ fn main() {
         ready_timeout_secs: Some(5),
         keep_alive: false,
     };
-    match proc::start(&proj, &conflicting, 4, 60) {
+    match proc::start(&proj, &conflicting, 4, 60, &proj) {
         Ok(o) => println!("⚠️ 不该成功：handle={}", o.info.handle),
         Err(e) => println!("{}", e.trim_end()),
     }
@@ -209,7 +209,7 @@ fn main() {
         keep_alive: false,
     };
     let mut wrong_handle = None;
-    match proc::start(&proj, &mismatched, 4, 60) {
+    match proc::start(&proj, &mismatched, 4, 60, &proj) {
         Ok(o) => {
             wrong_handle = Some(o.info.handle.clone());
             match &o.kind {
@@ -241,7 +241,7 @@ fn main() {
         ready_timeout_secs: Some(15),
         keep_alive: false,
     };
-    match proc::start(&proj, &good, 4, 60) {
+    match proc::start(&proj, &good, 4, 60, &proj) {
         Ok(o) => {
             println!(
                 "handle={} pid={} 等了 {:?}",

@@ -335,6 +335,8 @@ pub fn run(app_cfg: &AppConfig, run_id: &str, root: &Path, flag: &CancelFlag) ->
     };
     let seq = AtomicUsize::new(0);
     let v = &app_cfg.verify;
+    // 产物落点先定一次：下面所有检查共用（与"隔离方案先定一次"同一纪律）
+    let dirs = verify_dirs(&plan, app_cfg, root);
     let started = std::time::Instant::now();
     let files = crate::generate::file_listing(root);
     let langs = detect_languages(root, &files);
@@ -374,7 +376,7 @@ pub fn run(app_cfg: &AppConfig, run_id: &str, root: &Path, flag: &CancelFlag) ->
         }
         report
             .checks
-            .extend(syntax_checks(&plan, &seq, *lang, v, root, &files));
+            .extend(syntax_checks(&plan, &seq, *lang, v, root, &files, &dirs));
     }
 
     if let Some(p) = primary(&langs) {
@@ -388,6 +390,7 @@ pub fn run(app_cfg: &AppConfig, run_id: &str, root: &Path, flag: &CancelFlag) ->
                 &files,
                 &report.checks,
                 app_cfg,
+                &dirs,
             ));
         }
     } else {
@@ -436,6 +439,66 @@ impl VerifyReport {
     }
 }
 
+/// 验证产物的落点（v1.0.0 P3）。
+///
+/// - **宿主上跑**（非沙箱）→ **绝对路径**指到项目状态桶 `<状态根>/verify/{target,out}`。
+///   以前这两个值是相对路径（`.ruyix/target-verify`），相对的是**运行目录** ——
+///   而运行目录可能就是用户的真实项目，于是 `target/` 与编译产物落进用户仓库（A3/A4 的红点）。
+/// - **容器里跑** → 保持相对路径：项目挂在 `/work`，相对路径落在**容器内的复制品**里，
+///   本来就不碰宿主盘（那份复制品的 `.ruyix` 由 `workspace.rs` 收尾清掉）。
+struct VerifyDirs {
+    target: String,
+    out: String,
+    /// Python 字节码缓存（`__pycache__`）的改道目标：`PYTHONPYCACHEPREFIX`。
+    /// 不指走的话，`py_compile` 会写在**源码旁边**（你手跑也一样），而对"跑完仓库干净"的判据
+    /// 那就算新增文件。
+    pycache: String,
+}
+
+/// 容器内那份**复制品**的命名空间（宿主上的落点见 [`verify_dirs`]，是便携根里的绝对路径）。
+const SANDBOX_STATE: &str = ".ruyix";
+
+fn verify_dirs(plan: &sandbox::Plan, app_cfg: &AppConfig, root: &Path) -> VerifyDirs {
+    if plan.isolation.is_sandboxed() {
+        // 容器里的相对落点。**名字只在这一个 const 里出现一次** —— 复制品的命名空间是我们
+        // 自己的，而"我们的名字"值得只有一个出处（门禁也是这么数的）。
+        return VerifyDirs {
+            target: format!("{SANDBOX_STATE}/target-verify"),
+            out: format!("{SANDBOX_STATE}/out-verify"),
+            pycache: format!("{SANDBOX_STATE}/pycache"),
+        };
+    }
+    let base = crate::config::project_state_root(app_cfg, root).join("verify");
+    VerifyDirs {
+        target: base.join("target").to_string_lossy().to_string(),
+        out: base.join("out").to_string_lossy().to_string(),
+        pycache: base.join("pycache").to_string_lossy().to_string(),
+    }
+}
+
+/// Python 检查的环境：编码 + **字节码缓存改道**（见 [`VerifyDirs::pycache`]）。
+fn py_envs(dirs: &VerifyDirs) -> [(&'static str, &str); 2] {
+    [
+        ("PYTHONIOENCODING", "utf-8"),
+        ("PYTHONPYCACHEPREFIX", dirs.pycache.as_str()),
+    ]
+}
+
+/// `cargo` 会在**项目里**写 `Cargo.lock`（它的行为，不是我们的）—— 但"跑完仓库里只剩用户
+/// 自己的改动"是这一版的判据，所以：验证前不存在、验证后被这次检查带出来的，**我们负责删掉**；
+/// 本来就有的（比如 bin crate 提交了 lock）一个字都不动。
+///
+/// 这条是被一条真跑的测试逼出来的：`repo_clean_tests` 里验证一次真 `cargo check`，项目里就多了
+/// `Cargo.lock` —— 残留不会报错，只会让用户 `git status` 里多出一个 ``?? Cargo.lock``。
+fn tidy_cargo_lock(root: &Path, existed_before: bool) {
+    if !existed_before {
+        let lock = root.join("Cargo.lock");
+        if lock.is_file() {
+            let _ = std::fs::remove_file(&lock);
+        }
+    }
+}
+
 fn duration(v: &VerifyConfig, is_test: bool) -> Duration {
     Duration::from_secs(if is_test {
         v.test_timeout_secs
@@ -451,6 +514,7 @@ fn syntax_checks(
     v: &VerifyConfig,
     root: &Path,
     files: &[String],
+    dirs: &VerifyDirs,
 ) -> Vec<CheckResult> {
     let mut out = Vec::new();
     match lang {
@@ -474,13 +538,15 @@ fn syntax_checks(
                     &v.python_bin,
                     &["-m", "py_compile", &f],
                     duration(v, false),
-                    &[("PYTHONIOENCODING", "utf-8")],
+                    &py_envs(dirs),
                 );
                 out.push(CheckResult::from_output("syntax", "python", &f, &o));
             }
         }
         Lang::Rust => {
             if root.join("Cargo.toml").exists() {
+                // cargo 可能往项目里写 Cargo.lock：本来没有的，跑完我们删掉（见 tidy_cargo_lock）
+                let lock_before = root.join("Cargo.lock").exists();
                 let o = run_check(
                     plan,
                     seq,
@@ -488,13 +554,14 @@ fn syntax_checks(
                     &v.cargo_bin,
                     &["check", "--message-format=short", "--color", "never"],
                     duration(v, true),
-                    // 把构建产物约束在运行目录内，别污染全局 target
-                    // （.ruyix 是 IDE 自己的命名空间：暂存/备份/验证产物都在这，仓库 .gitignore 里已排除）
+                    // 把构建产物约束在我们的**项目状态桶**里（不在用户仓库里）：
+                    // 沙箱内跑是容器里的相对路径（项目挂在 /work），宿主上跑是绝对路径。
                     &[
                         ("CARGO_TERM_COLOR", "never"),
-                        ("CARGO_TARGET_DIR", ".ruyix/target-verify"),
+                        ("CARGO_TARGET_DIR", dirs.target.as_str()),
                     ],
                 );
+                tidy_cargo_lock(root, lock_before);
                 out.push(CheckResult::from_output(
                     "syntax",
                     "rust",
@@ -525,7 +592,7 @@ fn syntax_checks(
                             "lib",
                             "--emit=metadata",
                             "--out-dir",
-                            ".ruyix/out-verify",
+                            dirs.out.as_str(),
                             "-A",
                             "warnings",
                             &f,
@@ -763,6 +830,7 @@ fn test_checks(
     files: &[String],
     previous: &[CheckResult],
     app_cfg: &AppConfig,
+    dirs: &VerifyDirs,
 ) -> Vec<CheckResult> {
     let mut out = Vec::new();
 
@@ -804,7 +872,7 @@ fn test_checks(
                 &v.python_bin,
                 &["-c", "import pytest"],
                 Duration::from_secs(30),
-                &[("PYTHONIOENCODING", "utf-8")],
+                &py_envs(dirs),
             )
             .passed();
             let _ = app_cfg;
@@ -867,6 +935,7 @@ fn test_checks(
                 ));
                 return out;
             }
+            let lock_before = root.join("Cargo.lock").exists();
             let o = run_check(
                 plan,
                 seq,
@@ -876,9 +945,10 @@ fn test_checks(
                 duration(v, true),
                 &[
                     ("CARGO_TERM_COLOR", "never"),
-                    ("CARGO_TARGET_DIR", ".ruyix/target-verify"),
+                    ("CARGO_TARGET_DIR", dirs.target.as_str()),
                 ],
             );
+            tidy_cargo_lock(root, lock_before);
             out.push(CheckResult::from_output("test", "rust", "cargo test", &o));
         }
         Lang::Node => {

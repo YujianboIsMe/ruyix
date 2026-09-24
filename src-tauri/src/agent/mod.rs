@@ -16,6 +16,8 @@ pub mod connect;
 pub mod env_setup;
 pub mod machine;
 pub mod project_context;
+#[cfg(test)]
+mod repo_clean_tests;
 pub mod sessions;
 pub mod sink;
 pub mod stage;
@@ -132,7 +134,7 @@ pub async fn agent_run(
 ///
 /// 不再做"问答/任务"预分类 —— 边界划不清（问项目要读代码，修报错也要读文件）。
 /// 模型在循环里自己决定下一步用哪个能力，问读答、任务改验，直到给出最终答复。
-/// 写入策略由会话工具栏模式映射：确认 → Stage（暂存 `.ruyix/stage/`，UI 确认后落盘）；
+/// 写入策略由会话工具栏模式映射：确认 → Stage（暂存到项目桶的 `stage/`，UI 确认后落盘）；
 /// 写入/自主 → Apply（直接写进项目，覆盖前备份）。
 ///
 /// Connect 的落地端是 `connect::RuyixConnector`：MCP 工具 + A2A 远端 Agent。
@@ -544,7 +546,7 @@ pub fn agent_session_save(
 
 #[tauri::command]
 pub fn agent_session_new(project_root: Option<String>) -> Result<sessions::Session, String> {
-    // 会话跟项目走：没有项目就没有 <root>/.ruyix 可写
+    // 会话跟项目走：没有项目就没有项目桶可写（会话存在 `<根>/projects/<项目 key>/sessions/`）
     if project_root.is_none() {
         return Err("未打开项目".into());
     }

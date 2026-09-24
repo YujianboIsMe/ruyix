@@ -19,8 +19,9 @@
 //! （子进程、HTTP、三 scope 配置），ruyix 侧用 MCP 客户端 + A2A 客户端实现，引擎搬到别的宿主
 //! 时接别的实现即可。宿主没接任何外部能力时用 [`NoConnector`]（清单为空 → 提示词里不出现连接段）。
 //!
-//! 写入策略（[`WritePolicy`]）由调用方定：Stage = 只暂存到 `.ruyix/stage/`，UI 确认后
-//! 才落盘；Apply = 直接写进项目（被覆盖文件先备份到 `.ruyix/backups/`）。
+//! 写入策略（[`WritePolicy`]）由调用方定：Stage = 只暂存到**项目状态根**（`<便携根>/projects/<项目 key>/stage/`），
+//! UI 确认后才落盘；Apply = 直接写进项目（被覆盖文件先备份到同一状态根的 `backups/`）。
+//! 两者都**不写用户仓库**（v1.0.0：IDE 状态属于 IDE，见 `doc/需求-便携形态与零残留-v1.0.0.md`）。
 
 use crate::config::AppConfig;
 use crate::discover;
@@ -73,9 +74,9 @@ pub struct HistoryMsg {
 /// 写入策略：确认模式 → Stage；写入/自主模式 → Apply
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WritePolicy {
-    /// 只暂存（`<项目>/.ruyix/stage/<id>/`），UI 确认后才落盘
+    /// 只暂存（`<状态根>/stage/<id>/`，在 ruyix 程序目录里），UI 确认后才落盘
     Stage,
-    /// 直接写进项目；被覆盖文件先备份到 `<项目>/.ruyix/backups/agent-<ts>/`
+    /// 直接写进项目；被覆盖文件先备份到 `<状态根>/backups/agent-<ts>/`
     Apply,
 }
 
@@ -481,7 +482,8 @@ fn agent_system_prompt() -> String {
 pub(crate) fn policy_system_note(policy: WritePolicy) -> Option<&'static str> {
     match policy {
         WritePolicy::Stage => Some(
-            "当前运行模式：**确认模式**。你的 write 只写进 `.ruyix/stage/` 暂存区，\
+            "当前运行模式：**确认模式**。你的 write 只写进 **IDE 的暂存区**\
+             （在 ruyix 程序目录里，**不在你的项目目录里**），\
              **项目磁盘上的文件不会变**，要等用户在界面里确认后才落盘。因此：\n\
              - `read` 看到的是你**暂存后**的内容（本会话覆盖层），这是对的，不是文件真变了；\n\
              - `execute` 跑的是**项目真实磁盘**，看到的是**改动前**的旧文件。两者不一致时以 read 为准，\
@@ -1462,7 +1464,7 @@ pub(crate) fn write_edits_ok_text(
     format!(
         "已改 {rel}：{count} 处锚点替换（改后 {len} 字节）{}",
         if policy == WritePolicy::Stage {
-            "（已暂存到 .ruyix/stage/，项目磁盘未变，用户确认后才生效）"
+            "（已暂存到 IDE 暂存区，项目磁盘未变，用户确认后才生效）"
         } else {
             ""
         }
@@ -1525,7 +1527,7 @@ pub(crate) fn write_ok_text(rel: &str, len: usize, policy: WritePolicy) -> Strin
     format!(
         "已写入 {rel}（{len} 字节）{}",
         if policy == WritePolicy::Stage {
-            "（已暂存到 .ruyix/stage/，项目磁盘未变，用户确认后才生效）"
+            "（已暂存到 IDE 暂存区，项目磁盘未变，用户确认后才生效）"
         } else {
             ""
         }
@@ -2255,6 +2257,9 @@ pub struct Ctx<'a> {
     probes: Vec<Probe>,
     policy: WritePolicy,
     backup_dir: Option<PathBuf>,
+    /// **项目状态根**（宿主注入；暂存与备份落这里，绝不落进项目）。
+    /// `None` = 走兜底（临时目录）—— 引擎单测与"宿主没注入"的情况都走它。
+    state_root: Option<PathBuf>,
 }
 
 impl<'a> Ctx<'a> {
@@ -2266,7 +2271,21 @@ impl<'a> Ctx<'a> {
             probes: Vec::new(),
             policy,
             backup_dir: None,
+            state_root: None,
         }
+    }
+
+    /// 项目状态根：注入优先，否则兜底临时目录（**绝不回落进项目**）。
+    pub(crate) fn state_root(&self) -> PathBuf {
+        self.state_root
+            .clone()
+            .unwrap_or_else(|| crate::config::fallback_state_root(self.proj))
+    }
+
+    /// 宿主注入项目状态根（`<便携根>/projects/<项目 key>`）：暂存与备份都写到那儿。
+    pub(crate) fn with_state_root(mut self, dir: PathBuf) -> Self {
+        self.state_root = Some(dir);
+        self
     }
 
     /// 本会话改了哪些文件（步骤执行体按"本步写过的路径"筛自己那部分）
@@ -2408,9 +2427,9 @@ impl<'a> Ctx<'a> {
     /// 必须在**主线程**调（它改 `Ctx`），线程里只读 [`Ctx::backup_dir`] 的克隆。
     pub(crate) fn ensure_backup_dir(&mut self, need: bool) -> Option<PathBuf> {
         if need {
+            // 备份落在**项目状态根**里（v1.0.0 起不在用户仓库里）
             let d = self
-                .proj
-                .join(".ruyix")
+                .state_root()
                 .join("backups")
                 .join(format!("agent-{}", crate::workspace::now_compact()));
             let _ = std::fs::create_dir_all(&d);
@@ -2446,9 +2465,9 @@ impl<'a> Ctx<'a> {
 
     /// Stage 策略收尾：把覆盖层写到暂存目录，返回目录路径
     fn flush_stage(&self) -> Result<PathBuf, String> {
+        // 暂存落在**项目状态根**里（v1.0.0 起不在用户仓库里）
         let dir = self
-            .proj
-            .join(".ruyix")
+            .state_root()
             .join("stage")
             .join(format!("agent-{}", crate::workspace::now_compact()));
         for c in &self.changes {
@@ -2848,7 +2867,13 @@ pub(crate) fn tool_exec_bg(
         preflight_execute(proj, rc).map_err(|e| format!("就绪判据没通过闸门：\n{e}"))?;
         execute_allowed(rc).map_err(|e| format!("就绪判据被拒绝：{e}"))?;
     }
-    let out = crate::proc::start(proj, spec, cfg.proc.max, cfg.proc.ready_timeout_secs)?;
+    let out = crate::proc::start(
+        proj,
+        spec,
+        cfg.proc.max,
+        cfg.proc.ready_timeout_secs,
+        &crate::config::project_state_root(cfg, proj),
+    )?;
     Ok(render_start(proj, &out))
 }
 

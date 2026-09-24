@@ -6,7 +6,7 @@
 //!
 //! 纪律：
 //! - 只在模型**显式** `connect` 请求时动手（不预装、不猜、不扫盘）；
-//! - 每次动作**留记录**（`.ruyix/env/installs.jsonl`）并播 UI 事件 —— "有记录" 是这条
+//! - 每次动作**留记录**（`<根>/projects/<项目 key>/env/installs.jsonl`）并播 UI 事件 —— "有记录" 是这条
 //!   能力的硬要求，装了什么、用什么命令装的、成没成，都要能事后追；
 //! - 包管理器按平台优先级挑**第一个可用的**，挑不到就把原因回给模型（不硬凑）。
 
@@ -191,7 +191,7 @@ pub fn pick_manager() -> Option<Pm> {
     })
 }
 
-/// 一次安装动作的留痕（写成 `.ruyix/env/installs.jsonl` 的一行）
+/// 一次安装动作的留痕（写成 `<根>/projects/<项目 key>/env/installs.jsonl` 的一行）
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct InstallRecord {
     /// epoch 毫秒（不引 chrono，够排序与追溯）
@@ -235,11 +235,10 @@ impl InstallRecord {
     }
 }
 
-/// 记录文件：项目内、`.ruyix/` 下 —— 与 stage / backup 同级，都属"这次会话的产物"。
+/// 记录文件：**便携根**里的项目桶 —— 与 stage / backup 同级，都属"这次会话的产物"。
 pub fn record_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".ruyix")
-        .join("env")
+    crate::paths::current()
+        .project_bucket(&project_root.to_string_lossy(), "env")
         .join("installs.jsonl")
 }
 
@@ -381,7 +380,7 @@ mod tests {
     #[test]
     fn record_path_lives_under_ruyix_env() {
         let p = record_path(Path::new("/tmp/proj"));
-        assert!(p.ends_with(".ruyix/env/installs.jsonl"), "{p:?}");
+        assert!(p.ends_with("env/installs.jsonl"), "{p:?}");
     }
 
     /// 没包管理器时的记录：可序列化、有解释、且真的落盘一行。

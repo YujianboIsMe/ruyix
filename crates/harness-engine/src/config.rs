@@ -904,6 +904,14 @@ pub struct AppConfig {
     /// 向委托人提问（需求歧义只能问人，v0.8）
     #[serde(default)]
     pub ask: AskConfig,
+    /// **项目状态根**（暂存 / 备份 / 进程日志 / 验证产物）：宿主注入
+    /// `<便携根>/projects/<项目 key>`。
+    ///
+    /// 引擎是库，不许自己找 exe 或家目录 —— 这个值只能由宿主给（同 `workspace_root` 的纪律）。
+    /// 空 = 宿主没注入（引擎单测 / eval）→ 兜底临时目录，**绝不回落进项目**：往用户仓库里
+    /// 写 IDE 状态正是 v1.0.0 要消灭的东西（见 [`project_state_root`]）。
+    #[serde(default)]
+    pub project_state_root: String,
     #[serde(default = "d_workspace")]
     pub workspace_root: String,
     #[serde(default = "d_max_context")]
@@ -930,6 +938,7 @@ impl Default for AppConfig {
             env: EnvConfig::default(),
             proc: ProcConfig::default(),
             ask: AskConfig::default(),
+            project_state_root: String::new(),
             workspace_root: d_workspace(),
             max_context_chars: d_max_context(),
         }
@@ -978,6 +987,49 @@ pub fn runs_root(cfg: &AppConfig) -> PathBuf {
 /// 宿主没注入（或只给了相对路径）时的兜底：**临时目录**。
 fn fallback_runs_root() -> PathBuf {
     std::env::temp_dir().join("ruyix").join("runs")
+}
+
+/// **项目状态根**（暂存 / 备份 / 进程日志 / 验证产物）—— 宿主注入，空则兜底临时目录。
+///
+/// **绝不回落进项目**：v1.0.0 的整个卖点是"用户仓库零写入"，而这里正是那 7 类写入的落点。
+/// 宿主没注入（引擎单测 / eval / 忘了注入）时，宁可写进临时目录（跑完可删、不污染任何仓库），
+/// 也不退回到 `<项目>/.ruyix/`。
+pub fn project_state_root(cfg: &AppConfig, proj: &std::path::Path) -> PathBuf {
+    let raw = cfg.project_state_root.trim();
+    if !raw.is_empty() {
+        return PathBuf::from(raw);
+    }
+    fallback_state_root(proj)
+}
+
+/// 兜底状态根：临时目录 + 可读前缀 + 路径哈希（同一个项目稳定、不同项目不撞）。
+pub fn fallback_state_root(proj: &std::path::Path) -> PathBuf {
+    std::env::temp_dir()
+        .join("ruyix")
+        .join("state")
+        .join(state_slug(proj))
+}
+
+fn state_slug(proj: &std::path::Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    proj.to_string_lossy().to_ascii_lowercase().hash(&mut h);
+    let raw = proj
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let clean: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(24)
+        .collect();
+    let clean = if clean.is_empty() {
+        "project".to_string()
+    } else {
+        clean
+    };
+    format!("{clean}-{:016x}", h.finish())
 }
 
 /// `~/` 的展开（唯一实现）。读环境变量而不是引入 `dirs`：引擎不该有能力"自己找系统位置"，
@@ -1072,6 +1124,9 @@ const FORM_HIDDEN: &[&str] = &[
     "sandbox.engine",
     // 熵管理（自动开 PR 那套）是实验室能力，IDE 场景用不到。
     "entropy",
+    // 项目状态根：由宿主按当前项目算好注入（值依赖项目路径，用户在配置里写死一个
+    // 只会把状态写错地方），不是用户旋钮。
+    "project_state_root",
 ];
 
 fn is_hidden(path: &str) -> bool {

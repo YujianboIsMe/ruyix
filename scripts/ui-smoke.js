@@ -167,6 +167,9 @@
  *                     "点禁用项什么都不发生"。真 index.html + 真 styles.css + main.js 源码切片，
  *                     派发真 contextmenu 事件读 computed display。`scripts/tab-menu-layout.js`。
  *   U47 wide-line-real  编辑器**宽行只读视图**的真实几何（真浏览器，v0.13）：打开单行 283KB 的
+
+
+
  *                     文件（`ui/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
  *                     曾把编辑器打崩 —— 背板要塞进 28 万字符的 `.code-line`（+ 十万级 span），
  *                     textarea 里还装着同长度的单行原文；纵向虚拟化对"整个文件就是一行"无效。
@@ -190,6 +193,11 @@
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
  *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
+ *   U48 bucket-panel IDE 状态桶（v1.0.0）：项目侧的暂存 / 备份 / 会话 / 验证产物全部搬进**便携根**的
+ *                     `projects/<key>/`（用户仓库零写入）—— 而这些桶属于 IDE 不属于项目，项目改名/移动
+ *                     就会留下孤儿桶，所以窗口里必须**看得见 + 能删**（绝不自动删）。契约钉四件事：
+ *                     后端两个命令已注册 + `paths` 的删桶入口带路径逃逸守卫 + 前端只许经**命令系统**
+ *                     （`bucket delete <key>`）删、确认框在命令处理器里先于 invoke + 中英文案键一一对应
  */
 
 "use strict";
@@ -548,8 +556,10 @@ function runStaticChecks() {
     "确认模式必须映射 Stage、写入/自主映射 Apply（mod.rs 的策略映射缺失）");
   const applyRs = read("src-tauri/src/agent/apply.rs");
   check("U14", "apply-writeback",
-    has(applyRs, "拒绝写回") && has(applyRs, "is_safe_rel") && has(applyRs, ".ruyix/backups"),
-    "apply.rs 缺安全约束：路径封闭 / 拒绝写进沙箱 / 写前备份");
+    has(applyRs, "拒绝写回") && has(applyRs, "is_safe_rel") &&
+      has(applyRs, "fn backup_root(") && has(applyRs, "is_inside_state"),
+    "apply.rs 缺安全约束：路径封闭 / 拒绝写进沙箱 / 拒绝写进 ruyix 自己的家 / 写前备份" +
+      "（v1.0.0 起备份落便携根的项目桶，不再落用户仓库）");
   const stageRs = read("src-tauri/src/agent/stage.rs");
   check("U14", "apply-writeback",
     has(stageRs, "is_safe_stage_rel") && has(stageRs, ".ruyix"),
@@ -862,14 +872,16 @@ function runStaticChecks() {
 
   check("U23", "proc-lifecycle",
     has(procRs, "fn probe_ready(") &&
-      has(procRs, ".join(\".ruyix\").join(\"proc\")") &&
+      // v1.0.0：日志落**项目状态根**（便携根里的项目桶）—— 不再是"项目内的 .ruyix/proc"
+      has(procRs, "fn log_dir(state_dir: &Path)") &&
+      has(procRs, "state_dir: &Path") &&
       has(procRs, "pub const LOG_TAIL_LINES") &&
       has(execRs, "pub fn kill_tree(") &&
       has(execRs, "pub fn shell_command(") &&
       has(procRs, "exec::shell_command(") &&
       has(execRs, "raw_arg(") &&
       has(execRs, "\"/S\""),
-    "就绪判据 / 日志落项目内 / 连子进程树杀 / shell 构造只有一份（raw_arg + /S /C 是带引号命令行能跑通的前提）—— 缺一样就回到孤儿占端口的老路");
+    "就绪判据 / 日志落项目状态根 / 连子进程树杀 / shell 构造只有一份（raw_arg + /S /C 是带引号命令行能跑通的前提）—— 缺一样就回到孤儿占端口的老路");
 
   check("U23", "proc-lifecycle",
     has(intentRs, "ExecBg(crate::proc::StartSpec)") &&
@@ -3517,6 +3529,51 @@ async function runSessionTraceChecks() {
   }
 }
 
+/**
+ * U48 IDE 状态桶（v1.0.0）：这些桶是**IDE 的状态**（暂存/备份/会话/验证产物），现在住在便携根里 ——
+ * 用户仓库因此一个字节都不写。代价是：项目改名/移动后桶会变成孤儿，所以界面上必须看得见、删得掉。
+ * 这里钉住四件事：后端命令在册；`paths::delete_bucket` 自己挡路径逃逸；前端删除**只走命令系统**
+ * （面板里不许直接 `invoke("project_bucket_delete")`，那正是"AI 集成盲点"的成因）；文案中英对齐。
+ */
+async function runBucketPanelChecks() {
+  const commandJs = readLf("ui/command.js");
+  const mainSrc = readLf("ui/main.js");
+  const pathsRs = readLf("src-tauri/src/paths.rs");
+  const mainRs = readLf("src-tauri/src/main.rs");
+
+  check("U48", "bucket-commands", ["project_buckets,", "project_bucket_delete,"].every((c) => mainRs.includes(c)),
+    "main.rs 未注册 project_buckets / project_bucket_delete（面板读不到也删不掉）");
+  check("U48", "bucket-delete-guard",
+    has(pathsRs, "pub fn list_buckets") && has(pathsRs, "pub fn delete_bucket") &&
+      has(pathsRs, "pub fn stamp_project") && has(pathsRs, 'contains("..")'),
+    "paths.rs 的桶清单/删桶/自证三件缺一，或删桶入口没有路径逃逸守卫（一个删除入口不值得赌调用方传对）");
+
+  const i = commandJs.indexOf("async function handleBucketCommand");
+  const j = commandJs.indexOf("async function handleProjectCommand");
+  check("U48", "bucket-verb", i >= 0 && has(commandJs, 'case "bucket":'), "command.js 里没有 bucket 动词或处理器");
+  if (i < 0 || j <= i) return;
+  const body = commandJs.slice(i, j);
+  check("U48", "bucket-confirm-before-delete",
+    body.indexOf("showConfirm") > 0 && body.indexOf("showConfirm") < body.indexOf("project_bucket_delete"),
+    "删桶前必须先出确认框（桶里有暂存与写前备份，自动删等于替用户做决定）");
+
+  check("U48", "bucket-panel-via-command",
+    mainSrc.includes("handleCommand(`bucket delete ${el.dataset.key}`)") &&
+      !mainSrc.includes('invoke("project_bucket_delete"'),
+    "面板必须经命令系统删（`bucket delete <key>`），不许在按钮处理器里直接 invoke");
+  check("U48", "bucket-orphan-marked",
+    has(mainSrc, "renderProjectBuckets") && has(mainSrc, "bucket.orphan") &&
+      has(mainSrc, "known.has("),
+    "面板没有把「不对应任何已知项目的桶」标出来（没有它，孤儿只能靠用户对着目录名猜）");
+
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const en = JSON.parse(read("ui/lang/en.json"));
+  const keys = Object.keys(zh).filter((k) => k.startsWith("bucket."));
+  check("U48", "bucket-i18n",
+    keys.length >= 10 && keys.every((k) => k in en),
+    `bucket.* 文案不全或中英不对齐：zh=${keys.length}，缺 ${keys.filter((k) => !(k in en)).join(",")}`);
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -3540,6 +3597,7 @@ async function main() {
     ["U45", "tab-context-menu", runTabContextMenuChecks],
     ["U46", "tab-menu-real", runTabMenuLayoutProbe],
     ["U47", "wide-line-real", runEditorWideLineProbe],
+    ["U48", "bucket-panel", runBucketPanelChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

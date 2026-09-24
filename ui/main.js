@@ -1,5 +1,5 @@
 /**
- * Darkhorse Code — Main JavaScript
+ * ruyix — Main JavaScript
  * 使用 Tauri 2 原生 API（window.__TAURI__），无需 npm 依赖
  */
 
@@ -2274,7 +2274,7 @@ function updateTitlebarTitle() {
     titleEl.textContent = state.currentProject.path;
     titleEl.classList.add("has-project");
   } else {
-    titleEl.textContent = "Darkhorse Code";
+    titleEl.textContent = "ruyix";
     titleEl.classList.remove("has-project");
   }
 
@@ -2285,7 +2285,7 @@ function updateTitlebarTitle() {
 
 /**
  * 更新操作系统窗口标题（Alt+Tab / 任务栏可见）。
- * 打开项目时显示项目名，否则显示 Darkhorse Code。
+ * 打开项目时显示项目名，否则显示 ruyix。
  */
 async function updateWindowTitle() {
   const win = getTauriWindow();
@@ -2293,7 +2293,7 @@ async function updateWindowTitle() {
   try {
     const title = state.currentProject
       ? state.currentProject.name
-      : "Darkhorse Code";
+      : "ruyix";
     await win.setTitle(title);
   } catch {
     // 静默失败
@@ -2314,7 +2314,7 @@ function setupResponsiveTitlebar() {
 
   const update = () => {
     if (!state.currentProject) {
-      titleEl.textContent = "Darkhorse Code";
+      titleEl.textContent = "ruyix";
       return;
     }
 
@@ -3066,6 +3066,94 @@ function projectLangIcon(lang) {
   return entry ? entry.icon : PROJECT_LANGS[0].icon;
 }
 
+/**
+ * IDE 状态桶（v1.0.0）：项目侧的暂存 / 备份 / 会话 / 验证产物都在**便携根**的
+ * `projects/<key>/` 里 —— 它们属于 IDE，不属于项目，所以不在用户仓库里。
+ *
+ * 这里把它们列出来（体积 + "是不是孤儿"），并给一个整桶删除的入口。
+ * 删除走**命令系统**（`bucket delete <key>`，确认框在命令处理器里），不在这里直接 invoke ——
+ * 界面上的写操作只许有一条道，否则 AI 集成就会出现盲点。
+ */
+async function renderProjectBuckets(list) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+
+  let buckets = [];
+  let known = new Set();
+  try {
+    buckets = (await invoke("project_buckets")) || [];
+    known = new Set(
+      ((await invoke("get_projects")) || []).map((p) => String(p.path || "").toLowerCase())
+    );
+  } catch (err) {
+    list.insertAdjacentHTML(
+      "beforeend",
+      `<div class="bucket-section">
+        <div class="bucket-header">${escapeHtml(I18N.t("bucket.title"))}</div>
+        <span class="project-list-empty">${escapeHtml(I18N.t("bucket.load_fail", { err }))}</span>
+      </div>`
+    );
+    return;
+  }
+
+  const humanBytes = (n) => {
+    let v = Number(n) || 0;
+    const units = ["B", "KB", "MB", "GB"];
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i += 1;
+    }
+    return `${i ? v.toFixed(1) : v.toFixed(0)} ${units[i]}`;
+  };
+
+  const rows = buckets
+    .map((b) => {
+      const claimed = b.project_path || "";
+      // 孤儿 = 桶还在，但它自证的那个项目不在项目列表里（或那个路径已经不见了）
+      const orphan = !claimed || !b.exists || !known.has(claimed.toLowerCase());
+      const badge = !claimed
+        ? I18N.t("bucket.orphan")
+        : !b.exists
+          ? I18N.t("bucket.missing")
+          : orphan
+            ? I18N.t("bucket.orphan")
+            : "";
+      return `<div class="bucket-list-item" data-key="${escapeHtml(b.key)}">
+          <span class="bucket-key" title="${escapeHtml(b.path)}">${escapeHtml(b.key)}</span>
+          <span class="bucket-size">${humanBytes(b.bytes)}</span>
+          ${badge ? `<span class="bucket-badge">${escapeHtml(badge)}</span>` : ""}
+          <span class="bucket-del" title="${escapeHtml(I18N.t("bucket.del"))}">🗑️</span>
+        </div>`;
+    })
+    .join("");
+
+  const body = buckets.length
+    ? `<div class="bucket-list">${rows}</div>`
+    : `<span class="project-list-empty">${escapeHtml(I18N.t("bucket.empty"))}</span>`;
+  list.insertAdjacentHTML(
+    "beforeend",
+    `<div class="bucket-section">
+      <div class="bucket-header" title="${escapeHtml(I18N.t("bucket.hint"))}">${escapeHtml(
+        I18N.t("bucket.title")
+      )}</div>
+      ${body}
+    </div>`
+  );
+
+  list.querySelectorAll(".bucket-list-item").forEach((el) => {
+    const del = el.querySelector(".bucket-del");
+    if (!del) return;
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await handleCommand(`bucket delete ${el.dataset.key}`);
+    });
+  });
+}
+
+/** 命令层刷新钩子：`bucket list` 之后重新渲染项目面板（与 `loadProjectList` 同一份渲染） */
+window.refreshProjectBuckets = () => loadProjectList();
+
 async function loadProjectList() {
   const list = document.getElementById("project-list");
   if (!list) return;
@@ -3081,6 +3169,8 @@ async function loadProjectList() {
 
     if (!projects || projects.length === 0) {
       list.innerHTML = `<span class="project-list-empty">${I18N.t("projectlist.empty")}<br>${I18N.t("projectlist.hint")}</span>`;
+      // 没有项目也要列状态桶：全成孤儿正是最该被看见的情况
+      await renderProjectBuckets(list);
       return;
     }
 
@@ -3141,6 +3231,9 @@ async function loadProjectList() {
         });
       }
     });
+
+    // 项目列表下面接一段「IDE 状态桶」：项目侧状态都住在便携根里（v1.0.0），看得见、收得掉
+    await renderProjectBuckets(list);
   } catch (err) {
     list.innerHTML = `<span class="project-list-empty">${I18N.t("projectlist.load_error", { err })}</span>`;
   }

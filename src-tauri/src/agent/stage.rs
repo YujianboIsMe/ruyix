@@ -1,9 +1,9 @@
 //! 会话 Agent 工具循环的暂存产物（`WritePolicy::Stage`，确认模式）。
 //!
-//! 引擎把 Agent 的 write/edit 收集到 `<项目>/.ruyix/stage/agent-<ts>/`
+//! 引擎把 Agent 的 write/edit 收集到 `<根>/projects/<项目 key>/stage/agent-<ts>/`
 //! （`files/<相对路径>` + `manifest.json`）。确认模式下这些改动**不落盘**，
 //! 由人看完差异、勾选后才经 [`apply`] 写进项目 —— 与 apply.rs 同一套安全约定：
-//! 路径封闭（拒绝绝对路径 / `..` / `.git` / `.ruyix` 自身）、写前备份、绝不默认写。
+//! 路径封闭（拒绝绝对路径 / `..` / `.git` / **ruyix 自己的状态目录**）、写前备份、绝不默认写。
 //! `preview` 的 `before` 取项目**当前**内容（不是暂存时的快照）—— 用户在确认前
 //! 手改过文件的话，看到的是真实差异。
 
@@ -21,13 +21,17 @@ fn stage_dir(project_root: &Path, stage_id: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("非法暂存 id: {stage_id}"));
     }
-    Ok(project_root.join(".ruyix").join("stage").join(stage_id))
+    Ok(crate::paths::current()
+        .project_bucket(&project_root.to_string_lossy(), "stage")
+        .join(stage_id))
 }
 
-/// 暂存路径安全：继承 apply 的封闭规则，另拒绝写进 `.ruyix` 自身
-/// （否则 Agent 可以覆盖自己的备份/暂存区，等于撤销安全网）
-fn is_safe_stage_rel(rel: &str) -> bool {
-    apply::is_safe_rel(rel) && rel != ".ruyix" && !rel.starts_with(".ruyix/")
+/// 暂存路径安全：继承 apply 的封闭规则，另拒绝写进**我们自己的家**。
+///
+/// v1.0.0 把判据从"名字叫不叫 `.ruyix`"换成"**是不是我们的家**"：暂存区与备份
+/// 都不在项目里了，真正要挡的是"Agent 覆盖自己的安全网"这件事，而它跟目录叫什么无关。
+fn is_safe_stage_rel(project_root: &Path, rel: &str) -> bool {
+    apply::is_safe_rel(rel) && !crate::paths::current().is_inside_state(&project_root.join(rel))
 }
 
 pub fn preview(project_root: &Path, stage_id: &str) -> Result<Preview, String> {
@@ -45,7 +49,7 @@ pub fn preview(project_root: &Path, stage_id: &str) -> Result<Preview, String> {
 
     let mut changes = Vec::new();
     for (rel, after) in apply::generated_files(&files)? {
-        if !is_safe_stage_rel(&rel) {
+        if !is_safe_stage_rel(project_root, &rel) {
             continue;
         }
         let target = project_root.join(&rel);
@@ -97,10 +101,10 @@ pub fn apply(
     let mut skipped = Vec::new();
     let mut backup_dir: Option<PathBuf> = None;
     for rel in paths {
-        if !is_safe_stage_rel(rel) {
+        if !is_safe_stage_rel(project_root, rel) {
             skipped.push(Skipped {
                 path: rel.clone(),
-                reason: "非法路径（绝对路径 / .. / .git / .ruyix）".to_string(),
+                reason: "非法路径（绝对路径 / .. / .git / ruyix 状态目录）".to_string(),
             });
             continue;
         }
@@ -123,10 +127,12 @@ pub fn apply(
         }
         if backup && target.exists() {
             let dir = backup_dir.get_or_insert_with(|| {
-                let d = project_root.join(".ruyix").join("backups").join(format!(
-                    "{stage_id}-{}",
-                    harness_engine::workspace::now_compact()
-                ));
+                let d = crate::paths::current()
+                    .project_bucket(&project_root.to_string_lossy(), "backups")
+                    .join(format!(
+                        "{stage_id}-{}",
+                        harness_engine::workspace::now_compact()
+                    ));
                 let _ = std::fs::create_dir_all(&d);
                 d
             });
@@ -205,10 +211,15 @@ mod tests {
         assert!(fresh.before.is_none());
     }
 
-    /// 落盘：只写勾选的；一致跳过；覆盖先备份；.ruyix 自身拒绝
+    /// 落盘：只写勾选的；一致跳过；覆盖先备份；越界路径拒绝。
+    ///
+    /// v1.0.0：备份的落点由 `paths` 定 —— 测试注入一个临时便携根，**顺便把 A3/A4 的单元级判据
+    /// 钉在这里**：备份必须在便携根里、绝不在用户项目里（这是"零残留"最容易回退的一处）。
     #[test]
-    fn apply_writes_selected_with_backup_and_blocks_ruyix() {
+    fn apply_writes_selected_with_backup_and_blocks_escape_paths() {
         let root = dir("ap");
+        let home = dir("ap-home");
+        crate::paths::set_test_root(&home);
         std::fs::write(root.join("keep.txt"), "old").unwrap();
         seed_stage(
             &root,
@@ -216,17 +227,13 @@ mod tests {
             &[
                 ("keep.txt", "new"),
                 ("fresh.txt", "hi"),
-                (".ruyix/backups/x", "evil"),
+                ("../evil.txt", "evil"),
             ],
         );
         let res = apply(
             &root,
             "agent-t2",
-            &[
-                "keep.txt".into(),
-                "fresh.txt".into(),
-                ".ruyix/backups/x".into(),
-            ],
+            &["keep.txt".into(), "fresh.txt".into(), "../evil.txt".into()],
             true,
         )
         .unwrap();
@@ -236,11 +243,20 @@ mod tests {
             std::fs::read_to_string(root.join("keep.txt")).unwrap(),
             "new"
         );
-        assert!(res.backup_dir.is_some());
-        let backup = PathBuf::from(res.backup_dir.clone().unwrap());
+        let backup = PathBuf::from(res.backup_dir.clone().expect("覆盖了既有文件，应产生备份"));
         assert_eq!(
             std::fs::read_to_string(backup.join("keep.txt")).unwrap(),
             "old"
+        );
+        assert!(
+            backup.starts_with(home.join("projects")),
+            "备份必须落在便携根的项目桶里：{}",
+            backup.display()
+        );
+        assert!(
+            !backup.starts_with(&root),
+            "备份不许落在用户项目里：{}",
+            backup.display()
         );
 
         // 内容一致时再写 → 跳过
@@ -248,5 +264,28 @@ mod tests {
         assert!(again.applied.is_empty());
         assert_eq!(again.skipped[0].reason, "项目内容已一致，无需写入");
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// v1.0.0 的封闭规则：**判据是"是不是我们的家"，不是"名字叫不叫 .ruyix"**。
+    /// 项目恰好开在便携根里时（`<根>/projects/...` 本身被当成项目打开），任何写入都该被拒 ——
+    /// 否则 Agent 能覆盖自己的暂存区与备份，等于把安全网撤掉。
+    #[test]
+    fn apply_refuses_writing_into_the_portable_home() {
+        let home = dir("ap-home2");
+        crate::paths::set_test_root(&home);
+        let inner = home.join("global").join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        seed_stage(&inner, "agent-t3", &[("a.txt", "hi")]);
+        let res = apply(&inner, "agent-t3", &["a.txt".into()], true).unwrap();
+        assert!(res.applied.is_empty(), "不该写进去：{:?}", res.applied);
+        assert_eq!(res.skipped.len(), 1);
+        assert!(
+            res.skipped[0].reason.contains("ruyix 状态目录"),
+            "{}",
+            res.skipped[0].reason
+        );
+        assert!(!inner.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

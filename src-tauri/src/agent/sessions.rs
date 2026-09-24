@@ -2,14 +2,15 @@
 //!
 //! 会话是 IDE 侧概念：一条会话 = 中央编辑区的一个聊天 tab，消息流里可选挂
 //! `run_id`（该消息触发的引擎任务，事件流在会话内渲染，产物可从 runs 目录回看）。
-//! 持久化在项目内：`<root>/.ruyix/code/agent/sessions/<id>.json`
+//! 持久化在**便携根**里的项目桶：`<根>/projects/<项目 key>/sessions/<id>.json`
+//! （v1.0.0 起不写用户仓库 —— 会话是 IDE 的状态，不是项目的源码）。
 //! （agent 只在项目内可用，会话与项目同生命周期）。
 
 use harness_engine::agent::VerifyOutcome;
 use harness_engine::plan::PlanStep;
 use harness_engine::reflect::Reflection;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// 一轮任务计划的持久化快照。
 ///
@@ -119,11 +120,7 @@ pub struct Session {
 }
 
 fn sessions_dir(project_root: &str) -> PathBuf {
-    Path::new(project_root)
-        .join(".ruyix")
-        .join("code")
-        .join("agent")
-        .join("sessions")
+    crate::paths::current().project_bucket(project_root, "sessions")
 }
 
 fn session_path(project_root: &str, id: &str) -> Result<PathBuf, String> {

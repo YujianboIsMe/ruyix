@@ -10,7 +10,8 @@
 //!
 //! 安全约定（三条硬约束，不得绕过）：
 //!   1. **绝不默认写**：`preview` 只读，`apply` 必须显式给出要写的文件清单；
-//!   2. **写前备份**：被覆盖的原文件先进 `<项目>/.ruyix/backups/<run_id>-<时间戳>/`；
+//!   2. **写前备份**：被覆盖的原文件先进 `<根>/projects/<项目 key>/backups/<run_id>-<时间戳>/`
+//!      （v1.0.0 起在便携根里 —— 往用户仓库写 IDE 状态是这一版要消灭的东西）；
 //!   3. **路径封闭**：拒绝绝对路径 / `..` / `.git`，拒绝把产物写进沙箱自身。
 
 use serde::Serialize;
@@ -21,8 +22,13 @@ pub const KIND_ADD: &str = "add";
 pub const KIND_MODIFY: &str = "modify";
 pub const KIND_SAME: &str = "same";
 
-/// 备份目录（相对项目根）。放 `.ruyix/` 下：既在项目内便于找回，又不会污染仓库内容。
-const BACKUP_ROOT: &str = ".ruyix/backups";
+/// 备份根目录：**便携根里的项目桶**（`<根>/projects/<项目 key>/backups`）。
+///
+/// 以前它在项目内的 `.ruyix/` 下（"在项目内便于找回"），代价是往用户仓库里写 IDE 状态 ——
+/// v1.0.0 把它搬出去，路径只从 [`crate::paths`] 这一个解析点来。
+fn backup_root(project_root: &Path) -> PathBuf {
+    crate::paths::current().project_bucket(&project_root.to_string_lossy(), "backups")
+}
 
 /// 单个文件的差异。before 为 `None` 表示这是个新文件。
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +258,15 @@ pub fn apply(
             continue;
         };
         let target = real_root.join(rel);
+        // 硬约束 3b（v1.0.0）：产物也不许写进**我们自己的家**（便携根 / 项目桶）——
+        // 判据从"名字叫不叫 .ruyix"换成"是不是我们的家"（名字可以随便起，家只有一个）。
+        if crate::paths::current().is_inside_state(&target) {
+            skipped.push(Skipped {
+                path: rel.clone(),
+                reason: "拒绝写入 ruyix 自己的状态目录".to_string(),
+            });
+            continue;
+        }
         if let Some(cur) = read_text(&target) {
             if cur == *content {
                 skipped.push(Skipped {
@@ -262,7 +277,7 @@ pub fn apply(
             }
             if backup {
                 let dir = backup_dir
-                    .get_or_insert_with(|| real_root.join(BACKUP_ROOT).join(backup_name(run_id)));
+                    .get_or_insert_with(|| backup_root(&real_root).join(backup_name(run_id)));
                 let dst = dir.join(rel);
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)
@@ -387,6 +402,10 @@ mod tests {
     fn apply_writes_selected_files_and_backs_up() {
         let runs = temp("runs2");
         let proj = temp("proj2");
+        // 备份落点由 `paths` 定 —— 测试里注入一个临时根，顺手把 A3/A4 的**单元级**判据钉在这里：
+        // 备份必须在便携根里、绝不在用户项目里。
+        let root = temp("root2");
+        crate::paths::set_test_root(&root);
         fake_run(
             &runs,
             "r2",
@@ -408,6 +427,14 @@ mod tests {
 
         let bak = res.backup_dir.as_ref().expect("覆盖了既有文件，应产生备份");
         assert_eq!(read(&Path::new(bak).join("pom.xml")), "old");
+        assert!(
+            Path::new(bak).starts_with(root.join("projects")),
+            "备份必须在便携根的项目桶里：{bak}"
+        );
+        assert!(
+            !Path::new(bak).starts_with(&proj),
+            "备份不许落在用户项目里：{bak}"
+        );
         // 新文件没有原文件可备份
         assert!(!Path::new(bak).join("src/A.java").exists());
     }

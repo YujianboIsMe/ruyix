@@ -738,6 +738,7 @@ fn tool_read_file_dir_overlay_and_jail() {
         changes: Vec::new(),
         policy: WritePolicy::Stage,
         backup_dir: None,
+        state_root: None,
     };
     assert!(rd(&ctx, "src/main.rs").unwrap().contains("fn main()"));
     assert!(rd(&ctx, "src").unwrap().contains("main.rs"));
@@ -769,6 +770,7 @@ fn write_policies_stage_vs_apply() {
         changes: Vec::new(),
         policy: WritePolicy::Stage,
         backup_dir: None,
+        state_root: None,
     };
     ctx.tool_write("keep.txt", "new").unwrap();
     ctx.tool_write("created.txt", "hi").unwrap();
@@ -801,6 +803,7 @@ fn write_policies_stage_vs_apply() {
         changes: Vec::new(),
         policy: WritePolicy::Apply,
         backup_dir: None,
+        state_root: None,
     };
     ctx2.tool_write("keep.txt", "new").unwrap();
     assert_eq!(
@@ -1226,6 +1229,7 @@ fn ctx_with<'a>(proj: &'a Path, changes: Vec<FileChange>, policy: WritePolicy) -
         probes: Vec::new(),
         policy,
         backup_dir: None,
+        state_root: None,
     }
 }
 
@@ -2368,6 +2372,7 @@ fn parallel_reads_land_in_declared_order() {
         changes: Vec::new(),
         policy: WritePolicy::Stage,
         backup_dir: None,
+        state_root: None,
     };
     let paths: Vec<ReadSpec> = ["a.txt", "ghost.txt", "c.txt", "b.txt"]
         .iter()
@@ -2643,6 +2648,7 @@ fn ctx_for(d: &TempDir) -> Ctx<'_> {
         changes: Vec::new(),
         policy: WritePolicy::Stage,
         backup_dir: None,
+        state_root: None,
     }
 }
 

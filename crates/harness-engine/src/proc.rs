@@ -207,8 +207,10 @@ fn state_exited(code: Option<i32>) -> String {
     )
 }
 
-fn log_dir(proj: &Path) -> PathBuf {
-    proj.join(".ruyix").join("proc")
+/// 进程日志目录：`<项目状态根>/proc`（v1.0.0 起在便携根里，不在用户仓库里）。
+/// 日志**按 pid 命名**（见下面的 `format!("{handle}.log")`），面板与模型都按 pid 找。
+fn log_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("proc")
 }
 
 /// 轮询一个子进程。`Ok(None)` = 还在跑，`Ok(Some(码))` = 已退出，
@@ -793,8 +795,9 @@ pub fn start(
     spec: &StartSpec,
     max: usize,
     default_ready_secs: u64,
+    state_dir: &Path,
 ) -> Result<StartOutcome, String> {
-    let dir = log_dir(proj);
+    let dir = log_dir(state_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("创建托管目录失败（{}）：{e}", dir.display()))?;
 
@@ -1177,6 +1180,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::create_dir_all(&d);
         d
+    }
+
+    /// 测试用的 `start`：状态根 = 项目目录自身。
+    ///
+    /// 测试里的"项目"本来就是临时目录，再给它造一个家没有意义；真正要守的是**生产路径**
+    /// 上状态根必须由宿主注入（`proc::start` 的第五个参数不是可选的）。同名遮蔽之后，
+    /// 下面所有用例都少写一个参数。
+    fn start(p: &Path, s: &StartSpec, max: usize, secs: u64) -> Result<StartOutcome, String> {
+        super::start(p, s, max, secs, p)
     }
 
     const MARKER: &str = "proc-ready-marker.txt";

@@ -28,13 +28,18 @@ const HARNESS_PREFIX: &str = "ruyix.code.harness.";
 /// 摆在 harness 段会让用户看到两份互相打架的开关。
 const FROM_AI_NAMESPACE: &[&str] = &["llm.base_url", "llm.api_key", "llm.model", "llm.api_format"];
 
+/// 这几个引擎键**必须由宿主按当前项目算出来**，因此不进 `harness.*` 命名空间：
+/// 用户在配置里写死一个路径，只会把项目状态写到别的项目头上（`project_state_root` 就是
+/// `<便携根>/projects/<项目 key>`，key 由项目路径决定）。
+const HOST_INJECTED: &[&str] = &["project_state_root"];
+
 /// 这个引擎键是不是由宿主 `ai` 段供值。
 ///
 /// 备用 LLM（`llm_fallback`）**不在这里**：它是 `Option<LlmConfig>`，默认 `None` 时
 /// toml 整段省略，于是根本不进 `schema()`，第 1 步的遍历天然碰不到它 —— 备用段的值
 /// 全部由第 2b 步从 `ruyix.code.ai_fallback.*` 直接读（见 `apply_ai_fallback_keys`）。
 fn is_host_owned(path: &str) -> bool {
-    FROM_AI_NAMESPACE.contains(&path)
+    FROM_AI_NAMESPACE.contains(&path) || HOST_INJECTED.contains(&path)
 }
 
 /// 这几个整数键上的 0 不是"关"，而是**把能力静默关死**（批调用会拒掉所有批、
@@ -68,6 +73,16 @@ fn read(mgr: &ConfigManager, key: &str, project_root: Option<&str>) -> Option<St
 pub fn ruyix_workspace_root() -> String {
     crate::paths::current()
         .runs_root()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// 项目状态根（v1.0.0 P3）：`<便携根>/projects/<项目 key>` —— 暂存 / 备份 / 进程日志 /
+/// 验证产物都写这儿。**引擎不 `discover`**（它是库，不许自己找 exe），所以只能由宿主注入；
+/// key 规则也只在 `paths` 里算一次，引擎侧拿到的已经是算好的目录。
+pub fn ruyix_project_state_root(project_root: &str) -> String {
+    crate::paths::current()
+        .project_dir(project_root)
         .to_string_lossy()
         .to_string()
 }
@@ -112,6 +127,14 @@ fn apply_engine_keys(cfg: &mut engine::config::AppConfig, raw: &[(String, String
     // D5：运行目录落进**便携根**（`<exe 同目录>/global/runs`），不与旧 harness 共享
     if !configured("workspace_root") {
         cfg.workspace_root = ruyix_workspace_root();
+    }
+}
+
+/// 项目状态根的注入（**只在有项目时**）：没有项目就没有桶，此时引擎侧走兜底临时目录，
+/// 而绝不会回落到某个项目里（见引擎 `config::project_state_root`）。
+fn apply_project_state_root(cfg: &mut engine::config::AppConfig, project_root: Option<&str>) {
+    if let Some(proj) = project_root {
+        cfg.project_state_root = ruyix_project_state_root(proj);
     }
 }
 
@@ -198,6 +221,10 @@ pub fn build_app_config(
     }
     apply_engine_keys(&mut cfg, &pairs);
 
+    // 1a) 项目状态根（v1.0.0 P3）：宿主注入 —— 项目侧那几类写入（暂存/备份/进程日志/
+    //     验证产物）全靠它搬进便携根，一个字节都不进用户仓库。
+    apply_project_state_root(&mut cfg, project_root);
+
     // 2) LLM 端点 / 密钥 / 模型 / 协议格式来自 `ruyix.code.ai.*`（D8：配置单源）
     let ai_url = read(mgr, "ruyix.code.ai.api_url", project_root);
     let ai_key = read(mgr, "ruyix.code.ai.api_key", project_root);
@@ -272,6 +299,29 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ruyix_bridge_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// 项目状态根必须落到便携根里的项目桶（A3/A4 的单元级判据：写出去的东西不在项目里）
+    #[test]
+    fn project_state_root_is_host_injected_under_the_portable_root() {
+        crate::paths::set_test_root(r"D:\tmp-ruyix-root2");
+        let cfg = bridge(&[]);
+        assert!(
+            cfg.project_state_root.is_empty(),
+            "桥本身不管这个键：它在【宿主注入】名单里"
+        );
+        let mut cfg2 = engine::config::AppConfig::default();
+        apply_project_state_root(&mut cfg2, Some(r"D:\Projects\Rust\ruyix"));
+        assert_eq!(
+            cfg2.project_state_root.replace('\\', "/"),
+            "D:/tmp-ruyix-root2/projects/D-Projects-Rust-ruyix"
+        );
+        let mut cfg3 = engine::config::AppConfig::default();
+        apply_project_state_root(&mut cfg3, None);
+        assert!(
+            cfg3.project_state_root.is_empty(),
+            "没项目就不注入，引擎侧走兜底"
+        );
     }
 
     #[test]

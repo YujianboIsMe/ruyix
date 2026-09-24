@@ -18,11 +18,13 @@ Cargo.lock
 
 /target
 /.idea
-/.ruyix
 
 # 本地微调环境（WSL 脚本、日志与产物）
 training/.wsl/
 training/outputs/
+
+# 便携包产物（scripts/package-portable.js 出的 zip 与组包目录）
+/dist/
 
 # macOS
 .DS_Store

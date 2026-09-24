@@ -1,5 +1,5 @@
 /**
- * Darkhorse Code — Command System
+ * ruyix — Command System
  * 命令栏、命令解析与分发、以及各命令的实现。
  * 注意：本文件必须先于 main.js 加载——命令函数引用 main.js 中的
  * UI 基础设施函数（setStatus / state / getTauriInvoke / renderTabs 等）作为全局。
@@ -114,6 +114,10 @@ async function handleCommand(raw, _fromAi = false) {
       break;
     case "project":
       await handleProjectCommand(raw);
+      break;
+    case "bucket":
+    case "buckets":
+      await handleBucketCommand(raw);
       break;
     default:
       // 标准命令未命中 → 调用 AI 翻译（防止递归）
@@ -310,6 +314,53 @@ async function handleRunCommand(raw) {
  *   project edit "<项目路径>" "<名称>" <语言>     修改项目名称与图标（路径不可修改）
  *   project delete <项目路径>                     从项目列表删除（路径取剩余部分，可含空格）
  */
+/**
+ * `bucket [list|delete <key>]` —— IDE 状态桶（v1.0.0）。
+ *
+ * 项目侧的暂存 / 备份 / 会话 / 验证产物都在**便携根**的 `projects/<key>/` 里（不在用户仓库里）。
+ * 这些桶属于 IDE、不属于项目：项目改名或移动后就会留下孤儿桶，所以用户得能**看见**、能**收掉**
+ * —— "绿色"不只是"不往别处写"，也包括"写过的东西看得见、删得掉"。
+ *
+ * **只在确认后删**：桶里有暂存与写前备份，自动删等于替用户做决定。
+ */
+async function handleBucketCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_browser"));
+    return;
+  }
+  const rest = raw.replace(/^\S+/, "").trim();
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || "list").toLowerCase();
+
+  if (sub === "list" || sub === "ls") {
+    await window.refreshProjectBuckets?.();
+    setStatus(I18N.t("bucket.listed"));
+    return;
+  }
+  if (sub !== "delete" && sub !== "del" && sub !== "rm") {
+    setStatus(I18N.t("bucket.usage"), "error");
+    return;
+  }
+  const key = parts[1];
+  if (!key) {
+    setStatus(I18N.t("bucket.usage"), "error");
+    return;
+  }
+  const ok = await showConfirm(
+    I18N.t("bucket.del_title"),
+    I18N.t("bucket.del_confirm", { key, path: key })
+  );
+  if (!ok) return;
+  try {
+    await invoke("project_bucket_delete", { key });
+    setStatus(I18N.t("bucket.deleted", { key }));
+  } catch (err) {
+    setStatus(I18N.t("bucket.delete_fail", { err }), "error");
+  }
+  await window.refreshProjectBuckets?.();
+}
+
 async function handleProjectCommand(raw) {
   const invoke = getTauriInvoke();
   if (!invoke) {
@@ -438,7 +489,7 @@ async function handleAiCommand(raw) {
 
     // 闲聊回复（不是标准命令动词开头）→ 直接显示
     const firstWord = result.split(/\s+/)[0]?.toLowerCase();
-    if (!["open", "close", "config", "new", "run", "help", "service", "services", "agent", "mcp", "a2a", "tools", "skill", "skills", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
+    if (!["open", "close", "config", "new", "run", "help", "service", "services", "agent", "mcp", "a2a", "tools", "skill", "skills", "bucket", "buckets", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
       console.log("[AI] → 闲聊:", result);
       setStatus(result);
       return;

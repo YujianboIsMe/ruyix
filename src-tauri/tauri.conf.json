@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickolay/tauri-docs/refs/heads/v2/src/static/tauri.conf.json",
-  "productName": "Darkhorse Code",
-  "version": "0.1.0",
+  "productName": "ruyix",
+  "version": "1.0.0",
   "identifier": "com.ruyix.code",
   "build": {
     "frontendDist": "../ui",

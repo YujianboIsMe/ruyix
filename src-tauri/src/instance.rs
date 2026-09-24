@@ -25,8 +25,11 @@ fn detect() -> bool {
     /// 首实例持有的互斥体句柄（进程退出时由系统释放）
     static GUARD: OnceLock<isize> = OnceLock::new();
 
-    // "Local\\" 前缀：互斥体仅在当前登录会话内可见
-    let name: Vec<u16> = "Local\\ruyix-instance-mutex"
+    // 名字里带**根的指纹**：便携形态天生允许多份副本并存，而写死的名字会让两份副本互相
+    // 当成"另一个自己"（P0 实测：`--name-mode global` 时第二个 `first_instance=false`）。
+    // 同一个根 → 同一个名字（同一份副本的第二次启动仍被识别）；不同根 → 各不相干。
+    // "Local\\" 前缀：互斥体仅在当前登录会话内可见。
+    let name: Vec<u16> = mutex_name(&crate::paths::current().root_fingerprint())
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -53,6 +56,15 @@ fn detect() -> bool {
     false
 }
 
+/// 互斥体名字：按根指纹区分。
+///
+/// 抽成纯函数是为了**能单测** —— 名字写错的表现是"两份副本互相以为对方是自己"，
+/// 那要跑到真机上、装了两份副本时才会发现（P0 的探针就是这么抓到的）。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn mutex_name(fingerprint: &str) -> String {
+    format!("Local\\ruyix-instance-{fingerprint}")
+}
+
 // ============================================
 // 测试
 // ============================================
@@ -62,6 +74,18 @@ mod tests {
     use std::ptr;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    /// 名字必须**按根区分**：同一个指纹出同一个名字，不同指纹必须不同。
+    #[test]
+    fn mutex_name_is_scoped_to_the_root() {
+        assert_eq!(super::mutex_name("abc123"), super::mutex_name("abc123"));
+        assert_ne!(super::mutex_name("abc123"), super::mutex_name("def456"));
+        assert!(super::mutex_name("abc123").starts_with("Local\\ruyix-instance-"));
+        // 真实指纹形状：16 位 hex（`paths::root_fingerprint`）
+        let fp = crate::paths::current().root_fingerprint();
+        assert_eq!(fp.len(), 16, "{fp}");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()), "{fp}");
+    }
 
     /// 验证检测所依赖的内核契约：同一进程内第二次创建同名互斥体
     /// （模拟第二实例）时，系统返回 ERROR_ALREADY_EXISTS。
