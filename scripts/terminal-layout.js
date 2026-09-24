@@ -295,6 +295,7 @@ async function cleanup() {
   const ok = (msg) => console.log("  ok  " + msg);
 
   let out;
+  let sawGlobal = false;
   try {
     const endpoint = await waitForEndpoint();
     const ws = await openCdp(endpoint);
@@ -309,6 +310,22 @@ async function cleanup() {
       if (r.result && r.result.value === true) break;
       await sleep(100);
     }
+    // 驱动脚本在**解析时**就把 Promise 挂在 `window.__PROBE_RESULT__` 上了，所以正常情况
+    // 这一句立刻通过。留着这段"先看有没有"是因为反过来会很难查：取不到结果时下面的
+    // `res.result.value` 只是 undefined，最后只印一句"1 项不通过" ——
+    // **红一次却没有证据**（实测在负载重的机器上偶发过一次，ui-smoke 那边的简报里只有摘要）。
+    sawGlobal = false;
+    for (let i = 0; i < 50; i++) {
+      const g = await send("Runtime.evaluate", {
+        expression: "typeof window.__PROBE_RESULT__",
+        returnByValue: true,
+      });
+      if (g.result && g.result.value === "object") {
+        sawGlobal = true;
+        break;
+      }
+      await sleep(100);
+    }
     const shotArg = process.argv.slice(2).find((a) => a.startsWith("--shot="));
     if (shotArg) {
       const want = shotArg.split("=")[1];
@@ -317,15 +334,20 @@ async function cleanup() {
       fs.writeFileSync(shotPath, Buffer.from(img.data, "base64"));
       console.log(`  截图: ${shotPath}`);
     }
-    const res = await send("Runtime.evaluate", {
-      expression: "window.__PROBE_RESULT__",
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (res.exceptionDetails) {
-      throw new Error("页面里抛异常：" + JSON.stringify(res.exceptionDetails).slice(0, 400));
+    // 取结果：拿不到就**重试**（上面的竞态是偶发的，重试一次比让人看一句"1 项不通过"划算）。
+    for (let i = 0; i < 3; i++) {
+      const res = await send("Runtime.evaluate", {
+        expression: "window.__PROBE_RESULT__",
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      if (res.exceptionDetails) {
+        throw new Error("页面里抛异常：" + JSON.stringify(res.exceptionDetails).slice(0, 400));
+      }
+      out = res.result.value;
+      if (out) break;
+      await sleep(500);
     }
-    out = res.result.value;
     ws.close();
   } catch (err) {
     console.log("FAIL: 探针没能跑起来：" + ((err && err.message) || err));
@@ -336,6 +358,12 @@ async function cleanup() {
 
   for (const e of (out && out.errors) || []) fail("页面报错: " + e);
   if (!out) {
+    // 这一支以前只印一句"1 项不通过"：红的**没有证据**，看不出是几何不通过还是探针没取到结果。
+    // 两者必须分得开 —— 前者是真缺陷，后者是探针/浏览器层的竞态，处置完全不同。
+    console.log(
+      "FAIL: 页面没交回结果（window.__PROBE_RESULT__ 取到 " + (sawGlobal ? "有定义但没解析出值" : "undefined") +
+        "）—— 这是**探针自身**没取到结果（CDP/竞态），不是任何几何判据不通过；判据这一轮**没被评估过**"
+    );
     console.log("terminal-layout: 1 项不通过");
     process.exit(1);
   }
