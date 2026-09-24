@@ -143,6 +143,9 @@ cargo run -p ruyix -- --debug         # 开发（工作区有两个 member，必
   sessions / verify / plugins); **nothing is ever written into the user's repo** (today's `<project>/.ruyix/`, 7
   kinds of writes, is the thing being removed). Plan: `doc/需求-便携形态与零残留-v1.0.0.md` (R1–R14 / A1–A12),
   `doc/架构-便携根与项目状态搬迁-v1.0.0.md`, `doc/排期-1.0.0.md`. 0.x-era docs are archived under `doc/v0.x/`.
+  **No migration code** (2026-09-24): the only user's legacy dirs were scanned (`D:\Projects`, two levels → 3 hit,
+  all deleted) and `~/.ruyix/code` was already empty, so R7/A10 were retired and the migration phase dropped —
+  `Paths` has exactly one shape, there is no "old path" branch.
 - Windows-first (developed on Windows 11). WebView2 is included with Windows 11.
 - Window decorations disabled (`"decorations": false`) — custom titlebar with `data-tauri-drag-region`.
 - Frontend has no bundler — Tauri serves files from `ui/` directly (`"frontendDist": "../ui"`).
