@@ -159,8 +159,13 @@
  *                     标签栏没拦 ⇒ 多标签上右键出来的是 WebView 的**系统菜单**（后退/刷新/
  *                     检查元素…）。判据：①`contextmenu` 必须 preventDefault（否则还是系统菜单）；
  *                     ②**右键不改激活标签**（目标由命中的 data-tab-id 决定，否则"关闭其他"会把
- *                     刚右键的那个也关掉）；③close/others/right/left/all 逐条对，单标签时
- *                     others/right/left 必须是空计划（菜单项据此隐藏）。切片真源码回放。
+ *                     刚右键的那个也关掉）；③close/others/right/left/all 逐条对，且**菜单项恒在**
+ *                     （干不了的置灰禁用，不藏 —— 藏了就被人当成缺功能，见 U46）。切片真源码回放。
+ *   U46 tab-menu-real   标签右键菜单的**真 DOM/真 CSS** 验证：旧版把"计划为空"的菜单项
+ *                     `display:none` 藏掉 ⇒ 右键**最左**标签时【关闭左侧】整个消失，被用户报成
+ *                     "菜单里没有这一项"。契约改为**关闭项恒在、干不了的置灰禁用**；判据含
+ *                     "点禁用项什么都不发生"。真 index.html + 真 styles.css + main.js 源码切片，
+ *                     派发真 contextmenu 事件读 computed display。`scripts/tab-menu-layout.js`。
  *   U44 nav-layout-real  导航栏的**真实几何**（真浏览器）。方案（用户拍板）：**不做横向滚动** ——
  *                     长名走省略号，完整路径由行上的 `title` 悬停给出（两版横滚都被否：
  *                     `max-content` 撑宽会抖、`sticky` 钉按钮会压在长路径上）。判据：短内容与
@@ -2282,8 +2287,9 @@ function runSessionTraceLayoutProbe() {
  *   ① `contextmenu` 必须 `preventDefault`（不拦就还是系统菜单）+ 显示自家菜单；
  *   ② **右键不改激活标签**：目标由命中的那个 `data-tab-id` 决定 —— 否则"关闭其他"会把用户
  *      刚右键的那个也关掉（最容易被忽略的边界）；
- *   ③ 关闭策略逐条对：close / others / right / left / all，以及"只有一个标签"时
- *      others/right/left 得到**空计划**（菜单项应当被隐藏，而不是点了没反应）。
+ *   ③ 关闭策略逐条对：close / others / right / left / all；**菜单项恒在**，干不了的那几项
+ *      （单标签时的 others/right/left、伪标签的复制项）置灰禁用而**不是**藏掉 ——
+ *      "计划为空 ⇒ 隐藏"是这条单子最初的错法：右键最左标签看不到【关闭左侧】，被当成缺功能报上来。
  */
 async function runTabContextMenuChecks() {
   const mainSrc = read("ui/main.js");
@@ -2308,10 +2314,23 @@ async function runTabContextMenuChecks() {
   }
 
   // ---- 回放 ----
-  const ROWS = ["close", "others", "right", "left", "all", "copy-path", "copy-full-path"].map((a) => ({
-    dataset: { tabAction: a },
-    style: {},
-  }));
+  const mkRow = (action) => {
+    const cls = new Set();
+    return {
+      dataset: { tabAction: action },
+      style: {},
+      _cls: cls,
+      classList: {
+        add: (c) => cls.add(c),
+        remove: (c) => cls.delete(c),
+        contains: (c) => cls.has(c),
+        toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)),
+      },
+      setAttribute: () => {},
+    };
+  };
+  const ROWS = ["close", "others", "right", "left", "all", "copy-path", "copy-full-path"].map(mkRow);
+  const disabled = (r) => r._cls.has("context-menu-item--disabled");
   const captured = { bar: null, menu: null, outside: null };
   const menuEl = {
     style: {},
@@ -2400,13 +2419,14 @@ async function runTabContextMenuChecks() {
   check("U45", "tab-context-menu", state.activeTabId === "t1",
     `右键**不该**改激活标签（右键 t2 后 activeTabId=${state.activeTabId}）—— 否则"关闭其他"会先把刚右键的那个关掉`);
 
-  // 三个标签时：五个关闭项都该可见
-  const shown = ROWS.filter((r) => r.style.display !== "none").map((r) => r.dataset.tabAction);
+  // 三个标签、目标在中间：**七项恒在且都不是禁用态**
+  const shown = ROWS.filter((r) => r.style.display !== "none" && !disabled(r)).map((r) => r.dataset.tabAction);
   check("U45", "tab-context-menu",
     ["close", "others", "right", "left", "all", "copy-path"].every((a) => shown.includes(a)),
-    `三个标签、目标在中间时关闭项应全可见，实际可见：${shown.join(",")}`);
+    `三个标签、目标在中间时七项都该可用，实际可用：${shown.join(",")}`);
 
-  // 只有一个标签（伪标签：没有 path）→ others/right/left 隐藏、复制项也隐藏
+  // 只有一个标签（伪标签：没有 path）→ **七项仍然恒在**，干不了的置灰禁用。
+  // （旧版是把它们 display:none 藏掉 —— 用户右键最左标签看不到【关闭左侧】，报成"缺功能"。）
   state.tabs = [{ id: "s1", name: "会话", path: "" }];
   barHandlers.contextmenu({
     preventDefault: () => {},
@@ -2415,14 +2435,24 @@ async function runTabContextMenuChecks() {
     clientY: 0,
     target: { closest: () => ({ dataset: { tabId: "s1" } }) },
   });
-  const shownOne = ROWS.filter((r) => r.style.display !== "none").map((r) => r.dataset.tabAction);
+  const gone = ROWS.filter((r) => r.style.display === "none").map((r) => r.dataset.tabAction);
+  check("U45", "tab-context-menu", gone.length === 0,
+    `单标签时菜单项**不许消失**（消失就被当成缺功能）：消失了 ${gone.join(",")}`);
+  const dis = (a) => disabled(ROWS.find((r) => r.dataset.tabAction === a));
   check("U45", "tab-context-menu",
-    shownOne.includes("close") && shownOne.includes("all") &&
-      !shownOne.includes("others") && !shownOne.includes("right") && !shownOne.includes("left"),
-    `单标签时只该留 close/all，实际：${shownOne.join(",")}`);
-  check("U45", "tab-context-menu",
-    !shownOne.includes("copy-path") && !shownOne.includes("copy-full-path"),
-    `没有路径的伪标签（会话/配置/服务）不该出现复制项，实际：${shownOne.join(",")}`);
+    !dis("close") && !dis("all") && dis("others") && dis("right") && dis("left"),
+    `单标签时该禁用 others/right/left（close/all 仍可用），实际：` +
+      ROWS.map((r) => r.dataset.tabAction + (dis(r.dataset.tabAction) ? "(灰)" : "")).join(" "));
+  check("U45", "tab-context-menu", dis("copy-path") && dis("copy-full-path"),
+    "没有路径的伪标签（会话/配置/服务）该**禁用**复制项（而不是藏掉）");
+
+  // 点禁用项：什么都不该发生
+  closed.length = 0;
+  await menuHandlers.click({
+    stopPropagation: () => {},
+    target: { closest: () => ROWS.find((r) => r.dataset.tabAction === "others") },
+  });
+  check("U45", "tab-context-menu", closed.length === 0, `点禁用项竟然关了标签：${JSON.stringify(closed)}`);
 
   // 点"关闭其他"：关的是 t1/t3，**必须保住** t2
   state.tabs = [
@@ -2469,6 +2499,39 @@ async function runTabContextMenuChecks() {
   // 静态契约：init 里真的调了
   check("U45", "tab-context-menu", /^\s*setupTabContextMenu\(\);/m.test(mainSrc),
     "initApp 里没调用 setupTabContextMenu —— 菜单永远装不上");
+}
+
+/**
+ * U46 tab-menu-real：标签右键菜单的**真 DOM/真 CSS** 验证（用户报的那条）。
+ *
+ * 病根不在 JS 逻辑（`closePlan` 里 `left` 分支一直在），而在**可见性规则**：旧版把"计划为空"
+ * 的菜单项整条 `display:none` 藏掉 —— 右键**最左**标签时左边没东西可关，【关闭左侧】就整个消失，
+ * 用户看到并报成"菜单里没有【关闭左侧】子菜单"。真 DOM 复现：`… right left(藏) all …`。
+ *
+ * 现在契约是：**关闭类菜单项恒在**，干不了的**置灰禁用**（`.context-menu-item--disabled`），
+ * 点禁用项什么都不发生 —— 菜单形状稳定、位置记得住。
+ *
+ * 桩里验不了这一条（桩没有 CSS，量不到"是不是被哪条规则藏了"），所以挂真浏览器探针：
+ * 真 index.html + 真 styles.css + main.js 真源码切片，派发真的 contextmenu 事件，
+ * 读每一项的 computed display 与 class。见 scripts/tab-menu-layout.js。
+ * 本机没 Edge/Chrome 时该脚本自行 SKIP（"没跑"与"通过"必须能分辨）。
+ */
+function runTabMenuLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "tab-menu-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U46 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|tab-menu-layout|中间标签|最左标签)/.test(l))
+    .join(" ⏐ ");
+  check("U46", "tab-menu-real",
+    r.status === 0,
+    "标签右键菜单探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
 }
 
 /**
@@ -3406,6 +3469,7 @@ async function main() {
     ["U43", "terminal-layout-real", runTerminalLayoutProbe],
     ["U44", "nav-layout-real", runNavLayoutProbe],
     ["U45", "tab-context-menu", runTabContextMenuChecks],
+    ["U46", "tab-menu-real", runTabMenuLayoutProbe],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

@@ -1328,6 +1328,16 @@ html, body {
   background: var(--accent);
 }
 
+/* 禁用态（标签右键菜单里"没东西可关"的那几项）：**留在菜单里但点不动** ——
+   菜单形状稳定、位置记得住。别改成 `display:none`（那就变成"这一项随标签位置忽隐忽现"，
+   用户会当成功能缺失报上来）。 */
+.context-menu-item--disabled,
+.context-menu-item--disabled:hover {
+  opacity: 0.4;
+  background: none;
+  pointer-events: none;
+}
+
 .context-menu-sep {
   height: 1px;
   background: var(--border-color);

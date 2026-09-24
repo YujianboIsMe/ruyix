@@ -2302,12 +2302,16 @@ function setupTabContextMenu() {
     const target = state.tabs.find((t) => t.id === targetId);
     menu.querySelectorAll("[data-tab-action]").forEach((row) => {
       const mode = row.dataset.tabAction;
-      // 复制路径类：只有落在真实文件上的标签才有路径（配置/会话/服务这类伪标签没有）
-      const show =
+      // **每一项恒在**，干不了的那几项**置灰禁用**而不是消失 —— 菜单形状稳定、位置记得住。
+      // （旧实现把"计划为空"的那项整条隐藏，于是"右键最左标签时【关闭左侧】不见了"被当成
+      // 缺功能报上来：菜单项会随标签位置忽隐忽现，用户记住的位置下一秒就没了。）
+      const usable =
         mode === "copy-path" || mode === "copy-full-path"
           ? !!(target && target.path)
           : closePlan(ids, targetId, mode).length > 0;
-      row.style.display = show ? "" : "none";
+      row.style.display = "";
+      row.classList.toggle("context-menu-item--disabled", !usable);
+      row.setAttribute("aria-disabled", usable ? "false" : "true");
     });
     menu.style.left = e.clientX + "px";
     menu.style.top = e.clientY + "px";
@@ -2317,6 +2321,8 @@ function setupTabContextMenu() {
   menu.addEventListener("click", async (e) => {
     const item = e.target && e.target.closest ? e.target.closest("[data-tab-action]") : null;
     if (!item) return;
+    // 禁用项点了什么都不做（CSS 的 pointer-events:none 挡在前面，这里是兜底）
+    if (item.classList.contains("context-menu-item--disabled")) return;
     e.stopPropagation();
     const mode = item.dataset.tabAction;
     hideContextMenu(menu);
