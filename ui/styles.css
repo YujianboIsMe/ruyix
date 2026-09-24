@@ -584,31 +584,41 @@ html, body {
   height: 100%;
 }
 
-/* **名称/路径型**列表按内容撑宽：长文件名 / 长路径不再被压进视口用省略号收掉，超出部分交给
-   `.nav-content` 的横向滚动条（auto = "过宽时才出现"）。
+/* **只有文件树**需要横向滚动：长路径 / 深缩进会把行撑宽 —— 行按**自己的内容宽度**排，
+   过宽的部分交给 `.nav-content` 的横向滚动条（auto = "过宽时才出现"）。
    实测病根：一个 477px 的长名被塞进 157px 的格子，`text-overflow: ellipsis` 吃掉 320px ——
    内容永远等于视口宽，所以横向滚动条永远不出现。
-   **只给这几个列表加，不给 `.nav-panel` 统一加**：那会让能力面板里的说明文字也停止折行。 */
-.file-tree,
-.project-list,
-.terminal-list,
-.agent-history-list,
-.run-targets-list {
+   三条边界（都是踩出来的）：
+   · **不给 `.nav-panel` 统一加**：那会让能力面板里的说明文字也停止折行；
+   · **不给行加 sticky 按钮**：钉在可视区右缘的按钮会**盖在滚动中的路径文字上**（用户报的瑕疵）
+     —— 行末的刷新按钮就待在**行自己的末尾**：短行看得见，长行滚到最右就看见，谁都不遮字；
+   · 项目卡片 / 会话 / 运行目标那几个列表保持原样（名字走省略号，本来就装得下）——
+     别顺手一起改。 */
+.file-tree {
   min-width: max-content;
 }
 
-/* 行会被面板带到"最宽那一行"的宽度（横向滚动的前提），于是行右侧的按钮（目录刷新、项目编辑/
-   删除、终端新窗口）会落到视口之外 —— 让它们**粘在可视区右缘**：短行本来就在视口里（看不出
-   差别），长行滚到哪都点得到。底色跟侧边栏一致，免得长名从按钮底下穿出来。
-   （别改成"给行加 min-width:100%"：那个 100% 是相对**最宽的父级**解析的，等于把每行都撑到
-   最宽那一行 —— 实测普通目录行的刷新按钮会被推到 557px，直接滚出 260px 的侧边栏。） */
-.tree-refresh,
-.project-list-item .project-item-edit,
-.project-list-item .project-item-del,
-.terminal-list .terminal-new-window {
-  position: sticky;
-  right: 0;
-  background: var(--bg-secondary);
+.file-tree .tree-node {
+  width: fit-content;
+}
+
+/* 行按内容宽度排之后，:hover 底色本来只铺内容那么宽（短行的底色缩成一小条）——
+   用一层铺到可视区右缘的伪元素补回来（多余的部分被 .nav-content 裁掉）。 */
+.tree-node {
+  position: relative;
+}
+
+.tree-node:hover::before {
+  content: "";
+  position: absolute;
+  inset: 0 -100vw 0 0;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.tree-node > * {
+  position: relative;
 }
 
 .nav-panel.active {
@@ -637,9 +647,8 @@ html, body {
   white-space: nowrap;
 }
 
-.tree-node:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
+/* 行底色由 `.tree-node:hover::before` 铺（要铺到可视区右缘），这里不再给行本身刷背景 ——
+   两层叠起来内容区会明显更深（一道竖着的色差）。 */
 
 .tree-arrow {
   width: 16px;

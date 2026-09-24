@@ -123,16 +123,19 @@ const driver = `
     ["pom.xml", "src", "README.md"].forEach((n) => tree.appendChild(fileRow(n, 0, n === "src")));
     out.shortBars = bars(content);
 
-    // ---- 场景 B：长内容（一个名字极长的文件 + 深层缩进 + 长列表）----
+    // ---- 场景 B：长内容（一个名字极长的**目录**：它带刷新按钮，正好验"按钮遮不遮字"）----
     tree.innerHTML = "";
     tree.appendChild(fileRow("cloud-shop-authority", 0, true));
     tree.appendChild(fileRow("src", 1, true));
     tree.appendChild(fileRow("main", 2, true));
     for (let i = 0; i < 40; i++) {
       tree.appendChild(
-        i === 7 ? fileRow("${LONG_NAME}", 3, false) : fileRow("File" + i + ".java", 3, false)
+        i === 7
+          ? fileRow("integration-environment-application-properties-for-cloud-shop-authority", 3, true)
+          : fileRow("File" + i + ".java", 3, false)
       );
     }
+    tree.appendChild(fileRow("${LONG_NAME}", 3, false));
     // 项目列表面板也塞一条长路径（同一类"过宽"来源）
     const plist = document.getElementById("project-list");
     plist.innerHTML = "";
@@ -164,33 +167,43 @@ const driver = `
     })();
 
     // 长名有没有被压缩（省略号吃掉）
+    const rectOf = (el) => {
+      const r = el.getBoundingClientRect();
+      return { left: round(r.left), right: round(r.right) };
+    };
     const names = [...document.querySelectorAll(".tree-name")];
     const longEl = names.find((e) => e.textContent === "${LONG_NAME}");
     out.longName = longEl
-      ? { clientW: longEl.clientWidth, scrollW: longEl.scrollWidth, ...(() => {
-          const r = longEl.getBoundingClientRect();
-          return { left: round(r.left), right: round(r.right) };
-        })() }
+      ? { clientW: longEl.clientWidth, scrollW: longEl.scrollWidth, ...rectOf(longEl) }
       : null;
     out.ellipsisRule = longEl ? getComputedStyle(longEl).textOverflow : null;
 
-    // 真能横向滚过去：滚到底，看长名是否整条进入可视区
+    // **按钮遮不遮字**（本单的原始瑕疵）：拿一个名字很长的**目录**行来量
+    const longDirRow = [...document.querySelectorAll(".tree-node")].find((n) =>
+      n.textContent.includes("integration-environment-application-properties")
+    );
+    if (longDirRow) {
+      const nm = longDirRow.querySelector(".tree-name");
+      const bt = longDirRow.querySelector("button.tree-refresh");
+      out.longDir = { name: rectOf(nm), btn: rectOf(bt), nameClientW: nm.clientWidth, nameScrollW: nm.scrollWidth };
+    }
+    // 短目录行（不滚就该看见按钮）
+    const shortDirRow = [...document.querySelectorAll(".tree-node")].find(
+      (n) => n.querySelector("button.tree-refresh") && (n.querySelector(".tree-name") || {}).textContent === "src"
+    );
+    if (shortDirRow) {
+      out.shortDir = {
+        name: rectOf(shortDirRow.querySelector(".tree-name")),
+        btn: rectOf(shortDirRow.querySelector("button.tree-refresh")),
+      };
+    }
+
+    // 真能横向滚过去：滚到底，看长名与长行的按钮是否都进入可视区
     content.scrollLeft = content.scrollWidth;
     out.scrolled = { scrollLeft: round(content.scrollLeft), maxScroll: content.scrollWidth - content.clientWidth };
-    out.longNameAfterScroll = longEl
-      ? (() => {
-          const r = longEl.getBoundingClientRect();
-          return { left: round(r.left), right: round(r.right) };
-        })()
-      : null;
+    out.longNameAfterScroll = longEl ? rectOf(longEl) : null;
+    out.longDirBtnAfterScroll = longDirRow ? rectOf(longDirRow.querySelector("button.tree-refresh")) : null;
     content.scrollLeft = 0;
-
-    // 普通短目录行的刷新按钮是否还在可视区（防"把行撑到最宽"那种修法）
-    const dirRows = [...document.querySelectorAll(".tree-node")].filter(
-      (n) => n.querySelector("button.tree-refresh") && !n.textContent.includes("${LONG_NAME}")
-    );
-    const shortDirBtn = dirRows.length ? dirRows[dirRows.length - 1].querySelector("button.tree-refresh") : null;
-    out.shortDirBtnRight = shortDirBtn ? round(shortDirBtn.getBoundingClientRect().right) : null;
 
     // 纵向仍然能滚
     out.vertical = { scrollH: content.scrollHeight, clientH: content.clientHeight };
@@ -296,24 +309,44 @@ out.vertical && out.vertical.scrollH > out.vertical.clientH && l.vBar > 0
   ? ok(`纵向仍可滚（内容 ${out.vertical.scrollH}px > 视口 ${out.vertical.clientH}px）`)
   : fail(`长列表纵向滚不动了：内容 ${out.vertical && out.vertical.scrollH}px、视口 ${out.vertical && out.vertical.clientH}px、纵条 ${l.vBar}px`);
 
-// 判据 5：普通短行的刷新按钮仍在可视区（防"行撑到最宽"）
-out.shortDirBtnRight !== null && out.navRect && out.shortDirBtnRight <= out.navRect.right + 2
-  ? ok(`普通目录行的刷新按钮仍在可视区（右边缘 ${out.shortDirBtnRight} ≤ 导航右界 ${out.navRect.right}）`)
+// 判据 5：**刷新按钮不许盖在路径文字上**（用户报的瑕疵：长路径触发横滚时刷新符号压在路径上）
+const noOverlap = (row, tag) => {
+  if (!row || !row.name || !row.btn) {
+    fail(`没量到${tag}的名字/按钮（探针注入失败）`);
+    return;
+  }
+  row.btn.left >= row.name.right - 1
+    ? ok(`${tag}：刷新按钮在名字右侧（名字右 ${row.name.right} ≤ 按钮左 ${row.btn.left}），没有遮挡`)
+    : fail(
+        `${tag}：刷新按钮**盖在路径文字上**（按钮左 ${row.btn.left} < 名字右 ${row.name.right}）` +
+          ` —— 别用 position:sticky 把按钮钉在可视区右缘`
+      );
+};
+noOverlap(out.longDir, "长目录行");
+noOverlap(out.shortDir, "短目录行");
+out.longDir && out.longDir.nameScrollW <= out.longDir.nameClientW + 1
+  ? ok(`长目录名的文字也没被压缩（${out.longDir.nameClientW}px 装下 ${out.longDir.nameScrollW}px）`)
   : fail(
-      `普通目录行的刷新按钮被挤到可视区外（右 ${out.shortDirBtnRight} > 导航右界 ${out.navRect && out.navRect.right}）` +
-        ` —— 别把行撑到"最宽那一行"的宽度`
+      `长目录名被压缩了（${out.longDir && out.longDir.nameClientW} vs ${out.longDir && out.longDir.nameScrollW}）`
     );
 
-// 判据 6：另一类名称型列表（终端）也要过宽可滚，且它行右缘的 🪟 图标粘在可视区
-const tb = out.termBars || {};
-tb.scrollW > tb.clientW && tb.hBar > 0
-  ? ok(`终端列表过宽时也能横滚（内容 ${tb.scrollW}px > 视口 ${tb.clientW}px）`)
-  : fail(`终端列表没被撑宽或没出横条：内容 ${tb.scrollW}px、视口 ${tb.clientW}px、横条 ${tb.hBar}px`);
-out.termIcon && out.navRect && out.termIcon.right <= out.navRect.right + 2
-  ? ok(`终端行的 🪟 图标仍在可视区（右边缘 ${out.termIcon.right} ≤ 导航右界 ${out.navRect.right}）`)
+// 判据 6：短行的按钮**不滚就能点**；长行的按钮**滚到最右能点**
+out.shortDir && out.navRect && out.shortDir.btn.right <= out.navRect.right + 2
+  ? ok(`短目录行的刷新按钮不滚就在可视区（右 ${out.shortDir.btn.right} ≤ 导航右界 ${out.navRect.right}）`)
   : fail(
-      `终端行的 🪟 图标被推出可视区（右 ${out.termIcon && out.termIcon.right} > 导航右界 ` +
-        `${out.navRect && out.navRect.right}）`
+      `短目录行的刷新按钮跑到可视区外（右 ${out.shortDir && out.shortDir.btn.right} > ` +
+        `导航右界 ${out.navRect && out.navRect.right}）`
+    );
+out.longDirBtnAfterScroll &&
+out.navRect &&
+out.longDirBtnAfterScroll.right <= out.navRect.right + 2 &&
+out.longDirBtnAfterScroll.left >= out.navRect.left - 2
+  ? ok(
+      `长目录行滚到最右时刷新按钮进入可视区（${out.longDirBtnAfterScroll.left}..${out.longDirBtnAfterScroll.right}）`
+    )
+  : fail(
+      `长目录行滚到最右按钮仍不在可视区（${JSON.stringify(out.longDirBtnAfterScroll)} vs 导航 ` +
+        `${JSON.stringify(out.navRect)}）`
     );
 
 if (bad) {
