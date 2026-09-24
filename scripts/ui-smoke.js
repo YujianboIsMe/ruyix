@@ -193,6 +193,10 @@
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
  *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
+ *   U50 pane-exclusive 编辑区面板**互斥**（bug 3 的回归门禁）：#editor-body 是 flex 行、每块面板 flex:1，
+ *                    两块同时显示 = 各占一半宽（症状：配置面板只剩一半宽、被挤到右边）。
+ *                    序列覆盖真实触发路径（配置 ↔ 服务面板交替 + 会话），每步只许一块可见；
+ *                    并核对 EDITOR_PANES 覆盖 #editor-body 里全部面板
  *   U49 i18n-no-cjk   英文界面不许露出**写死的中文**（bug 1/2 的回归门禁）：i18n 的 en 侧本来就没有中文，
  *                    所以界面上的中文只可能来自写死的字面量。扫 8 个面板 JS 的"显示出口"
  *                    （status / setStatus / innerHTML / textContent / title / showPrompt / showConfirm）：
@@ -3624,6 +3628,139 @@ async function runI18nSweepChecks() {
   );
 }
 
+/**
+ * U50 pane-exclusive（bug 3 的回归）：编辑区面板**互斥** —— 同一时刻只许一块可见。
+ *
+ * 为什么这条判据值得单独存在：bug 3 的症状（打开配置后切项目，`#config-view` 只剩一半宽度、
+ * 还被挤到右边）本质是**两块面板同时显示** —— `#editor-body` 是 flex 行，两块都是 `flex:1`，
+ * 于是各占一半，而 config 在 DOM 里靠后 ⇒ 出现在右半边。触发路径是"配置开着 + 服务面板自己
+ * 刷新显示"（切项目时 `ServiceUI` 跟着新项目走），而旧的 `showConfigView()` 不关 `#service-view`。
+ *
+ * 真的几何（谁占多少像素）要在真浏览器里量（U32 / U43 / U47 那几条探针），但
+ * **"只有一块可见"是结构不变式**：它才是那个 bug 的正面判据，而且在 DOM 桩里就能钉死。
+ * 这条在修之前**必红**（序列第 3 步之后 config-view 与 service-view 会同时亮着）。
+ */
+async function runPaneExclusiveChecks() {
+  const panes = [
+    "editor-empty",
+    "editor-view",
+    "service-view",
+    "config-view",
+    "terminal-view",
+    "proc-log-view",
+    "session-view",
+    "image-view",
+  ];
+  const store = new Map();
+  const mkEl = (id) => {
+    const e = {
+      id,
+      style: { display: "none" },
+      dataset: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener() {},
+      appendChild() {},
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      setAttribute() {},
+      removeAttribute() {},
+      scrollTo() {},
+    };
+    store.set(id, e);
+    return e;
+  };
+  panes.forEach(mkEl);
+
+  const sandbox = {
+    window: {
+      I18N: { t: (k) => k, init: async () => {}, getLang: () => "zh-CN", setLang: async () => {} },
+      __TAURI__: null,
+      addEventListener() {},
+      matchMedia: () => ({ matches: false, addEventListener() {} }),
+    },
+    document: {
+      getElementById: (id) => store.get(id) || mkEl(id),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener() {},
+      createElement: () => mkEl("_" + Math.random()),
+      body: mkEl("body"),
+      documentElement: mkEl("html"),
+      // main.js 尾部按 readyState 决定「立刻 initApp」还是「等 DOMContentLoaded」：
+      // 报 loading 就只挂监听不执行 —— 我们只要那批函数声明，不要跑整个应用初始化。
+      readyState: "loading",
+    },
+    setTimeout,
+    clearTimeout,
+    I18N: { t: (k) => k, init: async () => {}, getLang: () => "zh-CN" },
+  };
+
+  const saved = ["window", "document", "setTimeout", "clearTimeout", "I18N"].map((k) => [
+    k,
+    globalThis[k],
+  ]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // main.js 的函数在 new Function 作用域里，外面拿不到 —— 尾部追加导出
+    const src =
+      read("ui/main.js") +
+      "\nwindow.__pane = { showPane: showPane, hidePane: hidePane, EDITOR_PANES: EDITOR_PANES," +
+      " showConfigView: showConfigView, showServiceView: showServiceView," +
+      " showSessionView: showSessionView, hideConfigView: hideConfigView };\n";
+    // eslint-disable-next-line no-new-func
+    new Function(src)();
+    const api = sandbox.window.__pane;
+    check(
+      "U50",
+      "pane-exclusive",
+      !!api && typeof api.showPane === "function" && Array.isArray(api.EDITOR_PANES),
+      "main.js 没暴露 showPane / EDITOR_PANES（面板统一入口改名或没接上？）"
+    );
+    if (!api) return;
+
+    // 序列覆盖**真实的触发路径**：配置 ↔ 服务面板交替（切项目时后者会自己刷新显示），
+    // 再串一块会话面板。每一步都必须只剩预期的那一块。
+    const seq = [
+      ["showConfigView", "config-view"],
+      ["showServiceView", "service-view"],
+      ["showConfigView", "config-view"],
+      ["showSessionView", "session-view"],
+      ["showConfigView", "config-view"],
+      ["hideConfigView", null],
+    ];
+    const bad = [];
+    for (const [fn, want] of seq) {
+      api[fn]();
+      const shown = panes.filter((id) => store.get(id).style.display !== "none");
+      if (want === null) {
+        if (shown.length !== 0) bad.push(`${fn} → 仍亮着 [${shown.join(", ")}]`);
+      } else if (shown.length !== 1 || shown[0] !== want) {
+        bad.push(`${fn} → [${shown.join(", ")}] 期望 [${want}]`);
+      }
+    }
+    // 面板清单必须覆盖 #editor-body 里真实存在的全部面板（漏一个 = 又留一条并排路径）
+    const listed = new Set(api.EDITOR_PANES);
+    const missing = panes.filter((id) => !listed.has(id));
+    check(
+      "U50",
+      "pane-list-complete",
+      missing.length === 0,
+      `EDITOR_PANES 漏了面板：${missing.join(", ")}（漏掉的那个迟早会和别的面板并排）`
+    );
+    check(
+      "U50",
+      "pane-exclusive-seq",
+      bad.length === 0,
+      "面板会并排显示（各占 flex:1 的一半 → 症状就是宽度减半、挤到右边）：\n      " + bad.join("\n      ")
+    );
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -3649,6 +3786,7 @@ async function main() {
     ["U47", "wide-line-real", runEditorWideLineProbe],
     ["U48", "bucket-panel", runBucketPanelChecks],
     ["U49", "i18n-no-hardcoded-cjk", runI18nSweepChecks],
+    ["U50", "pane-exclusive", runPaneExclusiveChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

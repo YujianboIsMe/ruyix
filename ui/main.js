@@ -655,8 +655,46 @@ function closeTab(tabId) {
 }
 
 function hideEditorView() {
-  document.getElementById("editor-view").style.display = "none";
+  hidePane("editor-view");
 }
+/**
+ * 编辑区里的面板是**互斥**的：同一时刻只允许一个可见。
+ *
+ * 为什么要收这个口（bug 3，用户实测）：以前每个 `show*View()` 只负责点亮自己、顺手关掉它**当时
+ * 认得**的那几个，于是"谁该关"散落在七八个函数里 —— 漏一个就会**两块面板并排**。实测症状：
+ * 打开配置后从标题栏切项目，`#config-view` 只剩一半宽度、还被挤到右边 —— 因为切项目时
+ * **服务面板会自己刷新并显示**（`ServiceUI` 跟着新项目走），而 `showConfigView()` 不关
+ * `#service-view`；`#editor-body` 是 flex 行、两块都是 `flex:1`，于是各占一半，
+ * 而 config 在 DOM 里靠后 ⇒ 显示在右半边。
+ *
+ * 现在所有面板的显示/隐藏都过这里：**先全关，再点亮一个**。这样无论谁在什么时候调，
+ * "只有一块可见"都是结构性成立的，不再依赖各调用点记得关谁。
+ */
+const EDITOR_PANES = [
+  "editor-empty",
+  "editor-view",
+  "service-view",
+  "config-view",
+  "terminal-view",
+  "proc-log-view",
+  "session-view",
+  "image-view",
+];
+
+/** 只显示 `id` 这一块（其余全关）。见 [`EDITOR_PANES`]。 */
+function showPane(id) {
+  for (const pane of EDITOR_PANES) {
+    const el = document.getElementById(pane);
+    if (el) el.style.display = pane === id ? "" : "none";
+  }
+}
+
+/** 关掉某一块（不动其它）。只有"确实要让位给编辑区之外的视图"时才用它。 */
+function hidePane(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = "none";
+}
+
 // 编辑区渲染
 // ============================================
 
@@ -671,8 +709,8 @@ function showEditor() {
   if (help) help.style.display = "none";
   if (agent) agent.style.display = "none";
   if (editorBody) editorBody.style.display = "";
-  document.getElementById("editor-empty").style.display = "none";
-  document.getElementById("editor-view").style.display = "";
+  // 统一入口：点亮 editor-view 的同时关掉其余面板（见 EDITOR_PANES 的说明）
+  showPane("editor-view");
   // 编辑区刚重新可见：视口高度可能和上次不同，强制重画一次窗口
   if (editorModel) {
     editorModel.paintedStart = -1;
@@ -681,11 +719,7 @@ function showEditor() {
 }
 
 function hideEditor() {
-  document.getElementById("editor-empty").style.display = "";
-  document.getElementById("editor-view").style.display = "none";
-  document.getElementById("terminal-view").style.display = "none";
-  document.getElementById("image-view").style.display = "none";
-  document.getElementById("session-view").style.display = "none";
+  showPane("editor-empty");   // 统一入口：其余面板一起关掉（bug 3）
   const serviceView = document.getElementById("service-view");
   if (serviceView) serviceView.style.display = "none";
   const procLogView = document.getElementById("proc-log-view");
@@ -3725,19 +3759,15 @@ async function listenToPtyExit(tabId, term, name) {
 }
 
 function showTerminalView() {
-  document.getElementById("editor-empty").style.display = "none";
-  document.getElementById("editor-view").style.display = "none";
-  document.getElementById("terminal-view").style.display = "";
+  showPane("terminal-view");   // 统一入口：其余面板一起关掉（bug 3）
 }
 
 function hideTerminalView() {
-  document.getElementById("terminal-view").style.display = "none";
+  hidePane("terminal-view");
 }
 
 function showSessionView() {
-  document.getElementById("editor-empty").style.display = "none";
-  document.getElementById("editor-view").style.display = "none";
-  document.getElementById("session-view").style.display = "";
+  showPane("session-view");
 }
 
 function hideSessionView() {
@@ -3746,7 +3776,7 @@ function hideSessionView() {
 }
 
 function showImageView() {
-  document.getElementById("image-view").style.display = "";
+  showPane("image-view");
 }
 
 function hideImageView() {
@@ -3754,9 +3784,9 @@ function hideImageView() {
 }
 
 function showConfigView() {
-  document.getElementById("editor-empty").style.display = "none";
-  document.getElementById("editor-view").style.display = "none";
-  document.getElementById("config-view").style.display = "";
+  // 注意这里**不能**只关 editor-empty / editor-view：切项目时服务面板会自己刷新并显示，
+  // 漏掉它就会两块并排、配置只占一半宽（bug 3）。统一入口一次关干净。
+  showPane("config-view");
 }
 
 function hideConfigView() {
@@ -3765,9 +3795,7 @@ function hideConfigView() {
 }
 
 function showServiceView() {
-  document.getElementById("editor-empty").style.display = "none";
-  document.getElementById("editor-view").style.display = "none";
-  document.getElementById("service-view").style.display = "";
+  showPane("service-view");
 }
 
 function hideServiceView() {
@@ -3776,9 +3804,7 @@ function hideServiceView() {
 }
 
 function showProcLogView() {
-  document.getElementById("editor-empty").style.display = "none";
-  document.getElementById("editor-view").style.display = "none";
-  document.getElementById("proc-log-view").style.display = "";
+  showPane("proc-log-view");
 }
 
 function hideProcLogView() {
