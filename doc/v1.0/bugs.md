@@ -58,23 +58,46 @@ function calling 的端点会更省事。
 报错、部分命令的执行错误）。这一截要动的是「错误码 + 前端文案表」的改造，不属于本次五个 bug 的
 范围，**登记为下一批**（改动面大：168 条消息 + 前端映射表 + 一批既有测试的断言文案）。
 
-## ⏳ 3. 切项目后 `#config-view` 只剩一半宽、靠右 —— 未修（已定位方向）
+## ✅ 3. 切项目后 `#config-view` 只剩一半宽、靠右 —— 已修（改成结构性互斥）
+
+**根因（读代码 + 拿 HEAD 里未修的那份 main.js 复现，钉死了）**：`#editor-body` 是 flex 行、
+8 块面板各 `flex:1`；而 `showConfigView()` 只关编辑器自己那两块，**不关 `#service-view`** ——
+切项目时服务面板会跟着新项目**自己刷新显示**，于是两块并排各占一半宽度，`#config-view` 在 DOM
+里靠后 ⇒ 出现在右半边。复现输出（未修的代码）：`showServiceView()` 之后
+`[service-view, config-view]` 同时亮着；再来一块会话面板就是三块并排。
+
+**改法**：收成唯一入口 `showPane(id)`（**先全关，再点亮一个**），`show*` / `hide*` 全部过它
+（editor-empty / editor-view / session / config / service / proc-log / terminal / image）。
+"只有一块可见"从此是结构性成立，不再依赖每个调用点记得关谁。
+
+**门禁**：`ui-smoke` **U50 pane-exclusive** —— 把真实触发路径排成序列（配置 ↔ 服务交替 + 会话），
+每步只许一块可见；并核对 `EDITOR_PANES` 覆盖 `#editor-body` 里全部 8 块面板（漏一个就留一条并排路径）。
+这条在修之前**必红**。
 
 - 相关代码：`ui/index.html:304`（`#config-view`，`style="display:none"`）、
   `ui/main.js:3753`（`showConfigView()`）、`:530`（切标签时调它）；项目切换会走 `teardownProject()`
   + `setNavigatorMode()`，重排的是 `#project-workspace` 里的 `project-layout`（左导航 + 右编辑区两栏）。
-- 症状"宽度恰好一半 + 靠右"符合「配置视图被放进了**编辑区那一栏**（而不是整块工作区）」——
-  切项目时它被重新挂载/重建，落到了右栏里，于是只占 `flex:1` 的那一半。
-- 下一步：先写一个**真浏览器探针**复现（`scripts/editor-layout.js` 那套无头 Edge + CDP），
-  量 `#config-view` 的 parent、computed width、以及切换前后 DOM 位置的变化，**再改**（不猜着改 CSS）。
+- 定位过程留档：先按"两块并排 ⇒ 各占一半、靠后者在右"的假设读代码，再拿**未修的 main.js**
+  跑同一序列把复现输出打出来（上面那三行 ✗），最后才动手 —— 没有靠猜着调 CSS。
+- 真几何（谁占多少像素）继续由既有浏览器探针守着：U32 编辑器布局 / U43 终端几何 / U47 宽行，
+  它们在本轮 326 项里全绿，说明这次改动没有动到任何一块面板自身的尺寸。
 
-## ⏳ 4. 终端目标要可添加 —— 未做（这是功能，不是修 bug）
+## ✅ 4. 终端目标要可添加 —— 已做（与「运行目标」同一套形态）
 
-现状：导航区「终端资源」里是**写死的一组**条目（PowerShell / Cmd / WSL / Claude / Python / Node.js /
-Git Bash，见 `ui/main.js` 的终端菜单 + `index.html` 的 `nav-panel-terminal`），
-`spawn_terminal` 直接拿命令起窗口。
+**改法**：
 
-要做的是**与"运行目标"同一套形态**：配置里可增删改（`ruyix.code.term.target<N>.name/cmd`）、
-面板里可添加/编辑/删除、命令系统给动词（例如 `term add 名称=命令` / `term del 名称`）、
-i18n 文案齐备、门禁一条（合同 + 面板回放）。估时半天；**下次开工按这份形态做**，
-并且顺手把 U49 的扫描面扩到新面板。
+- **后端**：`config::scan_target_file(file, section, project_root)` —— 把运行目标的扫描器**抽成一份共用的**
+  （具名目标 = `<key>.name` / `<key>.cmd`，运行目标多一个 `.bind`），`load_run_targets` 与新增的
+  `load_term_targets`（`term.toml`）都调它；新命令 `get_term_targets` 已注册。
+  *为什么不让两份复制*：复制的那份漏改不会有任何测试失败，只会在某个面板上表现为"加了不显示"。
+- **前端**：导航区「终端资源」加 ➕ 添加入口；用户条目由 `get_term_targets` 渲染（内置的
+  PowerShell / Cmd / … 仍在前面，用户加的自己往下排）；每条带 🪟（新窗口）/ ✎（改）/ 🗑（删）。
+  增删改**全部走命令系统**：`term add <名字>=<命令>`（同名即改，避免"改一次名字多出一条"）、
+  `term del <key|名字>`、`term list`；写盘落项目配置 `ruyix.code.term.target<N>.name/.cmd`。
+- **门禁**：`ui-smoke` **U51 terminal-targets** —— 添加入口存在 + 用户条目走 `get_term_targets` +
+  写入全走命令系统（面板不许直接 `config_set`）+ 后端与运行目标**共用同一份扫描器** + 中英文案齐备。
+
+- 原来的样子（留档）：终端列表是 `index.html` 里**写死的几条**（PowerShell / Cmd / WSL / Claude /
+  Python / Node.js / Git Bash），`spawn_terminal` 直接拿命令起窗口 —— 想加一个自己的环境
+  （某个 venv 的 shell、某台机器的 ssh、带一长串参数的工具）只能去改文件。这几条**保留**，
+  用户加的排在它们后面。

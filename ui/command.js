@@ -75,6 +75,10 @@ async function handleCommand(raw, _fromAi = false) {
     case "mv":
       await handleRenameCommand(parts.slice(1));
       break;
+    case "term":
+    case "terms":
+      await handleTermCommand(raw);
+      break;
     case "run":
       await handleRunCommand(raw);
       break;
@@ -140,6 +144,107 @@ async function handleCommand(raw, _fromAi = false) {
  *   config add -p ruyix.code.run.target<N>.name=<name>
  * 其中 <N> = 现有运行目标数量
  */
+/**
+ * `term [list|add <名字>=<命令>|del <key|名字>]` —— 终端目标的增删改（bug 4）。
+ *
+ * 为什么与 `run` 一个形状：两者都是"给我起一条命令"，差别只在起在哪 —— 运行目标一次性跑完
+ * （`run`）、终端是常驻的交互式 PTY 会话。既然形状相同，配置与命名也跟着走：
+ * `ruyix.code.term.target<N>.name` / `.cmd`，后端用**同一份扫描器**读回来
+ * （`config::scan_target_file`），面板里加一条不会因为"漏改另一处"而看不见。
+ *
+ * 为什么 upsert 而不是纯 add：`add` 带的是**名字**，名字相同就该是"改这一条"——
+ * 否则用户改一次名字就会多出一条，而旧那条永远留在列表里。
+ */
+async function handleTermCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+  if (!state.currentProject) {
+    setStatus(I18N.t("terminal.no_project"), "error");
+    return;
+  }
+  const projectRoot = state.currentProject.path || undefined;
+  const rest = raw.replace(/^terms?/i, "").trim();
+  const sub = (rest.split(/\s+/)[0] || "list").toLowerCase();
+
+  if (sub === "list" || sub === "ls" || !rest) {
+    await window.refreshTerminalTargets?.();
+    return;
+  }
+
+  if (sub === "del" || sub === "delete" || sub === "remove" || sub === "rm") {
+    const what = rest.slice(sub.length).trim();
+    if (!what) {
+      setStatus(I18N.t("terminal.usage"), "error");
+      return;
+    }
+    try {
+      const targets = (await invoke("get_term_targets", { projectRoot })) || [];
+      const hit = targets.find((t) => t.key === what || (t.name || "") === what);
+      if (!hit) {
+        setStatus(I18N.t("terminal.not_found", { name: what }), "error");
+        return;
+      }
+      for (const suffix of ["name", "cmd"]) {
+        await invoke("config_delete", {
+          scope: "project",
+          key: `ruyix.code.term.${hit.key}.${suffix}`,
+          projectRoot,
+        });
+      }
+      setStatus(I18N.t("terminal.deleted", { name: hit.name || hit.key }));
+      await window.refreshTerminalTargets?.();
+    } catch (err) {
+      setStatus(I18N.t("terminal.del_fail", { err }), "error");
+    }
+    return;
+  }
+
+  // add：`term add <名字>=<命令>`（没有 `=` 就把整段当名字、命令后面再补）
+  const body = rest.slice(sub.length).trim();
+  const eq = body.indexOf("=");
+  if (!body || eq <= 0) {
+    setStatus(I18N.t("terminal.usage"), "error");
+    return;
+  }
+  const name = body.slice(0, eq).trim();
+  const cmd = body.slice(eq + 1).trim();
+  if (!name || !cmd) {
+    setStatus(I18N.t("terminal.usage"), "error");
+    return;
+  }
+  try {
+    const targets = (await invoke("get_term_targets", { projectRoot })) || [];
+    const same = targets.find((t) => (t.name || "") === name);
+    let key = same?.key;
+    if (!key) {
+      // 下一个空位：`target<N>` 里没被占用的最小 N（与 `run` 的取号规则一致）
+      const used = new Set(targets.map((t) => t.key));
+      let i = 0;
+      while (used.has(`target${i}`)) i += 1;
+      key = `target${i}`;
+    }
+    await invoke("config_set", {
+      scope: "project",
+      key: `ruyix.code.term.${key}.name`,
+      value: name,
+      projectRoot,
+    });
+    await invoke("config_set", {
+      scope: "project",
+      key: `ruyix.code.term.${key}.cmd`,
+      value: cmd,
+      projectRoot,
+    });
+    setStatus(I18N.t("terminal.saved", { name }));
+    await window.refreshTerminalTargets?.();
+  } catch (err) {
+    setStatus(I18N.t("terminal.save_fail", { err }), "error");
+  }
+}
+
 async function handleRunCommand(raw) {
   const rest = raw.slice("run".length).trim();
   if (!rest) {

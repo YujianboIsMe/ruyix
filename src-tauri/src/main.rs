@@ -741,6 +741,16 @@ fn get_run_targets(
     mgr.load_run_targets(project_root.as_deref())
 }
 
+/// 终端目标（导航区「终端资源」里可点的终端）：与运行目标同一套形状，用户可增删改。
+#[tauri::command]
+fn get_term_targets(
+    project_root: Option<String>,
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+) -> Result<Vec<config::RunTarget>, String> {
+    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+    mgr.load_term_targets(project_root.as_deref())
+}
+
 // ============================================
 // 托管进程（"服务"面板）
 // ============================================
@@ -1878,6 +1888,7 @@ fn main() {
             update_project,
             delete_project,
             get_run_targets,
+            get_term_targets,
             run_target,
             proc_list,
             proc_stop,

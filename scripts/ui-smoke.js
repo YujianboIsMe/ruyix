@@ -193,6 +193,9 @@
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
  *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
+ *   U51 terminal-targets 终端目标**可添加**（bug 4 的回归门禁）：面板有添加入口、用户条目由 get_term_targets
+ *                    渲染、增删改全部走命令系统（面板不直接写配置）、后端与运行目标共用同一份扫描器、
+ *                    中英文案齐备
  *   U50 pane-exclusive 编辑区面板**互斥**（bug 3 的回归门禁）：#editor-body 是 flex 行、每块面板 flex:1，
  *                    两块同时显示 = 各占一半宽（症状：配置面板只剩一半宽、被挤到右边）。
  *                    序列覆盖真实触发路径（配置 ↔ 服务面板交替 + 会话），每步只许一块可见；
@@ -3761,6 +3764,66 @@ async function runPaneExclusiveChecks() {
   }
 }
 
+/**
+ * U51 terminal-targets（bug 4 的回归）：**终端目标是可添加的**，不是写死的几条。
+ *
+ * 用户原话："Terminal 是固定的目标，应该改成可添加的。"
+ * 这条门禁钉住四件事（缺一件这个功能就会退化回去或者只做了一半）：
+ *   ① 面板里有**添加入口**（`#terminal-add` 按钮），并且用户条目由 `get_term_targets` 渲染；
+ *   ② 用户条目的增删改**全部走命令系统**（`handleCommand("term add …")` / `term del …`）——
+ *      面板里直接调 `config_set` 就绕过了命令层，AI/命令行的行为会和不一致；
+ *   ③ 后端有 `get_term_targets` 命令，且与运行目标**共用同一份扫描器**
+ *      （`config::scan_target_file`）—— 复制两份扫描器的代价是"改一处漏一处"；
+ *   ④ 文案双语齐备（中英各一份，英文界面不能露出中文，见 U49）。
+ */
+async function runTerminalTargetChecks() {
+  const html = readLf("ui/index.html");
+  const mainSrc = readLf("ui/main.js");
+  const cmdSrc = readLf("ui/command.js");
+  const rustMain = readLf("src-tauri/src/main.rs");
+  const rustCfg = readLf("src-tauri/src/config.rs");
+  const zh = JSON.parse(readLf("ui/lang/zh-CN.json"));
+  const en = JSON.parse(readLf("ui/lang/en.json"));
+
+  check(
+    "U51",
+    "terminal-add-entry",
+    has(html, 'id="terminal-add"') && has(mainSrc, '"get_term_targets"') && has(mainSrc, "renderTerminalTargets"),
+    "面板缺添加入口，或用户终端没走 get_term_targets 渲染（又回到写死的几条了？）"
+  );
+  check(
+    "U51",
+    "terminal-writes-via-command",
+    has(mainSrc, "handleCommand(`term add ") &&
+      has(mainSrc, "handleCommand(`term del ") &&
+      has(cmdSrc, "async function handleTermCommand(") &&
+      has(cmdSrc, 'case "term":') &&
+      // 面板层不许自己写配置（那是命令层的活）
+      !/terminal[\s\S]{0,600}?invoke\("config_set"/.test(mainSrc),
+    "增删改没有全部走命令系统（面板直接写配置会绕开命令层）"
+  );
+  check(
+    "U51",
+    "terminal-shared-scanner",
+    has(rustMain, "fn get_term_targets(") &&
+      has(rustMain, "get_term_targets,") &&
+      has(rustCfg, "fn scan_target_file(") &&
+      has(rustCfg, "load_term_targets") &&
+      has(rustCfg, 'scan_target_file("term.toml", "term"') &&
+      has(rustCfg, 'scan_target_file("run.toml", "run"'),
+    "终端目标没有与运行目标共用扫描器（或后端命令没注册）"
+  );
+  const keys = ["terminal.add", "terminal.add_name", "terminal.add_cmd", "terminal.edit",
+    "terminal.del", "terminal.usage", "terminal.saved", "terminal.deleted", "terminal.no_project"];
+  const missing = keys.filter((k) => !(k in zh) || !(k in en));
+  check(
+    "U51",
+    "terminal-i18n",
+    missing.length === 0,
+    `终端目标的文案缺键（中英都要有）：${missing.join(", ")}`
+  );
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -3787,6 +3850,7 @@ async function main() {
     ["U48", "bucket-panel", runBucketPanelChecks],
     ["U49", "i18n-no-hardcoded-cjk", runI18nSweepChecks],
     ["U50", "pane-exclusive", runPaneExclusiveChecks],
+    ["U51", "terminal-targets", runTerminalTargetChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

@@ -3519,9 +3519,76 @@ function renderTerminalOutput(tab, text) {
 // 终端资源列表
 // ============================================
 
+/**
+ * 渲染**用户添加的**终端目标（`ruyix.code.term.*`，与运行目标同一套形状）。
+ *
+ * 为什么要有它（bug 4）：终端列表以前是 `index.html` 里写死的几条 —— 想加一个自己的环境
+ * （某个 venv 的 shell、某台机器的 ssh、带一长串参数的工具 shell）只能去改文件。
+ * 现在用户加的条目落进项目配置，面板里增删改，点一下就是一条 PTY。
+ *
+ * 数据来源：`get_term_targets`（后端按 `term.toml` 分组扫出来，与 `get_run_targets` 同一份扫描器）。
+ * 写入全部走命令系统（`term add` / `term del`），这里只读、只画。
+ */
+async function renderTerminalTargets() {
+  const list = document.getElementById("terminal-list");
+  const invoke = getTauriInvoke();
+  if (!list || !invoke) return;
+  let targets = [];
+  try {
+    targets = (await invoke("get_term_targets", {
+      projectRoot: state.currentProject?.path || undefined,
+    })) || [];
+  } catch {
+    targets = [];   // 读不到就只留内置那几条（不打扰用户）
+  }
+  list.querySelectorAll(".terminal-user").forEach((el) => el.remove());
+  for (const t of targets) {
+    const li = document.createElement("li");
+    li.className = "terminal-user";
+    li.dataset.cmd = t.cmd || "";
+    li.dataset.name = t.name || t.key;
+    li.dataset.key = t.key;
+    li.innerHTML =
+      `<span class="terminal-name">${escapeHtml(t.name || t.key)}</span>` +
+      `<span class="terminal-new-window" title="${escapeHtml(I18N.t("terminal.new_window"))}">🪟</span>` +
+      `<span class="terminal-edit" title="${escapeHtml(I18N.t("terminal.edit"))}">&#9998;</span>` +
+      `<span class="terminal-del" title="${escapeHtml(I18N.t("terminal.del"))}">&#128465;</span>`;
+    li.querySelector(".terminal-edit")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const name = await showPrompt(I18N.t("terminal.edit_name"), t.name || t.key);
+      if (!name) return;
+      const cmd = await showPrompt(I18N.t("terminal.edit_cmd"), t.cmd || "");
+      if (!cmd) return;
+      await handleCommand(`term add ${name}=${cmd}`);
+    });
+    li.querySelector(".terminal-del")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await handleCommand(`term del ${t.key}`);
+    });
+    list.appendChild(li);
+  }
+}
+
+/** 命令层 / 面板刷新钩子（`term list` 走这里） */
+window.refreshTerminalTargets = () => renderTerminalTargets();
+
 function setupTerminalList() {
   const list = document.getElementById("terminal-list");
   if (!list) return;
+
+  // ➕ 添加终端（bug 4）：先问名字再问命令，两步 showPrompt —— 与「运行目标」的编辑一个手感。
+  // 写盘走命令系统（`term add 名字=命令`），这里不直接 invoke。
+  document.getElementById("terminal-add")?.addEventListener("click", async () => {
+    if (!state.currentProject) {
+      setStatus(I18N.t("terminal.no_project"), "error");
+      return;
+    }
+    const name = await showPrompt(I18N.t("terminal.add_name"), "");
+    if (!name) return;
+    const cmd = await showPrompt(I18N.t("terminal.add_cmd"), "");
+    if (!cmd) return;
+    await handleCommand(`term add ${name}=${cmd}`);
+  });
 
   // 事件委托：在 <ul> 上统一监听
   list.addEventListener("click", (e) => {

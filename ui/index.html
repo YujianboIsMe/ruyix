@@ -109,7 +109,12 @@
               <div id="file-tree" class="file-tree"></div>
             </div>
             <div id="nav-panel-terminal" class="nav-panel">
-              <ul id="terminal-list" class="terminal-list">
+              <!-- 终端目标是**可添加的**（bug 4）：与「运行目标」同一套形态，
+                 内置的那几条（PowerShell / Cmd / …）仍在这里，用户加的自己往下排。 -->
+            <div class="terminal-add-row">
+              <button id="terminal-add" class="terminal-add" data-i18n="terminal.add">➕ 添加终端</button>
+            </div>
+            <ul id="terminal-list" class="terminal-list">
                 <li data-cmd="powershell.exe">
                   <span class="terminal-name">PowerShell</span>
                   <span class="terminal-new-window" title="在新窗口中打开">🪟</span>

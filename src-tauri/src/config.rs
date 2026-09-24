@@ -749,12 +749,21 @@ impl ConfigManager {
     // 运行目标
     // ============================================
 
-    /// 加载项目运行目标，按 target key 分组。
-    /// 从 `run.toml` 中读取所有 `target<N>.cmd` 和 `target<N>.name` 键值对。
-    pub fn load_run_targets(&self, project_root: Option<&str>) -> Result<Vec<RunTarget>, String> {
+    /// **具名目标配置的扫描器**（`run.toml` / `term.toml` 共用这一份）。
+    ///
+    /// 为什么抽出来：终端目标与运行目标是**同一套形状** —— 面板上增删改、落成
+    /// `<key>.cmd` / `<key>.name`（运行目标多一个 `.bind`），差别只在文件名。复制一份 40 行的
+    /// 扫描器，改一处就得记得改两处，而漏改的那次不会有任何测试失败、只会在某个面板上表现为
+    /// "加了不显示"。
+    fn scan_target_file(
+        &self,
+        file: &str,
+        section: &str,
+        project_root: Option<&str>,
+    ) -> Result<Vec<RunTarget>, String> {
         let dir = self.resolve_project_dir(project_root)?;
-        let path = dir.join("run.toml");
-        let map = self.read_toml_file(&path, "run")?;
+        let path = dir.join(file);
+        let map = self.read_toml_file(&path, section)?;
 
         // 按 key 分组：build.cmd → build, build.name → build, build.bind → build
         let mut groups: HashMap<String, Option<String>> = HashMap::new();
@@ -787,6 +796,19 @@ impl ConfigManager {
         // 按 key 排序
         targets.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(targets)
+    }
+
+    /// 加载项目运行目标（`run.toml`）。
+    pub fn load_run_targets(&self, project_root: Option<&str>) -> Result<Vec<RunTarget>, String> {
+        self.scan_target_file("run.toml", "run", project_root)
+    }
+
+    /// 加载项目的**终端目标**（`term.toml`）：导航区「终端资源」里那些可点的终端。
+    ///
+    /// 与运行目标同一个形状不是巧合：两者都是"给我起一条命令"，差别只在起在哪 ——
+    /// 运行目标一次性跑完，终端是**常驻的交互式会话**（PTY + xterm）。
+    pub fn load_term_targets(&self, project_root: Option<&str>) -> Result<Vec<RunTarget>, String> {
+        self.scan_target_file("term.toml", "term", project_root)
     }
 
     // ============================================
