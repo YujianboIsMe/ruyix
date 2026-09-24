@@ -67,6 +67,26 @@
 **刹车留着**：`MAX_UNPARSEABLE_ROUNDS`（连续 3 轮）与诊断现在管的是**别的原因**（真不发工具调用的
 模型/网关），仍是对的兜底 —— 但它不再是这条路的主治。
 
+### ✅ 真机验证（2026-09-25，用用户自己的端点）
+
+用户环境实测：`--example llm_tool_probe -- --config target/debug/global/ai.toml`
+（配置：`api_format = "anthropic"`、`api_url = https://api.deepseek.com/anthropic`、
+`model = deepseek-v4-flash`、`tool_protocol = "true"` —— **正是这个 bug 的现场**）。
+
+| 臂 | 任务 | 结果 |
+|---|---|---|
+| A | `你好`（用户实测的复现句） | **5 轮工具调用（标准协议）· 0 轮无法解析**；`完成，共 5 轮` |
+| B | `读一下 hello.txt 第一行并原样告诉我`（**必须用工具**） | 第 1 轮就 `read hello.txt`；答复里含文件里那句 `probe-line-42` ⇒ 工具真跑了、结果真回到模型 |
+
+修之前是这个样子（用户原日志）：第 1/2/3… 轮一路「输出无法解析：content 里没有可执行的工具调用」，
+直到烧完预算 —— **同一条端点、同一个模型、同一句话**。
+
+探针（`crates/harness-engine/examples/llm_tool_probe.rs`，已入库）把判据预注册在文件头：
+A 臂不许出现「无法解析」且必须出现「工具调用（标准协议）」；B 臂还要求答复里含文件里的密语
+（只跑 A 臂是不够的：模型"不发工具、直接用 final 交付"也能让 A 过 —— 那说明不了工具通不通）。
+两条臂都退 0 才算过。**以后换端点/换模型，先跑它，不要靠感觉。**
+
+
 **如果还要用现在这个模型**：把 `ruyix.code.ai.tool_protocol` 设成 `false`（动作改走 content 里的
 JSON，这是 v0.0.6 之前的协议，那条路已实测可用）—— 代价是模型自带标记更容易泄露。
 **注意**：日志里那 6 处标记说明该模型/网关**没把 `tools` 变成 `tool_calls`** —— 换一个支持
