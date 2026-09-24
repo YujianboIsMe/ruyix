@@ -32,6 +32,41 @@
    连发 4 条纯聊天 → 断言 ①三轮内就停（不消费第 4 条）②返回 `Err` ③诊断里带「连续 3 轮」
    「tool_protocol」「最近一轮原文」。
 
+### ✅ 5 的真病因与真修法（2026-09-25，用户点破）
+
+上面那三条（上限 + 诊断 + 回归测试）是**刹车**，不是修。用户一句话点到位：
+**"不支持 anthropic 接口 tool_use 你改了吗？如果是 anthropic 接口时，走 anthropic 的工具调用，
+这才是正确的改法"** —— 他是对的，代码里当时就这么写着：
+
+- `llm.rs::extract_anthropic`：`// anthropic 的 tool_use 块本次不映射：这条路保持老协议`
+- `llm.rs::anthropic_parts`：**一个 `tools` 都不声明**（`body["tools"]` 只出现在 OpenAI 的
+  `/chat/completions` 分支）
+
+⇒ `api_format = anthropic` + 严格模式（默认开）= 模型**根本拿不到工具**，只能把动作写进正文，
+而正文里的动作一律作废 —— 于是每轮都"没有工具调用"，直到烧完预算。**这就是"发一句你好
+无限死循环"的真病因**，与模型无关、与我们自己的请求有关。同理还有 `/responses`（web_search 那条路）：
+那里**只声明了 `web_search`**，一个函数工具都没有 —— 同一个病的另一处。
+
+**修法**（三条协议各自形状，一处都不能想当然）：
+
+| | 请求里怎么声明 | 响应里怎么解析 | 回灌形态 |
+|---|---|---|---|
+| OpenAI `/chat/completions` | `{type:"function", function:{name, description, parameters}}` | `choices[0].message.tool_calls[]`（`arguments` 是 JSON **字符串**） | `role="tool"` + `tool_call_id` |
+| **anthropic** `/v1/messages` | `{name, description, input_schema}` —— **没有** `function` 外壳 | `content[]` 里 `type=="tool_use"` 的块（`input` 是**对象**，id 在 `tool_use.id`） | assistant 用 `tool_use` 块；结果**没有** `role="tool"`，要包成 user 消息里的 `tool_result` + `tool_use_id` |
+| **`/responses`** | `{type:"function", name, description, parameters}` —— **扁平**，与上面那个不同 | `output[]` 里 `type=="function_call"`（`call_id` / `arguments` 是字符串） | 文本回放（不需要 `function_call_output`） |
+
+**判据**（`crates/harness-engine/src/llm.rs::protocol_tests`，6 条，跑 `cargo test -p harness-engine`）：
+
+- anthropic 声明：`tools[].input_schema.required` 到位、**没有** `function` 外壳（混错就是 400）；
+- anthropic 不声明工具时**不发空 `tools` 数组**（有的网关对 `tools: []` 直接 400）；
+- anthropic 解析：`tool_use` 块 → 可用调用（参数从对象转成我们的 JSON 字符串、id 取 `tool_use.id`）；
+- anthropic 回灌：assistant 用 `tool_use` 块、结果挂 user 消息的 `tool_result`；
+- `/responses` 声明：`web_search` 与函数工具**共处一个数组**、扁平形态；
+- `/responses` 解析：`function_call` 项 → 可用调用（且内部 `ws_call_id=` 标记不被当成查询词）。
+
+**刹车留着**：`MAX_UNPARSEABLE_ROUNDS`（连续 3 轮）与诊断现在管的是**别的原因**（真不发工具调用的
+模型/网关），仍是对的兜底 —— 但它不再是这条路的主治。
+
 **如果还要用现在这个模型**：把 `ruyix.code.ai.tool_protocol` 设成 `false`（动作改走 content 里的
 JSON，这是 v0.0.6 之前的协议，那条路已实测可用）—— 代价是模型自带标记更容易泄露。
 **注意**：日志里那 6 处标记说明该模型/网关**没把 `tools` 变成 `tool_calls`** —— 换一个支持

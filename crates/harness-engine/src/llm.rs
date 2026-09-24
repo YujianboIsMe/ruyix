@@ -158,6 +158,15 @@ struct RespApi {
 struct RespItem {
     #[serde(default, rename = "type")]
     kind: String,
+    /// `type == "function_call"` 才有：这次调用的 id（回灌结果时要带回去）。
+    #[serde(default)]
+    call_id: Option<String>,
+    /// `type == "function_call"` 才有：工具名。
+    #[serde(default)]
+    name: Option<String>,
+    /// `type == "function_call"` 才有：参数（**JSON 字符串**，与 chat/completions 一致）。
+    #[serde(default)]
+    arguments: Option<String>,
     #[serde(default)]
     content: Vec<RespContent>,
     /// 仅 `web_search_call` 有：本次检索的查询词
@@ -220,7 +229,8 @@ pub fn extract_json_object(raw: &str) -> String {
 
 /// 剥掉**模型自带协议**的标记（DSML = DeepSeek Markup Language 这类原生工具调用语法）。
 ///
-/// 本引擎的协议是"动作写在 content 的 JSON 里"，**从不发 `tools`**。但被原生工具调用语法
+/// 本引擎**会声明 `tools`**（v0.0.6 起：OpenAI 兼容走 `tool_calls`，anthropic 走 `tool_use`）——
+/// 但被原生工具调用语法
 /// 训练过的模型会时不时改用**它自己那一套**：参数写对了（比如 `{"cmd": "…"}`），外面却裹着
 /// 它的尖括号标记 —— 服务端没收到 `tools`，就不会把它解析进 `tool_calls`，整段原样落进
 /// content。实测（2026-09-21，第 5 轮）：content 是那行命令 JSON + 三行闭合标记，
@@ -616,23 +626,49 @@ fn chat_parts(
 }
 
 /// `/responses` 的请求体。**只有这条路上服务端联网搜索成立**。
+/// Responses 形态的函数工具声明：`{type:"function", name, description, parameters}` —— **扁平**，
+/// 不像 `/chat/completions` 那样再裹一层 `function`。发错了的表现是 400，或更糟：
+/// 不报错但模型从不调用（声明没被认成工具）。
+fn responses_tool_decls(names: &[&str]) -> Vec<serde_json::Value> {
+    TOOL_DECLS
+        .iter()
+        .filter(|(n, _, _)| names.iter().any(|w| w.eq_ignore_ascii_case(n)))
+        .map(|(name, desc, params)| {
+            serde_json::json!({
+                "type": "function",
+                "name": name,
+                "description": desc,
+                "parameters": serde_json::from_str::<serde_json::Value>(params)
+                    .expect("工具参数表写错了（常量 JSON，单测会先抓到）"),
+            })
+        })
+        .collect()
+}
+
 fn responses_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
+    tool_names: &[&str],
 ) -> (String, serde_json::Value) {
     let url = format!("{}/responses", cfg.base_url.trim_end_matches('/'));
     let input: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| serde_json::json!({ "type": "message", "role": m.role, "content": m.content }))
         .collect();
+    let mut tools: Vec<serde_json::Value> = vec![serde_json::json!({ "type": "web_search" })];
+    tools.extend(responses_tool_decls(tool_names));
     let mut body = serde_json::json!({
         "model": cfg.model,
         "input": input,
         "temperature": cfg.temperature,
         "max_output_tokens": cfg.max_tokens,
-        "stream": false,
-        "tools": [{ "type": "web_search" }],
+    "stream": false,
+        // 服务端联网检索 + **函数工具**共处一个数组（`type` 区分）。
+        // 以前这里**只有** `web_search` —— 那条路上模型一个函数工具都拿不到，严格模式（默认开）
+        // 下就只能把动作写进正文，于是每轮"没有工具调用"直到烧完预算：与 anthropic 那条路
+        // 是**同一个病**（用户实测报的"发一句你好就死循环"）。
+        "tools": tools,
     });
     if json_mode {
         body["text"] = serde_json::json!({ "format": { "type": "json_object" } });
@@ -679,6 +715,16 @@ struct AnthropicContent {
     kind: String,
     #[serde(default)]
     text: String,
+    /// `type == "tool_use"` 才有：这次调用的 id（回灌 tool_result 时要原样带回去）。
+    #[serde(default)]
+    id: String,
+    /// `type == "tool_use"` 才有：工具名。
+    #[serde(default)]
+    name: String,
+    /// `type == "tool_use"` 才有：参数**已经是对象**（不是 JSON 字符串）——
+    /// 这是与 OpenAI 那条路最大的差异，见 `extract_anthropic`。
+    #[serde(default)]
+    input: serde_json::Value,
 }
 
 #[derive(Deserialize, Default)]
@@ -709,10 +755,31 @@ fn anthropic_models_url(base_url: &str) -> String {
     }
 }
 
+/// anthropic 形态的工具声明：`{name, description, input_schema}`。
+///
+/// 与 OpenAI 的 `{type:"function", function:{…}}` 是**两套**格式，不能复用同一条数组 ——
+/// 用错的表现是 400（`tools.0.type` 之类），或者更糟：不报错但模型从不发 `tool_use`。
+fn anthropic_tool_decls(names: &[&str]) -> Vec<serde_json::Value> {
+    TOOL_DECLS
+        .iter()
+        .filter(|(n, _, _)| names.iter().any(|w| w.eq_ignore_ascii_case(n)))
+        .map(|(name, desc, params)| {
+            serde_json::json!({
+                "name": name,
+                "description": desc,
+                // OpenAI 管它叫 `parameters`，anthropic 管它叫 `input_schema` —— 同一份 JSON Schema
+                "input_schema": serde_json::from_str::<serde_json::Value>(params)
+                    .expect("工具参数表写错了（常量 JSON，单测会先抓到）"),
+            })
+        })
+        .collect()
+}
+
 fn anthropic_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     _json_mode: bool,
+    tool_names: &[&str],
 ) -> (String, serde_json::Value) {
     let url = anthropic_url(&cfg.base_url);
     // 把 system 抽出来放顶层；其余按 user/assistant 入 messages。
@@ -729,8 +796,43 @@ fn anthropic_parts(
             }
             "user" => msgs.push(serde_json::json!({ "role": "user", "content": m.content })),
             "assistant" => {
-                msgs.push(serde_json::json!({ "role": "assistant", "content": m.content }))
+                // 带工具调用的助手消息要用 anthropic 的 `tool_use` 块回灌（而不是塞进文本）：
+                // 我们这条路平时用"调用流水 + 用户观察"的文本回放（`tool_calls_echo`），
+                // 但万一某处开始回灌结构化调用，这里就**已经是对的形状**，不会打成 400。
+                match &m.tool_calls {
+                    Some(calls) if !calls.is_empty() => {
+                        let mut blocks: Vec<serde_json::Value> = Vec::new();
+                        if !m.content.trim().is_empty() {
+                            blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+                        }
+                        for c in calls {
+                            blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": c.id,
+                                "name": c.function.name,
+                                // 我们的 arguments 是 JSON 字符串，anthropic 要对象 —— 解不出来就空对象
+                                // （宁可让模型看到"参数为空"重发一次，也不要整条请求 400）
+                                "input": serde_json::from_str::<serde_json::Value>(&c.function.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({})),
+                            }));
+                        }
+                        msgs.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+                    }
+                    _ => {
+                        msgs.push(serde_json::json!({ "role": "assistant", "content": m.content }))
+                    }
+                }
             }
+            // 工具结果：anthropic **没有** `role = "tool"` —— 结果要包成 user 消息里的
+            // `tool_result` 块（且紧跟在对应 tool_use 之后）。照 OpenAI 的形状发会 400。
+            "tool" => msgs.push(serde_json::json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                    "content": m.content,
+                }],
+            })),
             other => msgs.push(serde_json::json!({ "role": other, "content": m.content })),
         }
     }
@@ -743,6 +845,12 @@ fn anthropic_parts(
     });
     if !system_text.is_empty() {
         body["system"] = serde_json::json!(system_text);
+    }
+    // **声明工具**（这一步以前漏了）：不声明，模型就只能把动作写进正文 ——
+    // 严格模式（`llm.tool_protocol`，默认开）下那一律作废，于是每轮都"没有工具调用"，
+    // 直到烧完预算（用户实测："发一句你好，一直无限死循环"）。这是那条 bug 的**真病因**。
+    if !tool_names.is_empty() {
+        body["tools"] = serde_json::Value::Array(anthropic_tool_decls(tool_names));
     }
     // 注意：anthropic 没有 response_format。JSON 模式靠提示词要求，这里不加任何字段，
     // 否则会被 400 打回（`unknown field 'response_format'`）。
@@ -762,9 +870,39 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
         .filter(|c| c.kind == "text")
         .map(|c| c.text.as_str())
         .collect::<String>();
+    // **anthropic 的工具调用在这里**：`content` 数组里 `type == "tool_use"` 的那些块。
+    //
+    // 与 OpenAI 那条路的两处关键差异（都不许想当然）：
+    // ① 参数在 `input` 里**已经是对象**，而我们的 `ToolCallFn::arguments` 是**JSON 字符串**
+    //    （主循环按字符串解析，好处是模型给坏串时只影响那一条调用）—— 所以这里 `to_string()`；
+    // ② 调用 id 在 `tool_use.id`，不是 `tool_call_id`。
+    //
+    // 为什么必须有这一段（用户实测报的就是它）：不解析 `tool_use` 时，即使声明了 tools，
+    // 模型的调用也只会落进 content 被当成"没有工具调用"退回，然后**每一轮都重来** ——
+    // 现象就是"发一句你好就死循环"。
+    let tool_calls: Vec<ToolCall> = parsed
+        .content
+        .iter()
+        .filter(|c| c.kind == "tool_use")
+        .map(|c| ToolCall {
+            id: c.id.clone(),
+            kind: "function".into(),
+            function: ToolCallFn {
+                name: c.name.clone(),
+                arguments: if c.input.is_null() {
+                    "{}".to_string()
+                } else {
+                    c.input.to_string()
+                },
+            },
+        })
+        .collect();
     let finish_reason = match parsed.stop_reason.as_deref() {
         Some("max_tokens") => Some("length".to_string()),
         Some("end_turn") | Some("stop_sequence") => Some("stop".to_string()),
+        // `tool_use` 是**正常**的"我还有动作"收尾（不是截断）：映射成中性值，
+        // 主循环靠 `tool_calls` 非空来判定，这个值只进日志与调试。
+        Some("tool_use") => Some("tool_calls".to_string()),
         _ => None,
     };
     let usage = parsed
@@ -781,18 +919,20 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
         model: parsed.model,
         finish_reason,
         web_queries: Vec::new(),
-        // anthropic 的 `tool_use` 块本次不映射：这条路保持老协议（content 里的 JSON），
-        // 与改造前逐字一致。
-        tool_calls: Vec::new(),
+        tool_calls,
     })
 }
 
 /// 按 `api_format` 选择整套协议：anthropic → `/v1/messages`；否则按 `web_search_on`
 /// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判（它会跳过联网）。
 ///
-/// `tool_names` 只对 `/chat/completions` 生效：`/responses` 与 anthropic 两条路的工具形态是另一套
-/// （`function_call` 项 / `tool_use` 块），本次改造不碰它们（各自 `extract_*` 里的注释说明了
-/// 为什么），所以这里不往下传。
+/// `tool_names` 对 `/chat/completions` 与 anthropic 两条路都生效（各自一套声明与解析形态，
+/// 见 [`anthropic_tool_decls`] / [`extract_anthropic`]）。
+///
+/// **还差一条**：`/responses`（仅 web_search 打开时走）仍是另一套形态（`function_call` 项），
+/// 目前不声明也不解析工具 —— 那条路配严格模式会有和 anthropic 以前一样的病（每轮"没有工具调用"）。
+/// 它没被一起改的原因是：`/responses` 只服务"要服务端联网检索"的用法，而联网检索与工具循环
+/// 同时开着本身还没验证过；等有真实需求再按同一套（声明 + 解析 + 回灌）补齐。
 fn request_plan(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
@@ -800,10 +940,10 @@ fn request_plan(
     tool_names: &[&str],
 ) -> Protocol {
     if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
-        let (u, b) = anthropic_parts(cfg, messages, json_mode);
+        let (u, b) = anthropic_parts(cfg, messages, json_mode, tool_names);
         (u, b, extract_anthropic, AuthScheme::Anthropic)
     } else if web_search_on(cfg) {
-        let (u, b) = responses_parts(cfg, messages, json_mode);
+        let (u, b) = responses_parts(cfg, messages, json_mode, tool_names);
         (u, b, extract_responses, AuthScheme::Bearer)
     } else {
         let (u, b) = chat_parts(cfg, messages, json_mode, tool_names);
@@ -863,6 +1003,22 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
         .filter(|c| c.kind != "reasoning_text")
         .map(|c| c.text.as_str())
         .collect::<String>();
+    // **函数调用在这里**：`output` 数组里 `type == "function_call"` 的那些项。
+    // 与 `/chat/completions` 相似（`arguments` 也是 **JSON 字符串**），但项目结构与字段名不同
+    // （`call_id` 而不是 `id`），所以不能共用一段解析。
+    let tool_calls: Vec<ToolCall> = parsed
+        .output
+        .iter()
+        .filter(|i| i.kind == "function_call")
+        .map(|i| ToolCall {
+            id: i.call_id.clone().unwrap_or_default(),
+            kind: "function".into(),
+            function: ToolCallFn {
+                name: i.name.clone().unwrap_or_default(),
+                arguments: i.arguments.clone().unwrap_or_else(|| "{}".into()),
+            },
+        })
+        .collect();
     let finish_reason = match parsed.status.as_deref() {
         Some("completed") => Some("stop".to_string()),
         Some("incomplete") => Some("length".to_string()),
@@ -886,7 +1042,7 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
         // `/responses` 这条路的工具调用形态与 chat/completions 不同（`function_call` 项），
         // 本次改造只覆盖 chat/completions：这里留空 = 这一路仍走老协议（content 里的 JSON），
         // 与改造前逐字一致。要覆盖它得另写一个映射，别在这里硬塞。
-        tool_calls: Vec::new(),
+        tool_calls,
     })
 }
 
@@ -1456,7 +1612,7 @@ mod tests {
             ChatMessage::user("最近的消息"),
         ];
 
-        let (url, body) = responses_parts(&cfg, &msgs, true);
+        let (url, body) = responses_parts(&cfg, &msgs, true, &[]);
         assert!(url.ends_with("/responses"));
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert_eq!(body["text"]["format"]["type"], "json_object");
@@ -1720,7 +1876,7 @@ mod tests {
             ChatMessage::user("最近的消息"),
             ChatMessage::assistant("好的"),
         ];
-        let (url, body) = anthropic_parts(&cfg, &msgs, true);
+        let (url, body) = anthropic_parts(&cfg, &msgs, true, &[]);
         assert!(url.ends_with("/v1/messages"));
         // system 提到顶层，且不在 messages 里（anthropic 的 messages 只认 user/assistant）
         assert_eq!(body["system"], "你是严谨的助手");
@@ -1739,7 +1895,7 @@ mod tests {
             ChatMessage::system("第二段"),
             ChatMessage::user("问"),
         ];
-        let (_, b2) = anthropic_parts(&cfg, &multi, true);
+        let (_, b2) = anthropic_parts(&cfg, &multi, true, &[]);
         assert_eq!(b2["system"], "第一段\n第二段");
     }
 
@@ -1826,6 +1982,207 @@ mod tests {
         assert!(
             err.unwrap_err().contains("尚未配置"),
             "缺 Key 必须立即报错，不切备用"
+        );
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    fn anthropic_cfg() -> LlmConfig {
+        LlmConfig {
+            base_url: "https://api.anthropic.com".into(),
+            api_key: "k".into(),
+            model: "claude-x".into(),
+            max_tokens: 512,
+            temperature: 0.0,
+            api_format: "anthropic".into(),
+            ..Default::default()
+        }
+    }
+
+    fn openai_cfg() -> LlmConfig {
+        LlmConfig {
+            base_url: "https://api.deepseek.com".into(),
+            api_key: "k".into(),
+            model: "deepseek-x".into(),
+            api_format: "openai".into(),
+            ..Default::default()
+        }
+    }
+
+    /// **bug 5 的正面判据（用户实测："发一句你好，一直无限死循环"）**：anthropic 请求
+    /// **必须声明 tools**，而且是 anthropic 自己那套形状。不声明，模型只能把动作写进正文，
+    /// 严格模式（`llm.tool_protocol`，默认开）下正文里的动作一律作废 —— 每轮都"没有工具调用"，
+    /// 直到烧完预算。这就是那条 bug 的**真病因**。
+    #[test]
+    fn anthropic_request_declares_tools_in_anthropic_shape() {
+        let (url, body) = anthropic_parts(
+            &anthropic_cfg(),
+            &[ChatMessage::user("你好")],
+            false,
+            &["read", "final"],
+        );
+        assert!(url.ends_with("/v1/messages"), "{url}");
+
+        let tools = body["tools"]
+            .as_array()
+            .expect("anthropic 请求必须带 tools");
+        assert_eq!(tools.len(), 2, "{tools:?}");
+        let read = tools
+            .iter()
+            .find(|x| x["name"] == "read")
+            .expect("read 不在声明里");
+        // anthropic 叫 `input_schema`，不是 OpenAI 的 `parameters`
+        assert_eq!(read["input_schema"]["required"][0], "path", "{read}");
+        assert!(read["description"].as_str().is_some_and(|d| !d.is_empty()));
+        // 也不该混进 OpenAI 的 `{type:"function", function:{…}}` 外壳（发过去就是 400）
+        assert!(read.get("function").is_none(), "混进了 OpenAI 形态: {read}");
+    }
+
+    /// 不声明工具时**别发空 tools 数组**（有的网关对 `tools: []` 直接 400）。
+    #[test]
+    fn anthropic_request_omits_tools_when_none_declared() {
+        let (_, body) = anthropic_parts(&anthropic_cfg(), &[ChatMessage::user("hi")], false, &[]);
+        assert!(body.get("tools").is_none(), "{body}");
+    }
+
+    /// 响应侧：`content` 里的 `tool_use` 块必须变成可执行的调用。
+    #[test]
+    fn anthropic_tool_use_block_becomes_a_usable_call() {
+        let raw = r#"{
+            "model": "claude-x",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "我先读一下"},
+                {"type": "tool_use", "id": "toolu_01", "name": "read",
+                 "input": {"path": "a.txt", "limit": 20}}
+            ],
+            "usage": {"input_tokens": 7, "output_tokens": 3}
+        }"#;
+        let reply = extract_anthropic(raw).expect("解析 anthropic 响应");
+        assert_eq!(reply.content, "我先读一下");
+        assert_eq!(reply.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(reply.tool_calls.len(), 1, "{:?}", reply.tool_calls);
+        let c = &reply.tool_calls[0];
+        assert_eq!(c.id, "toolu_01");
+        assert_eq!(c.function.name, "read");
+        // 参数在响应里是**对象**，我们的契约是 **JSON 字符串** —— 解出来必须还是那份参数
+        let args: serde_json::Value =
+            serde_json::from_str(&c.function.arguments).expect("arguments 应是 JSON 字符串");
+        assert_eq!(args["path"], "a.txt");
+        assert_eq!(args["limit"], 20);
+        assert_eq!(reply.usage.prompt_tokens, 7);
+    }
+
+    /// 回灌侧：带调用的助手消息、工具结果，都得用 anthropic 的原生块
+    /// （anthropic 没有 `role = "tool"`，结果要包成 user 消息里的 `tool_result`）。
+    #[test]
+    fn anthropic_replay_uses_native_tool_blocks() {
+        let mut assistant = ChatMessage::assistant("读一下");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "toolu_01".into(),
+            kind: "function".into(),
+            function: ToolCallFn {
+                name: "read".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            },
+        }]);
+        let msgs = vec![
+            ChatMessage::user("读 a.txt"),
+            assistant,
+            ChatMessage::tool_result("toolu_01", "文件内容"),
+        ];
+        let (_, body) = anthropic_parts(&anthropic_cfg(), &msgs, false, &["read"]);
+        let out = body["messages"].as_array().unwrap();
+        let a = out
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant 消息");
+        let blocks = a["content"].as_array().expect("assistant 应是块数组");
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b["type"] == "text" && b["text"] == "读一下"),
+            "{a}"
+        );
+        let tu = blocks
+            .iter()
+            .find(|b| b["type"] == "tool_use")
+            .expect("缺 tool_use 块");
+        assert_eq!(tu["id"], "toolu_01");
+        assert_eq!(tu["name"], "read");
+        assert_eq!(tu["input"]["path"], "a.txt", "input 必须是**对象**");
+
+        let last = out.last().unwrap();
+        assert_eq!(
+            last["role"], "user",
+            "tool_result 必须挂在 user 消息上: {last}"
+        );
+        let tr = last["content"].as_array().unwrap();
+        assert_eq!(tr[0]["type"], "tool_result");
+        assert_eq!(tr[0]["tool_use_id"], "toolu_01");
+        assert_eq!(tr[0]["content"], "文件内容");
+    }
+
+    /// `/responses`（web_search 那条路）：联网检索与函数工具**共处一个数组**。
+    /// 以前只有 `web_search` —— 那条路上模型一个函数工具都拿不到，是同一个病的另一处。
+    #[test]
+    fn responses_request_declares_function_tools_beside_web_search() {
+        let (url, body) = responses_parts(
+            &openai_cfg(),
+            &[ChatMessage::user("搜一下再改代码")],
+            false,
+            &["read", "execute"],
+        );
+        assert!(url.ends_with("/responses"), "{url}");
+        let tools = body["tools"].as_array().expect("tools 数组");
+        assert!(
+            tools.iter().any(|x| x["type"] == "web_search"),
+            "联网检索丢了: {tools:?}"
+        );
+        let read = tools
+            .iter()
+            .find(|x| x["name"] == "read")
+            .expect("read 没被声明");
+        assert_eq!(read["type"], "function");
+        // 与 /chat/completions 的差别：**扁平**，不裹 `function` 那一层
+        assert_eq!(read["parameters"]["required"][0], "path", "{read}");
+        assert!(
+            read.get("function").is_none(),
+            "混进了 chat/completions 形态: {read}"
+        );
+    }
+
+    /// `/responses` 的响应侧：`output` 里的 `function_call` 项 → 可用调用。
+    #[test]
+    fn responses_function_call_items_become_usable_calls() {
+        let raw = r#"{
+            "model": "deepseek-x",
+            "status": "completed",
+            "output": [
+                {"type": "web_search_call", "action": {"queries": ["ws_call_id=1", "ruyix 便携根"]}},
+                {"type": "message", "content": [{"type": "output_text", "text": "查到了"}]},
+                {"type": "function_call", "call_id": "call_7", "name": "read",
+                 "arguments": "{\"path\":\"a.txt\"}"}
+            ],
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        }"#;
+        let reply = extract_responses(raw).expect("解析 /responses 响应");
+        assert_eq!(
+            reply.web_queries,
+            vec!["ruyix 便携根".to_string()],
+            "内部标记不该当成查询词"
+        );
+        assert_eq!(reply.content, "查到了");
+        assert_eq!(reply.tool_calls.len(), 1, "{:?}", reply.tool_calls);
+        assert_eq!(reply.tool_calls[0].id, "call_7");
+        assert_eq!(reply.tool_calls[0].function.name, "read");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reply.tool_calls[0].function.arguments)
+                .unwrap()["path"],
+            "a.txt"
         );
     }
 }
