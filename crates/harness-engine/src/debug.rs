@@ -235,6 +235,7 @@ mod tests {
                 None,
                 &[crate::llm::ChatMessage::user("用户的问题原文")],
                 true,
+                false,
             ))
             .expect("假 LLM 该回话");
         assert_eq!(out.content, r#"{"tool":"final"}"#);

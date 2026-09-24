@@ -442,6 +442,7 @@ pub async fn propose(
         fallback,
         &[ChatMessage::system(REPAIR_SYSTEM), ChatMessage::user(user)],
         true,
+        false,
     )
     .await?;
     let attempt_parsed = parse_attempt(&out.content)?;

@@ -329,6 +329,7 @@ pub async fn run_all(
                 ChatMessage::user(user),
             ],
             true,
+            false,
         )
         .await;
 

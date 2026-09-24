@@ -81,6 +81,24 @@ pub struct LlmConfig {
     /// 切到 Claude(anthropic 格式)"这种异构组合。`chat()` 据此分支建请求与解析响应。
     #[serde(default = "d_api_format")]
     pub api_format: String,
+    /// **标准工具协议**（v0.0.6，默认开）：请求里声明 `tools`，让模型把动作发进
+    /// `tool_calls`，而不是写在 content 的 JSON 里。
+    ///
+    /// 为什么必须开：引擎原先从不声明 `tools`，而 DeepSeek 这类模型被**原生工具调用语法**
+    /// 训练过 —— 它把调用写成 DSML 标记吐进 content，服务端没收到 `tools` 就不会解析进
+    /// `tool_calls`，于是"明明算对了的命令"变成一整轮作废（实测真跑 **5/16 轮**）。
+    /// 4 臂 × 8 轮对照：声明 `tools` 的两臂**零泄露、6/8 走标准 `tool_calls`**，且与
+    /// `response_format=json_object` 不冲突（见 `doc/问题-DSML标记泄露.md`）。
+    ///
+    /// 关掉它 = 逐字回到老行为（一行回滚），代价是泄露率与"白烧一轮"一起回来。
+    /// 只覆盖 `/chat/completions`：`/responses` 与 anthropic 两条路的工具形态不同，
+    /// 这次不映射（详见 `llm::extract_responses` / `extract_anthropic` 里的说明）。
+    #[serde(default = "d_tool_protocol")]
+    pub tool_protocol: bool,
+}
+
+fn d_tool_protocol() -> bool {
+    true
 }
 
 fn d_api_format() -> String {
@@ -98,6 +116,7 @@ impl Default for LlmConfig {
             timeout_secs: d_llm_timeout(),
             web_search: d_web_search(),
             api_format: d_api_format(),
+            tool_protocol: d_tool_protocol(),
         }
     }
 }

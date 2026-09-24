@@ -72,9 +72,20 @@ pub fn fake_llm(script: Vec<String>) -> FakeLlm {
             }
             let body = read_http_body(&mut stream);
             seen_bg.lock().unwrap().push(body);
+            // 剧本条目有两种写法（见 [`tool_script`]）：
+            //   · `{"tool_calls":[…]}` → 回一个**工具调用轮**（content 空，动作在 tool_calls 里）
+            //   · 其它一切 → 照旧当 content 回话（老剧本一行都不用改）
+            let message = match tool_calls_of(&script[i]) {
+                Some(calls) => serde_json::json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": calls,
+                }),
+                None => serde_json::json!({ "role": "assistant", "content": script[i] }),
+            };
             let reply = format!(
-                r#"{{"model":"fake","choices":[{{"message":{{"role":"assistant","content":{}}}}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#,
-                serde_json::to_string(&script[i]).unwrap()
+                r#"{{"model":"fake","choices":[{{"message":{}}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#,
+                serde_json::to_string(&message).unwrap()
             );
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
@@ -89,6 +100,45 @@ pub fn fake_llm(script: Vec<String>) -> FakeLlm {
         seen,
         script_len,
     }
+}
+
+/// 造一条**工具调用轮**的剧本条目（标准工具协议）。
+///
+/// ```ignore
+/// let llm = testllm::fake_llm(vec![
+///     testllm::tool_script(&[("read", serde_json::json!({"path": "a.txt"}))]),
+///     r#"{"final":"读完了"}"#.into(),
+/// ]);
+/// ```
+///
+/// 参数会被**序列化成字符串**（协议要求 `function.arguments` 是 JSON 串），id 自动编号。
+/// 做成"造剧本的糖"而不是让测试手写转义串 —— 参数串里嵌套引号是真踩过的坑。
+pub fn tool_script(calls: &[(&str, serde_json::Value)]) -> String {
+    let list: Vec<serde_json::Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (name, args))| {
+            serde_json::json!({
+                "id": format!("call_{}", i + 1),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::to_string(args).unwrap(),
+                }
+            })
+        })
+        .collect();
+    serde_json::json!({ "tool_calls": list }).to_string()
+}
+
+/// 剧本条目是不是"工具调用轮"（`{"tool_calls":[…]}`）：是就取出那串，不是就 `None`。
+fn tool_calls_of(entry: &str) -> Option<Vec<serde_json::Value>> {
+    let v: serde_json::Value = serde_json::from_str(entry).ok()?;
+    let arr = v.get("tool_calls")?.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    Some(arr.clone())
 }
 
 fn read_http_body(stream: &mut std::net::TcpStream) -> String {
@@ -141,6 +191,7 @@ mod tests {
                 None,
                 &[crate::llm::ChatMessage::user("你好")],
                 true,
+                false,
             ))
             .expect("假 LLM 该回话");
             assert_eq!(&out.content, expect);

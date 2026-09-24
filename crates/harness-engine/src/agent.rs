@@ -421,38 +421,38 @@ fn connect_note(targets: &[ConnectTarget]) -> Option<String> {
     Some(s.trim_end().to_string())
 }
 
-pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过工具循环完成用户的工作。只有四种原子能力：
+pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过工具循环完成用户的工作。**动作一律用工具调用表达** —— 引擎已声明 read / write / execute / connect / plan / ask_user / final 七个工具，参数名与说明见工具声明。只有四种原子能力：
 
-- read    读项目：{"tool":"read","args":{"path":"src/ 或 src/main.rs"}} —— 目录给结构树，文件给内容；Git 历史用 execute 跑 git log / git show 查。
-  文件大、只要一段：{"tool":"read","args":{"path":"src/big.rs","offset":120,"limit":60}} —— 从第 120 行起读 60 行（行号从 1 起，一次上限 400 行）。表头上写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」，照着它接着读就能把缺口补齐。
+- read    读项目：read(path="src/ 或 src/main.rs") —— 目录给结构树，文件给内容；Git 历史用 execute 跑 git log / git show 查。
+  文件大、只要一段：read(path="src/big.rs", offset=120, limit=60) —— 从第 120 行起读 60 行（行号从 1 起，一次上限 400 行）。表头上写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」，照着它接着读就能把缺口补齐。
   **该用窗口**：文件好几百行、你只需要其中一段（定位一个函数、看某一处报错）；**别用窗口**：文件不大（一次读完更省事），或者你紧接着要用 content 整份重写它（那必须先看全）。只读了一段就别在 final 里断言"全篇如何如何"—— 没看到的部分就是没看到。
 - write   写文件，两种写法**二选一**：
   · 改已有文件里的一处或几处 —— 用 **edits**（首选：只传改动，不重发全文）：
-    {"tool":"write","args":{"path":"src/x.rs","edits":[{"find":"要被替换的原文","replace":"换成什么"}]}}
+    write(path="src/x.rs", edits=[{"find":"要被替换的原文","replace":"换成什么"}])
     `find` 必须与文件里**逐字符一致**（含缩进），且在文件里**恰好出现一次**；不唯一就把上下文多带两行。匹配不上或撞上多次 → **整批作废、一个字节都不落盘**，所以改之前先 read 确认原文。同一文件的多条 edits 按你给的顺序累积。
   · 新建文件、或改动大到划不出锚点 —— 用 **content**（整份内容）：
-    {"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}}
+    write(path="相对路径", content="完整文件内容")
   **别用 edits**：新建文件（没有原文可锚）、整篇重排、或者你压根没读过这个文件 —— 猜出来的 find 匹配不上，白费一轮。**别用 content**：只改几行的既有文件 —— 把整份吐回来既贵又容易顺手丢原文（曾经真这么删掉过用户的代码）。
   两种形态**不许同时给**（引擎当面拒），content 不许是空串。
-- execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化、git 都走它。
+- execute 跑命令：execute(cmd="命令", timeout_secs=30) —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化、git 都走它。
   永不退出的服务（spring-boot:run / java -jar / npm run dev / vite）**必须**用后台模式，不要用 start、Start-Process、往 %TEMP% 写 bat/ps1 那类花招（它们拿不到输出，进程还会脱离掌控）：
-  {"tool":"execute","args":{"cmd":"mvn spring-boot:run","background":true,"ready_cmd":"netstat -ano | findstr :8083","ready_timeout_secs":90,"keep_alive":true}}
+  execute(cmd="mvn spring-boot:run", background=true, ready_cmd="netstat -ano | findstr :8083", ready_timeout_secs=90, keep_alive=true)
   background 起完不等它；ready_cmd 是**一条命令**，退出码 0 即就绪（不写就等于不等、起完即返）。返回 handle、pid 与日志**文件路径**，输出全部落在那个文件里（路径由引擎给，别自己写重定向）。
-  **keep_alive 决定它活不活得过本次 run**：不写就是 false —— 本次 run 一结束，引擎就把它收掉（连子进程树）。用户要的是“把服务跑起来”（让我访问 / 留着跑 / 等会儿用）→ **必须**写 "keep_alive":true：它会留在引擎进程表里，用户在【服务】面板能看到、能按 pid 停掉，IDE 退出时一并收。只是验证它起不起得来、随后就停 → 别写，并在 final 里说明“本次结束已自动收掉”。**报“已启动”时它必须还活着**：不带 keep_alive 却报“服务已启动”，用户 netstat 一看就是空的 —— 那是谎报，不是措辞问题。
-  之后用 execute {"op":"status","handle":"p1"} 查状态（它会告诉你这个进程有没有声明 keep_alive）、op=log 读日志尾、op=stop 停掉（连子进程树一起杀）。重启同一个服务前先 status / stop：端口被上一次的进程占着时，"起不来"是假的。
-- connect 连外部能力：{"tool":"connect","args":{"action":"list"}} 先看有哪些可连；调 MCP 工具用 {"tool":"connect","args":{"action":"call","server":"服务器名","tool":"工具名","arguments":{}}}；把任务委托给远端 Agent 用 {"tool":"connect","args":{"action":"send","agent":"名字","text":"任务描述"}}。可用清单在提示词里给过，没有的就别硬猜名字。
-- plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 {"tool":"plan","args":{"steps":[{"title":"短标题","detail":"做什么","files":["相对路径"]}]}}，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
+  **keep_alive 决定它活不活得过本次 run**：不写就是 false —— 本次 run 一结束，引擎就把它收掉（连子进程树）。用户要的是“把服务跑起来”（让我访问 / 留着跑 / 等会儿用）→ **必须**写 keep_alive=true：它会留在引擎进程表里，用户在【服务】面板能看到、能按 pid 停掉，IDE 退出时一并收。只是验证它起不起得来、随后就停 → 别写，并在 final 里说明“本次结束已自动收掉”。**报“已启动”时它必须还活着**：不带 keep_alive 却报“服务已启动”，用户 netstat 一看就是空的 —— 那是谎报，不是措辞问题。
+  之后用 execute(op="status", handle="p1") 查状态（它会告诉你这个进程有没有声明 keep_alive）、op="log" 读日志尾、op="stop" 停掉（连子进程树一起杀）。重启同一个服务前先 status / stop：端口被上一次的进程占着时，"起不来"是假的。
+- connect 连外部能力：connect(action="list") 先看有哪些可连；调 MCP 工具用 connect(action="call", server="服务器名", tool="工具名", arguments={})；把任务委托给远端 Agent 用 connect(action="send", agent="名字", text="任务描述")。可用清单在提示词里给过，没有的就别硬猜名字。
+- plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 plan(steps=[{"title":"短标题","detail":"做什么","files":["相对路径"]}])，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
 规则：
-1. 每轮只输出一个 JSON 对象（一次能力调用，或最终答复），不要输出解释文字、不要 markdown 代码块包裹。本引擎**不走 tools 协议**（没有函数调用通道）：不要输出任何工具调用标记（DSML 之类），能力名只写在 JSON 的 `tool` 字段里。
+1. 每轮用**工具调用**表达动作：可以发一个，也可以一轮发多个互不依赖的（批量，见后续提示）。不要输出解释文字、不要 markdown 代码块包裹；**也不要把动作写成 content 里的 JSON**（那是老协议，只在兼容时才认），更不要输出任何工具调用标记（DSML 之类）。
 2. 回答关于本项目的问题前，先 read 相关文件/目录 —— 不要凭空猜测项目内容。
 3. 改代码：先 read 拿到现状。改已有文件用 write + edits 只传改动；新建文件、或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 改动能验证就验证：execute 跑编译/测试（如 cargo test、python -m pytest、npm test），失败就继续修。
 5. 项目之外的东西（数据库、浏览器、远端服务、另一个 Agent）走 connect —— 不要自己写脚本硬凑协议，也不要把外部能力的事当成项目内的改动。
-6. 全部完成后输出最终答复：{"final":"给用户的完整说明（Markdown：结论、改了哪些文件、验证结果）"}
+6. 全部完成后**调用 final 工具交付**：final(answer="给用户的完整说明（Markdown：结论、改了哪些文件、验证结果）")
    final 是**给用户的答复**，不是取证记录：不要整段粘贴命令的原始输出、编译/测试日志或文件内容 ——
-   那些已经在你自己的调用结果里（用户也能在 Agent 面板逐条看到），抄进 final 只会把 JSON 撑大、
-   撑到手写转义出错，一轮白干。要引用就摘那一行结论（哪个端口、哪个版本号、第几行报错），不要整张贴。"#;
+   那些已经在你自己的调用结果里（用户也能在 Agent 面板逐条看到），抄进交付只会把答复撑爆、
+   还容易在转义上翻车，一轮白干。要引用就摘那一行结论（哪个端口、哪个版本号、第几行报错），不要整张贴。"#;
 
 /// 系统提示词 = [`AGENT_SYSTEM`] + 平台特定补充。
 /// Windows 上 findstr 的多文件掩码语义不稳（`/c:"串"` 配多个通配符经常漏配），
@@ -514,8 +514,8 @@ pub(crate) fn staged_execute_note(policy: WritePolicy, has_changes: bool) -> &'s
 /// 放在**首轮 user 消息**而不是 `AGENT_SYSTEM`：与 connect 清单 / 命令发现 / 写入策略同一条
 /// 通道（那里已有一处 note 的落点），且 `AGENT_SYSTEM` 保持常量不动（测试直接断言其内容）。
 const BATCH_HINT_HEAD: &str = concat!(
-    "批量调用（省轮次）：互不依赖的调用可以一轮发一批 —— ",
-    r#"{"actions":[{"tool":"read","args":{"path":"a.rs"}},{"tool":"read","args":{"path":"b.rs"}}]}"#,
+    "批量调用（省轮次）：互不依赖的调用可以一轮发一批 —— 也就是同一轮里发**多个工具调用**",
+    "（例如同时 read(\"a.rs\") 与 read(\"b.rs\")）",
     "。引擎**把一批里的调用并发跑**（读 / 写 / 执行 / 连接各走各的），结果在同一轮的 results 里按同样顺序一次全给你。",
     "同一批里**只有两种情况**会被自动按你给的顺序排：对同一个文件的写与读、以及托管进程的起停查；",
     "其余依赖（先 build 再 test、抢同一个端口、拿上一条的输出当参数）引擎看不出来 —— 有依赖就分两轮发。"
@@ -889,9 +889,103 @@ fn markup_note(err: String, markup: usize) -> String {
         return err;
     }
     format!(
-        "{err}（本次输出里检测到 {markup} 处模型自带的工具调用标记，已剥掉 —— 本引擎不走 tools 协议：\
-         动作只写在 content 的 JSON 里，能力名放 `tool` 字段、参数放 `args`，不要再发那种标记）"
+        "{err}（本次输出里检测到 {markup} 处模型自带的工具调用标记，已剥掉 —— 动作请**直接用工具调用**\
+         表达（本轮已声明 read / write / execute / connect / plan / ask_user / final），不要把动作、\
+         更不要把这类标记写进 content）"
     )
+}
+
+/// `tool_calls` → 动作清单（**标准工具协议**，v0.0.6 起的主路）。
+///
+/// 一条 `tool_call` = 一个动作；一轮多条 = 我们的**批量调用**（顺序即声明顺序，与老协议
+/// `{"actions":[…]}` 同义，后面的波次并发/冲突保序照旧生效）。
+///
+/// 三条纪律：
+///
+/// 1. **参数解析失败只作废那一条**，不整批抛出 —— 模型算对了另外三条时不该一起烧掉；
+/// 2. **校验复用 `parse_one`**：把 `{tool: <名字>, args: <参数>}` 交给它，于是"未知能力 /
+///    参数不合法"两种判定父子两条协议只有一份实现（工具名与能力名一一对应由
+///    `llm::tool_decls` 的契约保证）；
+/// 3. **控制动作不许进批**（`plan` / `ask_user` / `final`）：与老协议同一条纪律，理由也一样 ——
+///    同一批里两件事谁先谁后没有合理解释，替模型猜一个顺序不如当面拒。
+fn parse_tool_calls(
+    calls: &[llm::ToolCall],
+    max: usize,
+    allow_batch: bool,
+) -> Result<Vec<Action>, String> {
+    if calls.len() > 1 && !allow_batch {
+        return Err(format!(
+            "本轮不允许批量调用：一次发了 {} 个工具调用。请每轮只发一个",
+            calls.len()
+        ));
+    }
+    if calls.len() > max {
+        return Err(format!(
+            "一批最多 {max} 个调用，这次给了 {} 个 —— 请拆成多轮，或按依赖关系分成几批",
+            calls.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(calls.len());
+    for (i, c) in calls.iter().enumerate() {
+        let name = c.function.name.trim().to_ascii_lowercase();
+        // 工具名对不上是模型自己的锅，报清楚它发了什么（不带"未知能力"那套老词，
+        // 免得它以为要改用 content 里的 JSON）
+        let args: serde_json::Value = if c.function.arguments.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&c.function.arguments).map_err(|e| {
+                format!(
+                    "第 {} 个工具调用 `{name}` 的参数不是合法 JSON: {e}；片段: {}",
+                    i + 1,
+                    clip(&c.function.arguments, 200)
+                )
+            })?
+        };
+        // 交付动作：`final({answer})` —— 它不是"第五种能力"，是收尾（老协议里是 final 字段）
+        if name == "final" {
+            let answer = args
+                .get("answer")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if answer.is_empty() {
+                return Err(
+                    "final 的 answer 为空 —— 交付要写清结论、改了哪些文件、验证结果".into(),
+                );
+            }
+            out.push(Action::Final(answer));
+            continue;
+        }
+        let v = serde_json::json!({ "tool": name, "args": args });
+        let a = parse_one(&v).map_err(|e| format!("第 {} 个工具调用：{e}", i + 1))?;
+        match &a {
+            Action::Plan(_) if calls.len() > 1 => {
+                return Err("plan 不能和别的调用放进同一轮：清单要单独发一轮".into());
+            }
+            Action::Ask(_) if calls.len() > 1 => {
+                return Err("ask_user 不能和别的调用放进同一轮：提问要单独一轮".into());
+            }
+            Action::Final(_) if calls.len() > 1 => {
+                return Err("final 不能和别的调用放进同一轮：完成时单独发一轮".into());
+            }
+            _ => out.push(a),
+        }
+    }
+    Ok(out)
+}
+
+/// 工具轮**回显给模型**的那条 assistant 消息。
+///
+/// 工具轮的 `content` 天生是空的（动作全在 `tool_calls` 里）。若原样回显空消息，模型下一轮
+/// 就看不见自己刚发过什么 —— 于是把**它自己发的那串调用**原样写回去（`arguments` 一字不改，
+/// 截断/畸形也照原样，让模型自己看出来问题）。形状是 JSON，与老协议的历史写法同族。
+pub(crate) fn tool_calls_echo(calls: &[llm::ToolCall]) -> String {
+    let list: Vec<serde_json::Value> = calls
+        .iter()
+        .map(|c| serde_json::json!({ "name": c.function.name, "arguments": c.function.arguments }))
+        .collect();
+    serde_json::json!({ "tool_calls": list }).to_string()
 }
 
 /// 一轮模型输出 → 动作清单（1 个或多个）。
@@ -1884,6 +1978,19 @@ pub(crate) fn parse_step_actions(
     allow_batch: bool,
 ) -> Result<Vec<StepAction>, String> {
     Ok(parse_actions(raw, max, allow_batch)?
+        .into_iter()
+        .map(to_step_action)
+        .collect())
+}
+
+/// 步骤执行体的**工具调用**入口：与主循环同一套解析（[`parse_tool_calls`]），只把动作收窄成
+/// 三种能力 —— 与 [`parse_step_actions`] 的父子分工完全对称（批协议不许父子两处各长一遍）。
+pub(crate) fn parse_step_tool_calls(
+    calls: &[llm::ToolCall],
+    max: usize,
+    allow_batch: bool,
+) -> Result<Vec<StepAction>, String> {
+    Ok(parse_tool_calls(calls, max, allow_batch)?
         .into_iter()
         .map(to_step_action)
         .collect())
@@ -3476,7 +3583,15 @@ pub async fn run_with_ask(
             continue;
         }
 
-        let reply = match llm::chat(&cfg.llm, cfg.llm_fallback.as_ref(), &msgs, true).await {
+        let reply = match llm::chat(
+            &cfg.llm,
+            cfg.llm_fallback.as_ref(),
+            &msgs,
+            true,
+            cfg.llm.tool_protocol,
+        )
+        .await
+        {
             Ok(r) => {
                 llm_failures = 0;
                 r
@@ -3519,8 +3634,16 @@ pub async fn run_with_ask(
                 ),
             );
         }
-        let mut actions = match parse_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
-        {
+        // 两条协议都要认（实测：声明 `tools` 之后**仍有 2/8 轮**走老形状 —— 见
+        // `doc/问题-DSML标记泄露.md` 的 4 臂对照）：
+        //   ① 标准工具协议：动作在 `reply.tool_calls` 里（主路，v0.0.6 起）
+        //   ② 兼容层：动作在 content 的 JSON 里（老协议，模型偶尔还会用）
+        let via_tools = !reply.tool_calls.is_empty();
+        let mut actions = match if via_tools {
+            parse_tool_calls(&reply.tool_calls, cfg.agent.batch_max, cfg.agent.batch)
+        } else {
+            parse_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
+        } {
             Ok(a) => a,
             Err(e) => {
                 // 解析失败不终止：把错误告诉模型让它重出（消耗轮次预算，防死循环）。
@@ -3543,10 +3666,30 @@ pub async fn run_with_ask(
                 continue;
             }
         };
+        // 迁移期的观测点：这一轮的动作是从哪条协议来的。"兼容层"出现的比例就是迁移进度
+        // （实测第一天 6/8 走工具协议、2/8 走兼容层），也是判断能不能收敛、要不要回滚的依据。
+        sink.log(
+            "info",
+            format!(
+                "[agent] 第 {step} 轮 {} → {} 个动作",
+                if via_tools {
+                    "工具调用（标准协议）"
+                } else {
+                    "content 里的 JSON（兼容层）"
+                },
+                actions.len()
+            ),
+        );
         // 记下模型那半在 msgs 里的落点 —— 历史折叠要靠它回头把这一格的正文换掉。
         // （ask / final / 解析失败那几条 `continue` 不会走到"记落点"，所以不会留下悬空的轮次）
         let assistant_idx = msgs.len();
-        msgs.push(ChatMessage::assistant(reply.content.clone()));
+        // 工具轮的 content 天生是空的（动作全在 `tool_calls` 里），原样回显等于给模型看一条
+        // 空消息 —— 所以把**它自己发的那串调用**写回去（见 [`tool_calls_echo`]）。
+        msgs.push(ChatMessage::assistant(if via_tools {
+            tool_calls_echo(&reply.tool_calls)
+        } else {
+            reply.content.clone()
+        }));
 
         // 第五个动作：向委托人提问。控制动作独占一轮（批里的 ask_user 已被当面拒）。
         // 上限是硬闸：`ask` 是稀缺资源，超了要求"交付并声明假设"，而不是继续追问。

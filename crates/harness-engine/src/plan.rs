@@ -315,6 +315,7 @@ pub async fn generate(
         fallback,
         &[ChatMessage::system(PLAN_SYSTEM), ChatMessage::user(user)],
         true,
+        false,
     )
     .await?;
     let plan = parse_plan(&out.content)?;

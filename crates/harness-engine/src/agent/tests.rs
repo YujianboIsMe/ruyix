@@ -144,6 +144,146 @@ fn a_headless_dsml_call_gets_told_what_is_missing_and_recovers() {
     assert_eq!(llm.count(), 3, "泄露一轮 → 纠正后一轮 → 交付");
 }
 
+/// 跑一轮工具循环：无提问通道、无连接器、Apply 策略、静默 sink —— 工具协议那几条用例共用。
+fn run_loop(cfg: &crate::config::AppConfig, root: &std::path::Path) -> AgentOutcome {
+    block_on(run_with_ask(
+        cfg,
+        root,
+        "任务",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &NoAsker,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect("run 不该失败")
+}
+
+/// **标准工具协议**（v0.0.6 主路）：一轮 `tool_calls` → 动作照跑；模型下一轮**看得见**自己
+/// 发过的那串调用（工具轮 content 天生是空的，回显见 `tool_calls_echo`）。
+#[test]
+fn tool_calls_round_runs_and_the_model_sees_its_own_call() {
+    let d = TempDir::new("tools-basic");
+    d.write("a.txt", "AAA");
+    let llm = crate::testllm::fake_llm(vec![
+        crate::testllm::tool_script(&[("read", serde_json::json!({"path": "a.txt"}))]),
+        r#"{"final":"读完了"}"#.into(),
+    ]);
+    let cfg = ask_cfg(&llm);
+    let out = run_loop(&cfg, &d.0);
+
+    assert_eq!(llm.count(), 2, "工具轮只该占一轮（读 + 交付）");
+    assert!(out.answer.contains("读完了"), "{}", out.answer);
+    // 请求里真的声明了工具（不开这个开关等于没改造）
+    let req1 = llm.request(0);
+    assert!(req1.contains("\"tools\""), "第 1 轮必须声明 tools");
+    assert!(req1.contains("\"read\""), "四个能力都要在声明里: {req1}");
+    // 第 2 轮：模型看得到自己发过什么 + 拿得到读到的内容
+    let req2 = llm.request(1);
+    assert!(
+        req2.contains("tool_calls"),
+        "工具轮的 content 是空的，必须把它的调用回显回去: {req2}"
+    );
+    assert!(req2.contains("a.txt"), "观察结果要带上文件内容: {req2}");
+}
+
+/// 一轮里发多个工具调用 = **批量调用**（顺序即声明顺序，波次并发照旧）
+#[test]
+fn several_tool_calls_in_one_round_are_one_batch() {
+    let d = TempDir::new("tools-batch");
+    d.write("a.txt", "AAA");
+    d.write("b.txt", "BBB");
+    let llm = crate::testllm::fake_llm(vec![
+        crate::testllm::tool_script(&[
+            ("read", serde_json::json!({"path": "a.txt"})),
+            ("read", serde_json::json!({"path": "b.txt"})),
+        ]),
+        r#"{"final":"两个都读了"}"#.into(),
+    ]);
+    let cfg = ask_cfg(&llm);
+    let out = run_loop(&cfg, &d.0);
+
+    assert_eq!(llm.count(), 2, "两条 read 一轮发完，仍然只占一轮");
+    assert!(out.answer.contains("两个都读了"), "{}", out.answer);
+    let req2 = llm.request(1);
+    assert!(
+        req2.contains("a.txt") && req2.contains("b.txt"),
+        "两条观察都要回灌: {req2}"
+    );
+}
+
+/// 交付：`final` 工具调用（不是"第五种能力"，是收尾）
+#[test]
+fn final_as_a_tool_call_delivers_in_one_round() {
+    let d = TempDir::new("tools-final");
+    let llm = crate::testllm::fake_llm(vec![crate::testllm::tool_script(&[(
+        "final",
+        serde_json::json!({"answer": "做完了"}),
+    )])]);
+    let cfg = ask_cfg(&llm);
+    let out = run_loop(&cfg, &d.0);
+    assert_eq!(llm.count(), 1);
+    assert!(out.answer.contains("做完了"), "{}", out.answer);
+}
+
+/// 批开关关掉：一轮多个工具调用**当面拒**，并给一句模型能照做的纠正
+#[test]
+fn batch_off_refuses_several_tool_calls() {
+    let d = TempDir::new("tools-nobatch");
+    let llm = crate::testllm::fake_llm(vec![
+        crate::testllm::tool_script(&[
+            ("read", serde_json::json!({"path": "a.txt"})),
+            ("read", serde_json::json!({"path": "a.txt"})),
+        ]),
+        r#"{"final":"好"}"#.into(),
+    ]);
+    let mut cfg = ask_cfg(&llm);
+    cfg.agent.batch = false;
+    let out = run_loop(&cfg, &d.0);
+
+    assert_eq!(llm.count(), 2, "拒绝也是一轮，之后模型照要求重来");
+    assert!(out.answer.contains("好"), "{}", out.answer);
+    let req2 = llm.request(1);
+    assert!(req2.contains("不允许批量调用"), "{req2}");
+}
+
+/// 一行回滚：`llm.tool_protocol = false` → 请求里**一个字都不提**工具，老协议照旧能跑
+#[test]
+fn tool_protocol_switch_off_sends_no_tools_field() {
+    let d = TempDir::new("tools-off");
+    let llm = crate::testllm::fake_llm(vec![r#"{"final":"老路也能交付"}"#.into()]);
+    let mut cfg = ask_cfg(&llm);
+    cfg.llm.tool_protocol = false;
+    let out = run_loop(&cfg, &d.0);
+
+    assert!(
+        !llm.request(0).contains("\"tools\""),
+        "关掉开关就不该声明工具"
+    );
+    assert!(out.answer.contains("老路也能交付"), "{}", out.answer);
+}
+
+/// 混合态（实测 6/8 工具协议 + 2/8 老协议）：同一趟里两种形状都要能接住
+#[test]
+fn tool_round_and_legacy_json_round_both_work() {
+    let d = TempDir::new("tools-mixed");
+    d.write("a.txt", "AAA");
+    let llm = crate::testllm::fake_llm(vec![
+        // 第 1 轮：标准工具协议
+        crate::testllm::tool_script(&[("read", serde_json::json!({"path": "a.txt"}))]),
+        // 第 2 轮：老协议（content 里的 JSON），模型偶尔还会这么发
+        r#"{"tool":"write","args":{"path":"b.txt","content":"BBB"}}"#.into(),
+        r#"{"final":"都做完了"}"#.into(),
+    ]);
+    let cfg = ask_cfg(&llm);
+    let out = run_loop(&cfg, &d.0);
+
+    assert_eq!(llm.count(), 3, "工具轮 + 老协议轮 + 交付");
+    assert_eq!(std::fs::read_to_string(d.0.join("b.txt")).unwrap(), "BBB");
+    assert!(out.answer.contains("都做完了"), "{}", out.answer);
+}
+
 /// connect 的三形态：省略 action = list；call 要 server+tool；send 要 agent+text
 #[test]
 fn parse_action_covers_connect() {
@@ -1765,8 +1905,8 @@ fn the_prompt_teaches_keep_alive_and_its_consequence() {
         );
     }
     assert!(
-        AGENT_SYSTEM.contains(r#""keep_alive":true"#),
-        "示例里必须带 keep_alive:true —— 那是模型最常抄的一行"
+        AGENT_SYSTEM.contains("keep_alive=true"),
+        "示例里必须带 keep_alive=true —— 那是模型最常抄的一行"
     );
 }
 
@@ -2272,8 +2412,8 @@ fn the_batch_hint_follows_the_switch() {
         "子步骤那份不该提 plan：{step_hint}"
     );
     assert!(
-        hint.contains("actions") && hint.contains("最多 8"),
-        "{hint}"
+        hint.contains("工具调用") && hint.contains("最多 8"),
+        "批提示要说清「一轮发多个工具调用」与上限：{hint}"
     );
     assert!(hint.contains("并发"), "得说清只读会并发、其余按序：{hint}");
 

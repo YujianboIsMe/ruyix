@@ -15,6 +15,40 @@ use std::time::{Duration, Instant};
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// 工具协议：assistant 消息里**原样回显**的 tool_calls。
+    ///
+    /// 本引擎用一种**混合**形态（详见 `doc/需求-工具协议改造-v0.0.6.md`）：请求里声明 `tools`
+    /// 让模型把动作发进 `tool_calls`（这是治 DSML 泄露的关键 —— 实测声明后 4 臂对照里
+    /// 零泄露、6/8 走标准调用），但**自己不在这条消息链上做 tool 记账**：下一轮把动作以
+    /// 我们自己的 JSON 形状回显（模型看得懂，且与老协议的历史写法一致），观察结果照旧走
+    /// user 消息。这样既拿到"模型的原生调用有地方可去"，又不用把观察结果全部改成 tool
+    /// 角色 + 逐条对 id（那会牵动历史折叠、批次与所有观察落点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// 工具协议：`role = tool` 的结果消息指向它答复的那次调用（混合形态下暂不用，
+    /// 留着这条通路是为了将来真要切"纯标准协议"时不用再动结构）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// 模型**发出来**的一次工具调用（响应里 `message.tool_calls` 的一项）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ToolCall {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFn,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ToolCallFn {
+    #[serde(default)]
+    pub name: String,
+    /// 参数是**一个 JSON 字符串**（不是对象）—— 实测 DeepSeek 也会给不合法/截断的串，
+    /// 所以解析放在调用方，且失败只影响那一条调用（不整轮作废）。
+    #[serde(default)]
+    pub arguments: String,
 }
 
 impl ChatMessage {
@@ -22,18 +56,33 @@ impl ChatMessage {
         Self {
             role: "system".into(),
             content: c.into(),
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
     pub fn user(c: impl Into<String>) -> Self {
         Self {
             role: "user".into(),
             content: c.into(),
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
     pub fn assistant(c: impl Into<String>) -> Self {
         Self {
             role: "assistant".into(),
             content: c.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+    /// 工具结果消息（`role = tool`）—— 混合形态下暂未使用，见 [`ChatMessage::tool_calls`]。
+    pub fn tool_result(id: impl Into<String>, c: impl Into<String>) -> Self {
+        Self {
+            role: "tool".into(),
+            content: c.into(),
+            tool_calls: None,
+            tool_call_id: Some(id.into()),
         }
     }
 }
@@ -72,6 +121,12 @@ pub struct ChatOutcome {
     /// 标题与链接都不回传。但**有查询词就够了** —— 复核员据此知道模型真去查过，
     /// 不会再把"证据池里没有"当成"主循环没做"（那是上一个死锁的成因）。
     pub web_queries: Vec<String>,
+    /// 标准工具协议返回的动作（模型按请求里声明的 `tools` 发回来的 `tool_calls`）。
+    ///
+    /// 与 `content` **并列**：`final` 之前的每一轮，模型要么给工具调用、要么（老习惯）把
+    /// 动作写在 content 的 JSON 里 —— 两条路都要认，因为实测声明 `tools` 之后仍有 2/8 轮
+    /// 走老形状（见 `doc/问题-DSML标记泄露.md` 的 4 臂对照）。
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +199,9 @@ struct Choice {
 struct MsgBody {
     #[serde(default)]
     content: String,
+    /// 标准工具协议的调用清单（模型按请求里声明的 `tools` 发回来的动作）
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
 }
 
 /// 从模型回复里把一个 JSON 对象抠出来，**并修掉字符串里的裸控制字符**。
@@ -322,6 +380,8 @@ struct RawReply {
     model: Option<String>,
     finish_reason: Option<String>,
     web_queries: Vec<String>,
+    /// 标准工具协议返回的动作（没声明 `tools`、或模型这轮没用工具时为空）
+    tool_calls: Vec<ToolCall>,
 }
 
 /// 端点是不是 DeepSeek 官方（`api.deepseek.com` 及其子域）。
@@ -437,10 +497,87 @@ pub fn web_search_on(cfg: &LlmConfig) -> bool {
     }
 }
 
+/// 声明给模型的工具 —— **表驱动**：加一个能力 = 加一行，不动 match 臂。
+///
+/// ## 为什么非要有它（这次的病根）
+///
+/// 引擎原先从不声明 `tools`，动作全靠"content 里的 JSON"这条约定。但 DeepSeek 这类模型被
+/// **原生工具调用语法**训练过：它会把自己的调用写成 DSML 标记吐进 content，而服务端没收到
+/// `tools` 就**不会**把它解析进 `tool_calls` —— 于是"模型明明算对了的命令"变成一整轮作废
+/// （实测真跑 **5/16 轮**，见 `doc/问题-DSML标记泄露.md`）。4 臂 × 8 轮对照里，声明 `tools`
+/// 的两臂**零泄露、6/8 走标准 `tool_calls`**，且与 `response_format=json_object` 不冲突。
+///
+/// ## 与 [`crate::agent::parse_one`] 的契约（改一处必须看另一处）
+///
+/// `name` 与 `parameters` 的形状必须与 `parse_one` 认的**逐字一致**（`parameters` 那一层
+/// 就是它眼里的 `args`）：名字对不上 = "未知能力"，参数键对不上 = "参数不合法"。
+/// 单测 `tools_cover_every_parser_capability` 钉住"工具名与能力名一一对应"。
+///
+/// `final` 不是"第五个能力"：它是**交付动作**（老协议里是 `{"final":"…"}` 这个字段），
+/// 所以这里跟在四种能力后面单独说明。
+pub fn tool_decls() -> Vec<serde_json::Value> {
+    TOOL_DECLS
+        .iter()
+        .map(|(name, desc, params)| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": desc,
+                    // 表里写的是 JSON 源串：常量表不能直接放 Value（const 里没有堆分配），
+                    // 解析失败属于写错常量，构建期就该炸 —— 单测会逐条解析一遍。
+                    "parameters": serde_json::from_str::<serde_json::Value>(params)
+                        .expect("工具参数表写错了（常量 JSON，单测会先抓到）"),
+                }
+            })
+        })
+        .collect()
+}
+
+/// 工具的（名字 / 说明 / 参数 JSON 源串）表。**契约见 [`tool_decls`] 的文档。**
+const TOOL_DECLS: &[(&str, &str, &str)] = &[
+    (
+        "read",
+        "读项目内的文件（或目录列表）。大文件用 offset/limit 分段读；连续读多个互不依赖的文件请在一轮里发多个 read。",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔"},"offset":{"type":"integer","description":"从第几行开始读（1 起）"},"limit":{"type":"integer","description":"最多读多少行"}},"required":["path"]}"#,
+    ),
+    (
+        "write",
+        "写项目内的文件（整文件）。改已有文件优先用 edits 只传改动；新建文件或整篇重排才用 content 交回整份。两个都给会被拒。",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径"},"content":{"type":"string","description":"整份新内容（新建/整篇重排）"},"edits":{"type":"array","description":"锚点替换（改已有文件的首选）","items":{"type":"object","properties":{"find":{"type":"string","description":"要被替换的原文（必须唯一）"},"replace":{"type":"string","description":"换成什么"}},"required":["find","replace"]}}},"required":["path"]}"#,
+    ),
+    (
+        "execute",
+        "在项目根执行命令。前台有界：{cmd, timeout_secs}（编译/测试/git）。起常驻服务：{cmd, background:true, ready_cmd, ready_timeout_secs, keep_alive}，ready_cmd 退出码 0 即算就绪，返回 handle。句柄操作：{op:\"status\"|\"log\"|\"stop\", handle}。",
+        r#"{"type":"object","properties":{"cmd":{"type":"string","description":"要执行的命令行"},"timeout_secs":{"type":"integer","description":"前台最长等多久"},"background":{"type":"boolean","description":"true = 托管常驻进程，起完就返"},"ready_cmd":{"type":"string","description":"后台就绪判据：退出码 0 即就绪"},"ready_timeout_secs":{"type":"integer","description":"等就绪的上限"},"keep_alive":{"type":"boolean","description":"run 结束是否保留这个进程（服务默认要留）"},"op":{"type":"string","description":"句柄操作：status / log / stop"},"handle":{"type":"string","description":"后台进程的句柄（op 时必填）"}},"required":[]}"#,
+    ),
+    (
+        "connect",
+        "连项目之外的能力：MCP 工具与远端 agent。action=list 看清单；action=call 调 MCP 工具；action=send 给远端 agent 派任务。项目内的读写执行别用它。",
+        r#"{"type":"object","properties":{"action":{"type":"string","description":"list / call / send"},"server":{"type":"string","description":"MCP 服务器名（call）"},"tool":{"type":"string","description":"工具名（call）"},"arguments":{"type":"object","description":"工具参数（call）"},"agent":{"type":"string","description":"远端 agent 名（send）"},"text":{"type":"string","description":"派给远端 agent 的话（send）"}},"required":["action"]}"#,
+    ),
+    (
+        "plan",
+        "任务清单：要动多个文件时先发，用户会在大纲区看到进度，引擎也按它逐步派发。files 只列**这一步真的会写**的文件（拿它对账，列多了会让做完的步骤看起来没做完）。",
+        r#"{"type":"object","properties":{"steps":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string","description":"短标题"},"detail":{"type":"string","description":"这一步做什么（一句话）"},"files":{"type":"array","items":{"type":"string"},"description":"这一步真的会写的文件（相对路径）"},"kind":{"type":"string","description":"code / test / config / doc"}},"required":["title"]}}},"required":["steps"]}"#,
+    ),
+    (
+        "ask_user",
+        "需求有歧义、且猜错会白做时，问委托人（独占一轮）。必须给 why：说明这个答案会决定接下来的什么动作。答案不构成任何授权。",
+        r#"{"type":"object","properties":{"question":{"type":"string","description":"要问的问题"},"why":{"type":"string","description":"为什么必须问（决定接下来什么动作）"},"options":{"type":"array","items":{"type":"string"},"description":"候选答案（最多 5 个，用户也可自由输入）"},"default_index":{"type":"integer","description":"推荐第几个选项（0 起）"}},"required":["question","why"]}"#,
+    ),
+    (
+        "final",
+        "交付：全部做完后调用它结束本轮。answer 是给用户的完整说明（Markdown：结论、改了哪些文件、验证结果），不要粘贴命令原始输出或整段文件内容。",
+        r#"{"type":"object","properties":{"answer":{"type":"string","description":"给用户的完整说明（Markdown）"}},"required":["answer"]}"#,
+    ),
+];
+
 fn chat_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
+    tools: bool,
 ) -> (String, serde_json::Value) {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({
@@ -452,6 +589,11 @@ fn chat_parts(
     });
     if json_mode {
         body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    // 标准工具协议（`tools` 由调用方显式传，见 [`chat`] 的文档）：**这是治 DSML 泄露的那一步**
+    // —— 声明之后模型的原生调用进了 `tool_calls`，而不是被截头后落进 content。
+    if tools {
+        body["tools"] = serde_json::Value::Array(tool_decls());
     }
     (url, body)
 }
@@ -622,12 +764,24 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
         model: parsed.model,
         finish_reason,
         web_queries: Vec::new(),
+        // anthropic 的 `tool_use` 块本次不映射：这条路保持老协议（content 里的 JSON），
+        // 与改造前逐字一致。
+        tool_calls: Vec::new(),
     })
 }
 
 /// 按 `api_format` 选择整套协议：anthropic → `/v1/messages`；否则按 `web_search_on`
 /// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判（它会跳过联网）。
-fn request_plan(cfg: &LlmConfig, messages: &[ChatMessage], json_mode: bool) -> Protocol {
+///
+/// `tools` 只对 `/chat/completions` 生效：`/responses` 与 anthropic 两条路的工具形态是另一套
+/// （`function_call` 项 / `tool_use` 块），本次改造不碰它们（各自 `extract_*` 里的注释说明了
+/// 为什么），所以这里不往下传。
+fn request_plan(
+    cfg: &LlmConfig,
+    messages: &[ChatMessage],
+    json_mode: bool,
+    tools: bool,
+) -> Protocol {
     if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
         let (u, b) = anthropic_parts(cfg, messages, json_mode);
         (u, b, extract_anthropic, AuthScheme::Anthropic)
@@ -635,7 +789,7 @@ fn request_plan(cfg: &LlmConfig, messages: &[ChatMessage], json_mode: bool) -> P
         let (u, b) = responses_parts(cfg, messages, json_mode);
         (u, b, extract_responses, AuthScheme::Bearer)
     } else {
-        let (u, b) = chat_parts(cfg, messages, json_mode);
+        let (u, b) = chat_parts(cfg, messages, json_mode, tools);
         (u, b, extract_chat, AuthScheme::Bearer)
     }
 }
@@ -648,18 +802,16 @@ fn extract_chat(text: &str) -> Result<RawReply, String> {
         )
     })?;
     let finish_reason = parsed.choices.first().and_then(|c| c.finish_reason.clone());
-    let content = parsed
-        .choices
-        .first()
-        .and_then(|c| c.message.as_ref())
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let msg = parsed.choices.first().and_then(|c| c.message.as_ref());
+    let content = msg.map(|m| m.content.clone()).unwrap_or_default();
+    let tool_calls = msg.map(|m| m.tool_calls.clone()).unwrap_or_default();
     Ok(RawReply {
         content,
         usage: parsed.usage.unwrap_or_default(),
         model: parsed.model,
         finish_reason,
         web_queries: Vec::new(),
+        tool_calls,
     })
 }
 
@@ -714,6 +866,10 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
         model: parsed.model,
         finish_reason,
         web_queries,
+        // `/responses` 这条路的工具调用形态与 chat/completions 不同（`function_call` 项），
+        // 本次改造只覆盖 chat/completions：这里留空 = 这一路仍走老协议（content 里的 JSON），
+        // 与改造前逐字一致。要覆盖它得另写一个映射，别在这里硬塞。
+        tool_calls: Vec::new(),
     })
 }
 
@@ -728,11 +884,19 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
 /// - 有备用（弹性模式）：主用 2 次、单次超时封顶 `min(timeout_secs, 30s)`（避免主用僵尸
 ///   挂死 300s 还不切）；主用失败且 `is_switchable_error` 为真才切备用；鉴权 / 配额 /
 ///   参数错误不切（重试也没用），直接返回主用错误。
+///
+/// `tools = true` 时**这次调用**会声明工具（`chat/completions` 才认；另两条协议忽略它）。
+/// 为什么是**每次调用的参数**而不是配置项：工具语义只属于**工具循环**（agent 主循环与
+/// 步骤执行体）。plan / generate / repair / reflect / eval 那几处是"单发一次、拿 structured
+/// JSON 回来"的生成调用，它们没有"工具"这个语义 —— 给它们声明工具，模型会去调工具、
+/// content 变空，而它们的解析器只认 content，等于自己把自己打瘸。所以能力要显式传，
+/// 不给隐式默认（`LlmConfig.tool_protocol` 只是 agent 那一侧的开关）。
 pub async fn chat(
     cfg: &LlmConfig,
     fallback: Option<&LlmConfig>,
     messages: &[ChatMessage],
     json_mode: bool,
+    tools: bool,
 ) -> Result<ChatOutcome, String> {
     if cfg.api_key.trim().is_empty() {
         return Err(
@@ -740,7 +904,7 @@ pub async fn chat(
         );
     }
 
-    let (out, last_err) = attempt_loop(cfg, messages, json_mode, fallback.is_some()).await;
+    let (out, last_err) = attempt_loop(cfg, messages, json_mode, tools, fallback.is_some()).await;
     if let Some(o) = out {
         return Ok(o);
     }
@@ -759,7 +923,7 @@ pub async fn chat(
         ));
     }
 
-    let (fb_out, fb_err) = attempt_loop(fb, messages, json_mode, true).await;
+    let (fb_out, fb_err) = attempt_loop(fb, messages, json_mode, tools, true).await;
     match fb_out {
         Some(o) => {
             observe_failover(cfg, fb, messages);
@@ -780,9 +944,10 @@ async fn attempt_loop(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
     json_mode: bool,
+    tools: bool,
     resilient: bool,
 ) -> (Option<ChatOutcome>, String) {
-    let (url, body, extract, auth) = request_plan(cfg, messages, json_mode);
+    let (url, body, extract, auth) = request_plan(cfg, messages, json_mode, tools);
     // `--debug`：先记下这次请求的全貌（端点 / 协议 / 请求体 / 模型实际看到的消息）
     dump_request(cfg, &url, auth, &body, messages, json_mode);
     let max_attempts: u32 = if resilient { 2 } else { 3 };
@@ -843,7 +1008,10 @@ async fn attempt_loop(
                             continue;
                         }
                     };
-                    if raw.content.trim().is_empty() {
+                    // 注意：声明了 `tools` 之后，**工具调用轮本来就是空 content**
+                    // （动作全在 `tool_calls` 里）—— 只判 content 会把正常的工具轮当成
+                    // "模型返回了空内容"重试，等于把整套标准协议废掉。
+                    if raw.content.trim().is_empty() && raw.tool_calls.is_empty() {
                         // 空内容这条最需要 `finish_reason`：`length` 是截断、其余是模型波动，
                         // 处置方式不同 —— 所以这条分支也要记解析结果。
                         dump_reply(cfg, &raw, attempt);
@@ -864,6 +1032,7 @@ async fn attempt_loop(
                             finish_reason: raw.finish_reason,
                             elapsed_ms: started.elapsed().as_millis(),
                             web_queries: raw.web_queries,
+                            tool_calls: raw.tool_calls,
                         };
                         // 记一次 LLM 调用：**这是"模型输出错了"唯一能复盘的地方**
                         observe_llm(cfg, messages, &out, attempt, "ok", None, started_ms);
@@ -1001,8 +1170,24 @@ fn dump_reply(cfg: &LlmConfig, raw: &RawReply, attempt: u32) {
     if !crate::debug::enabled() {
         return;
     }
+    // `tool_calls` 必须单独打出来：声明工具之后**动作不在 content 里**，只打 content
+    // 会让人以为"模型什么都没给"（这正是排查 DSML 那次踩过的坑的镜像）。
+    let calls = if raw.tool_calls.is_empty() {
+        "（无：这轮走 content 里的 JSON 或纯文本）".to_string()
+    } else {
+        raw.tool_calls
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}({}) [id={}]",
+                    c.function.name, c.function.arguments, c.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    };
     crate::debug::note(&format!(
-        "===== LLM 解析结果 =====\n第 {} 次尝试\nmodel        : {}\nfinish_reason: {:?}{}\ntokens       : prompt {} + completion {} = {}\nweb_queries  : {:?}\ncontent      : {} 字符\n----- content -----\n{}",
+        "===== LLM 解析结果 =====\n第 {} 次尝试\nmodel        : {}\nfinish_reason: {:?}{}\ntokens       : prompt {} + completion {} = {}\nweb_queries  : {:?}\ntool_calls   : {}\ncontent      : {} 字符\n----- content -----\n{}",
         attempt,
         raw.model.as_deref().unwrap_or(&cfg.model),
         raw.finish_reason,
@@ -1015,9 +1200,15 @@ fn dump_reply(cfg: &LlmConfig, raw: &RawReply, attempt: u32) {
         raw.usage.completion_tokens,
         raw.usage.total_tokens,
         raw.web_queries,
+        raw.tool_calls.len(),
         raw.content.chars().count(),
         raw.content,
     ));
+    if !raw.tool_calls.is_empty() {
+        crate::debug::note(&format!(
+            "----- tool_calls（模型发回来的动作）-----\n  {calls}"
+        ));
+    }
 }
 
 /// 记一次成功的 LLM 调用。
@@ -1253,7 +1444,12 @@ mod tests {
         );
 
         // 关掉就退回原链路：路径、字段、json 模式全都回到 /chat/completions 那一套
-        let (url2, body2) = chat_parts(&cfg_at("https://api.deepseek.com", "off"), &msgs, true);
+        let (url2, body2) = chat_parts(
+            &cfg_at("https://api.deepseek.com", "off"),
+            &msgs,
+            true,
+            false,
+        );
         assert!(url2.ends_with("/chat/completions"));
         assert!(body2["messages"].is_array());
         assert_eq!(body2["response_format"]["type"], "json_object");
@@ -1373,6 +1569,33 @@ mod tests {
         let raw = "{\"tool\":\"execute\",\"args\":{\"cmd\":\"netstat -ano | findstr \\\"8083\\\"\"},\"note\":\"a < b > c\"}";
         assert_eq!(strip_model_markup(raw).1, 0, "合法 JSON 里没有标记");
         assert_eq!(extract_json_object(raw), raw);
+    }
+
+    /// 工具声明与解析器的**契约**：工具名必须与 `parse_one` 认的能力一一对应 ——
+    /// 名字对不上 = 模型一调就"未知能力"；参数键对不上 = "参数不合法"。
+    /// 这条是防"改了一边忘了另一边"的唯一手段（加能力 = 改表 + 改解析器 + 改这里）。
+    #[test]
+    fn tools_cover_every_parser_capability() {
+        let decls = tool_decls();
+        let names: Vec<String> = decls
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        for want in [
+            "read", "write", "execute", "connect", "plan", "ask_user", "final",
+        ] {
+            assert!(
+                names.contains(&want.to_string()),
+                "工具表缺 {want}：{names:?}"
+            );
+        }
+        assert_eq!(names.len(), 7, "表里多了没被解析器认识的名字：{names:?}");
+        // 每条 parameters 都得是合法 JSON Schema（表里存的是 JSON 源串，写错这里就炸）
+        for t in &decls {
+            let params = &t["function"]["parameters"];
+            assert!(params.is_object(), "参数不是对象: {t}");
+            assert!(params["properties"].is_object(), "缺 properties: {t}");
+        }
     }
 
     #[test]
@@ -1565,7 +1788,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let err = rt.block_on(chat(&cfg, None, &[ChatMessage::user("hi")], false));
+        let err = rt.block_on(chat(&cfg, None, &[ChatMessage::user("hi")], false, false));
         assert!(err.is_err());
         assert!(
             err.unwrap_err().contains("尚未配置"),

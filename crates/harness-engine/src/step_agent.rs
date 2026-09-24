@@ -21,9 +21,9 @@
 use crate::agent::{
     CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, StepAction, VerifyOutcome,
     WriteBody, WriteSpec, batch_hint, batch_json_result, batch_waves_for_step, flush_write_disk,
-    json_result, narrow_verify, parse_failure_feedback, parse_step_actions, policy_system_note,
-    proc_op_name, read_group, resolve_write, staged_execute_note, tool_exec_bg, tool_execute,
-    tool_proc, write_edits_ok_text, write_ok_text,
+    json_result, narrow_verify, parse_failure_feedback, parse_step_actions, parse_step_tool_calls,
+    policy_system_note, proc_op_name, read_group, resolve_write, staged_execute_note,
+    tool_calls_echo, tool_exec_bg, tool_execute, tool_proc, write_edits_ok_text, write_ok_text,
 };
 use crate::config::AppConfig;
 use crate::discover;
@@ -49,23 +49,23 @@ const PRIOR_CLIP: usize = 1_500;
 /// 执行体一条都用不上，而每步都要重发一次。照 `REFLECT_SYSTEM` 的做法独立成常量。
 pub const STEP_SYSTEM: &str = r#"你是 ruyix 的步骤执行体：只负责**一个**计划步骤，做完把结果交回去。你看不到主循环的对话历史 —— 这是刻意的，你的上下文里只有本步需要的东西。
 
-三种原子能力：
-- read    读项目：{"tool":"read","args":{"path":"src/ 或 src/main.rs"}} —— 目录给结构树，文件给内容。
-  文件大、只要一段：{"tool":"read","args":{"path":"src/big.rs","offset":120,"limit":60}} —— 从第 120 行起读 60 行（从 1 起，一次上限 400 行）；表头写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」。
+**动作一律用工具调用表达**（引擎已声明 read / write / execute / final 四个工具，参数见工具声明）。三种原子能力：
+- read    读项目：read(path="src/ 或 src/main.rs") —— 目录给结构树，文件给内容。
+  文件大、只要一段：read(path="src/big.rs", offset=120, limit=60) —— 从第 120 行起读 60 行（从 1 起，一次上限 400 行）；表头写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」。
 - write   写文件，两种写法**二选一**：
-  · 改已有文件的几处 —— 用 edits（首选，只传改动）：{"tool":"write","args":{"path":"src/x.rs","edits":[{"find":"要被替换的原文","replace":"换成什么"}]}}
+  · 改已有文件的几处 —— 用 edits（首选，只传改动）：write(path="src/x.rs", edits=[{"find":"要被替换的原文","replace":"换成什么"}])
     `find` 必须与文件里**逐字符一致**且在文件中**恰好出现一次**（不唯一就多带两行上下文）；匹配不上或撞上多次 → **整批作废，一个字节都不落盘**。
-  · 新建文件、或整篇重排 —— 用 content（整份）：{"tool":"write","args":{"path":"相对路径","content":"完整文件内容"}}
+  · 新建文件、或整篇重排 —— 用 content（整份）：write(path="相对路径", content="完整文件内容")
   别用 edits 改新建/没读过的文件（没有原文可锚）；别用 content 改只动几行的既有文件（贵，而且容易顺手丢原文）。两种形态不许同时给。
-- execute 跑命令：{"tool":"execute","args":{"cmd":"命令","timeout_secs":30}} —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化都走它。
-  永不退出的服务（spring-boot:run / java -jar / npm run dev）用后台模式："background":true 加一条 "ready_cmd"（一条命令，退出码 0 即就绪），返回 handle；随后 op=status / op=log / op=stop 用 handle 操作。不要用 start / Start-Process 那类花招。同一个服务重启前先 status 或 stop。
+- execute 跑命令：execute(cmd="命令", timeout_secs=30) —— 工作目录是项目根，超时上限 120 秒；编译、测试、格式化都走它。
+  永不退出的服务（spring-boot:run / java -jar / npm run dev）用后台模式：background=true 加一条 ready_cmd（一条命令，退出码 0 即就绪），返回 handle；随后 op="status" / op="log" / op="stop" 用 handle 操作。不要用 start / Start-Process 那类花招。同一个服务重启前先 status 或 stop。
 
 规则：
-1. 每轮只输出一个 JSON 对象（一次能力调用，或本步的交付说明），不要解释文字、不要 markdown 代码块包裹。
+1. 每轮用**工具调用**表达动作（可以一轮发多个互不依赖的）；不要输出解释文字、不要 markdown 代码块包裹，也不要把动作写成 content 里的 JSON。
 2. 只做本步。发现计划与实际不符（要改的文件不存在、步骤拆得不对、范围明显比本步大）时不要自作主张扩大范围：做你能做的部分，并在交付说明里写清哪里对不上。
 3. 改代码：先 read 拿到现状；改已有文件用 write + edits 只传改动，新建或整篇重排才用 content 交回整份。没把握的地方原样保留，绝不丢内容。
 4. 能验证就验证：execute 跑本项目自己的编译/测试命令，失败就继续修。
-5. 本步做完输出：{"final":"本步做了什么、产出哪些文件、跑了什么验证、结果如何；对不上的地方写在这里"}"#;
+5. 本步做完**调用 final 工具交付**：final(answer="本步做了什么、产出哪些文件、跑了什么验证、结果如何；对不上的地方写在这里")"#;
 
 /// 交给下一步的那一行（引擎写的事实，只有它允许跨步骤流动）
 #[derive(Clone, Debug, Default)]
@@ -585,7 +585,15 @@ pub async fn run_step(
             "info",
             format!("[step {}] 第 {round} 轮（预算 {max_steps}）", inp.index),
         );
-        let reply = match llm::chat(&cfg.llm, cfg.llm_fallback.as_ref(), &msgs, true).await {
+        let reply = match llm::chat(
+            &cfg.llm,
+            cfg.llm_fallback.as_ref(),
+            &msgs,
+            true,
+            cfg.llm.tool_protocol,
+        )
+        .await
+        {
             Ok(r) => {
                 llm_failures = 0;
                 r
@@ -609,22 +617,33 @@ pub async fn run_step(
         };
         usage.add(&reply.usage);
 
-        let mut actions =
-            match parse_step_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch) {
-                Ok(a) => a,
-                Err(e) => {
-                    sink.log(
-                        "warn",
-                        format!("[step {}] 第 {round} 轮输出无法解析：{e}", inp.index),
-                    );
-                    msgs.push(ChatMessage::user(parse_failure_feedback(
-                        &e,
-                        reply.finish_reason.as_deref(),
-                    )));
-                    continue;
-                }
-            };
-        msgs.push(ChatMessage::assistant(reply.content.clone()));
+        // 两条协议都要认（与主循环同一套纪律，v0.0.6）：工具调用（主路）优先，
+        // content 里的 JSON 作兼容层 —— 子步骤拿到的也是同一份工具声明，不认它就会白烧轮次。
+        let via_tools = !reply.tool_calls.is_empty();
+        let mut actions = match if via_tools {
+            parse_step_tool_calls(&reply.tool_calls, cfg.agent.batch_max, cfg.agent.batch)
+        } else {
+            parse_step_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
+        } {
+            Ok(a) => a,
+            Err(e) => {
+                sink.log(
+                    "warn",
+                    format!("[step {}] 第 {round} 轮输出无法解析：{e}", inp.index),
+                );
+                msgs.push(ChatMessage::user(parse_failure_feedback(
+                    &e,
+                    reply.finish_reason.as_deref(),
+                )));
+                continue;
+            }
+        };
+        // 工具轮的 content 是空的：把它自己发的调用回显回去（同主循环，见 `tool_calls_echo`）
+        msgs.push(ChatMessage::assistant(if via_tools {
+            tool_calls_echo(&reply.tool_calls)
+        } else {
+            reply.content.clone()
+        }));
 
         // final 只可能是单动作（批里的 final 已被 parse_actions 当面拒）
         if actions.len() == 1 && matches!(actions[0], StepAction::Final(_)) {

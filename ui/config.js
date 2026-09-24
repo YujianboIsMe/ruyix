@@ -46,6 +46,9 @@ window.ConfigUI = (() => {
         { key: "alias", kind: "text" },
         // 协议格式：二选一（OpenAI 兼容 / Anthropic Messages）。引擎按它建请求与解析响应。
         { key: "api_format", kind: "select", options: ["openai", "anthropic"] },
+        // 工具协议（v0.0.6）：声明 tools 让模型把动作发进 tool_calls —— 这是治"模型自带标记
+        // 漏进正文、白烧一轮"的那一步。关掉 = 一行回滚到老协议（动作写在 content 的 JSON 里）。
+        { key: "tool_protocol", kind: "select", options: ["true", "false"] },
       ],
     },
     {

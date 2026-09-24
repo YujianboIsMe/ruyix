@@ -215,6 +215,16 @@ pub fn build_app_config(
         ai_fmt.as_deref(),
     );
 
+    // 2a) 工具协议开关（v0.0.6）来自 `ruyix.code.ai.tool_protocol`：缺省保持引擎默认（**开**）。
+    // 只在 agent 工具循环一侧生效（见 `engine::llm::chat` 的文档）：填 false = 一行回滚到
+    // "动作写在 content 的 JSON 里"的老协议，代价是 DSML 泄露与白烧轮次一起回来。
+    if let Some(v) = read(mgr, "ruyix.code.ai.tool_protocol", project_root) {
+        cfg.llm.tool_protocol = !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off" | "no"
+        );
+    }
+
     // 2b) 备用 LLM（故障切换）来自 `ruyix.code.ai_fallback.*`
     let fb_url = read(mgr, "ruyix.code.ai_fallback.api_url", project_root);
     let fb_key = read(mgr, "ruyix.code.ai_fallback.api_key", project_root);
