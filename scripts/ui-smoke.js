@@ -161,12 +161,10 @@
  *                     ②**右键不改激活标签**（目标由命中的 data-tab-id 决定，否则"关闭其他"会把
  *                     刚右键的那个也关掉）；③close/others/right/left/all 逐条对，单标签时
  *                     others/right/left 必须是空计划（菜单项据此隐藏）。切片真源码回放。
- *   U44 nav-layout-real  导航栏的**真实几何**（只针对**文件树**）：长路径过去被 `text-overflow:
- *                     ellipsis` 压进视口 ⇒ 内容永远等于视口宽 ⇒ 横向滚动条永远不出现（用户报
- *                     "导航栏没有水平滚动条"）。判据：短内容**不该**出条、长内容出条且长名能滚着
- *                     读完；**行末的刷新按钮不许盖在路径文字上**（用 sticky 钉在可视区右缘的
- *                     错法已踩过 —— 文字会从按钮底下滚过去），短行不滚就能点、长行滚到最右能点。
- *                     `scripts/nav-layout.js`，本机没 Edge/Chrome 时自行 SKIP。
+ *   U44 nav-layout-real  导航栏的**真实几何**：长文件名/长路径过去被 `text-overflow: ellipsis`
+ *                     压进视口 ⇒ 内容永远等于视口宽 ⇒ 横向滚动条永远不出现（用户报"导航栏没有
+ *                     水平滚动条"）。判据分两场景：短内容**不该**出条、长内容出条且长名能滚着
+ *                     读完，右侧按钮（目录刷新 / 🪟）粘在可视区。`scripts/nav-layout.js`。
  *   U43 terminal-layout-real  模拟终端的**真实几何**：`.xterm-screen` 的像素尺寸、"容器缩小时
  *                     终端跟不跟"、PTY 的 winsize 有没有同步 —— 桩里根本量不到。真机上出过事故
  *                     （终端永远停在 100×24、窗口怎么变都不动）⇒ 挂真浏览器探针
@@ -2472,14 +2470,13 @@ async function runTabContextMenuChecks() {
 }
 
 /**
- * U44 nav-layout-real：导航栏**真实几何**（真浏览器，只针对**文件树**）。
+ * U44 nav-layout-real：导航栏**真实几何**（真浏览器）。
  *
- * 需求：现状导航栏没有水平滚动条，期望"**过宽时**加上水平滚动条"（用户报的触发场景是长文件路径）。
+ * 需求：现状导航栏没有水平滚动条，期望"**过宽时**加上水平滚动条"。
  * 病根全在布局引擎里：长文件名/长路径被 `text-overflow: ellipsis` 压进视口 → 内容永远等于
  * 视口宽 → 横向滚动条永远不出现（实测：477px 的长名被塞进 157px 的格子，吃掉 320px）。
- * 探针在无头 Edge 里量：短内容**不该**出条 / 长内容出条且长名能滚着读完 / **行末刷新按钮不许
- * 盖在路径文字上**（sticky 钉按钮的错法已踩过：文字会从按钮底下滚过去）/
- * 短行不滚就能点、长行滚到最右能点。见 scripts/nav-layout.js。本机没 Edge/Chrome 时自行 SKIP。
+ * 探针在无头 Edge 里量两种场景（短内容**不该**出条 / 长内容出条且长名能滚着读完），
+ * 见 scripts/nav-layout.js。本机没 Edge/Chrome 时该脚本自行 SKIP。
  */
 function runNavLayoutProbe() {
   const script = path.join(ROOT, "scripts", "nav-layout.js");
