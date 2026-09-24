@@ -155,6 +155,10 @@
  *                     助手消息落盘（`SessionMsg.trace` 不声明就被 serde 抹掉，且必须有 default
  *                     否则老会话读不回来）；④回放一遍真事件路径，断言渲染出来的行、kind 分类、
  *                     落盘载荷里的 trace —— 顺带把"日志把气泡正文覆盖掉"那个老病钉死。
+ *   U44 nav-layout-real  导航栏的**真实几何**：长文件名/长路径过去被 `text-overflow: ellipsis`
+ *                     压进视口 ⇒ 内容永远等于视口宽 ⇒ 横向滚动条永远不出现（用户报"导航栏没有
+ *                     水平滚动条"）。判据分两场景：短内容**不该**出条、长内容出条且长名能滚着
+ *                     读完，右侧按钮（目录刷新 / 🪟）粘在可视区。`scripts/nav-layout.js`。
  *   U43 terminal-layout-real  模拟终端的**真实几何**：`.xterm-screen` 的像素尺寸、"容器缩小时
  *                     终端跟不跟"、PTY 的 winsize 有没有同步 —— 桩里根本量不到。真机上出过事故
  *                     （终端永远停在 100×24、窗口怎么变都不动）⇒ 挂真浏览器探针
@@ -2261,6 +2265,33 @@ function runSessionTraceLayoutProbe() {
 }
 
 /**
+ * U44 nav-layout-real：导航栏**真实几何**（真浏览器）。
+ *
+ * 需求：现状导航栏没有水平滚动条，期望"**过宽时**加上水平滚动条"。
+ * 病根全在布局引擎里：长文件名/长路径被 `text-overflow: ellipsis` 压进视口 → 内容永远等于
+ * 视口宽 → 横向滚动条永远不出现（实测：477px 的长名被塞进 157px 的格子，吃掉 320px）。
+ * 探针在无头 Edge 里量两种场景（短内容**不该**出条 / 长内容出条且长名能滚着读完），
+ * 见 scripts/nav-layout.js。本机没 Edge/Chrome 时该脚本自行 SKIP。
+ */
+function runNavLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "nav-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U44 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|nav-layout|短内容|长内容)/.test(l))
+    .join(" ⏐ ");
+  check("U44", "nav-layout-real",
+    r.status === 0,
+    "导航栏几何探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
+/**
  * U43 terminal-layout-real：模拟终端**真实几何**（真浏览器 + 真 xterm）。
  *
  * U32/U42 证明得了"编辑器/轨迹的几何"，证明不了终端那一块：`.xterm-screen` 的像素尺寸、
@@ -3164,6 +3195,7 @@ async function main() {
     ["U41", "session-trace", runSessionTraceChecks],
     ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
     ["U43", "terminal-layout-real", runTerminalLayoutProbe],
+    ["U44", "nav-layout-real", runNavLayoutProbe],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

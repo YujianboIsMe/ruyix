@@ -573,7 +573,8 @@ html, body {
 
 .nav-content {
   flex: 1;
-  overflow-y: auto;
+  /* 两个方向都能滚：内容比侧边栏宽时给横向滚动条（auto = "过宽时才加"，不是常驻） */
+  overflow: auto;
   position: relative;
 }
 
@@ -581,6 +582,33 @@ html, body {
   display: none;
   padding: 12px;
   height: 100%;
+}
+
+/* **名称/路径型**列表按内容撑宽：长文件名 / 长路径不再被压进视口用省略号收掉，超出部分交给
+   `.nav-content` 的横向滚动条（auto = "过宽时才出现"）。
+   实测病根：一个 477px 的长名被塞进 157px 的格子，`text-overflow: ellipsis` 吃掉 320px ——
+   内容永远等于视口宽，所以横向滚动条永远不出现。
+   **只给这几个列表加，不给 `.nav-panel` 统一加**：那会让能力面板里的说明文字也停止折行。 */
+.file-tree,
+.project-list,
+.terminal-list,
+.agent-history-list,
+.run-targets-list {
+  min-width: max-content;
+}
+
+/* 行会被面板带到"最宽那一行"的宽度（横向滚动的前提），于是行右侧的按钮（目录刷新、项目编辑/
+   删除、终端新窗口）会落到视口之外 —— 让它们**粘在可视区右缘**：短行本来就在视口里（看不出
+   差别），长行滚到哪都点得到。底色跟侧边栏一致，免得长名从按钮底下穿出来。
+   （别改成"给行加 min-width:100%"：那个 100% 是相对**最宽的父级**解析的，等于把每行都撑到
+   最宽那一行 —— 实测普通目录行的刷新按钮会被推到 557px，直接滚出 260px 的侧边栏。） */
+.tree-refresh,
+.project-list-item .project-item-edit,
+.project-list-item .project-item-del,
+.terminal-list .terminal-new-window {
+  position: sticky;
+  right: 0;
+  background: var(--bg-secondary);
 }
 
 .nav-panel.active {
