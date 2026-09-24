@@ -424,7 +424,19 @@
     <div class="context-menu-item context-menu-folder-only" data-action="newfolder" data-i18n="ctx.new_folder">📁 创建文件夹</div>
   </div>
 
-  <!-- 自定义弹窗 -->
+  <!-- 标签页右键菜单（编辑器多标签）。不拦的话 WebView 会弹**系统**菜单（后退/刷新/检查元素…），
+       与 IDE 的标签操作无关。目标标签由**事件命中的那个**决定，绝不改激活标签 ——
+       否则"关闭其他"会把用户刚右键的那个也关掉。 -->
+  <div id="tab-context-menu" class="context-menu" style="display:none">
+    <div class="context-menu-item" data-tab-action="close" data-i18n="ctx.tab_close">✖️ 关闭</div>
+    <div class="context-menu-item" data-tab-action="others" data-i18n="ctx.tab_close_others">🧹 关闭其他</div>
+    <div class="context-menu-item" data-tab-action="right" data-i18n="ctx.tab_close_right">➡️ 关闭右侧</div>
+    <div class="context-menu-item" data-tab-action="left" data-i18n="ctx.tab_close_left">⬅️ 关闭左侧</div>
+    <div class="context-menu-item" data-tab-action="all" data-i18n="ctx.tab_close_all">🗑️ 全部关闭</div>
+    <div class="context-menu-item context-menu-sep"></div>
+    <div class="context-menu-item context-menu-path-only" data-tab-action="copy-path" data-i18n="ctx.copy_path">📋 复制路径</div>
+    <div class="context-menu-item context-menu-path-only" data-tab-action="copy-full-path" data-i18n="ctx.copy_full_path">📋 复制绝对路径</div>
+  </div>
   <div id="modal-overlay" class="modal-overlay" style="display:none">
     <div class="modal-box">
       <div class="modal-title" id="modal-title"></div>

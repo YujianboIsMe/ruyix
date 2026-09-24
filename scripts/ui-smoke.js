@@ -155,6 +155,12 @@
  *                     助手消息落盘（`SessionMsg.trace` 不声明就被 serde 抹掉，且必须有 default
  *                     否则老会话读不回来）；④回放一遍真事件路径，断言渲染出来的行、kind 分类、
  *                     落盘载荷里的 trace —— 顺带把"日志把气泡正文覆盖掉"那个老病钉死。
+ *   U45 tab-context-menu 编辑器多标签的右键菜单（v0.11）：文件树早就拦掉了浏览器默认右键，
+ *                     标签栏没拦 ⇒ 多标签上右键出来的是 WebView 的**系统菜单**（后退/刷新/
+ *                     检查元素…）。判据：①`contextmenu` 必须 preventDefault（否则还是系统菜单）；
+ *                     ②**右键不改激活标签**（目标由命中的 data-tab-id 决定，否则"关闭其他"会把
+ *                     刚右键的那个也关掉）；③close/others/right/left/all 逐条对，单标签时
+ *                     others/right/left 必须是空计划（菜单项据此隐藏）。切片真源码回放。
  *   U44 nav-layout-real  导航栏的**真实几何**：长文件名/长路径过去被 `text-overflow: ellipsis`
  *                     压进视口 ⇒ 内容永远等于视口宽 ⇒ 横向滚动条永远不出现（用户报"导航栏没有
  *                     水平滚动条"）。判据分两场景：短内容**不该**出条、长内容出条且长名能滚着
@@ -2265,6 +2271,205 @@ function runSessionTraceLayoutProbe() {
 }
 
 /**
+ * U45 tab-context-menu：编辑器多标签的右键菜单（v0.11）。
+ *
+ * 病根：文件树早就把浏览器默认右键拦掉了（setupContextMenu），**标签栏没拦** —— 于是编辑器多标签
+ * 上右键出来的是 WebView 的**系统菜单**（后退/刷新/检查元素…），与 IDE 的标签操作无关。
+ *
+ * 三条判据，都拿真源码回放（切片 `closePlan` + `setupTabContextMenu` 到沙箱里跑，不另抄一份）：
+ *   ① `contextmenu` 必须 `preventDefault`（不拦就还是系统菜单）+ 显示自家菜单；
+ *   ② **右键不改激活标签**：目标由命中的那个 `data-tab-id` 决定 —— 否则"关闭其他"会把用户
+ *      刚右键的那个也关掉（最容易被忽略的边界）；
+ *   ③ 关闭策略逐条对：close / others / right / left / all，以及"只有一个标签"时
+ *      others/right/left 得到**空计划**（菜单项应当被隐藏，而不是点了没反应）。
+ */
+async function runTabContextMenuChecks() {
+  const mainSrc = read("ui/main.js");
+  const start = mainSrc.indexOf("function closePlan(ids, targetId, mode) {");
+  const end = mainSrc.indexOf("\nfunction setupContextMenu(", start);
+  check("U45", "tab-context-menu", start >= 0 && end > start,
+    "main.js 里定位不到 closePlan…setupTabContextMenu 这段源码（切片锚点失效）");
+  if (start < 0 || end <= start) return;
+  const funcs = mainSrc.slice(start, end);
+
+  // 菜单 DOM 契约：五个关闭动作 + 两个复制动作都在；文案键两语言都有
+  const html = read("ui/index.html");
+  const menuHtml = (html.match(/<div id="tab-context-menu"[\s\S]*?\n  <\/div>/) || [""])[0];
+  const acts = [...menuHtml.matchAll(/data-tab-action="([^"]+)"/g)].map((m) => m[1]);
+  for (const a of ["close", "others", "right", "left", "all", "copy-path", "copy-full-path"]) {
+    check("U45", "tab-context-menu", acts.includes(a), `标签右键菜单缺少 data-tab-action="${a}"`);
+  }
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const en = JSON.parse(read("ui/lang/en.json"));
+  for (const k of ["ctx.tab_close", "ctx.tab_close_others", "ctx.tab_close_right", "ctx.tab_close_left", "ctx.tab_close_all"]) {
+    check("U45", "tab-context-menu", !!zh[k] && !!en[k], `缺文案键 ${k}（zh 或 en）`);
+  }
+
+  // ---- 回放 ----
+  const ROWS = ["close", "others", "right", "left", "all", "copy-path", "copy-full-path"].map((a) => ({
+    dataset: { tabAction: a },
+    style: {},
+  }));
+  const captured = { bar: null, menu: null, outside: null };
+  const menuEl = {
+    style: {},
+    querySelectorAll: () => ROWS,
+  };
+  const barEl = {};
+  const docStub = {
+    getElementById: (id) => (id === "tab-context-menu" ? menuEl : id === "tab-bar" ? barEl : null),
+    addEventListener: (evt, fn) => {
+      captured.outside = fn;
+    },
+  };
+  const state = {
+    tabs: [
+      { id: "t1", name: "a.rs", path: "D:\\p\\a.rs" },
+      { id: "t2", name: "b.rs", path: "D:\\p\\b.rs" },
+      { id: "t3", name: "c.rs", path: "D:\\p\\c.rs" },
+    ],
+    activeTabId: "t1",
+  };
+  const closed = [];
+  const copied = [];
+  let hid = 0;
+  const mod = new Function(
+    "document",
+    "state",
+    "closeTab",
+    "hideContextMenu",
+    "handleContextCopyPath",
+    `${funcs}\nreturn { closePlan, setupTabContextMenu };`
+  )(
+    docStub,
+    state,
+    (id) => closed.push(id),
+    () => {
+      hid++;
+      menuEl.style.display = "none";
+    },
+    async (p, abs) => copied.push([p, abs])
+  );
+
+  // closePlan 的边界（纯函数，逐条）
+  const ids = ["t1", "t2", "t3"];
+  const expectPlan = (mode, want, msg) => {
+    const got = JSON.stringify(mod.closePlan(ids, "t2", mode));
+    check("U45", "tab-context-menu", got === JSON.stringify(want), `${msg}：期望 ${JSON.stringify(want)}，得到 ${got}`);
+  };
+  expectPlan("close", ["t2"], "close 应只关目标");
+  expectPlan("others", ["t1", "t3"], "others 应关掉除目标外的全部");
+  expectPlan("right", ["t3"], "right 应只关目标右侧");
+  expectPlan("left", ["t1"], "left 应只关目标左侧");
+  expectPlan("all", ["t1", "t2", "t3"], "all 应关全部");
+  expectPlan("nope", [], "未知动作给空计划");
+  check("U45", "tab-context-menu",
+    mod.closePlan(["t1"], "t1", "others").length === 0 &&
+      mod.closePlan(["t1"], "t1", "right").length === 0 &&
+      mod.closePlan(["t1"], "t1", "left").length === 0 &&
+      mod.closePlan(ids, "nope-id", "close").length === 0,
+    "只有一个标签（或目标不在列表里）时，others/right/left 必须是空计划（菜单项据此隐藏）");
+
+  // 装上菜单，模拟右键第 2 个标签
+  const barHandlers = {};
+  barEl.addEventListener = (evt, fn) => {
+    barHandlers[evt] = fn;
+  };
+  const menuHandlers = {};
+  menuEl.addEventListener = (evt, fn) => {
+    menuHandlers[evt] = fn;
+  };
+  mod.setupTabContextMenu();
+  check("U45", "tab-context-menu", !!barHandlers.contextmenu && !!menuHandlers.click,
+    "setupTabContextMenu 没把 contextmenu / click 挂上");
+
+  let prevented = 0;
+  barHandlers.contextmenu({
+    preventDefault: () => prevented++,
+    stopPropagation: () => {},
+    clientX: 120,
+    clientY: 40,
+    target: { closest: () => ({ dataset: { tabId: "t2" } }) },
+  });
+  check("U45", "tab-context-menu", prevented === 1,
+    "contextmenu 没有 preventDefault —— 那就还是 WebView 的系统菜单（本单的原始问题）");
+  check("U45", "tab-context-menu", menuEl.style.display !== "none" && menuEl.style.left === "120px",
+    `菜单没在该出现的时候出现（display=${menuEl.style.display} left=${menuEl.style.left}）`);
+  check("U45", "tab-context-menu", state.activeTabId === "t1",
+    `右键**不该**改激活标签（右键 t2 后 activeTabId=${state.activeTabId}）—— 否则"关闭其他"会先把刚右键的那个关掉`);
+
+  // 三个标签时：五个关闭项都该可见
+  const shown = ROWS.filter((r) => r.style.display !== "none").map((r) => r.dataset.tabAction);
+  check("U45", "tab-context-menu",
+    ["close", "others", "right", "left", "all", "copy-path"].every((a) => shown.includes(a)),
+    `三个标签、目标在中间时关闭项应全可见，实际可见：${shown.join(",")}`);
+
+  // 只有一个标签（伪标签：没有 path）→ others/right/left 隐藏、复制项也隐藏
+  state.tabs = [{ id: "s1", name: "会话", path: "" }];
+  barHandlers.contextmenu({
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    clientX: 0,
+    clientY: 0,
+    target: { closest: () => ({ dataset: { tabId: "s1" } }) },
+  });
+  const shownOne = ROWS.filter((r) => r.style.display !== "none").map((r) => r.dataset.tabAction);
+  check("U45", "tab-context-menu",
+    shownOne.includes("close") && shownOne.includes("all") &&
+      !shownOne.includes("others") && !shownOne.includes("right") && !shownOne.includes("left"),
+    `单标签时只该留 close/all，实际：${shownOne.join(",")}`);
+  check("U45", "tab-context-menu",
+    !shownOne.includes("copy-path") && !shownOne.includes("copy-full-path"),
+    `没有路径的伪标签（会话/配置/服务）不该出现复制项，实际：${shownOne.join(",")}`);
+
+  // 点"关闭其他"：关的是 t1/t3，**必须保住** t2
+  state.tabs = [
+    { id: "t1", name: "a.rs", path: "D:\\p\\a.rs" },
+    { id: "t2", name: "b.rs", path: "D:\\p\\b.rs" },
+    { id: "t3", name: "c.rs", path: "D:\\p\\c.rs" },
+  ];
+  barHandlers.contextmenu({
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    clientX: 0,
+    clientY: 0,
+    target: { closest: () => ({ dataset: { tabId: "t2" } }) },
+  });
+  await menuHandlers.click({
+    stopPropagation: () => {},
+    target: { closest: () => ROWS.find((r) => r.dataset.tabAction === "others") },
+  });
+  check("U45", "tab-context-menu", JSON.stringify(closed) === JSON.stringify(["t1", "t3"]),
+    `"关闭其他"应关掉 [t1,t3] 而保住右键的 t2，实际关了 ${JSON.stringify(closed)}`);
+  check("U45", "tab-context-menu", hid > 0, "点完菜单项要把它收起来");
+
+  // 点复制项：走既有 handleContextCopyPath（相对/绝对各一）
+  closed.length = 0;
+  await menuHandlers.click({
+    stopPropagation: () => {},
+    target: { closest: () => ROWS.find((r) => r.dataset.tabAction === "copy-full-path") },
+  });
+  check("U45", "tab-context-menu",
+    copied.length === 1 && copied[0][0] === "D:\\p\\b.rs" && copied[0][1] === true,
+    `复制绝对路径没走 handleContextCopyPath，实际：${JSON.stringify(copied)}`);
+
+  // 空白处右键：也拦掉默认菜单（但不弹菜单）
+  menuEl.style.display = "";
+  let prevented2 = 0;
+  barHandlers.contextmenu({
+    preventDefault: () => prevented2++,
+    stopPropagation: () => {},
+    target: { closest: () => null },
+  });
+  check("U45", "tab-context-menu", prevented2 === 1 && menuEl.style.display === "none",
+    "标签栏空白处右键也该拦掉系统菜单，并且不弹菜单");
+
+  // 静态契约：init 里真的调了
+  check("U45", "tab-context-menu", /^\s*setupTabContextMenu\(\);/m.test(mainSrc),
+    "initApp 里没调用 setupTabContextMenu —— 菜单永远装不上");
+}
+
+/**
  * U44 nav-layout-real：导航栏**真实几何**（真浏览器）。
  *
  * 需求：现状导航栏没有水平滚动条，期望"**过宽时**加上水平滚动条"。
@@ -3196,6 +3401,7 @@ async function main() {
     ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
     ["U43", "terminal-layout-real", runTerminalLayoutProbe],
     ["U44", "nav-layout-real", runNavLayoutProbe],
+    ["U45", "tab-context-menu", runTabContextMenuChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

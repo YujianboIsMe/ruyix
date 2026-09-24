@@ -34,6 +34,7 @@ async function initApp() {
 
   // 设置右键菜单
   setupContextMenu();
+  setupTabContextMenu();
 
   // 初始状态：无项目，导航区显示项目列表
   showWelcomePage();
@@ -2244,6 +2245,93 @@ function samePath(a, b) {
   if (!a || !b) return false;
   const norm = (p) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
   return norm(a) === norm(b);
+}
+
+/**
+ * 标签页右键菜单（编辑器多标签）。
+ *
+ * 为什么要自己实现：WebView 默认在**整块文档**上弹系统右键菜单（后退 / 刷新 / 检查元素…）。
+ * 文件树早就拦掉了（`setupContextMenu`），标签栏没拦 —— 于是编辑器多标签上右键出来的是系统那套，
+ * 与 IDE 的标签操作无关。这里在 `contextmenu` 上拦掉默认菜单，换成自家菜单；菜单项全部走**既有**
+ * 的 `closeTab` / `handleContextCopyPath`，不新增后端调用。
+ *
+ * 两条不变量：
+ *   ① 目标标签由**事件命中的那个**决定，绝不改激活标签 —— 否则"关闭其他"会把用户刚右键的
+ *      那一个也关掉（最容易被忽略、也最难受的边界）；
+ *   ② 关闭策略收敛在纯函数 [`closePlan`] 里（"关闭右侧"在末尾、"关闭其他"只有一个标签时
+ *      都必须得到空计划），这样边界能在 ui-smoke 里逐条回放。
+ */
+
+/** 关闭策略（纯函数）：给定标签序列与目标，算出要关掉哪些 id。 */
+function closePlan(ids, targetId, mode) {
+  const i = ids.indexOf(targetId);
+  if (i < 0) return [];
+  switch (mode) {
+    case "close":
+      return [targetId];
+    case "others":
+      return ids.filter((id) => id !== targetId);
+    case "right":
+      return ids.slice(i + 1);
+    case "left":
+      return ids.slice(0, i);
+    case "all":
+      return ids.slice();
+    default:
+      return [];
+  }
+}
+
+function setupTabContextMenu() {
+  const menu = document.getElementById("tab-context-menu");
+  const bar = document.getElementById("tab-bar");
+  if (!menu || !bar) return;
+  let targetId = null;
+
+  bar.addEventListener("contextmenu", (e) => {
+    // 标签栏整块都拦（空白处右键也不该弹系统菜单）；点了具体标签才开菜单
+    e.preventDefault();
+    e.stopPropagation();
+    const el = e.target && e.target.closest ? e.target.closest(".tab-item") : null;
+    if (!el || !el.dataset.tabId) {
+      hideContextMenu(menu);
+      return;
+    }
+    targetId = el.dataset.tabId;
+    const ids = state.tabs.map((t) => t.id);
+    const target = state.tabs.find((t) => t.id === targetId);
+    menu.querySelectorAll("[data-tab-action]").forEach((row) => {
+      const mode = row.dataset.tabAction;
+      // 复制路径类：只有落在真实文件上的标签才有路径（配置/会话/服务这类伪标签没有）
+      const show =
+        mode === "copy-path" || mode === "copy-full-path"
+          ? !!(target && target.path)
+          : closePlan(ids, targetId, mode).length > 0;
+      row.style.display = show ? "" : "none";
+    });
+    menu.style.left = e.clientX + "px";
+    menu.style.top = e.clientY + "px";
+    menu.style.display = "";
+  });
+
+  menu.addEventListener("click", async (e) => {
+    const item = e.target && e.target.closest ? e.target.closest("[data-tab-action]") : null;
+    if (!item) return;
+    e.stopPropagation();
+    const mode = item.dataset.tabAction;
+    hideContextMenu(menu);
+    const tab = state.tabs.find((t) => t.id === targetId);
+    if (!tab) return;
+    if (mode === "copy-path" || mode === "copy-full-path") {
+      await handleContextCopyPath(tab.path, mode === "copy-full-path");
+      return;
+    }
+    // 计划先算好再逐个关：closeTab 会改 state.tabs，边遍历边算会漏
+    for (const id of closePlan(state.tabs.map((t) => t.id), targetId, mode)) closeTab(id);
+  });
+
+  // 点菜单外关掉（与文件树那套一致）
+  document.addEventListener("click", () => hideContextMenu(menu));
 }
 
 function setupContextMenu() {
