@@ -93,7 +93,7 @@
       sessions = (await invoke("agent_session_list", { projectRoot: root() })) ?? [];
       renderList();
     } catch (err) {
-      status("会话列表刷新失败: " + err, "error");
+      status(L("会话列表刷新失败: ", "Session list refresh failed: ") + err, "error");
     }
   }
 
@@ -128,7 +128,7 @@
         s = await invoke("agent_session_new", { projectRoot: root() });
         sessions.unshift(s);
       } catch (err) {
-        return status("新建会话失败: " + err, "error");
+        return status(L("新建会话失败: ", "Failed to create session: ") + err, "error");
       }
     } else {
       // 无后端：内存会话（演示对话）
@@ -155,13 +155,13 @@
       try {
         sessions = (await invoke("agent_session_delete", { id, projectRoot: root() })) ?? [];
       } catch (err) {
-        return status("删除失败: " + err, "error");
+        return status(L("删除失败: ", "Delete failed: ") + err, "error");
       }
     } else {
       sessions = sessions.filter((s) => s.id !== id);
     }
     renderList();
-    status("会话已删除");
+    status(L("会话已删除", "Session deleted"));
   }
 
   // ============================================
@@ -176,7 +176,7 @@
     } else if (invoke && root()) {
       invoke("agent_session_load", { id, projectRoot: root() })
         .then((s) => openSession(s))
-        .catch((err) => status("打开会话失败: " + err, "error"));
+        .catch((err) => status(L("打开会话失败: ", "Failed to open session: ") + err, "error"));
     }
   }
 
@@ -252,7 +252,7 @@
       if (!caps.web_search) {
         webBtn.disabled = true;
         webBtn.title = L(
-          `当前模型 ${caps.model} 不支持服务端联网检索`,
+          L(`当前模型 ${caps.model} 不支持服务端联网检索`, `model ${caps.model} does not support server-side web search`),
           `Model ${caps.model} has no server-side web search`
         );
         return;
@@ -298,7 +298,7 @@
     wrap.querySelector("[data-send]").addEventListener("click", () => {
       const text = input.value.trim();
       if (!text) return;
-      if (busy) return status("已有任务在跑，请先取消或等待", "error");
+      if (busy) return status(L("已有任务在跑，请先取消或等待", "A task is already running — cancel it or wait"), "error");
       input.value = "";
       sendMessage(s, wrap, text);
     });
@@ -765,7 +765,7 @@
     const paths = [...panel.querySelectorAll("input[data-path]")]
       .filter((i) => i.checked)
       .map((i) => i.dataset.path);
-    if (!paths.length) return status("没有勾选任何文件", "no file selected");
+    if (!paths.length) return status(L("没有勾选任何文件", "no file selected"), "no file selected");
     try {
       const res = await applyStage(stageId, paths);
       const tail = res.backup_dir
@@ -778,9 +778,9 @@
         `<div class="session-apply-head session-apply-head--ok">` +
         `✓ ${L("已写入", "written")} ${res.applied.length} ${L("个文件", "files")} · ${esc(tail)}</div>` +
         `<div class="session-apply-list">${rows}</div>`;
-      status(`已写入 ${res.applied.length} 个文件`, "ok");
+      status(L(`已写入 ${res.applied.length} 个文件`, `${res.applied.length} file(s) written`), "ok");
     } catch (err) {
-      status("写入失败: " + err, "error");
+      status(L("写入失败: ", "Write failed: ") + err, "error");
     }
   }
 
@@ -1134,7 +1134,7 @@
       }
       renderList();
     } catch (err) {
-      status("会话保存失败: " + err, "error");
+      status(L("会话保存失败: ", "Failed to save session: ") + err, "error");
     }
   }
 

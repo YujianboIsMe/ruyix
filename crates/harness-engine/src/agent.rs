@@ -45,6 +45,17 @@ use std::time::{Duration, Instant};
 
 /// 循环轮次上限（每轮 = 一次模型调用，产出工具调用或最终答复）
 pub const MAX_STEPS: usize = 96;
+
+/// **连续**多少轮解析不出动作就停止本轮。
+///
+/// 为什么必须有这条：解析失败本身**不终止**循环（只回一句纠正再 `continue`），唯一的兜底是
+/// `MAX_STEPS`（96 轮）与墙钟闸（默认 30 分钟）——于是"模型坚决不发工具调用"这种病会把整轮
+/// 预算烧光，用户看到的就是**无限死循环**（实测：发一句"你好"，每轮收到同一句拒绝，一直转）。
+/// 三轮足够说明"这条路走不通"：第 1 轮讲清道理、第 2 轮只说短话、第 3 轮还不行就是
+/// 模型/端点侧的问题，再烧 93 轮只是把同一句话重复 93 遍。
+///
+/// **成功一轮就清零** —— 中间偶发一次格式烂不该累计成"病"。
+pub const MAX_UNPARSEABLE_ROUNDS: usize = 3;
 /// 连续模型调用失败的容忍上限：瞬时空内容/网络抖动退避后重试，连续超限才终止会话
 /// 连续模型调用失败几次算致命。步骤执行体（`crate::step_agent`）复用同一条判据 ——
 /// "抖两次就放弃"与"抖十次才放弃"是两种产品行为，不该在两个模块里各写一个数。
@@ -879,6 +890,43 @@ fn json_of(raw: &str) -> Result<(serde_json::Value, usize), String> {
                 markup,
             )
         })
+}
+
+/// 连续解析失败到上限时的收尾诊断（**纯函数，可单测**）。
+///
+/// 它要回答的不是"错了"，而是"**接下来怎么办**"——因为这个失败几乎总不是模型"笨"，
+/// 而是"这条通道在你的模型上走不通"。三件事必须给全：
+/// ① 现象（连续几轮、最近一轮的原文长什么样，截一小段，够看出是 JSON 还是标记）；
+/// ② 最可能的原因（网关把 `tools` 丢了 / 模型不支持 function calling / 模型坚持用它自己那套标记）；
+/// ③ 两条出路（换模型端点；或一行回滚到老协议 `tool_protocol=false`）。
+///
+/// 不给③的话，用户只能看着日志猜 —— 而这条回滚开关是现成的（`ruyix.code.ai.tool_protocol`）。
+pub(crate) fn unparseable_diagnosis(streak: usize, last_raw: &str) -> String {
+    let (clean, markup) = crate::llm::strip_model_markup(last_raw);
+    let snippet = clip(clean.trim(), 240);
+    let snippet = if snippet.trim().is_empty() {
+        "（这一轮 content 是空的）".to_string()
+    } else {
+        snippet
+    };
+    let markup_note = if markup > 0 {
+        format!(
+            "\n其中检测到 {markup} 处模型自带的工具调用标记（已剥掉），说明它**算出了动作**，\
+                 只是用了自己那套协议 —— 而这一轮的请求里服务端没能把它解析成 `tool_calls`。"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "连续 {streak} 轮没有拿到工具调用，已停止本轮（不再空烧预算）。\n\n\
+         最近一轮的 content 片段：{snippet}{markup_note}\n\n\
+         最可能的原因：这条请求在你的模型 / 端点上**没走工具调用**（网关把 `tools` 丢了、\
+         模型不支持 function calling、或它坚持用自己那套标记）。\n\n\
+         两条出路：\n\
+         ① 换一个支持工具调用（tools / function calling）的模型或端点；\n\
+         ② 一行回滚到老协议：把 `ruyix.code.ai.tool_protocol` 设成 false —— 动作改走 content 里的 \
+         JSON（代价是模型自带标记更容易泄露，所以只作为兜底）。"
+    )
 }
 
 /// 解析错误 + "你发的是自带协议标记"这句。

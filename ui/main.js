@@ -1,3 +1,6 @@
+/** 双语内联文案（与 session.js / mcp.js 等面板同款）：英文界面走第二段 */
+const L = (zh, en) => (window.I18N && I18N.getLang() === "en" ? en : zh);
+
 /**
  * ruyix — Main JavaScript
  * 使用 Tauri 2 原生 API（window.__TAURI__），无需 npm 依赖
@@ -2759,7 +2762,7 @@ async function handleContextRun(fullPath) {
     cmd = cmd.replace(/\{file\}/gi, fullPath);
     await autoCreateRunTarget(name, cmd, fullPath);
   } catch (err) {
-    setStatus("运行失败: " + err, "error");
+    setStatus(L("运行失败: ", "Run failed: ") + err, "error");
   }
 }
 
@@ -2771,7 +2774,7 @@ async function handleContextTryRun(fullPath) {
   try {
     const result = await invoke("ai_execute_check", { path: fullPath });
     if (!result || !result.trim()) {
-      setStatus("试跑失败: AI 返回为空，请重试", "error");
+      setStatus(L("试跑失败: AI 返回为空，请重试", "Try-run failed: the AI returned nothing, please retry"), "error");
       return;
     }
     const fileName = fullPath.split(/[/\\]/).pop() || fullPath;
@@ -2784,24 +2787,24 @@ async function handleContextTryRun(fullPath) {
       const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
       await invoke("set_execute_entry", { path: fullPath, canRun: true, asFile: true });
       await autoCreateRunTarget(fileName, cmd, fullPath);
-      setStatus("已记住文件名: " + fileName + " → " + cmd);
+      setStatus(L("已记住文件名: ", "Remembered file name: ") + fileName + " → " + cmd);
     } else if (upper.startsWith("YES")) {
       // 可运行 — 提取命令模板
       let cmdTemplate = upper.startsWith("YES|") ? result.slice(result.indexOf("|") + 1).trim() : ("python {file}");
       const cmd = cmdTemplate.replace(/\{file\}/gi, fullPath);
       await invoke("set_execute_entry", { path: fullPath, canRun: true, asFile: false });
       await autoCreateRunTarget(fileName, cmd, fullPath);
-      setStatus("已记住并创建运行目标: ." + ext + " → " + cmd);
+      setStatus(L("已记住并创建运行目标: .", "Remembered and created a run target: .") + ext + " → " + cmd);
     } else if (upper.startsWith("CONDITIONAL")) {
       const detail = upper.startsWith("CONDITIONAL|") ? result.slice(result.indexOf("|") + 1).trim() : result;
-      setStatus("功能待开发: " + detail, "error");
+      setStatus(L("功能待开发: ", "Not implemented yet: ") + detail, "error");
     } else {
       // NO 或其他
       await invoke("set_execute_entry", { path: fullPath, canRun: false, asFile: false });
-      setStatus("已记住: ." + ext + " 不可运行 (AI: " + result.slice(0, 60) + ")");
+      setStatus(L("已记住: .", "Remembered: .") + ext + L(" 不可运行 (AI: ", " cannot be run (AI: ") + result.slice(0, 60) + ")");
     }
   } catch (err) {
-    setStatus("试跑失败: " + err, "error");
+    setStatus(L("试跑失败: ", "Try-run failed: ") + err, "error");
   }
 }
 
@@ -2867,7 +2870,7 @@ async function createRunTargets(fullPath, specs) {
     }
     loadRunTargets();
   } catch (err) {
-    setStatus("自动创建运行目标失败: " + err, "error");
+    setStatus(L("自动创建运行目标失败: ", "Failed to create run targets: ") + err, "error");
   }
   return created;
 }
@@ -2950,8 +2953,8 @@ function showConfirm(title, message) {
     titleEl.textContent = title;
     bodyEl.textContent = message;
     inputRow.style.display = "none";
-    okBtn.textContent = I18N.t("modal.ok") || "确认";
-    cancelBtn.textContent = I18N.t("modal.cancel") || "取消";
+    okBtn.textContent = I18N.t("modal.ok") || "OK";
+    cancelBtn.textContent = I18N.t("modal.cancel") || "Cancel";
     overlay.style.display = "";
 
     const cleanup = () => { overlay.style.display = "none"; };
@@ -2991,8 +2994,8 @@ function showPrompt(title, defaultValue) {
     inputRow.style.display = "";
     inputEl.value = defaultValue || "";
     inputEl.select();
-    okBtn.textContent = I18N.t("modal.ok") || "确认";
-    cancelBtn.textContent = I18N.t("modal.cancel") || "取消";
+    okBtn.textContent = I18N.t("modal.ok") || "OK";
+    cancelBtn.textContent = I18N.t("modal.cancel") || "Cancel";
     overlay.style.display = "";
 
     const cleanup = () => { overlay.style.display = "none"; };
@@ -3021,20 +3024,20 @@ async function deleteFileOrFolder(fullPath) {
 
 async function renameFileOrFolder(fullPath) {
   const oldName = fullPath.split(/[/\\]/).pop() || fullPath;
-  const newName = await showPrompt('重命名', oldName);
+  const newName = await showPrompt(L('重命名', 'Rename'), oldName);
   if (!newName || newName === oldName) return;
   await handleCommand('rename ' + toRelativePath(fullPath) + ' ' + newName, true);
 }
 
 async function createFileInFolder(fullPath) {
-  const name = await showPrompt('新建文件', '');
+  const name = await showPrompt(L('新建文件', 'New file'), '');
   if (!name) return;
   const rel = toRelativePath(fullPath);
   await handleCommand('new file ' + (rel ? rel + '\\' : '') + name, true);
 }
 
 async function createFolderInFolder(fullPath) {
-  const name = await showPrompt('新建文件夹', '');
+  const name = await showPrompt(L('新建文件夹', 'New folder'), '');
   if (!name) return;
   const rel = toRelativePath(fullPath);
   await handleCommand('new folder ' + (rel ? rel + '\\' : '') + name, true);
@@ -3278,8 +3281,8 @@ function showProjectEditModal(path, name, lang) {
 
     const okBtn = document.getElementById("project-edit-ok");
     const cancelBtn = document.getElementById("project-edit-cancel");
-    okBtn.textContent = I18N.t("modal.ok") || "确认";
-    cancelBtn.textContent = I18N.t("modal.cancel") || "取消";
+    okBtn.textContent = I18N.t("modal.ok") || "OK";
+    cancelBtn.textContent = I18N.t("modal.cancel") || "Cancel";
 
     const cleanup = () => {
       overlay.style.display = "none";
@@ -3326,7 +3329,7 @@ async function loadRunTargets() {
 
   const invoke = getTauriInvoke();
   if (!invoke) {
-    list.innerHTML = '<span class="run-targets-empty">Tauri API 不可用</span>';
+    list.innerHTML = '<span class="run-targets-empty">' + L('Tauri API 不可用', 'Tauri API unavailable') + '</span>';
     return;
   }
 
@@ -3335,7 +3338,7 @@ async function loadRunTargets() {
     const targets = await invoke("get_run_targets", { projectRoot });
 
     if (!targets || targets.length === 0) {
-      list.innerHTML = '<span class="run-targets-empty">暂无运行目标</span>';
+      list.innerHTML = `<span class="run-targets-empty">${L("暂无运行目标", "No run targets yet")}</span>`;
       return;
     }
 
@@ -3349,10 +3352,10 @@ async function loadRunTargets() {
             ${escapeHtml(t.name || t.key)}
           </div>
           <div class="run-target-cmd">${escapeHtml(t.cmd || "（无命令）")}</div>
-          ${t.bind ? `<div class="run-target-bind" title="绑定文件">🔗 ${escapeHtml(t.bind)}</div>` : ""}
+          ${t.bind ? `<div class="run-target-bind" title="${L('绑定文件', 'bound file')}">🔗 ${escapeHtml(t.bind)}</div>` : ""}
         </div>
-        <span class="run-target-edit" title="修改运行目标">&#9998;</span>
-        <span class="run-target-del" title="删除运行目标">&#128465;</span>
+        <span class="run-target-edit" title="${L('修改运行目标', 'edit run target')}">&#9998;</span>
+        <span class="run-target-del" title="${L('删除运行目标', 'delete run target')}">&#128465;</span>
       </div>`
       )
       .join("");
@@ -3387,7 +3390,7 @@ async function loadRunTargets() {
       });
     });
   } catch (err) {
-    list.innerHTML = `<span class="run-targets-empty">加载失败: ${err}</span>`;
+    list.innerHTML = `<span class="run-targets-empty">${L(`加载失败: ${err}`, `Load failed: ${err}`)}</span>`;
   }
 }
 
@@ -3857,7 +3860,7 @@ async function loadFileTree(dirPath) {
 
   const invoke = getTauriInvoke();
   if (!invoke) {
-    tree.innerHTML = '<span class="file-tree-placeholder">Tauri API 不可用</span>';
+    tree.innerHTML = '<span class="file-tree-placeholder">' + L('Tauri API 不可用', 'Tauri API unavailable') + '</span>';
     return;
   }
 
@@ -3875,7 +3878,7 @@ async function loadFileTree(dirPath) {
     if (entries.length === 0) {
       const ph = document.createElement("span");
       ph.className = "file-tree-placeholder";
-      ph.textContent = "空目录";
+      ph.textContent = L("空目录", "Empty folder");
       rootChildren.appendChild(ph);
     } else {
       for (const entry of entries) {
@@ -3893,7 +3896,7 @@ async function loadFileTree(dirPath) {
       await restoreExpandedPaths(tree, expandedPaths);
     }
   } catch (err) {
-    tree.innerHTML = `<span class="file-tree-placeholder">读取失败: ${err}</span>`;
+    tree.innerHTML = `<span class="file-tree-placeholder">${L(`读取失败: ${err}`, `Read failed: ${err}`)}</span>`;
   }
 }
 
@@ -3952,7 +3955,7 @@ async function refreshTreeNode(fullPath) {
     if (entries.length === 0) {
       const ph = document.createElement("span");
       ph.className = "file-tree-placeholder";
-      ph.textContent = "空目录";
+      ph.textContent = L("空目录", "Empty folder");
       cc.appendChild(ph);
     } else {
       for (const entry of entries) {

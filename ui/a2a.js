@@ -113,7 +113,7 @@
       renderAgents();
       renderTask();
     } catch (err) {
-      status("A2A 刷新失败: " + err, "error");
+      status(L("A2A 刷新失败: ", "A2A refresh failed: ") + err, "error");
     }
   }
 
@@ -127,20 +127,20 @@
 
   async function discover() {
     const invoke = getInvoke();
-    if (!invoke) return status("后端不可用", "error");
+    if (!invoke) return status(L("后端不可用", "backend unavailable"), "error");
     const url = ($("a2a-discover-url")?.value || "").trim();
-    if (!url) return status("请填写 agent 基址 URL", "error");
+    if (!url) return status(L("请填写 agent 基址 URL", "Enter the agent base URL"), "error");
     renderStateLine(L("发现中…", "discovering…"), "run");
     try {
       const cfg = await invoke("a2a_discover", { url });
       $("a2a-discover-url").value = "";
-      status(`A2A 已注册: ${cfg.name}${cfg.version ? " " + cfg.version : ""}`);
+      status(L(`A2A 已注册: ${cfg.name}${cfg.version ? " " + cfg.version : ""}`, `A2A agent registered: ${cfg.name}${cfg.version ? " " + cfg.version : ""}`));
       selected = cfg.name;
       await refresh();
       renderStateLine("");
     } catch (err) {
       renderStateLine("");
-      status("发现失败: " + err, "error");
+      status(L("发现失败: ", "Discovery failed: ") + err, "error");
     }
   }
 
@@ -150,10 +150,10 @@
     try {
       await invoke("a2a_remove", { name, projectRoot: root() });
       if (selected === name) selected = null;
-      status("A2A 已删除: " + name);
+      status(L("A2A 已删除: ", "A2A agent removed: ") + name);
       await refresh();
     } catch (err) {
-      status("删除失败: " + err, "error");
+      status(L("删除失败: ", "Remove failed: ") + err, "error");
     }
   }
 
@@ -161,7 +161,7 @@
     const invoke = getInvoke();
     if (!invoke || !selected || running) return;
     const text = ($("a2a-task-input")?.value || "").trim();
-    if (!text) return status("请填写任务内容", "error");
+    if (!text) return status(L("请填写任务内容", "Enter the task text"), "error");
     running = true;
     renderTask();
     renderStateLine(L("发送中…", "sending…"), "run");
@@ -176,11 +176,11 @@
       }[res.state] || res.state;
       renderStateLine(`${res.agent} · ${stateText}`, res.state === "completed" ? "ok" : "err");
       renderResult(res.text);
-      status("A2A 任务结束: " + res.state);
+      status(L("A2A 任务结束: ", "A2A task finished: ") + res.state);
     } catch (err) {
       renderStateLine(L("✗ 出错", "✗ error"), "err");
       renderResult(String(err));
-      status("A2A 发送失败", "error");
+      status(L("A2A 发送失败", "A2A send failed"), "error");
     } finally {
       running = false;
       renderTask();
@@ -194,33 +194,33 @@
   async function handleCommand(rest) {
     const args = String(rest || "").trim().split(/\s+/).filter(Boolean);
     const invoke = getInvoke();
-    if (!invoke) return status("后端不可用", "error");
+    if (!invoke) return status(L("后端不可用", "backend unavailable"), "error");
     if (!args.length || args[0] === "list") {
       try {
         const list = await invoke("a2a_agents", { projectRoot: root() });
         const lines = (list ?? []).map((a) => `🤖 ${a.name} — ${a.url}`);
-        status(lines.length ? lines.join(" | ") : "未注册 A2A agent");
+        status(lines.length ? lines.join(" | ") : L("未注册 A2A agent", "No A2A agent registered"));
       } catch (err) {
-        status("A2A 查询失败: " + err, "error");
+        status(L("A2A 查询失败: ", "A2A query failed: ") + err, "error");
       }
       return;
     }
     if (args[0] === "send") {
       const name = args[1];
       const text = args.slice(2).join(" ");
-      if (!name || !text) return status("用法: a2a send <agent名> <任务文本>", "error");
+      if (!name || !text) return status(L("用法: a2a send <agent名> <任务文本>", "usage: a2a send <agent> <task text>"), "error");
       try {
         const res = await invoke("a2a_send", { name, text, projectRoot: root() });
         if (typeof showCommandResult === "function") {
           showCommandResult(res.text);
         }
-        status("A2A 任务结束: " + res.state);
+        status(L("A2A 任务结束: ", "A2A task finished: ") + res.state);
       } catch (err) {
-        status("发送失败: " + err, "error");
+        status(L("发送失败: ", "Send failed: ") + err, "error");
       }
       return;
     }
-    status("用法: a2a [list | send <agent名> <文本>]", "error");
+    status(L("用法: a2a [list | send <agent名> <文本>]", "usage: a2a [list | send <agent> <text>]"), "error");
   }
 
   // ============================================

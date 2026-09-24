@@ -43,6 +43,10 @@ pub async fn run_with_ask(
     let mut plan_cursor: usize = 0;
     // content 通道连续被拒的次数（严格模式的"提示一次即拒"：第 1 次讲清道理，之后只说短话）。
     let mut content_strikes: usize = 0;
+    // **连续**解析不出的轮数 —— 到上限就停（见 [`MAX_UNPARSEABLE_ROUNDS`]）。
+    // 与 `content_strikes` 分开：那个是"话术"计数器（决定下一句说长还是说短），
+    // 这个是"预算"闸（决定还烧不烧），两者语义不同，混用会改掉既有话术行为。
+    let mut unparsed_streak: usize = 0;
     let mut plan_resets: u32 = 0;
     let mut intervene = false;
     // 已完成步骤的引擎侧事实（跨步骤唯一通道：子步骤输入包里的那一行）
@@ -328,6 +332,18 @@ pub async fn run_with_ask(
                 // 解析失败不终止：把错误告诉模型让它重出（消耗轮次预算，防死循环）。
                 // 截断（finish_reason=length）与格式烂是两种病：截断必须叫模型写短，
                 // 否则它原样重发再截断一次（实测连烧三轮才碰巧写短过关）
+                // **连续**失败到上限：停下来并给出可执行的诊断，不再空烧轮次。
+                // 这条是用户报的"发一句你好就无限死循环"的正面治疗：旧行为只 `continue`，
+                // 兜底是 96 轮 / 30 分钟 —— 用户看到的就是"一直转"。
+                unparsed_streak += 1;
+                if unparsed_streak >= MAX_UNPARSEABLE_ROUNDS {
+                    sink.log(
+                        "error",
+                        format!("[agent] 连续 {unparsed_streak} 轮无工具调用，停止本轮"),
+                    );
+                    out.answer = unparseable_diagnosis(unparsed_streak, &reply.content);
+                    return Err(out.answer.clone());
+                }
                 let truncated = reply.finish_reason.as_deref() == Some("length");
                 let tag = if truncated {
                     "（finish_reason=length，已要求精简重发）"
@@ -346,6 +362,8 @@ pub async fn run_with_ask(
                 continue;
             }
         };
+        // 这一轮解析成功 ⇒ 连续失败计数清零（偶发一次格式烂不该累计成"病"）。
+        unparsed_streak = 0;
         // 迁移期的观测点：这一轮的动作是从哪条协议来的。`兼容层`只可能出现在
         // `tool_protocol=false`（回滚）那一侧 —— 严格模式下 content 通道在上一段就被拒了。
         sink.log(

@@ -193,6 +193,10 @@
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
  *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
+ *   U49 i18n-no-cjk   英文界面不许露出**写死的中文**（bug 1/2 的回归门禁）：i18n 的 en 侧本来就没有中文，
+ *                    所以界面上的中文只可能来自写死的字面量。扫 8 个面板 JS 的"显示出口"
+ *                    （status / setStatus / innerHTML / textContent / title / showPrompt / showConfirm）：
+ *                    注释、`L(zh,en)` / `I18N.t(...)`、`data-i18n=` 属性都不算违反
  *   U48 bucket-panel IDE 状态桶（v1.0.0）：项目侧的暂存 / 备份 / 会话 / 验证产物全部搬进**便携根**的
  *                     `projects/<key>/`（用户仓库零写入）—— 而这些桶属于 IDE 不属于项目，项目改名/移动
  *                     就会留下孤儿桶，所以窗口里必须**看得见 + 能删**（绝不自动删）。契约钉四件事：
@@ -3574,6 +3578,52 @@ async function runBucketPanelChecks() {
     `bucket.* 文案不全或中英不对齐：zh=${keys.length}，缺 ${keys.filter((k) => !(k in en)).join(",")}`);
 }
 
+/**
+ * U49 i18n-no-hardcoded-cjk（bug 1/2 的回归门禁）：**英文界面下不该出现中文**。
+ *
+ * 为什么这条静态扫描是有效的：i18n 的 en 侧本来就没有中文（实测：501 个键里只有
+ * `menu.lang.zh = 中文` 一处，那是有意的语言名），所以英文界面上任何中文都只可能来自
+ * **写死在代码里的字面量** —— 面板一直用 `L(zh, en)` 这套双语内联，但 `status("…")` 这类
+ * 调用漏掉了一个就永远漏着（用户报的正是这个：英文界面下 Skill / 工具 / A2A / MCP 面板全是中文）。
+ *
+ * 判据只扫"会显示给用户"的那几个出口（status / setStatus / innerHTML / textContent / title /
+ * showPrompt / showConfirm）：注释不算（不进界面）、`L(...)` 与 `I18N.t(...)` 里的中文不算
+ * （前者是双语的源、后者查表）、`data-i18n=` 属性不算（属性驱动的 i18n 在 init 时替换）。
+ */
+async function runI18nSweepChecks() {
+  const files = [
+    "main.js",
+    "command.js",
+    "session.js",
+    "mcp.js",
+    "a2a.js",
+    "capability.js",
+    "config.js",
+    "service.js",
+  ];
+  const offenders = [];
+  for (const f of files) {
+    readLf("ui/" + f)
+      .split("\n")
+      .forEach((line, i) => {
+        const s = line.trim();
+        if (s.startsWith("*") || s.startsWith("//") || s.startsWith("/*")) return;
+        if (!/[\u4e00-\u9fff]/.test(line)) return;
+        if (line.includes("L(") || line.includes("I18N.t(") || line.includes("data-i18n=")) return;
+        const shown =
+          /(status\(|setStatus\(|innerHTML|textContent|title=|showPrompt|showConfirm)/.test(line);
+        if (!shown) return;
+        offenders.push(`ui/${f}:${i + 1}  ${s.slice(0, 96)}`);
+      });
+  }
+  check(
+    "U49",
+    "i18n-no-hardcoded-cjk",
+    offenders.length === 0,
+    `英文界面会露出中文（这些字符串没走 I18N.t / L(zh,en)）：\n      ${offenders.join("\n      ")}`
+  );
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -3598,6 +3648,7 @@ async function main() {
     ["U46", "tab-menu-real", runTabMenuLayoutProbe],
     ["U47", "wide-line-real", runEditorWideLineProbe],
     ["U48", "bucket-panel", runBucketPanelChecks],
+    ["U49", "i18n-no-hardcoded-cjk", runI18nSweepChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

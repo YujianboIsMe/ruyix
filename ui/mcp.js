@@ -151,7 +151,7 @@
       renderServers();
       renderTools();
     } catch (err) {
-      status("MCP 刷新失败: " + err, "error");
+      status(L("MCP 刷新失败: ", "MCP refresh failed: ") + err, "error");
     }
   }
 
@@ -172,10 +172,10 @@
 
   async function addServer() {
     const invoke = getInvoke();
-    if (!invoke) return status("后端不可用", "error");
+    if (!invoke) return status(L("后端不可用", "backend unavailable"), "error");
     const name = ($("mcp-add-name")?.value || "").trim();
     const command = ($("mcp-add-command")?.value || "").trim();
-    if (!name || !command) return status("请填写名称与启动命令", "error");
+    if (!name || !command) return status(L("请填写名称与启动命令", "Enter a name and a launch command"), "error");
     try {
       // 简易解析：命令串按空白拆分（引号内包含空格的场景请用面板外手编 mcp.toml）
       const parts = command.match(/"[^"]*"|\S+/g) || [];
@@ -185,10 +185,10 @@
       });
       $("mcp-add-name").value = "";
       $("mcp-add-command").value = "";
-      status("MCP 服务器已添加: " + name);
+      status(L("MCP 服务器已添加: ", "MCP server added: ") + name);
       await refresh();
     } catch (err) {
-      status("添加失败: " + err, "error");
+      status(L("添加失败: ", "Add failed: ") + err, "error");
     }
   }
 
@@ -198,10 +198,10 @@
     try {
       await invoke("mcp_remove_server", { name, projectRoot: root() });
       if (selected === name) selected = null;
-      status("MCP 服务器已删除: " + name);
+      status(L("MCP 服务器已删除: ", "MCP server removed: ") + name);
       await refresh();
     } catch (err) {
-      status("删除失败: " + err, "error");
+      status(L("删除失败: ", "Remove failed: ") + err, "error");
     }
   }
 
@@ -211,11 +211,11 @@
     setBusy(true);
     try {
       const st = await invoke("mcp_start", { name: selected, projectRoot: root() });
-      status(`MCP 已连接: ${st.name}（${st.tools} 工具）`);
+      status(L(`MCP 已连接: ${st.name}（${st.tools} 工具）`, `MCP connected: ${st.name} (${st.tools} tools)`));
       await refresh();
       selectServer(selected);
     } catch (err) {
-      status("连接失败: " + err, "error");
+      status(L("连接失败: ", "Connect failed: ") + err, "error");
     } finally {
       setBusy(false);
     }
@@ -227,10 +227,10 @@
     try {
       await invoke("mcp_stop", { name: selected, projectRoot: root() });
       tools = [];
-      status("MCP 已断开: " + selected);
+      status(L("MCP 已断开: ", "MCP disconnected: ") + selected);
       await refresh();
     } catch (err) {
-      status("断开失败: " + err, "error");
+      status(L("断开失败: ", "Disconnect failed: ") + err, "error");
     }
   }
 
@@ -238,17 +238,17 @@
     const invoke = getInvoke();
     if (!invoke || !selected) return;
     const tool = $("mcp-call-tool")?.value;
-    if (!tool) return status("请先选择工具", "error");
+    if (!tool) return status(L("请先选择工具", "Select a tool first"), "error");
     const argsJson = $("mcp-call-args")?.value || "";
     renderResult(L("调用中…", "calling…"), false);
     setBusy(true);
     try {
       const out = await invoke("mcp_call_tool", { name: selected, tool, argsJson });
       renderResult(out.text, out.isError);
-      status(out.isError ? "MCP 工具返回错误" : "MCP 调用完成");
+      status(out.isError ? L("MCP 工具返回错误", "MCP tool returned an error") : L("MCP 调用完成", "MCP call finished"));
     } catch (err) {
       renderResult(String(err), true);
-      status("调用失败", "error");
+      status(L("调用失败", "Call failed"), "error");
     } finally {
       setBusy(false);
     }
@@ -261,34 +261,34 @@
   async function handleCommand(rest) {
     const args = String(rest || "").trim().split(/\s+/).filter(Boolean);
     const invoke = getInvoke();
-    if (!invoke) return status("后端不可用", "error");
+    if (!invoke) return status(L("后端不可用", "backend unavailable"), "error");
     if (!args.length || args[0] === "list") {
       try {
         const list = await invoke("mcp_servers", { projectRoot: root() });
         const lines = (list ?? []).map((s) =>
           `${s.running ? "●" : "○"} ${s.name} — ${s.command}${s.running ? ` (${s.tools} tools)` : ""}`);
-        status(lines.length ? lines.join(" | ") : "未配置 MCP 服务器");
+        status(lines.length ? lines.join(" | ") : L("未配置 MCP 服务器", "No MCP server configured"));
       } catch (err) {
-        status("MCP 查询失败: " + err, "error");
+        status(L("MCP 查询失败: ", "MCP query failed: ") + err, "error");
       }
       return;
     }
     if (args[0] === "call") {
       const [_, name, tool, ...restArgs] = args;
-      if (!name || !tool) return status("用法: mcp call <服务器> <工具> [参数JSON]", "error");
+      if (!name || !tool) return status(L("用法: mcp call <服务器> <工具> [参数JSON]", "usage: mcp call <server> <tool> [argsJSON]"), "error");
       const argsJson = restArgs.join(" ");
       try {
         const out = await invoke("mcp_call_tool", { name, tool, argsJson });
         if (typeof showCommandResult === "function") {
           showCommandResult(out.text);
         }
-        status(out.isError ? "MCP 工具返回错误" : "MCP 调用完成");
+        status(out.isError ? L("MCP 工具返回错误", "MCP tool returned an error") : L("MCP 调用完成", "MCP call finished"));
       } catch (err) {
-        status("调用失败: " + err, "error");
+        status(L("调用失败: ", "Call failed: ") + err, "error");
       }
       return;
     }
-    status("用法: mcp [list | call <服务器> <工具> {json}]", "error");
+    status(L("用法: mcp [list | call <服务器> <工具> {json}]", "usage: mcp [list | call <server> <tool> {json}]"), "error");
   }
 
   // ============================================

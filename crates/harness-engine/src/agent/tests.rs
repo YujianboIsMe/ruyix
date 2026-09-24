@@ -86,6 +86,55 @@ fn args_only_object_is_told_to_wrap_it_in_a_tool_field() {
     assert!(!err.contains("未知能力"), "缺 tool 不该报成未知能力: {err}");
 }
 
+/// **bug 5 的回归**（用户实测 2026-09-25）：发一句"你好"，模型每轮都不发工具调用，而引擎只
+/// 回一句拒绝就 `continue` —— 兜底是 `MAX_STEPS`（96 轮）与墙钟闸（30 分钟），用户看到的现象
+/// 就是**无限死循环**（日志里同一句 warn 一行接一行）。
+///
+/// 判据三条：
+/// ① **三轮之内就停**（不再空烧预算，也不消费第 4 条回复）；
+/// ② 停下来是**失败**（`Err`），不是静默的成功 —— 用户必须知道这一轮没跑成；
+/// ③ 诊断要指向"接下来怎么办"：点明连续几轮 + 原因（模型/端点侧没走工具调用）+ 现成的回滚开关
+///    `ruyix.code.ai.tool_protocol` + 最近一轮的原文片段（否则用户只能对着日志猜模型发了什么）。
+#[test]
+fn content_only_model_stops_after_the_cap_instead_of_spinning() {
+    let d = TempDir::new("unparsed-cap");
+    let llm = crate::testllm::fake_llm(vec![
+        "你好！有什么可以帮你的？".into(),
+        "我可以帮你读文件、改代码。".into(),
+        "你想让我做什么？".into(),
+        "（第 4 条不该被消费到）".into(),
+    ]);
+    let cfg = ask_cfg(&llm);
+
+    let err = block_on(run_with_ask(
+        &cfg,
+        &d.0,
+        "你好",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &NoAsker,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect_err("三轮都拿不到工具调用 ⇒ 必须失败，而不是继续转");
+
+    assert_eq!(
+        llm.count(),
+        MAX_UNPARSEABLE_ROUNDS,
+        "连续失败到上限就该停，不该再要第 4 条回复"
+    );
+    assert!(err.contains("连续 3 轮"), "要点明连续几轮：{err}");
+    assert!(
+        err.contains("tool_protocol"),
+        "要给出那条现成的回滚开关（否则用户只能猜）：{err}"
+    );
+    assert!(
+        err.contains("你想让我做什么？"),
+        "要带上**最近一轮**的原文片段（不是第一轮的），用户才看得见模型最后发的到底是什么：{err}"
+    );
+}
+
 /// 端到端复刻那次失败：模型把动作**只发了参数那一层**出来，后面挂着它自己的协议闭合标记
 /// （实测 2026-09-21 第 5 轮的原样：`{"cmd": …}` + 三行闭合标记，模型把工具名丢在自己的标记里）。
 ///

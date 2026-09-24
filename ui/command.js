@@ -1,3 +1,6 @@
+/** 双语内联文案（与 session.js / mcp.js 等面板同款）：英文界面走第二段 */
+const L = (zh, en) => (window.I18N && I18N.getLang() === "en" ? en : zh);
+
 /**
  * ruyix — Command System
  * 命令栏、命令解析与分发、以及各命令的实现。
@@ -219,11 +222,11 @@ async function handleRunCommand(raw) {
       const nameKey = `ruyix.code.run.${target.key}.name`;
 
       // 提示用户输入新名称
-      const newName = await showPrompt("修改运行目标名称", target.name);
+      const newName = await showPrompt(L("修改运行目标名称", "Edit run target name"), target.name);
       if (!newName) return;
 
       // 提示用户输入新命令
-      const newCmd = await showPrompt("修改运行目标命令", target.cmd || "");
+      const newCmd = await showPrompt(L("修改运行目标命令", "Edit run target command"), target.cmd || "");
       if (!newCmd) return;
 
       await executeConfigAction("update", "p", nameKey, newName);
@@ -887,7 +890,7 @@ async function handleGitCommand(raw, _fromAi = false) {
     if (out.exit_code === 0) {
       setStatus(I18N.t("git.done", { cmd: rest }));
     } else {
-      const errMsg = (out.stderr || out.stdout || "").trim().split("\n")[0] || "未知错误";
+      const errMsg = (out.stderr || out.stdout || "").trim().split("\n")[0] || L("未知错误", "unknown error");
       setStatus(I18N.t("git.fail", { cmd: rest, err: errMsg }), "error");
     }
   } catch (err) {
