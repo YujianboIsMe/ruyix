@@ -2112,9 +2112,39 @@ fn config_form_load(
     mgr.scan_scope_entries(&s, project_root.as_deref())
 }
 
+/// 配置改完之后**广播一次"哪些键变了"**，让订阅者自己决定要不要重取。
+///
+/// 为什么必须是事件、而不是"前端保存完顺手再刷一遍"：
+/// 配置表单与会话面板是**两个互不相识的模块** —— 表单不知道谁在用这些键，面板也不知道谁改了它们。
+/// 旧行为是"面板打开时探一次"，于是：**用户刚在配置里填完 API Key，回到会话面板，
+/// 红框里还写着「✗ key 未配置」** —— 界面在撒谎，用户只能以为"填了没用"（用户报障即此）。
+/// 事件是这两端之间唯一诚实的连接：改的一方只说"我改了这些键"，用的一方自己决定怎么刷新。
+///
+/// 载荷带 `keys`（section + key）而不是"某个布尔"，是为了让订阅者能**按相关度过滤**：
+/// 改个 `ui.lang` 不必把模型列表和 API key 状态全重探一遍。
+///
+/// **调用前必须已经放掉 config 锁**：监听者（会话面板）收到事件就会回头调
+/// `agent_env_probe` / `ai_models` —— 那些命令同样要锁 config，握着锁发事件就是自己撞自己。
+fn emit_config_changed(
+    app: &tauri::AppHandle,
+    scope: &str,
+    entries: &[config::ConfigEntryInput],
+    applied: bool,
+) {
+    let keys: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| serde_json::json!({ "section": e.section, "key": e.key }))
+        .collect();
+    let _ = app.emit(
+        "config://changed",
+        serde_json::json!({ "scope": scope, "applied": applied, "keys": keys }),
+    );
+}
+
 /// 配置菜单：保存表单（增量写；空值 = 删除该键）
 #[tauri::command]
 fn config_form_save(
+    app: tauri::AppHandle,
     scope: String,
     entries: Vec<config::ConfigEntryInput>,
     project_root: Option<String>,
@@ -2126,13 +2156,20 @@ fn config_form_save(
             scope
         )
     })?;
-    let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.save_scope_entries(&s, &entries, project_root.as_deref())
+    let report = {
+        let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+        mgr.save_scope_entries(&s, &entries, project_root.as_deref())?
+    };
+    // 上面那个作用域结束 = 配置锁已释放（见 emit_config_changed 的注释：
+    // 握着锁发事件会撞自己 —— 监听者收到事件就会回头调要锁的配置命令）
+    emit_config_changed(&app, &scope, &entries, false);
+    Ok(report)
 }
 
 /// 配置菜单：应用表单（= 保存 + 刷新 IDE 运行时内存里的配置对象）
 #[tauri::command]
 fn config_form_apply(
+    app: tauri::AppHandle,
     scope: String,
     entries: Vec<config::ConfigEntryInput>,
     project_root: Option<String>,
@@ -2144,8 +2181,13 @@ fn config_form_apply(
             scope
         )
     })?;
-    let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.apply_scope_entries(&s, &entries, project_root.as_deref())
+    let report = {
+        let mut mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+        mgr.apply_scope_entries(&s, &entries, project_root.as_deref())?
+    };
+    // 「应用」比「保存」更该广播：运行时内存真的变了，界面里所有派生状态当场就旧了
+    emit_config_changed(&app, &scope, &entries, true);
+    Ok(report)
 }
 
 /// 配置菜单：引擎声明的配置键（键名 / 类型 / 默认值 / 枚举取值）。

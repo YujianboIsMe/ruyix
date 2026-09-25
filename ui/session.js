@@ -544,7 +544,9 @@
       paintMic();
       paintModel();
     }
-    (async () => {
+    // 取模型列表 + 能力（联网/录音按钮的可用性都跟着它）。**起个名字**而不是匿名 IIFE：
+    // 配置一改（比如刚填完 API Key），这两样都得重取 —— 见 keyDependent 的注释。
+    const reloadModelState = async () => {
       const invoke = getInvoke();
       if (!invoke) return;
       try {
@@ -553,7 +555,9 @@
         wrap._models = null;
       }
       await refreshCaps();
-    })();
+    };
+    reloadModelState();
+    keyDependent.push({ el: wrap, fn: reloadModelState });
     modelSel.addEventListener("change", async () => {
       const id = modelSel.value;
       const invoke = getInvoke();
@@ -1542,20 +1546,70 @@
     const p = ev.payload ?? {};
     if (p.line) status(String(p.line), "info");
   });
+  // 配置改了（`config://changed`）：重取一切"取决于当前 key / 模型 / 端点"的状态。
+  // 触发场景就是用户报的那一条：在配置里填完 API Key → 会话面板那排 chip 还写着
+  // 「✗ key 未配置」—— 面板只在打开时探过一次，之后没人告诉它 key 变了。
+  listen("config://changed", (ev) => {
+    const keys = (ev.payload ?? {}).keys || [];
+    if (!touchesKeyDependentState(keys)) return; // 改别的键不值得重探
+    probeEnv();
+    for (const it of aliveKeyDependent()) {
+      Promise.resolve()
+        .then(() => it.fn())
+        .catch(() => {});
+    }
+  });
       }
     } catch {
       // 浏览器模式无 Tauri 事件
     }
-    // 环境探针（沿用原 agent 面板的能力）
-    const invoke = getInvoke();
-    if (invoke) {
-      invoke("agent_env_probe", { projectRoot: null })
-        .then((env) => renderEnvChips(env))
-        .catch(() => {});
-    } else {
-      renderEnvChips(null);
-    }
+    // 环境探针（沿用原 agent 面板的能力）—— 起个名字，好让 `config://changed` 也能叫它
+    probeEnv();
     syncForProject(true);
+  }
+
+  /**
+   * 配置改了之后要**重取**的东西（会话面板里凡是取决于"当前 key / 模型 / 端点"的状态）。
+   *
+   * 为什么需要这张表：配置表单与面板互不相识 —— 表单只知道"我改了这些键"，不知道谁在用。
+   * 以前面板只在打开时探一次，于是用户在配置里填完 API Key、回到会话面板，那排 chip 里
+   * 还写着「✗ key 未配置」（用户报障原话就是让我"用事件刷新红框标注的部分"）。
+   * 现在由宿主发 `config://changed`，谁用谁登记刷新。
+   */
+  const keyDependent = [];
+
+  /** 环境探针（那排 chip）：key 配没配就写在里面 */
+  function probeEnv() {
+    const invoke = getInvoke();
+    if (!invoke) return renderEnvChips(null);
+    invoke("agent_env_probe", { projectRoot: null })
+      .then((env) => renderEnvChips(env))
+      .catch(() => {});
+  }
+
+  /**
+   * `config://changed` 的载荷里，哪些键会改变会话面板的派生状态？
+   *
+   * **两个键空间都要认**：`ai.*` 是**配置表单**写的（api_key / api_url / model / …），
+   * `harness.llm.*` 是**会话里的模型下拉框**写的运行时 LLM 配置（换模型走它）。
+   * 只认相关的：改个 `ui.lang` 不值得把模型列表与 key 状态全重探一遍。
+   */
+  function touchesKeyDependentState(keys) {
+    return (keys || []).some((k) => {
+      if (!k) return false;
+      if (k.section === "ai" || k.section === "ai_fallback") return true;
+      return k.section === "harness" && String(k.key).startsWith("llm.");
+    });
+  }
+
+  /** 还活着的刷新登记项（标签页关掉后 DOM 就不在文档里了，顺手剔除，免得越攒越多） */
+  function aliveKeyDependent() {
+    const alive = (el) =>
+      typeof document?.contains !== "function" || !el || document.contains(el);
+    for (let i = keyDependent.length - 1; i >= 0; i -= 1) {
+      if (!alive(keyDependent[i].el)) keyDependent.splice(i, 1);
+    }
+    return keyDependent;
   }
 
   function renderEnvChips(env) {

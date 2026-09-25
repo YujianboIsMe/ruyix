@@ -568,3 +568,91 @@ devtools 网络面板（用户截图）：`voice_status` 一条花了 **6.58 秒
 - 首次自检仍要付一次全量哈希（release 实测 325 ms / 478MB）。这是"文件有没有坏"的唯一硬证据，
   保留；但它现在待在阻塞线程里、且一次进程只付一次。
 
+## ISSUE-7：配置被"保存"写坏 —— 23 个键变成 `"on"`（表单按位置读控件，读串了值）
+
+**状态**：**已修**（2026-09-25，做"配置保存后刷新面板"时顺出来的；**同时是 ISSUE-5 的真根因**）。
+
+### 症状（用户报障旁边那处）
+
+会话面板那排 chip 里写着 `✗ python 未找到（where / command -v 解析不到 on）`，
+`✗ node` 同样。用户截图里红框圈的正是这排 —— 而他问的是"能不能用事件刷新它"。
+**先说清楚：那不是渲染陈旧，是数据真的坏了。** 宿主探针老实回报：
+
+```json
+"python": { "bin": "on", "available": false, "version": "未找到（where / command -v 解析不到 on）" }
+"runs_root": "…\\ruyix\\runs\\on"      // docker.image 同款
+```
+
+磁盘上：
+
+```toml
+[harness]
+"proc.max" = "on"
+"sandbox.image" = "on"
+"verify.python_bin" = "on"
+workspace_root = "on"
+…                                 # 共 23 个键，全是 "on"
+```
+
+### 根因：`controls[row.idx]` 用 **DOM 位置**当下标
+
+```js
+controls = Array.from(body.querySelectorAll("[data-row]"));   // 位置数组
+const el = controls[row.idx];                                 // 按 row 下标取
+```
+
+只要两者错位，`readValue` 就会读到**别的控件**的值。而 checkbox 的 DOM `value` 默认是
+**`"on"`** —— 事故现场正是这个值：尾巴上 23 个**非 bool** 键（`proc.*` / `reflect.*` /
+`sandbox.*` / `step.max_steps` / `verify.*` / `workspace_root`）读到了开关的 `value`，
+于是被原样写进配置。**bool 键自己反而没事**（它们的 `readValue` 走 `el.checked` 分支）。
+
+这也解释了 ISSUE-5 那条 `model = "on"` —— **同一个字面量、同一个机制**：
+用户报的"配置里手输模型名导致 400"，我当时修的是入口（不许手输），
+但那个 `on` 根本不是他手输的，是**表单自己写进去的**。
+
+### 改法（四层，缺一层都不够）
+
+1. **按 `data-row` 属性寻址**（`Map<下标, 元素>`）—— 构造上正确，DOM 顺序怎么变都读不错；
+   这是真防线（`ui/config.js::render`）。
+2. **提交前的类型闸**（`firstInvalid`）：数字键必须能解析成数字、枚举键必须落白名单、
+   开关行走勾选态 —— 有一行说不通就**整单不提交**，并说出**是哪一行、为什么**。
+3. **读侧的 `acceptable` 加类型校验**（`config_bridge.rs`）：一份**已经坏掉**的配置不该把引擎带偏
+   —— int 键上的 `"on"` 一律当没配、回落到默认。（`text` 键拦不住：`image = "on"` 语法合法，
+   所以第 1 条才是那道真防线。）
+4. **把已坏的配置修回来**：按 schema 判定（值是 `on`、kind 不是 bool、options 不含 `on`、
+   默认值也不是 `on`）⇒ 删掉这些键、回落默认。两个便携根各 23 个，**备份在 `*.corrupt-<时间戳>.bak`**。
+
+### 证据（真机，同一实例同一调用，修前 / 修后）
+
+| | 修前 | 修后 |
+|---|---|---|
+| `python.bin` / 版本 | `"on"` / 未找到 | `python` / **Python 3.11.15** ✅ |
+| `node.bin` / 版本 | `"on"` / 未找到 | `node` / **v24.16.0** ✅ |
+| `docker.image` | `"on"` | `python:3.12-slim` ✅ |
+| `runs_root` | `…\\ruyix\\runs\\on` | `…\\global\\runs` ✅ |
+
+文件侧：`target/{debug,release}/global/harness.toml` 从 23 个 `= "on"` 变成 0 个 ✅。
+
+### 门禁（已跑）
+
+- `ui-smoke` **U65 config-form-no-value-smear**：回放里**故意把控件顺序打乱**
+  （位置下标实现会当场读串）⇒ 每行必须仍读到自己的值；再把数字键填成 `"on"` ⇒
+  **不许提交**且要说清是哪一行；
+- 宿主单测 `说不通的值当没配_坏配置不会把引擎带偏`（int/枚举/0 关死三类都当没配，
+  **合法值必须照常生效** —— 这道闸不能把正常配置一起拦下）；
+- `ui-smoke` 419/419 · `cargo test` 全绿 · clippy 两模式 0 warning。
+
+### 教训
+
+1. **位置下标是隐式契约**："DOM 顺序 == rows 顺序"没人写下来、也没有门禁守，出事只是时间问题。
+   有稳定标识（`data-row`）就该按标识寻址 —— 这不是洁癖，是**把隐式契约变成显式契约**。
+2. **界面上的坏显示，先怀疑数据**。我看到 `✗ python on）` 的第一反应是"渲染 bug"，
+   真相是配置里真写着 `on` —— 渲染层完全诚实。
+3. **一个值能横跨两个 bug**：`"on"` 同时出现在 ISSUE-5（模型名）与 ISSUE-7（23 个键）里。
+   修症状（不许手输）有用，但**把值追到源头**才终结了它。
+
+### 缺口
+
+- 那 23 个坏值已从两个便携根删掉（备份留着）；**用户手上的实例仍是修前的二进制**，需重启。
+- 类型闸只覆盖"值域明确"的键；`text` 键的坏值仍只能靠猜（真正的防线是第 1 条）。
+

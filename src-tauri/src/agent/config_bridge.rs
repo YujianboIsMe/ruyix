@@ -97,7 +97,29 @@ fn acceptable(spec: &engine::config::KeySpec, value: &str) -> bool {
     if !spec.options.is_empty() {
         return spec.options.iter().any(|o| o == value);
     }
-    !(ZERO_MEANS_BROKEN.contains(&spec.path.as_str()) && value == "0")
+    // **类型要对得上**（`KeySpec.kind` 只有 `bool` / `int` / `float` / `text` / `list`）。
+    //
+    // 为什么要在**读**的时候也拦：真事故（2026-09-25）里 23 个键被写成了字符串 `"on"`
+    // —— 一次错位的表单提交把 checkbox 的 DOM 默认值写进了 `proc.max` / `sandbox.image` /
+    // `verify.python_bin` / `workspace_root` 这些键（`verify.python_bin="on"` 会让环境探针
+    // 老老实实报告「python 未找到 on」）。写侧已修（按 `data-row` 寻址 + 提交前类型闸），
+    // 但读侧必须有兜底：**一份已经坏掉的配置不该把引擎带偏** —— 说不通的值一律当没配，回落默认。
+    // 这就是"坏文件不继续制造坏行为"。
+    let v = value.trim();
+    // 0 在这些键上不是"关"，而是**把能力静默关死**（提问次数 0 = 拒掉所有提问、
+    // 历史保留 0 轮 = 连当前这轮也折掉）—— 这条对**所有**类型都成立，别只写在 text 分支里。
+    if ZERO_MEANS_BROKEN.contains(&spec.path.as_str()) && v == "0" {
+        return false;
+    }
+    match spec.kind {
+        "bool" => matches!(
+            v.to_ascii_lowercase().as_str(),
+            "true" | "false" | "1" | "0" | "on" | "off" | "yes" | "no"
+        ),
+        "int" => v.parse::<i64>().is_ok(),
+        "float" => v.parse::<f64>().is_ok(),
+        _ => true,
+    }
 }
 
 /// 把 `harness.*` 下读到的键灌进配置，再补上 ruyix 与本实验室不同的两处默认。
@@ -293,6 +315,42 @@ mod tests {
         let mut cfg = engine::config::AppConfig::default();
         apply_engine_keys(&mut cfg, &owned);
         cfg
+    }
+
+    /// 说不通的值必须**当没配**（回落到默认）—— 真事故的回归判据。
+    ///
+    /// 现场：23 个键被写成字符串 `"on"`（错位的表单提交把 checkbox 的 DOM 默认值写了进去），
+    /// 于是 `verify.python_bin="on"`、`sandbox.image="on"`、`proc.max="on"`、`workspace_root="on"`。
+    /// 一份已经坏掉的配置不该把引擎带偏：`on` 在 int 键上不是数字 ⇒ 忽略、保持默认。
+    #[test]
+    fn 说不通的值当没配_坏配置不会把引擎带偏() {
+        let cfg = bridge(&[
+            ("verify.python_bin", "on"), // text 键：语法上合法，拦不住（写侧才是防线）
+            ("proc.max", "on"),          // int 键：说得通吗？不 ⇒ 当没配
+            ("sandbox.pids_limit", "on"), // int 同上（注意 `sandbox.cpus` 是 **text**：
+            // 语法上拦不住 —— 所以写侧的 `data-row` 寻址才是那道真防线）
+            ("agent.batch_max", "0"), // 0 = 会把能力静默关死 ⇒ 当没配
+            ("sandbox.mode", "yolo"), // 枚举外 ⇒ 当没配（不许静默换档）
+            ("proc.ready_timeout_secs", "60"), // 合法 ⇒ 要生效
+        ]);
+        let default = engine::config::AppConfig::default();
+        assert_eq!(
+            cfg.proc.max, default.proc.max,
+            "int 键上的 \"on\" 必须被忽略（否则引擎拿着 \"on\" 去 parse）"
+        );
+        assert_eq!(cfg.sandbox.pids_limit, default.sandbox.pids_limit, "同上");
+        assert_eq!(
+            cfg.agent.batch_max, default.agent.batch_max,
+            "0 会关死能力，按非法处理"
+        );
+        assert_eq!(
+            cfg.sandbox.mode, "prefer",
+            "枚举外的值不许生效（D3 的宿舍默认）"
+        );
+        assert_eq!(
+            cfg.proc.ready_timeout_secs, 60,
+            "合法值必须真的生效 —— 这道闸不能把正常配置一起拦下"
+        );
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {

@@ -159,7 +159,8 @@ window.ConfigUI = (() => {
   const NUMERIC = /^-?\d+(\.\d+)?$/;
 
   let tab = null;      // 当前渲染的配置标签
-  let controls = [];   // 渲染后的控件引用，下标 = row.idx
+  // 渲染后的控件引用：**下标（data-row）→ 元素**。用 Map 而不是位置数组 —— 见 render 里的注释
+  let controls = new Map();
   let busy = false;    // 保存 / 应用进行中，防重入
 
   // ============================================
@@ -528,7 +529,7 @@ window.ConfigUI = (() => {
 
   function render(tabRef) {
     tab = tabRef;
-    controls = [];
+    controls = new Map();
     const view = $("config-view");
     const body = $("config-body");
     if (!view || !body || !tab) return;
@@ -555,7 +556,19 @@ window.ConfigUI = (() => {
         `</section>`;
     }).join("");
 
-    controls = Array.from(body.querySelectorAll("[data-row]"));
+    // 控件按 **`data-row` 属性**收进"下标 → 元素"的表，**不用位置数组**。
+    //
+    // 真事故（2026-09-25）：位置数组一旦与 `row.idx` 错位，`readValue` 就会**串行**读值 ——
+    // 尾巴上 23 个非 bool 键（proc/reflect/sandbox/step/verify/workspace_root）读到了
+    // checkbox 的 DOM 默认 `value`，于是被原样写成 `"on"`，整个配置当场坏掉：
+    // `harness.toml` 里 23 个键 = "on"，`verify.python_bin="on"` 让环境探针显示
+    // 「✗ python 未找到（where / command -v 解析不到 on）」。
+    // 按属性寻址是**构造上正确**：DOM 顺序怎么变都读不错。
+    controls = new Map();
+    for (const el of body.querySelectorAll("[data-row]")) {
+      const i = Number(el.dataset && el.dataset.row);
+      if (Number.isInteger(i)) controls.set(i, el);
+    }
     applyFold(tab);
     renderOutline(tab);
     updateButtons();
@@ -566,7 +579,7 @@ window.ConfigUI = (() => {
   // ============================================
 
   function readValue(row) {
-    const el = controls[row.idx];
+    const el = controls.get(row.idx);
     if (!el) return row.initial;
     if (row.kind === "toggle") {
       if (el.checked) return "true";
@@ -574,6 +587,33 @@ window.ConfigUI = (() => {
       return row.initial === "" ? "" : "false";
     }
     return el.value;
+  }
+
+  /**
+   * 这一行的值说得通吗？说不通就**别提交**（返回一句人话，否则 null）。
+   *
+   * 为什么要有这道闸：上面那场事故里，坏值是**被静默写进配置**的 —— 没人拦，也没人报，
+   * 等用户从环境探针上看到「python 未找到 on」才知道出事了。值域明确的键（数字 / 枚举）
+   * 必须先拦住。**纯文本键拦不住**（`image = "on"` 语法上完全合法），所以真正的防线
+   * 是按 `data-row` 寻址（见 render 里的注释）；这道闸是第二层。
+   */
+  function invalidRowReason(row, value) {
+    if (value === "") return null; // 空值 = 删除该键，合法
+    if (row.kind === "toggle") return null; // 勾选状态由 readValue 归一成 true/false
+    if (row.kind === "number" && !NUMERIC.test(value)) return `不是数字：${value}`;
+    if (row.options && row.options.length && !row.options.includes(value)) {
+      return `不在可选值里（${row.options.join(" / ")}）：${value}`;
+    }
+    return null;
+  }
+
+  /** 提交前的自检：有一行说不通就整单不提交，并把**是哪一行**说出来 */
+  function firstInvalid(rows) {
+    for (const row of rows) {
+      const reason = invalidRowReason(row, readValue(row));
+      if (reason) return { row, reason };
+    }
+    return null;
   }
 
   /** 收集表单值；changesOnly = 只提交改动过的行（保存用）。基准是已提交值（row.initial） */
@@ -591,7 +631,7 @@ window.ConfigUI = (() => {
   /** 把 DOM 上的编辑值暂存到标签里（切标签页不丢） */
   function stash() {
     if (!tab || !tab._isConfig || tab.id !== window.state?.activeTabId) return;
-    if (!tab._config || !controls.length || !ownerIs(tab)) return;
+    if (!tab._config || controls.size === 0 || !ownerIs(tab)) return;
     const map = {};
     for (const row of tab._config.rows) map[row.fullKey] = readValue(row);
     tab._config.stash = map;
@@ -689,6 +729,18 @@ window.ConfigUI = (() => {
     const invoke = getInvoke();
     if (!invoke) {
       status(I18N.t("status.tauri_unavail"), "error");
+      return;
+    }
+    // 提交前先自检：有一行说不通就**整单不提交**（并说清是哪一行、为什么）
+    const bad = firstInvalid(tab._config.rows);
+    if (bad) {
+      status(
+        L(
+          `没提交：${bad.row.section}.${bad.row.key} 的值 ${bad.reason}`,
+          `not submitted: value for ${bad.row.section}.${bad.row.key} ${bad.reason}`
+        ),
+        "error"
+      );
       return;
     }
     // 保存提交增量，应用提交整表（要把值刷进运行时对象）
@@ -819,7 +871,7 @@ window.ConfigUI = (() => {
       }
       const btn = e.target.closest("[data-eye]");
       if (!btn) return;
-      const input = controls[Number(btn.dataset.eye)];
+      const input = controls.get(Number(btn.dataset.eye));
       if (!input) return;
       input.type = input.type === "password" ? "text" : "password";
     });

@@ -1606,7 +1606,13 @@ function parseControls(html) {
       const end = html.indexOf("</select>", re.lastIndex);
       const inner = html.slice(re.lastIndex, end);
       const sel = inner.match(/<option value="([^"]*)" selected>/);
-      out.push({ id: "select-" + m[2], value: sel ? decode(sel[1]) : "", type: "select" });
+      out.push({
+        id: "select-" + m[2], value: sel ? decode(sel[1]) : "", type: "select",
+        // config.js 现在按 **data-row 属性**寻址控件（不再按 DOM 位置）——
+        // 位置寻址真出过事故：错位时读到了 checkbox 的 DOM `value`（"on"），
+        // 23 个键被写成 "on"。桩要如实提供这个属性，否则回放会以为控件不存在。
+        dataset: { row: m[2] },
+      });
     } else {
       const type = (attrs.match(/type="([^"]*)"/) || [, "text"])[1];
       out.push({
@@ -1614,6 +1620,7 @@ function parseControls(html) {
         type,
         value: decode((attrs.match(/value="([^"]*)"/) || [, ""])[1]),
         checked: /\schecked>/.test(attrs),
+        dataset: { row: m[2] },
       });
     }
   }
@@ -3872,6 +3879,176 @@ function runVoiceButtonChecks() {
 }
 
 /**
+ * U65 config-form-no-value-smear：表单**不许把值串行写进配置**（真事故，2026-09-25）。
+ *
+ * 现场：`target/{debug,release}/global/harness.toml` 里 **23 个键 = "on"** ——
+ * `proc.max` / `reflect.*` / `sandbox.*` / `step.max_steps` / `verify.*` / `workspace_root`
+ * 全被写成了字符串 `"on"`（checkbox 的 DOM 默认 `value`），于是环境探针老老实实显示
+ * 「✗ python 未找到（where / command -v 解析不到 on）」。机制：`controls[row.idx]` 用的是
+ * **DOM 位置**做下标，一旦与 `row.idx` 错位，读值就读到了别的控件（checkbox → "on"）。
+ *
+ * 两条判据：
+ *   ① 控件按 `data-row` **属性**寻址 ⇒ 就算 DOM 顺序被打乱，每行读到的仍是**自己的**值；
+ *   ② 提交前有类型闸 ⇒ 数字键上的 `"on"` 这类说不通的值**整单不提交**，并说出是哪一行。
+ */
+async function runConfigSmearChecks() {
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+  const bodyEl = el("config-body");
+  bodyEl.querySelectorAll = (sel) => {
+    if (sel !== "[data-row]") return [];
+    // **故意把顺序打乱**：位置下标实现会在这里当场读串
+    bodyEl._controls = parseControls(bodyEl.innerHTML).reverse();
+    return bodyEl._controls;
+  };
+  el("config-view").dataset = {};
+  const calls = [];
+  const statuses = [];
+  const dump = {
+    scope: "global",
+    dir: "C:\\Users\\test",
+    entries: [
+      { section: "harness", key: "sandbox.image", full_key: "ruyix.code.harness.sandbox.image", value: "rust:1", inherited: null },
+      { section: "harness", key: "verify.python_bin", full_key: "ruyix.code.harness.verify.python_bin", value: "python", inherited: null },
+      { section: "harness", key: "lint.enabled", full_key: "ruyix.code.harness.lint.enabled", value: "true", inherited: null },
+      // 坏值：数字键上的 "on"（就是那次事故写进去的东西）
+      { section: "harness", key: "proc.max", full_key: "ruyix.code.harness.proc.max", value: "on", inherited: null },
+    ],
+  };
+  const appState = { tabs: [], activeTabId: null, currentProject: null };
+  const i18n = {
+    getLang: () => "zh-CN",
+    t(key, params) {
+      let s = zh[key] ?? key;
+      for (const [k, v] of Object.entries(params || {})) s = s.replaceAll(`{${k}}`, String(v));
+      return s;
+    },
+  };
+  if (!RE_STATE_EXPORT.test(read("ui/main.js"))) return;
+  const schema = [
+    { path: "sandbox.image", kind: "text", default: "rust:1", ui: true, options: [] },
+    { path: "verify.python_bin", kind: "text", default: "python", ui: true, options: [] },
+    { path: "lint.enabled", kind: "bool", default: "true", ui: true, options: [] },
+    { path: "proc.max", kind: "int", default: "4", ui: true, options: [] },
+  ];
+  const sandbox = {
+    I18N: i18n,
+    window: { state: appState, I18N: i18n, ConfigUI: null },
+    document: {
+      getElementById: el,
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    },
+    getTauriInvoke: () => async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "config_form_load") return dump;
+      if (cmd === "config_schema") return schema;
+      return { saved: 1, removed: 0, applied: 1 };
+    },
+    setStatus(msg, kind) { statuses.push({ msg: String(msg), kind }); },
+    renderTabs() {},
+    switchTab(id) {
+      appState.activeTabId = id;
+      const t2 = appState.tabs.find((x) => x.id === id);
+      if (t2 && t2._isConfig) sandbox.window.ConfigUI.render(t2);
+    },
+    showConfirm: async () => true,
+  };
+  const saved = ["window", "document", "getTauriInvoke", "setStatus", "renderTabs", "switchTab", "I18N"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/config.js"))();
+    const ConfigUI = sandbox.window.ConfigUI;
+    ConfigUI.attach();
+    await ConfigUI.handleCommand("form global");
+    const tab = appState.tabs.find((x) => x._isConfig);
+    // ① 打乱顺序之后，每行读到的仍是自己的值
+    ConfigUI.stash();
+    const st = (tab._config && tab._config.stash) || {};
+    check("U65", "config-form-no-value-smear",
+      st["ruyix.code.harness.sandbox.image"] === "rust:1" &&
+        st["ruyix.code.harness.verify.python_bin"] === "python" &&
+        st["ruyix.code.harness.lint.enabled"] === "true",
+      `DOM 顺序打乱后读串了值（sandbox.image=${st["ruyix.code.harness.sandbox.image"]} / ` +
+        `verify.python_bin=${st["ruyix.code.harness.verify.python_bin"]} / ` +
+        `lint.enabled=${st["ruyix.code.harness.lint.enabled"]}）——控件必须按 data-row 属性寻址`);
+    // ② 数字键上的 "on" 必须整单不提交，并说清是哪一行
+    statuses.length = 0;
+    calls.length = 0;
+    await ConfigUI.save();
+    const wrote = calls.find((c) => c.cmd === "config_form_save");
+    check("U65", "config-form-value-type-gate",
+      !wrote,
+      "数字键上的 \"on\" 被提交了 —— 提交前必须有类型闸");
+    check("U65", "config-form-value-type-gate",
+      statuses.some((s) => s.kind === "error" && /proc\.max/.test(s.msg)),
+      `没提交时要说清是哪一行（实际 status=${JSON.stringify(statuses.map((s) => s.msg))}）`);
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
+/**
+ * U64 config-change-refresh：配置改完要**发事件**，会话面板**按事件重取**（用户报的）。
+ *
+ * 真实场景：用户在配置里填完 API Key → 回到会话面板，那排 chip 里还写着「✗ key 未配置」。
+ * 面板只在打开时探过一次，之后没人告诉它 key 变了 —— 界面在撒谎，用户只能以为"填了没用"。
+ *
+ * 契约四条：
+ *   ① 宿主的保存 / 应用**都要发** `config://changed`，载荷带 `keys`（section + key）——
+ *      带明细而不是一个布尔，订阅者才能按相关度过滤；
+ *   ② **发事件前必须已放掉 config 锁**（监听者收到事件就回头调要锁的配置命令，握着锁发就是撞自己）；
+ *   ③ 面板要收听，并且只对"会改变派生状态"的键动手：`ai.*` / `ai_fallback.*` / `harness.llm.*`
+ *      （前两个是配置表单的键空间，第三个是会话里模型下拉框写的运行时 LLM 配置）；
+ *   ④ 刷新动作要**至少覆盖两处**：环境探针那排 chip + 模型列表与能力（key 变了，模型列表也会变）。
+ */
+function runConfigEventChecks() {
+  const mainRs = read("src-tauri/src/main.rs");
+  const sessJs = read("ui/session.js");
+
+  check("U64", "config-changed-emitted",
+    /fn emit_config_changed/.test(mainRs) &&
+      /"config:\/\/changed"/.test(mainRs) &&
+      /emit_config_changed\(&app, &scope, &entries, false\)/.test(mainRs) &&
+      /emit_config_changed\(&app, &scope, &entries, true\)/.test(mainRs),
+    "保存与应用都要发 config://changed（一个说「存了」，一个说「运行时内存也刷了」）");
+  check("U64", "config-changed-payload",
+    /"keys": keys/.test(mainRs) && /"section": e\.section, "key": e\.key/.test(mainRs),
+    "载荷要带 keys 明细（section + key），否则订阅者只能整表重探");
+  check("U64", "config-changed-after-lock-dropped",
+    (() => {
+      // 发事件那一行必须落在 `let report = { … }` 作用域**之外**（锁在里面就释放了）
+      const i = mainRs.indexOf("fn config_form_save");
+      const j = mainRs.indexOf("fn config_form_apply");
+      const seg = mainRs.slice(i, mainRs.indexOf("fn config_schema") > 0 ? mainRs.indexOf("fn config_schema") : j + 2000);
+      const emit = seg.indexOf("emit_config_changed(&app, &scope, &entries, false)");
+      const scopeEnd = seg.indexOf("};", seg.indexOf("let report = {"));
+      return emit > 0 && scopeEnd > 0 && emit > scopeEnd;
+    })(),
+    "发事件必须在配置锁释放之后 —— 监听者会回头调要锁的命令，握着锁发就是死锁");
+  check("U64", "config-changed-listened",
+    /listen\("config:\/\/changed"/.test(sessJs) && /touchesKeyDependentState/.test(sessJs),
+    "会话面板要收听 config://changed，并按相关度过滤");
+  check("U64", "config-changed-relevance",
+    /k\.section === "ai"/.test(sessJs) && /k\.section === "ai_fallback"/.test(sessJs) &&
+      /k\.section === "harness" && String\(k\.key\)\.startsWith\("llm\."\)/.test(sessJs),
+    "相关度要认两个键空间：ai.* / ai_fallback.*（配置表单）+ harness.llm.*（会话里的模型下拉框）");
+  check("U64", "config-changed-refreshes-both",
+    /function probeEnv/.test(sessJs) && /probeEnv\(\);/.test(sessJs) &&
+      /keyDependent\.push/.test(sessJs) && /ai_models/.test(sessJs),
+    "刷新要覆盖两处：环境探针 chip + 模型列表与能力（key 变了，能列出的模型也会变）");
+}
+
+/**
  * U63 voice-no-main-thread-block：语音这条路**不许占住主线程**（bug 现场：转写永久挂起）。
  *
  * 真实故障：`voice_status`（自检）旧版是**同步命令**，而自检里对 456MB 权重做
@@ -4770,6 +4947,8 @@ async function main() {
     ["U62", "config-model-no-typing", runConfigModelChecks],
     ["U62", "config-model-fail-closed", runConfigModelFailClosedChecks],
     ["U63", "voice-no-main-thread-block", runVoiceThreadChecks],
+    ["U64", "config-change-refresh", runConfigEventChecks],
+    ["U65", "config-form-no-value-smear", runConfigSmearChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {
