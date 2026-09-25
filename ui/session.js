@@ -489,7 +489,13 @@
 
       const pcm = await blobToPcmBase64(blob);
       if (pcm.error) return status(pcm.error, "error");
-      status(L("本机转写中…", "transcribing locally…"));
+      const audioSecs = Math.round(pcm.secs || 0);
+      status(
+        L(
+          `本机转写中…（${audioSecs} 秒音频，本机推理约需 ${Math.max(2, Math.round(audioSecs * 3))} 秒）`,
+          `transcribing locally… (${audioSecs}s of audio, about ${Math.max(2, Math.round(audioSecs * 3))}s of local inference)`
+        )
+      );
       let out = null;
       try {
         out = await invoke("voice_transcribe", { data: pcm.data, language: null });
@@ -1527,6 +1533,12 @@
     } else if (p.phase === "error") {
       status(String(p.line || L("语音模型下载失败", "voice model download failed")), "error");
     }
+  });
+  // 转写分段进度（`voice://stage`）：转写要十几秒，只写一句"本机转写中…"的话，
+  // 用户分不清"在算"和"卡死"（真被这么报过："一直 transcribing locally，不会变化"）。
+  listen("voice://stage", (ev) => {
+    const p = ev.payload ?? {};
+    if (p.line) status(String(p.line), "info");
   });
       }
     } catch {

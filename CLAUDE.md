@@ -14,6 +14,7 @@ follows Google JS / HTML / CSS / JSON style guides. Full rules: `doc/编码规�
 cargo fmt --check                  # Rust 格式（rustfmt.toml: max_width 100 等）
 node scripts/check-style.js        # JS/HTML/CSS/JSON 风格（零依赖，0 error 才算过）
 node scripts/ui-smoke.js           # UI 冒烟：契约静态断言 + agent 面板演示回放（零依赖）
+node scripts/voice-transcribe-probe.mjs <16k.wav>  # 语音转写活体证明（CDP 连真 WebView2；见 scripts/ 头注释）
 node scripts/editor-layout.js      # 编辑器真实布局（无头 Edge；找不到浏览器时自行 SKIP）
 node scripts/session-trace-layout.js  # 会话执行轨迹的真实布局（同上，省略号/折行/滚动条）
 cargo clippy --all-targets         # 静态检查，必须 0 warning
@@ -184,6 +185,13 @@ The `state` object drives the UI:
 
 ### 本地语音转写（v1.1）
 
+**自检（`modelstore::status_with`）的两条硬性质**（ISSUE-6 钉的，"转写永久挂起"那个 bug 的根）：
+哈希**流式**读（不许 `fs::read` 把 456MB 读进内存）+ **每份文件只真校验一次**（进程内缓存，
+键 = 路径/大小/mtime/期望哈希；实测 release 冷启 325ms → 热 2ms）。**绝不许放在主线程**：
+`voice_status` 是 `async` + `spawn_blocking` —— 同步命令干重活会把**别的**在飞 IPC 拖死
+（现场：同步自检 6.58 秒 ⇒ 两条 `voice_transcribe` 永远挂起）。转写分三段发 `voice://stage`
+（status / load / infer），前端收它并显示 ETA —— 十几秒的等待只给一句不动的话，用户只能得出"死了"。
+
 **需求**：会话界面能录音，但"把录音发给模型"这条腿**不存在** —— 实测 DeepSeek 四种入口
 （`/models` 的 `input_modalities` 只有 text/image、`/audio/transcriptions` 404、`input_audio` 422、
 `/files` 只收 webp/png/jpeg/gif）。所以做成**本机转写**：录音 → 本机出文字 → 文本进输入框
@@ -221,6 +229,11 @@ tiny 太小（中文不行），所以 turbo 是当下唯一"质量够 + 纯 Rus
 窗口不同就会让这种边界 token 翻转。所以口径是"**实测不掉字**的加速"，不是"等价加速"。
 2. 缺模型不许静默降级：按需下载（**456MB，绝不自动下** —— 与记忆模型刻意不同）、
    三类状态三种说法、进度走 `voice://model`、转写失败**兜底把音频存进项目桶**再说清路径。
+
+**跑语音要用 release 构建**：debug 下 candle 推理慢十几倍（同一段 3.77 秒音频：
+release 12.3 秒返回、debug 200 秒都没完）—— 用 debug 测"是不是卡了"会把人带偏。
+真窗口活体证明：`node scripts/voice-transcribe-probe.mjs <16k.wav>`（要一个带
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` 起着的实例）。
 
 **实测（真机，16 逻辑核，SAPI 合成中文 + 已知原文）**：4 段中文（含中英混说、数字）**内容全对**，
 1 处同音字（爆/报）；端到端 **RTF 2.8~3.6×**（说 5 秒 ≈ 等 17 秒）；加载 0.34s（453MB 走 mmap）。

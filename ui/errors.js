@@ -68,6 +68,7 @@
     "前向": "forward pass",
     "池化": "pool",
     "编入": "compile in",
+    "打开": "open",
     "创建目录": "create the directory",
     "创建父目录": "create the parent directory",
     "创建文件": "create the file",

@@ -1804,15 +1804,25 @@ fn voice_asr_cell() -> &'static std::sync::Mutex<Option<harness_engine::voice::A
 }
 
 /// 语音模型自检：没装 / 装坏了 / 就绪（带一句人话，界面直接显示它）。
+/// 语音模型自检。
+///
+/// **必须是 async**：自检含"首次全量哈希"（判"装坏了"的唯一硬证据），哪怕有缓存兜底，
+/// 首次也可能要一秒级 —— 而同步命令跑在**主线程**上，那期间界面里在飞的 IPC
+/// （典型的就是正在转写的那个）回复送不回去，表现就是"转写永远挂起"。
+/// 这个 bug 现场是真实发生过的：旧版同步 `voice_status` 在 devtools 里显示 **6.58 秒**。
 #[tauri::command]
-fn voice_status() -> serde_json::Value {
-    let st = harness_engine::voice::fetch::status();
-    serde_json::json!({
-        "ready": st.is_ready(),
-        "line": st.voice_line(),
-        "dir": harness_engine::voice::fetch::target_dir().ok().map(|d| d.display().to_string()),
-        "need_bytes": harness_engine::voice::fetch::required_bytes(),
+async fn voice_status() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let st = harness_engine::voice::fetch::status();
+        serde_json::json!({
+            "ready": st.is_ready(),
+            "line": st.voice_line(),
+            "dir": harness_engine::voice::fetch::target_dir().ok().map(|d| d.display().to_string()),
+            "need_bytes": harness_engine::voice::fetch::required_bytes(),
+        })
     })
+    .await
+    .map_err(|e| format!("自检失败: {e}"))
 }
 
 /// 按需下载语音模型（453MB）。**立即返回**，进度走 `voice://model` 事件 ——
@@ -1872,15 +1882,11 @@ async fn voice_model_fetch(app: tauri::AppHandle) -> Result<serde_json::Value, S
 /// 音频**不出本机**：这里全程本地推理，一个字节都不发往任何服务。
 #[tauri::command]
 async fn voice_transcribe(
+    app: tauri::AppHandle,
     data: String,
     language: Option<String>,
 ) -> Result<serde_json::Value, String> {
     use base64::Engine as _;
-    let st = harness_engine::voice::fetch::status();
-    if !st.is_ready() {
-        // 没装 / 装坏了 / 没配目录：三种说法的下一步不一样，一律照实说
-        return Err(st.voice_line());
-    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
         .map_err(|e| format!("PCM 数据不是合法 base64: {e}"))?;
@@ -1899,15 +1905,50 @@ async fn voice_transcribe(
         return Err("录音太短（不到 0.2 秒）".into());
     }
 
-    // CPU 密集（编码 + 解码循环，还可能含首次加载 453MB）：放到阻塞线程池，
+    // CPU 密集（自检 + 解码 + 首次加载 453MB + 编码 + 解码循环）：放到阻塞线程池，
     // 别占住 async 运行时 —— 那会让整个应用的 IPC 在这几秒里变慢。
+    //
+    // 每一段都往外发一个 `voice://stage`：转写要十几秒，界面只写一句"本机转写中…"的话，
+    // 用户没法区分"在算"和"卡死了"（这个 bug 的现场就是这样被报上来的
+    // ——"一直 transcribing locally，不会变化，一直是挂起状态"）。
+    // 分段可见之后，同样的等待至少能看出卡在哪一步。
+    let stage_app = app.clone();
+    let stage = move |phase: &str, line: String| {
+        let _ = stage_app.emit(
+            "voice://stage",
+            serde_json::json!({ "phase": phase, "line": line }),
+        );
+    };
+    stage("status", "检查语音模型…".into());
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let t_all = std::time::Instant::now();
+        // 自检：没装 / 装坏了 / 没配目录，三种说法的下一步不一样，一律照实说。
+        // 放在阻塞线程里（首次可能真算一遍哈希），别占主线程。
+        let st = harness_engine::voice::fetch::status();
+        if !st.is_ready() {
+            return Err(st.voice_line());
+        }
+        let status_ms = t_all.elapsed().as_millis();
+
+        let t = std::time::Instant::now();
         let cell = voice_asr_cell();
         let mut guard = cell.lock().map_err(|e| e.to_string())?;
+        let mut loaded = false;
         if guard.is_none() {
+            stage("load", "首次加载语音模型（约 456MB，之后常驻）…".into());
             let dir = harness_engine::voice::fetch::target_dir()?;
             *guard = Some(harness_engine::voice::Asr::load(&dir)?);
+            loaded = true;
         }
+        let load_ms = t.elapsed().as_millis();
+
+        stage(
+            "infer",
+            format!(
+                "识别中（{} 秒音频，本机推理）…",
+                pcm.len() as f32 / harness_engine::voice::asr::SAMPLE_RATE as f32
+            ),
+        );
         let asr = guard.as_mut().expect("上面刚填过");
         let r = asr.transcribe(&pcm, language.as_deref())?;
         Ok(serde_json::json!({
@@ -1917,6 +1958,12 @@ async fn voice_transcribe(
             "elapsed_ms": r.elapsed_ms,
             "tokens": r.tokens,
             "truncated": r.truncated,
+            "stages": {
+                "status_ms": status_ms,
+                "load_ms": load_ms,
+                "loaded_now": loaded,
+                "total_ms": t_all.elapsed().as_millis(),
+            },
         }))
     })
     .await

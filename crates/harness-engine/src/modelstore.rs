@@ -74,9 +74,74 @@ impl ModelSpec {
     }
 }
 
-pub fn sha256_file(p: &Path) -> Result<String, String> {
-    let data = std::fs::read(p).map_err(|e| format!("读 {} 失败: {e}", p.display()))?;
-    Ok(hex(&Sha256::digest(&data)))
+/// 流式算 sha256 —— **不许把整个文件读进内存**。
+///
+/// 以前这里是 `std::fs::read(p)` + `Sha256::digest(&data)`：对 475MB 的语音权重，
+/// 那等于每次自检都（1）把 475MB 读进内存（内存尖峰 + 页缓存冲刷），（2）重算一遍全量哈希。
+/// 实测这一下发要 **6.5 秒**，而调用它的 `voice_status` 当时是**同步命令** ⇒ 主线程被占 6.5 秒，
+/// 界面里在飞的 IPC（比如正在转写的那个）回复送不回去，表现就是"转写永远挂起"。
+fn sha256_file(p: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(p).map_err(|e| format!("打开 {} 失败: {e}", p.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("读 {} 失败: {e}", p.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// 已核验通过的文件：`(路径, 大小, mtime_ns)` → true。
+///
+/// 为什么要有这个缓存：全量哈希是"文件有没有坏"的唯一硬证据，但它**每次自检都算一遍**没意义 ——
+/// 同一份文件（大小与 mtime 都没变）在一次进程生命周期里不会自己坏掉。
+/// 于是：**每份文件只真校验一次**，之后只看 stat。这让"自检"从 6.5 秒降到微秒级，
+/// 界面每开一次会话、每按一次录音都调它也不再心疼。
+///
+/// mtime 变了（重新下载 / 用户换了一份权重）就自然失效重算 —— 不用手动清缓存。
+static VERIFIED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<VerifyKey>>> =
+    std::sync::OnceLock::new();
+
+/// 缓存键 = （路径，大小，mtime，**期望的哈希**）。
+/// 期望哈希必须进键：同一份文件被两份规格（不同 sha 要求）碰到时，缓存不许互相冒充"已核验"。
+type VerifyKey = (std::path::PathBuf, u64, i64, String);
+
+fn verified_cache() -> &'static std::sync::Mutex<std::collections::HashSet<VerifyKey>> {
+    VERIFIED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn verify_key(p: &Path, meta: &std::fs::Metadata, want: &str) -> VerifyKey {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    (p.to_path_buf(), meta.len(), mtime, want.to_string())
+}
+
+/// 校验一个文件对得上规格里的哈希；**同一份文件只真算一次**（见 `VERIFIED` 的注释）。
+fn sha256_matches_cached(p: &Path, want: &str) -> Result<bool, String> {
+    let meta = std::fs::metadata(p).map_err(|e| format!("stat {} 失败: {e}", p.display()))?;
+    let key = verify_key(p, &meta, want);
+    if let Ok(g) = verified_cache().lock()
+        && g.contains(&key)
+    {
+        return Ok(true);
+    }
+    if sha256_file(p)? != want {
+        return Ok(false);
+    }
+    if let Ok(mut g) = verified_cache().lock() {
+        g.insert(key);
+    }
+    Ok(true)
 }
 
 pub fn hex(b: &[u8]) -> String {
@@ -154,12 +219,11 @@ pub fn status_with(spec: &ModelSpec, dir: &Path) -> Status {
         }
         present += 1;
         bytes += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        match sha256_file(&p) {
-            Ok(h) if h == f.sha256 => {}
-            Ok(h) => problems.push(format!(
-                "{} 哈希不符（{}… ≠ {}…）",
+        match sha256_matches_cached(&p, &f.sha256) {
+            Ok(true) => {}
+            Ok(false) => problems.push(format!(
+                "{} 哈希不符（与规格不符；规格 {}…）",
                 f.name,
-                &h[..8],
                 &f.sha256[..8]
             )),
             Err(e) => problems.push(e),
@@ -334,4 +398,57 @@ where
         return Err(format!("体积不符：拿到 {done}，清单写 {}", f.bytes));
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toy_spec(sha: String) -> ModelSpec {
+        ModelSpec {
+            model: "toy".into(),
+            dir_name: "toy".into(),
+            dim: 0,
+            sources: vec![],
+            files: vec![SpecFile {
+                name: "w.bin".into(),
+                bytes: 11,
+                sha256: sha,
+                optional: false,
+            }],
+        }
+    }
+
+    /// 自检缓存的两条硬性质 —— 这就是"转写永久挂起"那个 bug 的根因，必须钉住：
+    ///   ① **同一份文件只真算一次哈希**（否则每次自检重读 456MB、算 6.5 秒，还会占住主线程）；
+    ///   ② **文件变了（大小 / mtime 变）必须重算** —— 缓存绝不能把"装坏了"盖过去。
+    #[test]
+    fn 自检缓存只算一次且文件变了就失效() {
+        let dir = std::env::temp_dir().join(format!("ruyix-modelstore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("w.bin");
+        std::fs::write(&file, b"hello world").unwrap();
+        let want = sha256_file(&file).unwrap();
+        let spec = toy_spec(want);
+
+        assert!(status_with(&spec, &dir).is_ready(), "第一遍该就绪");
+        let before = verified_cache().lock().unwrap().len();
+        assert!(status_with(&spec, &dir).is_ready(), "第二遍该就绪");
+        assert_eq!(
+            verified_cache().lock().unwrap().len(),
+            before,
+            "同一份文件不该算第二遍 —— 缓存没生效，等于每次自检都重读 456MB"
+        );
+
+        // 内容变了 → 必须重算并如实报"装坏了"
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&file, b"hello world!!").unwrap();
+        let st = status_with(&spec, &dir);
+        assert!(
+            matches!(st, Status::Broken { .. }),
+            "文件被改过之后该报 Broken，实际 {st:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

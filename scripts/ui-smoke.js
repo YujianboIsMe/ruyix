@@ -3872,6 +3872,51 @@ function runVoiceButtonChecks() {
 }
 
 /**
+ * U63 voice-no-main-thread-block：语音这条路**不许占住主线程**（bug 现场：转写永久挂起）。
+ *
+ * 真实故障：`voice_status`（自检）旧版是**同步命令**，而自检里对 456MB 权重做
+ * `std::fs::read` + 全量 sha256 ⇒ devtools 里那一条 `voice_status` 显示 **6.58 秒**。
+ * 同步命令跑在**主线程**上，那 6.5 秒里界面在飞的 IPC 回复送不回去
+ * ⇒ 用户看到的是"一直 transcribing locally，不会变化，一直挂起"。
+ *
+ * 四条契约（缺一条这病就会复发）：
+ *   ① 自检的哈希必须**流式**（不许 `fs::read` 整个权重进内存）+ **每份文件只真算一次**；
+ *   ② 自检命令必须 async（不占主线程），且真算的那一下要在阻塞线程里；
+ *   ③ 转写的每个阶段都要发 `voice://stage`（用户得能区分"在算"和"卡死"）；
+ *   ④ 前端要收这条事件，且状态行要给出"大概等多久"（时长 × 本机 RTF）。
+ */
+function runVoiceThreadChecks() {
+  const mainRs = read("src-tauri/src/main.rs");
+  const storeRs = read("crates/harness-engine/src/modelstore.rs");
+  const sessJs = read("ui/session.js");
+
+  check("U63", "voice-status-async",
+    /async fn voice_status\(\)/.test(mainRs) && /spawn_blocking\(\|\|/.test(mainRs),
+    "voice_status 必须是 async + spawn_blocking —— 同步命令跑在主线程上，会把在飞的 IPC 拖死");
+  check("U63", "voice-hash-streaming",
+    // 判据要看**代码**而不是注释：旧写法在文档注释里被引用着（说明"以前是 fs::read"），
+    // 所以只否定"调用形态" `= std::fs::read(p)`，并要求哈希函数体内真用 File::open。
+    !/= std::fs::read\(p\)/.test(storeRs) &&
+      /fn sha256_file[\s\S]{0,400}File::open/.test(storeRs) &&
+      /read\(&mut buf\)/.test(storeRs),
+    "自检哈希必须流式读 —— 把 456MB 读进内存是 6.5 秒的元凶");
+  check("U63", "voice-hash-cached-once",
+    /static VERIFIED/.test(storeRs) && /fn sha256_matches_cached/.test(storeRs) &&
+      /verified_cache\(\)/.test(storeRs),
+    "同一份文件只许真校验一次（换文件靠 mtime 失效），否则每次自检都重算 6.5 秒");
+  check("U63", "voice-stage-events",
+    /voice:\/\/stage/.test(mainRs) && /stage\(\s*"status"/.test(mainRs) &&
+      /stage\(\s*"infer"/.test(mainRs),
+    "转写要分阶段发 voice://stage（status / load / infer）—— 否则「卡住」和「在算」分不出来");
+  check("U63", "voice-stage-listened",
+    /listen\("voice:\/\/stage"/.test(sessJs),
+    "前端要收 voice://stage，否则事件发了没人看");
+  check("U63", "voice-eta-shown",
+    /本机推理约需/.test(sessJs),
+    "状态行要给「大概等多久」（音频时长 × 本机 RTF），让用户能判断该不该等");
+}
+
+/**
  * U62 config-model-no-typing：**模型名永不接受手输**（用户报的 bug，2026-09-25）。
  *
  * 真实故障：配置里出现 `model = "on"`（一个根本不是模型名的值）→ 请求原样发给厂商 →
@@ -4720,6 +4765,7 @@ async function main() {
     ["U61", "voice-transcribe", runVoiceTranscribeChecks],
     ["U62", "config-model-no-typing", runConfigModelChecks],
     ["U62", "config-model-fail-closed", runConfigModelFailClosedChecks],
+    ["U63", "voice-no-main-thread-block", runVoiceThreadChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {
