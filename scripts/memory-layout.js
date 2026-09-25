@@ -113,10 +113,22 @@ window.__TAURI__ = {
   core: { invoke },
   event: { listen: () => Promise.resolve(() => {}) },
 };
-window.I18N = { init: () => Promise.resolve(), t: (k) => k, getLang: () => "zh-CN", setLang: () => {} };
+// 真文案：读 ui/lang/zh-CN.json（截图与文案都按真机来，键名只在缺键时兜底）
+window.I18N = (() => {
+  const dict = __MEM_I18N__;
+  const t = (k, p) => {
+    let s = Object.prototype.hasOwnProperty.call(dict, k) ? dict[k] : k;
+    if (p) for (const key of Object.keys(p)) s = s.split("{" + key + "}").join(String(p[key]));
+    return s;
+  };
+  return { init: () => Promise.resolve(), t, getLang: () => "zh-CN", setLang: () => {} };
+})();
 `;
 
 // 驱动：开面板 → 量 → 展开修订链 → 量 → 切走（互斥）→ 量 → 缩窄 → 量
+const I18N_ZH = JSON.parse(read("ui/lang/zh-CN.json"));
+const i18nStub = `window.__MEM_I18N__ = ${JSON.stringify(I18N_ZH)};`;
+
 const driver = `
 window.__PROBE_RESULT__ = (async function () {
   const out = { errors: [], notes: [] };
@@ -230,6 +242,7 @@ html = html.replace(
   /<\/body>/,
   () =>
     `<style>${css}</style>` +
+    `<script>${i18nStub}</script>` +
     `<script>${stubs}</script>` +
     `<script>eval(${enc(read("ui/main.js"))})</script>` +
     `<script>eval(${enc(read("ui/memory.js"))})</script>` +

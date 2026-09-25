@@ -521,7 +521,7 @@
   "mem.search": "查",
   "mem.queryHint": "留空 = 按最近更新列出当前信念",
   "mem.queryPlaceholder": "查什么（自然语言也行）",
-  "mem.sectionNow": "当前信念（被推翻的**不在这里**，但点「凭什么」就能查到）",
+  "mem.sectionNow": "当前信念（被推翻的不在这里，点「凭什么」就能查到）",
   "mem.sectionAsOf": "按时间点回看（那时认为什么为真，含后来被推翻的）",
   "mem.sectionReceipts": "收据（逐出/压缩丢了什么、怎么换回来）",
   "mem.colKey": "键",

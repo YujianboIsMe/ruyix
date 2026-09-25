@@ -521,7 +521,7 @@
   "mem.search": "Search",
   "mem.queryHint": "empty = list current beliefs by most recently updated",
   "mem.queryPlaceholder": "What to look up (natural language is fine)",
-  "mem.sectionNow": "Current beliefs (superseded ones are NOT here — click why to reach them)",
+  "mem.sectionNow": "Current beliefs (superseded ones are not listed here — click why to reach them)",
   "mem.sectionAsOf": "As of a point in time (what was believed then, superseded included)",
   "mem.sectionReceipts": "Receipts (what a compaction evicted, and how to get it back)",
   "mem.colKey": "Key",
