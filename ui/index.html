@@ -58,6 +58,9 @@
           </span>
           <!-- 服务：agent 用 background 起的托管进程（mvn spring-boot:run / java -jar …），
                引擎持有、UI 原先看不见也停不掉 —— 这个面板读的是引擎同一份表 -->
+          <span class="menu-item" id="menu-memory" style="position:relative">
+            <span data-i18n="mem.menu">记忆</span>
+          </span>
           <span class="menu-item" id="menu-service" style="position:relative">
             <span data-i18n="menu.service">服务</span>
           </span>
@@ -294,6 +297,7 @@
                 <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" wrap="off"></textarea>
               </div>
             </div>
+            <div id="memory-view" class="memory-view" style="display:none"></div>
             <div id="service-view" class="service-view" style="display:none">
               <div class="service-head">
                 <div class="service-head-main">
@@ -494,6 +498,7 @@
   <script src="capability.js"></script>
   <script src="config.js"></script>
   <script src="service.js"></script>
+  <script src="memory.js"></script>
   <script src="proc-log.js"></script>
   <script src="external.js"></script>
   <script src="main.js"></script>

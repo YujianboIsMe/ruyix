@@ -504,6 +504,7 @@ function tabIcon(t) {
   if (t._isTerminal) return "🖥️";
   if (t._isService) return "🔌";
   if (t._isProcLog) return "📜";
+  if (t._isMemory) return "🧠";
   // 宽行只读视图：换一把锁 —— 一眼看出"这个文件只是给你看，不给改"
   if (t._wideReadOnly) return "🔒";
   return fileIcon(t.name);
@@ -613,6 +614,13 @@ function switchTab(tabId) {
     window.ProcLogUI?.render(tab);
     return;
   }
+  if (tab._isMemory) {
+    // 记忆标签页 — 项目记忆面板（自己拉 mem_*，content 恒为空）
+    hideEditorView();
+    showMemoryView();
+    window.MemoryUI?.render(tab);
+    return;
+  }
   if (tab._isTerminal) {
     // xterm.js 终端标签页 — 重新挂载到容器中
     hideEditorView();
@@ -664,6 +672,9 @@ function closeTab(tabId) {
 
   // 服务面板：停掉秒级刷新（否则关了标签页还在后台问后端）
   if (tab._isService) window.ServiceUI?.close();
+
+  // 记忆面板：停掉展开的修订链（本面板无轮询）
+  if (tab._isMemory) window.MemoryUI?.close();
 
   // 输出标签页：停轮询 + 释放终端 + 摘掉面板
   if (tab._isProcLog) window.ProcLogUI?.close(tab);
@@ -718,6 +729,7 @@ const EDITOR_PANES = [
   "proc-log-view",
   "session-view",
   "image-view",
+  "memory-view",
 ];
 
 /** 只显示 `id` 这一块（其余全关）。见 [`EDITOR_PANES`]。 */
@@ -3909,6 +3921,15 @@ function showConfigView() {
 
 function hideConfigView() {
   const el = document.getElementById("config-view");
+  if (el) el.style.display = "none";
+}
+
+function showMemoryView() {
+  showPane("memory-view");
+}
+
+function hideMemoryView() {
+  const el = document.getElementById("memory-view");
   if (el) el.style.display = "none";
 }
 

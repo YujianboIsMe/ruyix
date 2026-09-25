@@ -1071,6 +1071,29 @@ fn mem_receipts(
     }))
 }
 
+/// 人写一条（`origin=human`）：与探针/引擎决策在账本里同列，但来源可区分 ——
+/// 这是"谁说的"这个问题的最小答案。
+#[tauri::command]
+fn mem_record(
+    key: String,
+    value: String,
+    reason: Option<String>,
+    project_root: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
+    let ev = m.record_obs(
+        &scope,
+        key.trim(),
+        &value,
+        harness_engine::mem::Origin::Human,
+        &[],
+        None,
+    )?;
+    Ok(serde_json::json!({ "scope": scope, "id": ev.id, "reason": reason }))
+}
+
 /// 从账本重放重建派生层（`beliefs`/FTS/向量）—— **EC 的可操作形态**。
 #[tauri::command]
 async fn mem_rebuild(project_root: Option<String>) -> Result<serde_json::Value, String> {
@@ -2279,6 +2302,7 @@ fn main() {
             mem_as_of,
             mem_receipts,
             mem_rebuild,
+            mem_record,
             proc_stop,
             proc_log_read,
             open_external,

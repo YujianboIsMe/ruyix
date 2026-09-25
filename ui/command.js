@@ -85,6 +85,12 @@ async function handleCommand(raw, _fromAi = false) {
     case "help":
       openHelp();
       break;
+    case "mem":
+    case "memory": {
+      // `mem` 开记忆面板（当前信念 / why 链 / as-of / 收据）
+      window.MemoryUI?.open();
+      break;
+    }
     case "service":
     case "services": {
       // `service` 开服务面板；`service log <pid>` 直接开某个进程的输出标签页
@@ -597,7 +603,8 @@ async function handleAiCommand(raw) {
 
     // 闲聊回复（不是标准命令动词开头）→ 直接显示
     const firstWord = result.split(/\s+/)[0]?.toLowerCase();
-    if (!["open", "close", "config", "new", "run", "help", "service", "services", "agent", "mcp", "a2a", "tools", "skill", "skills", "bucket", "buckets", "del", "delete", "remove", "rm", "rename", "mv", "git"].includes(firstWord)) {
+    if (!["open", "close", "config", "new", "run", "help", "service", "services", "agent", "mcp", "a2a", "tools", "skill", "skills", "bucket", "buckets", "del", "delete", "remove", "rm", "rename", "mv", "git", "mem",
+      "memory"].includes(firstWord)) {
       console.log("[AI] → 闲聊:", result);
       setStatus(result);
       return;

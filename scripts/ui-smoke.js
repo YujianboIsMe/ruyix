@@ -3958,6 +3958,69 @@ async function runTerminalTargetChecks() {
   );
 }
 
+async function runMemoryPanelChecks() {
+  // U54 memory-panel（v1.1）：记忆落进引擎之后，用户必须能在界面上回答四问 ——
+  //   "现在认为什么为真 / 凭什么 / 那时是什么 / 丢过什么"。看不见就等于没有：
+  //   面板不存在时，那套账本/折叠/收据在 UI 上就没有任何出口。
+  //   七环：面板存在且调真命令 · 只走唯一入口 showPane（否则和服务面板并排各半，bug 3 同病）·
+  //   命令动词注册 · 文案两种语言齐（U49 的老病）· 缺模型要说人话 · 后端注册 ·
+  //   **记忆不许被插件化**（用户拍板：核心模块）。
+  const memJs = read("ui/memory.js");
+  const panelMainJs = read("ui/main.js");
+  const panelCmdJs = read("ui/command.js");
+  const panelMainRs = read("src-tauri/src/main.rs");
+  check(
+    "U54",
+    "memory-panel",
+    has(memJs, "window.MemoryUI") &&
+      has(memJs, "mem_status") &&
+      has(memJs, "mem_why") &&
+      has(memJs, "mem_as_of") &&
+      has(memJs, "mem_receipts") &&
+      has(memJs, "mem_rebuild"),
+    "ui/memory.js 必须存在且调齐 mem_status/mem_why/mem_as_of/mem_receipts/mem_rebuild",
+  );
+  check(
+    "U54",
+    "memory-panel",
+    panelMainJs.includes('"memory-view"') &&
+      panelMainJs.includes('showPane("memory-view")') &&
+      panelMainJs.includes("_isMemory"),
+    "记忆面板必须进 EDITOR_PANES 并只经 showPane 点亮（和服务面板并排各半 = bug 3 同病）",
+  );
+  check(
+    "U54",
+    "memory-panel",
+    panelCmdJs.includes('case "mem"') && panelCmdJs.includes('"memory"].includes(firstWord)'),
+    "命令动词 mem 必须注册（未注册会被 AI 兜底吞掉）",
+  );
+  check(
+    "U54",
+    "memory-panel",
+    has(read("ui/lang/zh-CN.json"), '"mem.embedOff"') && has(read("ui/lang/en.json"), '"mem.embedOff"'),
+    "面板文案必须两种语言都有（英文界面下露中文 = U49 的老病）",
+  );
+  check(
+    "U54",
+    "memory-panel",
+    has(memJs, "embed_reason") && has(memJs, "mem.embedOff"),
+    "向量腿缺席必须说人话（退化为纯词法不是错误，但必须说出来）",
+  );
+  check(
+    "U54",
+    "memory-panel",
+    panelMainRs.includes("mem_record,") && panelMainRs.includes("mem_status,"),
+    "main.rs 必须注册 mem_* 命令（面板读不到就只是块空壳）",
+  );
+  check(
+    "U54",
+    "memory-panel",
+    /^pub mod mem;/m.test(read("crates/harness-engine/src/lib.rs")) && !has(panelMainRs, "plugins/memory"),
+    "记忆是核心模块：pub mod mem; 必须无条件编译，且不许走 plugins/ 那条路",
+  );
+}
+
+
 /**
  * U52 backend-msg-i18n（bug 1/2 的收尾门禁）：**后端来的消息在英文界面下不露中文**。
  *
@@ -4104,6 +4167,7 @@ async function main() {
   ["U53", "highlight-plugins", runHighlightPluginChecks],
     ["U51", "terminal-targets", runTerminalTargetChecks],
     ["U52", "backend-msg-i18n", runBackendMsgChecks],
+    ["U54", "memory-panel", runMemoryPanelChecks],
   ];
   for (const [id, name, fn] of scenarios) {
     try {
