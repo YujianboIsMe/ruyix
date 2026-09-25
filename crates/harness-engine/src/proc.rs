@@ -172,11 +172,6 @@ fn lock() -> Result<MutexGuard<'static, HashMap<u32, Managed>>, String> {
     table().lock().map_err(|_| "托管进程表已损坏".to_string())
 }
 
-/// 按 handle 找：handle 不再是主键，只在模型侧那一句短引用里出现，线性扫描足够。
-fn by_handle_mut<'a>(t: &'a mut HashMap<u32, Managed>, handle: &str) -> Option<&'a mut Managed> {
-    t.values_mut().find(|m| m.handle == handle)
-}
-
 /// 按 handle 找，**限定项目**（ISSUE-1 / `doc/v1.1/bugs.md`）。
 ///
 /// handle 是全局递增的短名（`p1`/`p2`…），所以"两个项目各有一个 `p1`"是正常状态。
