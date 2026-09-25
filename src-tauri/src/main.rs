@@ -949,6 +949,142 @@ fn get_term_targets(
 // 为什么宿主必须能看见它们：agent 用 background 起的服务（mvn spring-boot:run / java -jar）
 // 是**宿主** spawn 的，却不在宿主的进程树里 —— 以前它们只活在引擎的进程表里，
 // UI 上等于不存在：起得来、看不见、也停不掉（只能靠任务管理器按 pid 找）。
+// ---------------------------------------------------------------- 项目记忆（v1.1）
+
+/// 记忆作用域：有项目用项目 key，没项目就是机器级。
+fn mem_scope(root_paths: &crate::paths::Paths, project_root: Option<&str>) -> String {
+    match project_root.filter(|s| !s.trim().is_empty()) {
+        Some(p) => root_paths.project_key(p),
+        None => harness_engine::mem::GLOBAL_SCOPE.to_string(),
+    }
+}
+
+/// 便携根（记忆库与模型都在它下面）。引擎不认识便携根，所以由宿主每次算出来。
+fn mem_root() -> crate::paths::Paths {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_default();
+    crate::paths::Paths::discover(&exe_dir)
+}
+
+/// 记忆库状态：账本/信念/收据/向量条数 + 向量腿是否可用（**带人话原因**）。
+#[tauri::command]
+fn mem_status(project_root: Option<String>) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current().ok_or("记忆库未安装（启动时打开失败）")?;
+    let st = m.stats(&scope)?;
+    Ok(serde_json::json!({
+        "scope": scope,
+        "db": rp.memory_dir().join("mem.db").display().to_string(),
+        "events": st.events,
+        "beliefs_active": st.beliefs_active,
+        "beliefs_all": st.beliefs_all,
+        "receipts": st.receipts,
+        "vectors": st.vectors,
+        "embed_available": harness_engine::mem::embed::is_available(),
+        "embed_reason": harness_engine::mem::embed::unavailable_reason(),
+    }))
+}
+
+/// 当前信念（`now`）：**先结构性过滤掉被推翻的**，再打分。query 为空 = 按最近更新取前 N。
+#[tauri::command]
+fn mem_beliefs(
+    query: Option<String>,
+    limit: Option<usize>,
+    project_root: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
+    let hits = m.beliefs_now(
+        &scope,
+        query.as_deref().unwrap_or(""),
+        limit.unwrap_or(50).min(500),
+        None,
+    )?;
+    Ok(serde_json::json!({
+        "scope": scope,
+        "hits": hits.iter().map(|h| serde_json::json!({
+            "key": h.key, "value": h.value, "status": h.status,
+            "valid_from": h.valid_from, "valid_to": h.valid_to,
+            "prov": h.prov.len(), "score": h.score,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+/// `why`：一条信念的完整修订链与依据 —— "你凭什么这么认为"。
+#[tauri::command]
+fn mem_why(key: String, project_root: Option<String>) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
+    let evs = m.why(&scope, &key)?;
+    Ok(serde_json::json!({
+        "scope": scope,
+        "chain": evs.iter().map(|e| serde_json::json!({
+            "seq": e.seq, "ts": e.ts, "kind": e.kind.as_str(), "op": e.op,
+            "value": e.value, "origin": e.origin.as_str(), "reason": e.reason,
+            "prov": e.prov, "id": e.id,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+/// `as-of`：某时刻的信念（**包含**当时成立、后来被推翻的）。
+#[tauri::command]
+fn mem_as_of(
+    at: i64,
+    key: Option<String>,
+    project_root: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
+    let hits = m.beliefs_as_of(&scope, key.as_deref(), at)?;
+    Ok(serde_json::json!({
+        "scope": scope, "at": at,
+        "hits": hits.iter().map(|h| serde_json::json!({
+            "key": h.key, "value": h.value, "status": h.status,
+            "valid_from": h.valid_from, "valid_to": h.valid_to,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+/// 收据：每次压缩/逐出"丢了什么、怎么换回来"（损失核算）。
+#[tauri::command]
+fn mem_receipts(
+    limit: Option<usize>,
+    project_root: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
+    let rs = m.receipts(&scope, limit.unwrap_or(50).min(500))?;
+    Ok(serde_json::json!({
+        "scope": scope,
+        "receipts": rs.iter().map(|r| serde_json::json!({
+            "id": r.id, "ts": r.ts, "kind": r.kind,
+            "covered": r.covered.len(), "dropped": r.dropped,
+            "rehydrate": r.rehydrate, "note": r.note,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+/// 从账本重放重建派生层（`beliefs`/FTS/向量）—— **EC 的可操作形态**。
+#[tauri::command]
+async fn mem_rebuild(project_root: Option<String>) -> Result<serde_json::Value, String> {
+    let rp = mem_root();
+    let scope = mem_scope(&rp, project_root.as_deref());
+    let m = harness_engine::mem::current()
+        .ok_or("记忆库未安装")?
+        .clone();
+    let n = tauri::async_runtime::spawn_blocking(move || m.rebuild(Some(&scope)))
+        .await
+        .map_err(|e| format!("重建失败: {e}"))??;
+    Ok(serde_json::json!({ "replayed_events": n }))
+}
+
 // 面板读的是引擎那**同一份**表（`harness_engine::proc::listing`），不另立一份，
 // 否则面板和模型就会各说各话。
 
@@ -2053,6 +2189,23 @@ fn main() {
             materialized
         );
     }
+    // 项目记忆（v1.1 核心模块，不可插件化）：账本 + 向量都在便携根的 global/memory/ 下。
+    // 失败**不阻止启动**：记忆是辅助能力，它坏了不该让 IDE 起不来；但必须留下痕迹。
+    {
+        let memory_dir = root_paths.memory_dir();
+        harness_engine::mem::embed::set_model_root(memory_dir.join("model"));
+        match harness_engine::mem::Memory::open(
+            memory_dir.join("mem.db"),
+            harness_engine::observe::secrets(),
+        ) {
+            Ok(m) => {
+                if let Err(e) = harness_engine::mem::install(m) {
+                    eprintln!("[mem] 安装失败（继续跑，记忆不参与本轮）：{e}");
+                }
+            }
+            Err(e) => eprintln!("[mem] 记忆库打开失败（继续跑，记忆不参与本轮）：{e}"),
+        }
+    }
     let plugin_reg = Mutex::new(reload_plugins(
         &plugins_root,
         root_paths.root(),
@@ -2120,6 +2273,12 @@ fn main() {
             get_term_targets,
             run_target,
             proc_list,
+            mem_status,
+            mem_beliefs,
+            mem_why,
+            mem_as_of,
+            mem_receipts,
+            mem_rebuild,
             proc_stop,
             proc_log_read,
             open_external,

@@ -98,6 +98,13 @@ pub async fn run_with_ask(
     if let Some(note) = discover::render_note(&tools, env_connector) {
         head.push_str(&format!("\n\n{note}"));
     }
+    // 发现结论同时**入账**（probe = 确定性证据）：下次不必重探也能知道，且说得清凭什么
+    crate::mem::record_discovery(&tools);
+    // 项目记忆：把"当前信念"（有界块）注进首条消息。记忆是**核心模块**（不可插件化），
+    // 模型不在时自动退化为纯词法检索，并且块里会写明这件事 —— 降级可以，静默不行。
+    if let Some(block) = crate::mem::prompt_block_for_current() {
+        head.push_str(&format!("\n\n{block}"));
+    }
     // 运行模式必须写进上下文：确认模式下 write 只暂存、execute 看到旧文件，
     // 不告诉模型这条，它会拿 execute 的失败反复当"改动错了"来修（见 policy_system_note）
     if let Some(note) = policy_system_note(policy) {

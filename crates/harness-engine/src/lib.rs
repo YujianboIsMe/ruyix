@@ -24,6 +24,7 @@ pub mod gitops;
 pub mod kb;
 pub mod lint;
 pub mod llm;
+pub mod mem;
 pub mod observe;
 pub mod pipeline;
 pub mod plan;

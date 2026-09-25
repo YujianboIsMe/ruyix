@@ -136,6 +136,20 @@ log(`校验和已写（${sumLines.length} 项）`);
 
 // ---------------------------------------------------------------- 4. 打 zip + 自校验
 fs.rmSync(ZIP, { force: true });
+// 项目记忆是**核心模块**（不可插件化）：模型随包走 `global/memory/model/`。
+// 模型文件不进 git（95.8MB 的二进制进历史就再也清不掉），所以这里是**取模型步骤**：
+// 从 ModelScope 取（HF 兜底）→ 逐文件 sha256 落 model.json → 打包前校验。
+if (process.argv.includes("--no-model")) {
+  log("跳过取模型（--no-model）：包里将没有向量腿，记忆退化为纯词法检索");
+} else {
+  log("取嵌入模型 → global/memory/model/（记忆是核心模块，随包）");
+  run("node", [
+    path.join(ROOT, "scripts", "fetch-embed-model.mjs"),
+    "--out",
+    path.join(STAGE, "global", "memory", "model"),
+  ]);
+}
+
 log(`打 zip → ${ZIP}`);
 run("powershell", [
   "-NoProfile",

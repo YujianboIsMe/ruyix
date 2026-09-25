@@ -185,6 +185,8 @@ pub async fn agent_reply(
     if !proj.is_dir() {
         return Err(format!("项目目录不存在: {root}"));
     }
+    // 记忆作用域 = 项目 key（一个库、按 scope 隔离）；机器级事实走 GLOBAL_SCOPE
+    engine::mem::set_scope(&crate::paths::Paths::from_root(&root).project_key(&root));
     let cfg = build_cfg(&config, Some(&root))?;
     let policy = match mode.as_deref() {
         Some("write") | Some("auto") => engine::agent::WritePolicy::Apply,

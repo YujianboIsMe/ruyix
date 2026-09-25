@@ -81,6 +81,12 @@ impl Paths {
         self.root.join("projects")
     }
 
+    /// 记忆库（v1.1 核心模块，**不可插件化**）：`<根>/global/memory/`。
+    /// 模型与账本都在这一个目录下 —— 删文件夹即卸载，仓库里一个字都不写。
+    pub fn memory_dir(&self) -> PathBuf {
+        self.global_dir().join("memory")
+    }
+
     pub fn plugins_dir(&self) -> PathBuf {
         self.root.join("plugins")
     }

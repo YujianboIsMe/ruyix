@@ -17,3 +17,16 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # v0.7 评估：判据要用真正则（"每条 return 都是三元组""错误码形如 E_XXX_YYY"这类形态判据
 # 用字符串包含判是假判据）。纯 Rust、无 C 依赖。
 regex = "1"
+# 账本的哈希链（纯 Rust，无 C 依赖）
+sha2 = "0.10"
+# 向量腿：本地嵌入，纯 Rust 推理（不要求用户装 Python / 不拉 ONNX Runtime）
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["fancy-regex"] }
+safetensors = { version = "0.6", optional = true }
+
+[features]
+# 记忆是**核心模块**（不可插件化）：向量腿默认编入。关掉它 = 记忆退化为纯词法检索。
+default = ["embed"]
+embed = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors"]
