@@ -1,5 +1,9 @@
-/** 双语内联文案（与 session.js / mcp.js 等面板同款）：英文界面走第二段 */
-const L = (zh, en) => (window.I18N && I18N.getLang() === "en" ? en : zh);
+/**
+ * 全局 L（双语内联文案）定义在 command.js —— 它比 session.js / mcp.js / 本文件都先加载。
+ * 这里**不能**再声明一次：经典脚本共享同一个全局作用域，重复的顶层 const 会让**本文件整份
+ * 不执行**（Uncaught SyntaxError: Identifier 'L' has already been declared），界面随之死掉。
+ * 门禁：ui-smoke U56 / U57（scripts/startup-probe.js）。
+ */
 
 /**
  * ruyix — Main JavaScript

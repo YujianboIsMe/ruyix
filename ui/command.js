@@ -1,5 +1,14 @@
-/** 双语内联文案（与 session.js / mcp.js 等面板同款）：英文界面走第二段 */
-const L = (zh, en) => (window.I18N && I18N.getLang() === "en" ? en : zh);
+/**
+ * 双语内联文案（与 session.js / mcp.js 等面板同款）：英文界面走第二段。
+ *
+ * ⚠️ 全局 L 只在这一处定义，而且必须挂在 window 上：index.html 的脚本都是**经典脚本**
+ * （没有 type="module"），它们共享**同一个全局作用域**。要是这里写成顶层 `const L`，而另一个
+ * 文件也写了一次，第二个脚本会在**求值之前**抛 SyntaxError 并**整份不执行**：
+ *   Uncaught SyntaxError: Identifier 'L' has already been declared
+ * 实测代价：main.js 曾有这样一份重复声明 ⇒ main.js 整份没跑、window.state 没建、界面死掉。
+ * 门禁：ui-smoke U56（静态：跨文件顶层词法声明不许重名）+ U57（真浏览器按真清单跑一遍）。
+ */
+window.L = (zh, en) => (window.I18N && I18N.getLang() === "en" ? en : zh);
 
 /**
  * ruyix — Command System

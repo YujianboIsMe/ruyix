@@ -256,6 +256,23 @@ function readEngineAgent() {
 const readLf = (p) => read(p).replace(/\r\n/g, "\n");
 
 /**
+ * realL —— 回放 main.js 的探针必须照**真页面的装配**来：index.html 里 command.js 先加载并
+ * 定义 window.L，而 main.js 里用的是裸 `L()`。只把 main.js 丢进裸环境的话，`L` 会落到本进程的
+ * globalThis 上 = undefined ⇒ 命中那条路径时当场 ReferenceError，判据假红。
+ * （ISSUE-2 的连带教训：声明位置一改，回放环境也得跟着补装配。）
+ * 这里**跑真的 ui/command.js** 取它的 window.L —— 不另抄一份定义（抄了就会漂）。
+ */
+function realL(win, doc, i18n) {
+  new Function("window", "document", "console", "I18N", readLf("ui/command.js"))(
+    win,
+    doc,
+    console,
+    i18n
+  );
+  return win.L;
+}
+
+/**
  * main.js 是否**真正**把 state 导出到 window（顶层 const 不挂 window，
  * 面板模块读的 window.state 全靠这一行）。行锚定 —— 否则注释里写一句同样文本也会算通过。
  */
@@ -2159,10 +2176,12 @@ async function runEditorChecks() {
     // main.js 必须能在"量不到任何尺寸"的环境里退化运行（真机上窗口被隐藏时也是这个分支）
     I18N: { t: (k) => k, init: async () => {}, getLang: () => "zh-CN" },
   };
-  const saved = ["window", "document", "setTimeout", "clearTimeout", "I18N", "state", "getComputedStyle"]
+  const saved = ["window", "document", "setTimeout", "clearTimeout", "I18N", "state", "getComputedStyle", "L"]
     .map((k) => [k, globalThis[k]]);
   Object.assign(globalThis, sandbox);
   delete globalThis.getComputedStyle;
+  // 真页面里 command.js 先加载并定义 window.L，main.js 用的是裸 L()（见 realL 注释）
+  globalThis.L = realL(sandbox.window, sandbox.document, sandbox.I18N);
   try {
     // 往源码尾部追加导出：main.js 的函数在 new Function 作用域里，外面拿不到
     const src =
@@ -3762,16 +3781,19 @@ async function runHighlightPluginChecks() {
     sandboxWin.document = sandboxDoc;
     sandboxWin.state = undefined;
     try {
+      // 真页面的装配：command.js 先加载并定义 window.L，main.js 里用的是裸 L()
+      // （main.js 里的 L() 又引用**裸全局** I18N —— new Function 的自由变量走本进程的
+      //   globalThis，所以两者都得显式当形参传进去，见 realL 注释。）
+      const L = realL(sandboxWin, sandboxDoc, sandboxWin.I18N);
       new Function(
         "window",
         "document",
         "console",
-        // main.js 里的 L() 引用的是**裸全局** I18N（不是 window.I18N），
-        // 而 new Function 的自由变量走的是本进程的 globalThis —— 所以显式当形参传进去。
         "I18N",
+        "L",
         readLf("ui/main.js") +
           "\n;window.__probe = { loadHighlightPlugins, fileIcon, get state() { return state; } };"
-      )(sandboxWin, sandboxDoc, console, sandboxWin.I18N);
+      )(sandboxWin, sandboxDoc, console, sandboxWin.I18N, L);
       await sandboxWin.__probe.loadHighlightPlugins();
       // 桩的 getElementById 对任何 id 都会造一个元素 ⇒ main.js 会认为 <style> 已存在、
       // 只往那个元素上写 textContent（不再 appendChild）。所以两个地方都要看。
@@ -3864,11 +3886,13 @@ async function runPaneExclusiveChecks() {
     I18N: { t: (k) => k, init: async () => {}, getLang: () => "zh-CN" },
   };
 
-  const saved = ["window", "document", "setTimeout", "clearTimeout", "I18N"].map((k) => [
+  const saved = ["window", "document", "setTimeout", "clearTimeout", "I18N", "L"].map((k) => [
     k,
     globalThis[k],
   ]);
   Object.assign(globalThis, sandbox);
+  // 真页面里 command.js 先加载并定义 window.L，main.js 用的是裸 L()（见 realL 注释）
+  globalThis.L = realL(sandbox.window, sandbox.document, sandbox.I18N);
   try {
     // main.js 的函数在 new Function 作用域里，外面拿不到 —— 尾部追加导出
     const src =
@@ -3988,6 +4012,85 @@ async function runTerminalTargetChecks() {
     missing.length === 0,
     `终端目标的文案缺键（中英都要有）：${missing.join(", ")}`
   );
+}
+
+/**
+ * U56 startup-scope（真缺陷回归）：**经典脚本共享同一个全局作用域**。
+ *
+ * index.html 里 15 个 <script> 没有一个是 type="module"，全是经典脚本 —— 它们共同拥有
+ * **唯一一个**全局词法作用域。于是两个文件各写一次顶层 `const L` 就会撞车：第二个脚本在
+ * **求值之前**抛 `SyntaxError: Identifier 'L' has already been declared`，**那一整份不执行**。
+ * 实测代价（用户报）：command.js 与 main.js 各有一份顶层 `const L`，main.js 整份没跑
+ * ⇒ window.state 没建、事件没挂 —— 界面直接死掉。
+ *
+ * 为什么只有这条静态判据能拦住它：① 面板回放与布局探针都把脚本 `eval()` 进 Node（eval 有
+ * 自己的一层作用域，撞不上）；② 布局探针还会先把 index.html 的 <script> 全删掉。
+ * 真浏览器那条路见 U57（scripts/startup-probe.js），但那条**没浏览器就 SKIP** ——
+ * 所以这条不吃浏览器的静态判据必须存在（没跑与通过必须能分辨）。
+ *
+ * 判据：跨文件顶层 const/let/class 不许重名；全局 L 只许有一处定义，且必须挂 window。
+ */
+function runStartupScopeChecks() {
+  const vendored = ["xterm.js", "markdown-it.min.js"];
+  const files = fs
+    .readdirSync(path.join(ROOT, "ui"))
+    .filter((f) => f.endsWith(".js") && !vendored.includes(f))
+    .sort();
+  const owner = new Map(); // 名字 -> [文件]
+  for (const f of files) {
+    const src = read("ui/" + f);
+    for (const m of src.matchAll(/^(?:const|let|class|var)\s+([A-Za-z_$][\w$]*)/gm)) {
+      const n = m[1];
+      if (!owner.has(n)) owner.set(n, []);
+      owner.get(n).push(f);
+    }
+  }
+  const dup = [...owner].filter(([, list]) => list.length > 1);
+  check(
+    "U56",
+    "startup-scope",
+    dup.length === 0,
+    "顶层词法声明重名（经典脚本共享一个全局作用域 —— 第二个脚本会整份不执行）：" +
+      dup.map(([n, list]) => `\n      ${n}: ${list.join(", ")}`).join("") +
+      "\n      改法：只留一处定义；共享的挂到 window 上（如 window.L）",
+  );
+  const cmdJs = read("ui/command.js");
+  const mainJs = read("ui/main.js");
+  check(
+    "U56",
+    "startup-scope",
+    /^window\.L\s*=/m.test(cmdJs) && !/^(?:const|let|var|class)\s+L\b/m.test(cmdJs),
+    "全局 L 必须是 window.L（写成顶层 const L 就会和别的脚本撞车），且只有 command.js 定义",
+  );
+  check(
+    "U56",
+    "startup-scope",
+    !/^(?:const|let|var|class)\s+L\b/m.test(mainJs),
+    "main.js 不许再声明顶层 L（command.js 已定义 window.L，重复声明 = 整份不执行）",
+  );
+}
+
+/**
+ * U57 startup-real：**真浏览器 + 真 index.html + 真脚本清单**（scripts/startup-probe.js）。
+ * 这是"这份文档能不能起来"的端到端判据 —— U56 静态拦重名，这条拦**所有**启动期崩法
+ * （清单缺文件 / 漏接线 / 加载失败 / 解析错误 / main.js 没跑到）。本机没 Edge/Chrome 时
+ * 探针自行 SKIP（沿用 U32/U42/U43/U46/U47/U55 的规矩）。
+ */
+function runStartupProbe() {
+  const script = path.join(ROOT, "scripts", "startup-probe.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U57 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^FAIL|^\s*FAIL/.test(l) || /^startup-probe:/.test(l))
+    .join(" ⏐ ");
+  check("U57", "startup-real", r.status === 0,
+    "启动探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
 }
 
 async function runMemoryPanelChecks() {
@@ -4208,6 +4311,8 @@ async function main() {
     ["U51", "terminal-targets", runTerminalTargetChecks],
     ["U52", "backend-msg-i18n", runBackendMsgChecks],
     ["U54", "memory-panel", runMemoryPanelChecks],
+    ["U56", "startup-scope", runStartupScopeChecks],
+    ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {
     try {

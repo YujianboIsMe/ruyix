@@ -164,3 +164,93 @@ cargo test --workspace     # 374 / 160，连跑 3 遍 0 failed
 
 教训（写给下一次）：**"限定项目"这件事必须落在每一个动作上**，
 而不是"在查询侧加一把锁"。查询侧限定治的是"看错人"，收尾越界治的是"把人弄丢"。
+
+---
+
+## ISSUE-2：启动就报 `Uncaught SyntaxError: Identifier 'L' has already been declared` —— 界面整块死掉
+
+**状态**：**已修**（2026-09-25）。
+
+### 症状（用户实测）
+
+启动即报，界面不工作（标签栏/文件树/会话全无反应）：
+
+```text
+Uncaught SyntaxError: Identifier 'L' has already been declared (at main.js:1:1)
+```
+
+### 根因：不是函数写错，是**脚本之间**的事
+
+`ui/index.html` 里 15 个 `<script>` **没有一个是 `type="module"`** ⇒ 全是**经典脚本**，
+它们共享**唯一一个全局词法作用域**。于是：
+
+| 文件 | 那一行 | 结果 |
+|---|---|---|
+| `command.js:2` | `const L = (zh, en) => …` | 先加载，拿到全局词法绑定 `L` |
+| `main.js:2` | `const L = (zh, en) => …`（**同一个提交里一起加的**，`79f4baf`） | 后加载，**求值前**抛 SyntaxError，**整份不执行** |
+
+`main.js` 不执行 ⇒ `window.state` 没建、事件没挂、面板全没了 —— 用户看到的"界面死掉"就是这么来的。
+注意报错位置写着 `main.js:1:1`，但**根本不在 main.js 里**：第二个声明的位置就是报错位置，
+这一条曾经误导排查方向（第一反应是去 main.js 里找重复的 `L`，方向错了）。
+
+### 为什么现有五条门禁全都没拦住它（这条最重要）
+
+| 门禁 | 为什么看不见 |
+|---|---|
+| `ui-smoke` 面板回放 | 把脚本 `eval()` 进 Node —— **eval 有自己的一层作用域**，两个文件各自 eval 也不会撞 |
+| `scripts/memory-layout.js` 等布局探针 | 更彻底：先把 `index.html` 的 `<script>` **全删掉**，再 `eval(read("ui/main.js"))` —— 既不加载 `command.js`，也不让**浏览器**去求值脚本 |
+| 布局探针的判据 | 它们量的是**几何**（宽高/溢出/滚动条），不是"这份文档能不能起来" |
+
+**教训**：`eval()` 真源码只能验**行为**，验不了**装载**（脚本清单、加载顺序、全局作用域冲突）。
+装载这件事必须让**真浏览器按 `index.html` 的真实顺序**跑一遍 —— 这正是 ISSUE-2 逼出来的新门禁。
+
+### 证据
+
+1. **V8 层复现**（同一 context 依序跑两个经典脚本，顺序同 index.html）：
+
+```text
+ok   command.js
+FAIL main.js -> SyntaxError: Identifier 'L' has already been declared
+```
+
+2. **真浏览器探针**（`scripts/startup-probe.js`，无头 Edge + 真 index.html）：
+
+```text
+# 修之前
+FAIL  A4  零 SyntaxError —— SyntaxError: Uncaught SyntaxError: Identifier 'L' has already been declared
+FAIL  A5  脚本真的执行到了（state=false showPane=false L=true EDITOR_PANES=false）
+  ·   CDP 另见 1 条异常: … @ main.js:1
+# 修之后
+PASS  A3  逐个加载成功（15/15）
+PASS  A4  零 SyntaxError
+PASS  A5  脚本真的执行到了（state=true showPane=true L=true EDITOR_PANES=true）
+```
+
+`state=false` 那一格是关键证据：它证明 **main.js 整份没跑**（不是"某个函数出错"）。
+
+3. `git blame`：`command.js:2` 与 `main.js:2` 同为 `79f4baf`（2026-09-25，"英文界面露中文"那一轮）
+   —— 同一个提交里往两个文件各写了一次，同源同因。
+
+### 改法
+
+1. **全局 L 只留一处定义，并挂到 `window` 上**（`ui/command.js`）：`window.L = (zh, en) => …`。
+   挂 window 才是"定义一次"的硬事实 —— 属性不是词法绑定，重复赋值也不冲突；
+   `session.js` / `mcp.js`（分别用 108 / 33 次裸 `L(`，本来就没有自己的声明）照旧拿得到。
+2. **删掉 `ui/main.js` 的重复声明**，原地留一条注释说明它从哪来、为什么不能再写一次。
+3. 两个文件的行为一字未变（同一个函数，只是装配方式变了）。
+
+### 门禁（已跑）
+
+```bash
+node scripts/startup-probe.js     # 真浏览器 + 真清单：15/15 加载、0 SyntaxError、state 就在（SKIP 可分辨）
+node scripts/ui-smoke.js          # U56 静态 + U57 真浏览器（347 → 351 项）
+```
+
+- **U56 `startup-scope`（静态，不吃浏览器）**：跨文件顶层 `const/let/class/var` **不许重名**；
+  全局 `L` 必须恰好一处 `window.L` 定义。修之前必红（就是这条抓住了 `L`）。
+  为什么要一条静态的：U57 **没浏览器就 SKIP**（"没跑"与"通过"必须能分辨），
+  而"全局作用域冲突"这种缺陷不能只在装了 Edge 的机器上才拦得住。
+- **U57 `startup-real`（真浏览器端到端）**：按 `index.html` 的真实顺序把真实的 15 个文件
+  交给真浏览器当经典脚本执行，判据 A1–A6（清单自洽 / 不漏接线 / 逐个加载成功 /
+  **零 SyntaxError** / 脚本真的执行到了 / 其余错误只报告不判红）。它拦的是**所有启动期崩法**，
+  不止重名这一类。
