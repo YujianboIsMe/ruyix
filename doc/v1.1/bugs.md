@@ -103,3 +103,32 @@ thread 'agent::tests::a_missed_criterion_carries_the_port_comparison' (25056) pa
 嫌疑集中在 `refresh_all` 之后的容量腾位（`proc.rs` 的 `while live_in(..) >= max` 会 remove 死条目）
 与 `set_state` 的状态推进顺序；要的是一份"表项什么时候被谁删"的时序日志，而不是再加一把锁。
 **在修掉之前，别把 `cargo test --workspace` 单跑一次的结果当作门禁结论** —— 连跑三遍才算。
+
+### 第二次尝试（当日）与回退：`poll_child` 也是按名字找
+
+**新证据**：把 `refresh_all` / `set_state` 那条线排除后，抓到这一条 ——
+
+```text
+handle=p1 的进程已被停止，本次等待中止
+```
+
+它来自 `proc.rs` 的 `poll_child`：那里用的还是**只按名字**的 `by_handle_mut`（全局线性扫描），
+别的项目/别的测试里同名、已被收掉的进程会让 `start` 的等待循环误判成"我这条被停了" ⇒ 
+**ISSUE-1 是同一个病在两个地方的实例**（查/停/读日志 是一处，轮询子进程 是另一处）。
+
+**尝试与回退**：把 `poll_child` 也改成 `(proj, handle)` 之后，
+*新建的* `a_handle_lookup_must_not_reach_across_projects` 反而开始间歇性红
+（限定比较在启动路径上不成立 —— 存表与查表两处的路径字面不同源）。
+按"不推没验证过的东西"，这一改动**已回退**，工作树回到 `f8bc5db`（那版：按项目限定查/停/读日志
+已修 + 回归判据在；残余是这条用例间歇性红）。
+
+**这次的失败原文（回退前抓到的）**：
+
+```text
+ thread 'agent::tests::a_missed_criterion_carries_the_port_comparison' (42196) panicked at crates\harness-engine\src\agent\tests.rs:2218:48: 判据没命中不等于启动失败: "handle=p1 的进程已被停止，本次等待中止" note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace   
+```
+
+**下一步（要点）**：修 `poll_child` 的正确做法不是照抄参数，而是**统一路径口径** ——
+先给 `Managed.proj` 与所有查询入口一个共同来源（例如都由 `start` 写入、
+比较用同一套规范化函数），否则"限定项目"这件事在存/查两侧各说各话。
+在它修好之前：**`cargo test --workspace` 单跑一次不算门禁结论，连跑三遍才算**。
