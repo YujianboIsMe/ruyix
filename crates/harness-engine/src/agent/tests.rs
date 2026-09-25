@@ -2168,7 +2168,9 @@ fn a_missed_criterion_carries_the_port_comparison() {
     let spec = crate::proc::StartSpec {
         cmd: sleeper.into(),
         ready_cmd: Some(r#"netstat -ano | findstr ":65533" | findstr "LISTENING""#.into()),
-        ready_timeout_secs: Some(1),
+        // 5 秒而不是 1 秒：**判据没变**（这个端口谁都不监听，必然"没命中"），
+        // 变的是余量 —— 1 秒在并行跑全量时会翻分支，表现为"handle 已从进程表移除"。
+        ready_timeout_secs: Some(5),
         keep_alive: false,
     };
     let note = tool_exec_bg(&d.0, &cfg, &spec).expect("判据没命中不等于启动失败");
