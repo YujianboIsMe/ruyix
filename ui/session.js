@@ -250,10 +250,13 @@
         return;
       }
       if (!caps.web_search) {
+        // 联网是"（协议 × 模型）"的能力：同一个模型换条协议可能就能搜（实测 flash 就是）。
+        // 所以文案要把**协议**写出来，否则用户看到的是一个无法解释的灰按钮。
+        const proto = caps.api_format || "openai";
         webBtn.disabled = true;
         webBtn.title = L(
-          L(`当前模型 ${caps.model} 不支持服务端联网检索`, `model ${caps.model} does not support server-side web search`),
-          `Model ${caps.model} has no server-side web search`
+          `当前模型 ${caps.model} 在 ${proto} 协议下不支持服务端联网检索（换模型或换协议）`,
+          `model ${caps.model} has no server-side web search on the ${proto} protocol`
         );
         return;
       }

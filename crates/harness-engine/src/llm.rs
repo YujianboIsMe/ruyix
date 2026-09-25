@@ -426,10 +426,24 @@ pub fn is_deepseek_endpoint(cfg: &LlmConfig) -> bool {
 /// 实测联网检索就是这样 —— `deepseek-v4-pro` 在 `/responses` 上每次都真检索，
 /// 而 `deepseek-v4-flash` 一次都不检索（模型自己明说"我没有可用的联网检索工具"）。
 /// 不查能力就换协议 = 白白走一条新路径却什么也没多拿到。
+///
+/// **联网检索还要再分一维：协议。** 它是**端点提供的服务端工具**，两条路的工具名不同，
+/// 于是"同一个模型在一条路上能搜、在另一条路上搜不了"是常态而非异常：
+///
+/// | 模型 | anthropic（`web_search_20250305`） | `/responses`（`{type:web_search}`） |
+/// |---|---|---|
+/// | `deepseek-v4-pro` | ✅ | ✅ |
+/// | `deepseek-flash` / `deepseek-v4-flash` | ✅ | ❌ |
+/// | `deepseek-v4-flash-vision-exp` | ✅ | ❌ |
+///
+/// （2026-09-25 四个模型 × 两条协议各打一遍实测。右列与旧的单维表一致 ——
+/// flash 之所以曾被判"搜不了"，是因为当时只在 `/responses` 上量过。）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelCaps {
-    /// 服务端联网检索（`/responses` + `tools:[{type:web_search}]`）
+    /// 服务端联网检索 · OpenAI 兼容路（`/responses` + `tools:[{type:web_search}]`）
     pub web_search: bool,
+    /// 服务端联网检索 · anthropic 路（`/v1/messages` + `tools:[{type:web_search_20250305}]`）
+    pub web_search_anthropic: bool,
     /// 能读图（视觉输入）
     pub multimodal: bool,
 }
@@ -443,6 +457,7 @@ const MODEL_CAPS: &[(&str, ModelCaps)] = &[
         "deepseek-v4-pro",
         ModelCaps {
             web_search: true,
+            web_search_anthropic: true,
             multimodal: false,
         },
     ),
@@ -452,6 +467,7 @@ const MODEL_CAPS: &[(&str, ModelCaps)] = &[
         "deepseek-flash",
         ModelCaps {
             web_search: false,
+            web_search_anthropic: true,
             multimodal: true,
         },
     ),
@@ -459,6 +475,7 @@ const MODEL_CAPS: &[(&str, ModelCaps)] = &[
         "deepseek-v4-flash",
         ModelCaps {
             web_search: false,
+            web_search_anthropic: true,
             multimodal: true,
         },
     ),
@@ -466,6 +483,7 @@ const MODEL_CAPS: &[(&str, ModelCaps)] = &[
         "deepseek-v4-flash-vision-exp",
         ModelCaps {
             web_search: false,
+            web_search_anthropic: true,
             multimodal: true,
         },
     ),
@@ -480,6 +498,7 @@ pub fn model_caps(model: &str) -> ModelCaps {
         .map(|(_, c)| *c)
         .unwrap_or(ModelCaps {
             web_search: false,
+            web_search_anthropic: false,
             multimodal: false,
         })
 }
@@ -489,23 +508,46 @@ pub fn known_models() -> &'static [(&'static str, ModelCaps)] {
     MODEL_CAPS
 }
 
+/// 某模型在**某协议**下能不能服务端联网检索 —— 能力表那一维的取值口径，
+/// 只此一处（`auto` 档与 UI 的开关可见性都从它来，避免两处各判一次）。
+pub fn web_search_capable(model: &str, api_format: &str) -> bool {
+    let caps = model_caps(model);
+    if api_format.trim().eq_ignore_ascii_case("anthropic") {
+        caps.web_search_anthropic
+    } else {
+        caps.web_search
+    }
+}
+
 /// 本次调用要不要挂服务端联网搜索（配置键 `llm.web_search`）。
 ///
 /// - `off`：永不开（联网出问题时**这就是回滚开关**，一行配置即退回老链路）；
-/// - `auto`（默认）：DeepSeek 官方端点 **且** 该模型真有联网能力 —— 两个条件缺一不可，
-///   否则就是换了协议却搜不了（flash 实测如此）；
-/// - `on`：强行开（自建兼容端点自己认这个参数时用，**不看能力表**）。
+/// - `auto`（默认）：DeepSeek 官方端点 **且** 该模型在**本协议**下真有联网能力 ——
+///   缺一不可，否则就是换了协议却搜不了；
+/// - `on`：强行开（自建兼容端点自己认这个工具时用，**不看能力表**）。
+///
+/// **2026-09-25 修**：以前这里对 anthropic **直接早返回 false**，即"anthropic 一律不支持
+/// 服务端联网"。实测是错的：DeepSeek 的 `/anthropic` 认 anthropic 原生的服务端检索工具
+/// （`web_search_20250305`），四个模型全都能搜。更糟的是那个早返回把用户设的 `on` 也一起吃掉
+/// —— 配置说开着、请求里没有、界面也不报错（用户报的正是"为什么没法用 web 搜索"）。
+/// 判断依据回到能力表那两维，`on` 恢复"强行开"的本义。
 pub fn web_search_on(cfg: &LlmConfig) -> bool {
-    // anthropic 协议不支持服务端联网检索（语义不成立），一律关。
-    if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
-        return false;
-    }
     match cfg.web_search.trim().to_ascii_lowercase().as_str() {
         "on" => true,
-        "auto" => is_deepseek_endpoint(cfg) && model_caps(&cfg.model).web_search,
+        "auto" => is_deepseek_endpoint(cfg) && web_search_capable(&cfg.model, &cfg.api_format),
         _ => false,
     }
 }
+
+/// anthropic 的服务端联网工具是**带版本的类型名**，不是 `web_search`。
+///
+/// 实测（2026-09-25）：发 `{"type":"web_search"}` 会被 422 打回，且服务端在报错里
+/// 自己给了正确取值 —— `unknown variant \`web_search\`, expected \`web_search_20250305\`
+/// or \`web_search_20260209\``。取旧的那个（兼容面更宽）。
+pub const WEB_SEARCH_ANTHROPIC_TYPE: &str = "web_search_20250305";
+
+/// 一轮里最多让服务端检索几次 —— 给模型一个上限，别把一轮烧成十次检索。
+pub const WEB_SEARCH_MAX_USES: u32 = 5;
 
 /// 全部工具名（**必须与 [`TOOL_DECLS`] 一行不改地对齐** —— 契约单测同时断言两边）。
 ///
@@ -625,7 +667,8 @@ fn chat_parts(
     (url, body)
 }
 
-/// `/responses` 的请求体。**只有这条路上服务端联网搜索成立**。
+/// `/responses` 的请求体。OpenAI 兼容路的服务端联网搜索在这条路上（`{type:web_search}`）；
+/// anthropic 路的同名能力走 `/v1/messages` + `web_search_20250305`，那条在 [`anthropic_parts`]。
 /// Responses 形态的函数工具声明：`{type:"function", name, description, parameters}` —— **扁平**，
 /// 不像 `/chat/completions` 那样再裹一层 `function`。发错了的表现是 400，或更糟：
 /// 不报错但模型从不调用（声明没被认成工具）。
@@ -694,8 +737,9 @@ type Protocol = (
 
 // ---- Anthropic Messages 协议（`/v1/messages`） ----
 // 与 OpenAI 兼容协议的主要差异：鉴权用 `x-api-key` + `anthropic-version` 头；system 是
-// 顶层字段（不在 messages 里）；没有 `response_format`（JSON 靠提示词保证）；不支持服务端
-// 联网检索（见 `web_search_on` 对 anthropic 直接返回 false）。
+// 顶层字段（不在 messages 里）；没有 `response_format`（JSON 靠提示词保证）；
+// 联网检索走**它自己的**服务端工具 `web_search_20250305`（见 `WEB_SEARCH_ANTHROPIC_TYPE`），
+// 与 OpenAI 那条路的 `{type:web_search}` 是两套名字，混用会被 422 打回。
 
 #[derive(Deserialize, Default)]
 struct AnthropicResp {
@@ -849,8 +893,23 @@ fn anthropic_parts(
     // **声明工具**（这一步以前漏了）：不声明，模型就只能把动作写进正文 ——
     // 严格模式（`llm.tool_protocol`，默认开）下那一律作废，于是每轮都"没有工具调用"，
     // 直到烧完预算（用户实测："发一句你好，一直无限死循环"）。这是那条 bug 的**真病因**。
-    if !tool_names.is_empty() {
-        body["tools"] = serde_json::Value::Array(anthropic_tool_decls(tool_names));
+    //
+    // 联网检索与函数工具**共处同一个数组**（靠 `type` 区分）：
+    // 服务端工具项是 `{type, name, max_uses}`，我们的函数工具项是 `{name, description, input_schema}`。
+    // 实测这个组合真干活（2026-09-25，`deepseek-flash`）：一轮里先出
+    // `server_tool_use(web_search, query="杭州今天天气")` + `web_search_tool_result`，
+    // 紧接着就是我们的 `tool_use(final)` —— 检索与交付在同一轮里完成。
+    let mut tools: Vec<serde_json::Value> = Vec::new();
+    if web_search_on(cfg) {
+        tools.push(serde_json::json!({
+            "type": WEB_SEARCH_ANTHROPIC_TYPE,
+            "name": "web_search",
+            "max_uses": WEB_SEARCH_MAX_USES,
+        }));
+    }
+    tools.extend(anthropic_tool_decls(tool_names));
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(tools);
     }
     // 注意：anthropic 没有 response_format。JSON 模式靠提示词要求，这里不加任何字段，
     // 否则会被 400 打回（`unknown field 'response_format'`）。
@@ -897,6 +956,18 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
             },
         })
         .collect();
+    // 服务端联网检索的痕迹：`server_tool_use` 块带着本次的查询词（`input.query`）——
+    // 与 `/responses` 那条路的 `web_search_call.action.queries` 同义，落到**同一个**
+    // `web_queries` 字段，于是"这一轮查了什么"在两条协议下都从同一处显示。
+    // `web_search_tool_result`（检索结果本身）与 `thinking` 既不是正文也不是我们的工具调用，
+    // 上面两个 filter（只取 `text` / 只取 `tool_use`）天然跳过它们 —— 这里也不再单独处理。
+    let web_queries: Vec<String> = parsed
+        .content
+        .iter()
+        .filter(|c| c.kind == "server_tool_use" && c.name == "web_search")
+        .filter_map(|c| c.input.get("query").and_then(|q| q.as_str()))
+        .map(|s| s.to_string())
+        .collect();
     let finish_reason = match parsed.stop_reason.as_deref() {
         Some("max_tokens") => Some("length".to_string()),
         Some("end_turn") | Some("stop_sequence") => Some("stop".to_string()),
@@ -918,13 +989,14 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
         usage,
         model: parsed.model,
         finish_reason,
-        web_queries: Vec::new(),
+        web_queries,
         tool_calls,
     })
 }
 
 /// 按 `api_format` 选择整套协议：anthropic → `/v1/messages`；否则按 `web_search_on`
-/// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判（它会跳过联网）。
+/// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判 ——
+/// **但联网不是被它跳过的**：anthropic 有自己的服务端检索工具，由 [`anthropic_parts`] 声明。
 ///
 /// `tool_names` 对 `/chat/completions` 与 anthropic 两条路都生效（各自一套声明与解析形态，
 /// 见 [`anthropic_tool_decls`] / [`extract_anthropic`]）。
@@ -1587,11 +1659,21 @@ mod tests {
         assert!(model_caps("deepseek-v4-flash").multimodal);
         assert!(!model_caps("deepseek-v4-pro").multimodal);
 
+        // 联网能力**按协议分**（2026-09-25 四个模型两条路各打一遍实测）：
+        // flash 在 `/responses` 上搜不了，但在 anthropic 路上能搜 —— 两列都要钉住，
+        // 只钉一列就会重演"整条协议被写死成不支持"。
+        assert!(!model_caps("deepseek-v4-flash").web_search);
+        assert!(model_caps("deepseek-v4-flash").web_search_anthropic);
+        assert!(model_caps("deepseek-v4-pro").web_search);
+        assert!(model_caps("deepseek-v4-pro").web_search_anthropic);
+        assert!(model_caps("deepseek-v4-flash-vision-exp").web_search_anthropic);
+
         // 表里没有的模型按"都没能力"处理（宁可不开，也不为不存在的能力换协议）
         assert_eq!(
             model_caps("deepseek-v5-ultra"),
             ModelCaps {
                 web_search: false,
+                web_search_anthropic: false,
                 multimodal: false
             }
         );
@@ -1917,7 +1999,9 @@ mod tests {
         assert_eq!(r.usage.total_tokens, 168);
         assert_eq!(r.model.as_deref(), Some("claude-sonnet-4"));
         assert_eq!(r.finish_reason.as_deref(), Some("stop"));
-        assert!(r.web_queries.is_empty(), "anthropic 协议无服务端联网检索");
+        // 该样本里没有 `server_tool_use` 块 → 查询词为空（有检索块的那种见
+        // `anthropic_extract_reports_server_side_queries_without_confusing_tool_use`）
+        assert!(r.web_queries.is_empty());
     }
 
     #[test]
@@ -1930,14 +2014,113 @@ mod tests {
         assert_eq!(r.content, "半截");
     }
 
+    /// 联网能力**按协议那一维**判（2026-09-25 实测修正掉"anthropic 一律关"）：
+    /// DeepSeek 的 `/anthropic` 认 anthropic 原生的服务端检索工具（`web_search_20250305`），
+    /// 实测四个模型全都能搜 —— 而旧代码在这里**直接早返回 false**，连带把用户设的 `on`
+    /// 也一起吃掉（配置说开着、请求里没有、界面不报错 = 用户报的"为什么没法用 web 搜索"）。
     #[test]
-    fn web_search_is_off_for_anthropic_even_when_auto() {
-        let mut cfg = cfg_anthropic();
-        cfg.web_search = "auto".into();
-        assert!(!web_search_on(&cfg), "anthropic 协议不支持服务端联网检索");
-        // openai 格式 + auto 在 DeepSeek 端点上仍应开（回归旧行为）
+    fn web_search_is_decided_per_protocol_not_per_api_format_alone() {
+        // ① auto + anthropic + DeepSeek + 表里说能搜的模型（flash 也行）→ 开
+        let mut ds_anthropic = cfg_anthropic();
+        ds_anthropic.base_url = "https://api.deepseek.com/anthropic".into();
+        ds_anthropic.model = "deepseek-flash".into();
+        ds_anthropic.web_search = "auto".into();
+        assert!(
+            web_search_on(&ds_anthropic),
+            "anthropic 路上 flash 实测能搜，不该再一律关掉"
+        );
+
+        // ② auto + anthropic + 表里没有的模型 → 关（不虚报能力：宁可不开，也不发一个搜不了的请求）
+        let mut unknown = ds_anthropic.clone();
+        unknown.model = "claude-sonnet-4".into();
+        assert!(!web_search_on(&unknown));
+
+        // ③ on = 强行开，而且**不再被协议吃掉**（这条正是本次缺陷的回归判据）
+        let mut forced = cfg_anthropic();
+        forced.model = "claude-sonnet-4".into();
+        forced.web_search = "on".into();
+        assert!(
+            web_search_on(&forced),
+            "用户设 on 却被协议静默吞掉 = 配置在撒谎"
+        );
+
+        // ④ 非 DeepSeek 端点 + auto → 关（往不认这个工具的端点塞会被 422 打回）
+        let mut foreign = cfg_anthropic();
+        foreign.web_search = "auto".into();
+        assert!(!web_search_on(&foreign));
+
+        // ⑤ 同一模型两条路能力不同 —— 这一条钉的是"表必须留一维给协议"
+        assert!(web_search_capable("deepseek-flash", "anthropic"));
+        assert!(!web_search_capable("deepseek-flash", "openai"));
+        assert!(web_search_capable("deepseek-v4-pro", "openai"));
+
+        // ⑥ openai 格式 + auto 在 DeepSeek 端点上仍应开（回归旧行为）
         let openai = cfg_at("https://api.deepseek.com", "auto");
         assert!(web_search_on(&openai));
+    }
+
+    /// anthropic 请求体里必须出现**带版本号**的服务端检索工具，且与函数工具同框。
+    /// 发错名字（`{type:web_search}`）会被 422 打回 —— 服务端报错原文就是这个字段的正确取值。
+    #[test]
+    fn the_anthropic_body_carries_the_versioned_server_web_search_tool() {
+        let mut cfg = cfg_anthropic();
+        cfg.base_url = "https://api.deepseek.com/anthropic".into();
+        cfg.model = "deepseek-flash".into();
+        cfg.web_search = "auto".into();
+        let msgs = vec![
+            ChatMessage::system("你是 A"),
+            ChatMessage::user("最近的消息"),
+        ];
+
+        let (url, body) = anthropic_parts(&cfg, &msgs, false, &["read", "final"]);
+        assert!(url.ends_with("/v1/messages"));
+        let tools = body["tools"].as_array().expect("tools 必须是数组");
+        assert_eq!(tools[0]["type"], WEB_SEARCH_ANTHROPIC_TYPE);
+        assert_eq!(tools[0]["name"], "web_search");
+        assert!(tools[0]["max_uses"].as_u64().unwrap_or(0) > 0);
+        // 函数工具与它同框（`type` 区分），且必须是 anthropic 形态（`input_schema` 而非 `parameters`）
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["name"] == "final" && t["input_schema"].is_object())
+        );
+        assert!(
+            !tools.iter().any(|t| t["type"] == "web_search"),
+            "OpenAI 形态的 {{type:web_search}} 会被 anthropic 端点 422 打回"
+        );
+
+        // 关掉时那块一个字节都不许出现（`off` 是回滚开关）
+        let mut off = cfg.clone();
+        off.web_search = "off".into();
+        let (_, body) = anthropic_parts(&off, &msgs, false, &["read"]);
+        let tools = body["tools"].as_array().expect("tools 必须是数组");
+        assert!(tools.iter().all(|t| t["type"] != WEB_SEARCH_ANTHROPIC_TYPE));
+        assert!(tools.iter().any(|t| t["name"] == "read"));
+    }
+
+    /// 一条**真实响应**的骨架（2026-09-25 实测 DeepSeek `/anthropic`：闪念 → 服务端检索 → 交付）。
+    /// 钉两件事：① 检索查询词进 `web_queries`（两条协议同一个字段 → UI 同一处显示）；
+    /// ② `server_tool_use` / `web_search_tool_result` **不许**被当成我们的工具调用，
+    /// 而同一轮里的 `tool_use(final)` 必须照旧解析出来（严格模式靠它推进）。
+    #[test]
+    fn anthropic_extract_reports_server_side_queries_without_confusing_tool_use() {
+        let raw = r#"{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash",
+            "stop_reason":"tool_use","content":[
+              {"type":"thinking","thinking":"先查一下今天天气"},
+              {"type":"server_tool_use","id":"call_00_x","name":"web_search",
+               "input":{"query":"杭州今天天气"},"caller":{"type":"direct"}},
+              {"type":"web_search_tool_result","tool_use_id":"call_00_x",
+               "content":[{"type":"web_search_result","title":"杭州天气","url":"https://x"}]},
+              {"type":"tool_use","id":"call_01_y","name":"final","input":{"answer":"多云"}}],
+            "usage":{"input_tokens":10,"output_tokens":20}}"#;
+        let r = extract_anthropic(raw).unwrap();
+        assert_eq!(r.web_queries, vec!["杭州今天天气".to_string()]);
+        assert_eq!(r.tool_calls.len(), 1, "服务端工具块不是我们的工具调用");
+        assert_eq!(r.tool_calls[0].function.name, "final");
+        assert!(r.tool_calls[0].function.arguments.contains("多云"));
+        assert_eq!(r.finish_reason.as_deref(), Some("tool_calls"));
+        assert!(r.content.is_empty(), "正文只取 text 块");
+        assert_eq!(r.usage.prompt_tokens, 10);
     }
 
     // ---- 故障切换（F1） ----

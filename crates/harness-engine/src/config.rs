@@ -65,12 +65,15 @@ pub struct LlmConfig {
     pub timeout_secs: u64,
     /// 服务端联网搜索：`off` / `auto` / `on`（见 `llm::web_search_on`）。
     ///
-    /// 联网搜索是**服务端能力**：请求里带上 `tools:[{"type":"web_search"}]`，由服务端
-    /// 自己检索、把结果灌进上下文，引擎看不到标题与链接（只在响应里拿得到查询词）。
-    /// 它**只在 `/responses` 端点上成立** —— 往 `/chat/completions` 塞会被拒
-    /// （实测 422 `unknown variant \`web_search\`, expected \`function\``）。
-    /// 而且它是**逐模型**的（见 `llm::model_caps`）：`auto` 档要端点与模型能力
-    /// 两个条件都满足才开。
+    /// 联网搜索是**服务端能力**：请求里带上服务端工具声明，由服务端自己检索、把结果灌进
+    /// 上下文，引擎看不到标题与链接（只在响应里拿得到**查询词**）。
+    /// **两条协议两种工具名**：OpenAI 兼容走 `/responses` + `{"type":"web_search"}`；
+    /// anthropic 走 `/v1/messages` + `{"type":"web_search_20250305"}`。
+    /// 名字混用会被打回（实测 422 `unknown variant \`web_search\`, expected
+    /// \`function\`` 是 OpenAI 那条；`expected \`web_search_20250305\`` 是 anthropic 那条）。
+    /// 能力是**（协议 × 模型）**的（见 `llm::model_caps` / `llm::web_search_capable`）：
+    /// `auto` 档要求"DeepSeek 官方端点 **且** 该模型在该协议下能搜"，
+    /// `on` 档不看表、强行开（自建兼容端点自己认这个工具时用）。
     #[serde(default = "d_web_search")]
     pub web_search: String,
     /// 接口协议格式：`openai`（默认，兼容 DeepSeek / OpenAI / 大多数网关）
@@ -1098,7 +1101,8 @@ pub struct KeySpec {
 /// 都从 `schema()` 读它，所以全局只有这一份。
 const ENUM_KEYS: &[(&str, &[&str])] = &[
     ("sandbox.mode", &["require", "prefer", "off"]),
-    // `auto` = 只对认这个参数的端点开（DeepSeek 官方），配了别的端点也不会被 422 打回。
+    // `auto` = 只对认这个工具的端点开（DeepSeek 官方），配了别的端点也不会被 422 打回；
+    // 两条协议各有自己的工具名与能力表（见 `llm::web_search_capable`）。
     ("llm.web_search", &["off", "auto", "on"]),
     // `api_format` 决定 `chat()` 走哪套协议：OpenAI 兼容 还是 Anthropic Messages。
     ("llm.api_format", &["openai", "anthropic"]),

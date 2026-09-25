@@ -254,3 +254,122 @@ node scripts/ui-smoke.js          # U56 静态 + U57 真浏览器（347 → 351 
   交给真浏览器当经典脚本执行，判据 A1–A6（清单自洽 / 不漏接线 / 逐个加载成功 /
   **零 SyntaxError** / 脚本真的执行到了 / 其余错误只报告不判红）。它拦的是**所有启动期崩法**，
   不止重名这一类。
+
+---
+
+## ISSUE-3：用 anthropic 端点时"联网搜索用不了" —— 我们自己把它关掉了，而且连用户设的 `on` 一起吃了
+
+**状态**：**已修**（2026-09-25）。
+
+### 症状（用户实测）
+
+配置 `api_format = anthropic` + `api_url = https://api.deepseek.com/anthropic` + `deepseek-flash`：
+联网搜索**没有任何反应**。把 `llm.web_search` 设成 `on` 也一样 —— 配置说开着、请求里没有、
+界面上不报错。
+
+### 根因（三层，一层比一层隐蔽）
+
+1. **一句未经实测的断言被当成设计约束**。`web_search_on()` 里写着：
+
+   ```rust
+   // anthropic 协议不支持服务端联网检索（语义不成立），一律关。
+   if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") { return false; }
+   ```
+
+   "语义不成立"是**推断**，不是实测。事实：Anthropic 的 Messages 协议**有**自己的服务端检索工具
+   （带版本的类型名 `web_search_20250305`），DeepSeek 的 `/anthropic` 入口实现了它。
+2. **早返回发生在看配置之前** ⇒ 用户显式设的 `on` 被静默吃掉。`on` 的文档承诺是"强行开、
+   不看能力表"（自建兼容端点用），而这里连协议判断都排在它前面 —— **配置界面在撒谎**：
+   用户能看到开关、能设成 on、请求里一个字节都不带、界面不报错。
+3. **能力表少了一维**。`ModelCaps` 只有"模型"一维，而联网是**端点提供的服务端工具**、
+   两条协议工具名不同 ⇒ 它是 **（协议 × 模型）** 的能力。旧表把 `flash` 标成"搜不了"，
+   那是在 `/responses` 上量出来的结论，被当成了模型的固有属性。
+
+### 证据（全是实测，不是推断）
+
+**(1) anthropic 端点真的认它自己的服务端检索工具**
+
+```text
+POST https://api.deepseek.com/anthropic/v1/messages
+tools = [{"type":"web_search_20250305","name":"web_search","max_uses":3}]
+→ HTTP 200，content 里出现：
+   {"type":"server_tool_use","name":"web_search","input":{"query":"杭州今天天气"},...}
+```
+
+**(2) 发 OpenAI 那套名字会被 422 打回，且服务端自己给出了正确取值**
+
+```text
+tools = [{"type":"web_search"}]
+→ HTTP 422 unknown variant `web_search`, expected `web_search_20250305` or `web_search_20260209`
+```
+
+**(3) 联网是（协议 × 模型）：四个模型两条路各打一遍**
+
+| 模型 | anthropic（`web_search_20250305`） | `/responses`（`{type:web_search}`） |
+|---|---|---|
+| `deepseek-v4-pro` | ✅ | ✅ |
+| `deepseek-flash` | ✅ | ❌ |
+| `deepseek-v4-flash` | ✅ | ❌ |
+| `deepseek-v4-flash-vision-exp` | ✅ | ❌ |
+
+**(4) 与函数工具同框真的干活**（严格模式的实际形状，实测 `deepseek-flash`）：
+
+```text
+tools = [ {name:final,...}, {name:read,...}, {"type":"web_search_20250305",...} ]
+→ HTTP 200，一轮里依次出现：
+   server_tool_use(web_search, query="杭州今天天气")
+   web_search_tool_result
+   tool_use(final, {answer:"今天（9月25日）杭州多云到阴…"})
+```
+
+**(5) 真机测试（`tests/web_search_live.rs`，新增两臂）**
+
+```text
+[live] anthropic 联网查询词 = ["2026年9月18日 上证指数 收盘点位", "Shanghai Composite Index September 18 2026 close"]
+[live] anthropic 答复       = {"answer":"…上证指数收盘报3911.87点…"}
+[live] anthropic 关联网答复 = {"answer":"2026年9月18日尚未到来，无法获知…"}   ← 对照组：关掉就答不出
+[live] anthropic+tools 查询词 = ["2026年9月18日 上证指数 收盘"]  工具调用 = execute {...}  ← 同框各不挤掉
+```
+
+**这条测试在修之前必然红**（查询词恒为空）—— 所以它就是这条缺陷的门禁形状。
+
+### 改法
+
+1. **能力表加一维**：`ModelCaps.web_search_anthropic`，四个模型按上表实测填。
+2. **一份取口径**：新增 `llm::web_search_capable(model, api_format)` —— 按协议取该维；
+   `web_search_on` 去掉早返回，`on` 恢复"强行开"的本义（**这条是本次缺陷的回归判据**）。
+3. **anthropic 请求体**：开着时把服务端工具 `{type: web_search_20250305, name: web_search,
+   max_uses: 5}` 与函数工具**同一个数组**声明（`type` 区分，常量见
+   `WEB_SEARCH_ANTHROPIC_TYPE` / `WEB_SEARCH_MAX_USES`）。
+4. **解析**：`extract_anthropic` 收 `server_tool_use` 的 `input.query` 进 `web_queries` ——
+   与 `/responses` 路的 `web_search_call` 落**同一个字段**，于是"这一轮查了什么"在两条协议下
+   都从同一处显示（`tool_loop` 已经在那儿渲染）。`web_search_tool_result` / `thinking`
+   既不是正文也不是我们的工具调用，天然被跳过。
+5. **宿主 + 界面**：`ai_model_caps` 现在给"**按当前协议算的有效值**"+两条协议的原始值 + `api_format`；
+   会话里那个 🌏 开关禁用时把**协议**写进文案（"在 anthropic 协议下不支持…（换模型或换协议）"）——
+   同一个模型换条协议可能就能搜，不写协议用户看不懂为什么突然不能搜。
+
+### 门禁（已跑）
+
+```bash
+cargo test --workspace          # 382（+2）/ 160 全绿
+cargo clippy --workspace --all-targets && cargo clippy -p ruyix --no-default-features --features custom-protocol
+                                # 两模式 0 warning
+cargo fmt --check && node scripts/check-style.js && node scripts/ui-smoke.js   # 351/351
+DEEPSEEK_API_KEY=sk-xxx cargo test -p harness-engine --test web_search_live -- --ignored --nocapture
+```
+
+单测四条（都在 `llm.rs`）：
+`web_search_is_decided_per_protocol_not_per_api_format_alone`（含"on 不许被协议吃掉"）、
+`the_anthropic_body_carries_the_versioned_server_web_search_tool`（发错名字必被 422，所以工具名要钉）、
+`anthropic_extract_reports_server_side_queries_without_confusing_tool_use`（真响应骨架：查询词进
+`web_queries`、服务端工具块**不**被当成我们的调用、同轮 `tool_use` 照旧解析）、
+能力表两维断言（防"只钉一列"重演）。
+
+### 教训（同一个病在四个 bug 里出现过四次）
+
+`llm.rs` 里的能力判断**必须带实测日期或证据**。这次那句"语义不成立"以**设计约束**的名义活了很久，
+表现却是"用户的开关静默失效"。同类前科：bug 5 的"接口格式想当然"（用户当时纠正原话：
+"如果是 anthropic 接口时，走 anthropic 的工具调用，这才是正确的改法！"）、
+`/responses` 曾经只声明联网不声明函数工具（同一个死循环病）。
+**规矩**：协议差异只许写"实测得到什么"，不许写"语义上应该怎样"。

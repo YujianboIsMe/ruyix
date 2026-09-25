@@ -84,3 +84,113 @@ fn live_web_search_really_searches_and_the_queries_come_back() {
         assert!(!out2.content.contains("3911"), "关了联网不该也有真值");
     });
 }
+
+/// **anthropic 路的同一件事**（2026-09-25 新增）。
+///
+/// 为什么必须有这一臂：引擎此前对 anthropic **一律关掉**联网（`web_search_on` 里直接
+/// 早返回 false），连带把用户设的 `on` 也一起吃掉 —— 配置说开着、请求里没有、界面不报错。
+/// 实测是错的：DeepSeek 的 `/anthropic` 认 anthropic **原生**的服务端检索工具
+/// （`web_search_20250305`，发 `{type:web_search}` 会 422）。这条真机判据就是那个缺陷的门禁：
+/// 它在本修复之前**必然红**（查询词恒为空）。
+#[test]
+#[ignore = "要真 key 与联网：DEEPSEEK_API_KEY=sk-xxx cargo test -p harness-engine --test web_search_live -- --ignored --nocapture"]
+fn live_anthropic_web_search_really_searches() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let cfg = mk_anthropic_cfg("auto");
+        assert!(
+            web_search_on(&cfg),
+            "DeepSeek 的 anthropic 端点 + flash 实测能搜，不该判为不支持"
+        );
+
+        let out = chat(&cfg, None, &the_question(), true, false)
+            .await
+            .unwrap();
+        println!("[anthropic] 联网查询词 = {:?}", out.web_queries);
+        println!("[anthropic] 答复       = {}", out.content);
+        assert!(!out.web_queries.is_empty(), "服务端没发起检索");
+        assert!(
+            out.content.contains("3911"),
+            "没答出检索到的真值：{}",
+            out.content
+        );
+
+        // 对照组：关掉联网，同一个问题答不出来（差别不显著就说明开关没真起作用）
+        let off = mk_anthropic_cfg("off");
+        assert!(!web_search_on(&off));
+        let out2 = chat(&off, None, &the_question(), true, false)
+            .await
+            .unwrap();
+        println!("[anthropic] 关联网答复 = {}", out2.content);
+        assert!(out2.web_queries.is_empty());
+    });
+}
+
+/// **同框**：严格模式（声明函数工具）与 anthropic 服务端检索工具一起发 —— 这是真实运行形状
+/// （`llm.tool_protocol = true`，默认开）。实测一轮里先 `server_tool_use` + `web_search_tool_result`，
+/// 紧跟着 `tool_use(final)`：检索与交付在同一轮完成，工具协议照旧推进。
+#[test]
+#[ignore = "要真 key 与联网：DEEPSEEK_API_KEY=sk-xxx cargo test -p harness-engine --test web_search_live -- --ignored --nocapture"]
+fn live_anthropic_web_search_coexists_with_the_function_tools() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let cfg = mk_anthropic_cfg("auto");
+        // tools = true：与主循环一样声明全套函数工具（`final` 等）
+        let out = chat(&cfg, None, &the_question(), false, true)
+            .await
+            .unwrap();
+        println!("[anthropic+tools] 联网查询词 = {:?}", out.web_queries);
+        println!("[anthropic+tools] 答复       = {}", out.content);
+        for c in &out.tool_calls {
+            println!(
+                "[anthropic+tools] 工具调用   = {} {}",
+                c.function.name, c.function.arguments
+            );
+        }
+
+        // 判据是"**两件事同框、各不挤掉对方**"（不是"模型必须答出某个数"——
+        // 声明了函数工具之后它先调哪个工具是它的自由，单发一次调用没有循环来接着走）：
+        // ① 真检索了 —— 服务端工具没被函数工具挤掉；
+        assert!(!out.web_queries.is_empty(), "开了联网就必须真检索");
+        // ② 函数工具照旧被解析出来 —— 服务端工具块没被误认成我们的调用、也没让我们漏解析；
+        assert!(
+            !out.tool_calls.is_empty(),
+            "声明了函数工具就必须有可解析的调用（同框把工具协议挤掉了）；content={}",
+            out.content
+        );
+        // ③ 声明的工具名与参数都是我们认得的形状（服务端工具块不该混进来）
+        for c in &out.tool_calls {
+            assert!(
+                [
+                    "read", "write", "execute", "connect", "plan", "ask_user", "final"
+                ]
+                .contains(&c.function.name.as_str()),
+                "解析出一个不存在的工具名：{}（服务端工具块混进来了？）",
+                c.function.name
+            );
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&c.function.arguments).is_ok(),
+                "参数不是合法 JSON：{}",
+                c.function.arguments
+            );
+        }
+    });
+}
+
+/// anthropic 端的配置（真 key + DeepSeek 的 anthropic 入口）。
+fn mk_anthropic_cfg(web: &str) -> LlmConfig {
+    LlmConfig {
+        api_key: key(),
+        api_format: "anthropic".to_string(),
+        base_url: "https://api.deepseek.com/anthropic".to_string(),
+        model: "deepseek-flash".to_string(),
+        web_search: web.to_string(),
+        ..LlmConfig::default()
+    }
+}

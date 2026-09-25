@@ -308,11 +308,20 @@ three protocols via `request_plan`:
 |---|---|---|---|
 | `openai` + `web_search` on | `/responses` | `Authorization: Bearer` | server-side web search (DeepSeek only) |
 | `openai` (default) | `/chat/completions` | `Authorization: Bearer` | supports `response_format` |
-| `anthropic` | `/v1/messages` | `x-api-key` + `anthropic-version: 2023-06-01` | `system` goes to a top-level field; **no** `response_format`; **no** web search |
+| `anthropic` | `/v1/messages` | `x-api-key` + `anthropic-version: 2023-06-01` | `system` goes to a top-level field; **no** `response_format`; web search uses **Anthropic's own server tool** `web_search_20250305` (declare + parse `server_tool_use` → `web_queries`) |
 
 `request_plan` checks `anthropic` **first** — check it after `web_search_on` and anthropic requests
 get wrapped as `/responses`. All three protocols share one retry/error-classification path;
 only the URL, body, extractor and auth scheme differ.
+
+**Web search is a `(protocol × model)` capability, not a per-model one** (measured 2026-09-25, four
+models × both routes): on DeepSeek's `/anthropic` **all four models search** (flash included), while
+on `/responses` only `deepseek-v4-pro` does — so `ModelCaps` carries `web_search` (OpenAI-compatible
+route) **and** `web_search_anthropic`, `llm::web_search_capable(model, api_format)` is the single
+place that picks the right dimension, and `web_search_on` must **never** early-return on
+`api_format = anthropic` again: that blanket ban silently ate the user's explicit `on` (config said
+on, request carried nothing, UI said nothing — the reported "why can't I use web search").
+`on` = force (ignore the table), `auto` = DeepSeek endpoint **and** capable on *this* route.
 
 **Failover (v0.5)**: when `cfg.llm_fallback` is `Some`, a primary failure switches to it — but only
 for *availability* faults (`is_switchable_error`: network / 5xx / 429 / timeout / retries exhausted).

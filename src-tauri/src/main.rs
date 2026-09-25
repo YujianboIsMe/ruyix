@@ -1656,6 +1656,12 @@ async fn ai_list_models(
 /// 能力表在引擎里（`llm::model_caps`），宿主不抄一份 —— 否则加一个模型要改两处，
 /// 而两处不一致的表现就是"配置里选得到、跑起来没反应"。
 /// `model` 省略时查当前配置的模型。
+///
+/// **联网是"（协议 × 模型）"的**：同一个模型在 anthropic 路上能搜、在 `/responses` 上搜不了
+/// （实测 flash 就是这样）。所以这里给三样东西：
+/// · `web_search` —— **按当前 `api_format` 算出来的有效值**（开关可见性只看它，前端不必懂协议）；
+/// · 两条协议各自的原始值 —— 界面要说清"哪个协议下能搜"时用；
+/// · `api_format` —— 说明上面那个有效值是按哪条协议算的（文案里要写出来，否则用户看不懂为什么突然不能搜）。
 #[tauri::command]
 fn ai_model_caps(
     model: Option<String>,
@@ -1672,9 +1678,22 @@ fn ai_model_caps(
         }
     };
     let c = harness_engine::llm::model_caps(&name);
+    // 有效值按**当前配置的协议**算：`api_format` 是从同一份配置里读的，
+    // 所以"面板里选的格式"与"能力判定"不会各说各话。
+    let api_format = {
+        let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+        agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
+            .llm
+            .api_format
+    };
+    // 先算有效值再进结构体字面量：`model: name` 会把 name 移走，之后就不能再借它了
+    let effective = harness_engine::llm::web_search_capable(&name, &api_format);
     Ok(ModelCapsDto {
         model: name,
-        web_search: c.web_search,
+        web_search: effective,
+        web_search_openai: c.web_search,
+        web_search_anthropic: c.web_search_anthropic,
+        api_format,
         multimodal: c.multimodal,
     })
 }
@@ -1682,7 +1701,13 @@ fn ai_model_caps(
 #[derive(serde::Serialize)]
 struct ModelCapsDto {
     model: String,
+    /// **按当前协议**的服务端联网能力（前端只看它）
     web_search: bool,
+    /// 两条协议各自的原始能力（界面要说清"哪个协议下能搜"时用）
+    web_search_openai: bool,
+    web_search_anthropic: bool,
+    /// 上面那个有效值是按哪条协议算的
+    api_format: String,
     multimodal: bool,
 }
 
