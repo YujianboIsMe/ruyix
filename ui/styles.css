@@ -4065,6 +4065,12 @@ html, body {
   opacity: 1;
 }
 
+.config-field-note {
+  font-size: 11px;
+  color: #d0a24c;
+  line-height: 1.45;
+}
+
 .config-inherit,
 .config-field-desc {
   font-size: 11px;

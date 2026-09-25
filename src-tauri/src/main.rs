@@ -1637,18 +1637,34 @@ async fn ai_translate(
 
 /// 厂商模型列表（GET /models）—— 配置表单的模型下拉框用它。
 ///
-/// 拿不到（没配 Key / 网络不通）就返回错误让前端降级成文本框，**不虚构一个列表**；
-/// 让用户以为有得选、结果选了一个跑不通的模型，比没有下拉框更糟。
+/// **拿不到就报错，绝不虚构列表**（虚构的清单会让用户选到一个跑不通的模型）。
+/// 前端拿到错误后渲染成**只读**行 —— 早先是"降级成文本框让用户手填"，那正是
+/// `model = "on"` 的来源：厂商对不认识的名字只回一句 400，用户还问不到该填什么。
+///
+/// `section` 决定探哪个端点：`ai`（默认，主用）或 `ai_fallback`（备用 LLM 自己的
+/// url/key/协议）—— 备用端点的模型集未必与主用相同，不能拿主用的清单去凑。
 #[tauri::command]
 async fn ai_list_models(
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
     project_root: Option<String>,
+    section: Option<String>,
 ) -> Result<Vec<String>, String> {
     let cfg = {
         let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
         agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
     };
-    harness_engine::llm::probe(&cfg.llm).await
+    let want_fallback = section
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("ai_fallback"))
+        .unwrap_or(false);
+    let llm = if want_fallback {
+        cfg.llm_fallback
+            .clone()
+            .ok_or("未配置备用 LLM（ai_fallback.*）—— 先把它的 api_url / api_key 填上")?
+    } else {
+        cfg.llm.clone()
+    };
+    harness_engine::llm::probe(&llm).await
 }
 
 /// 保存一段录音（前端 `MediaRecorder` 出来的 webm/opus），返回落盘位置。

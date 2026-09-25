@@ -40,9 +40,11 @@ window.ConfigUI = (() => {
       fields: [
         { key: "api_url", kind: "text" },
         { key: "api_key", kind: "password" },
-        // 模型：优先渲染成下拉框，选项来自厂商 `/models`（见 loadModelChoices）。
-        // 取不到就退回文本框 —— 让用户手填，也不要给一份可能跑不通的清单。
-        { key: "model", kind: "text", dynamic: "models" },
+        // 模型：**只许从厂商 `/models` 里选，永不接受手输**（用户口径，2026-09-25）。
+        // 旧行为是"拉不到列表就降级成「可手填的输入框」"—— 于是配置里出现了 `model = "on"` 这种值，
+        // 请求原样发出去、厂商回 400 `...but you passed on`，用户还问不到"那我该填什么"。
+        // 现在拉不到列表就**只读**（禁用 + 说清原因 + 怎么重试），手输这条路彻底关掉。
+        { key: "model", kind: "select", dynamic: "models" },
         { key: "alias", kind: "text" },
         // 协议格式：二选一（OpenAI 兼容 / Anthropic Messages）。引擎按它建请求与解析响应。
         { key: "api_format", kind: "select", options: ["openai", "anthropic"] },
@@ -56,13 +58,14 @@ window.ConfigUI = (() => {
       // 字段与 `ai` 段基本同构，两处**有意不同**：
       //   ① 没有 `alias` —— 别名是宿主展示用的字段，而备用 LLM 在界面上没有展示位，
       //      加上去就是个"配了没人读"的死字段（U39 门禁专门守这条）；
-      //   ② 模型不做 /models 下拉 —— 那份清单来自主用端点的 `/models`，对备用端点未必成立。
+      //   ② 模型的下拉框**探备用端点自己**的 `/models`（`ai_list_models` 带 section），
+      //      而不是拿主用的清单来凑 —— 备用端点的模型集未必相同。
       // `api_format` 允许与主用不同（异构切换：主用 OpenAI、备用 Anthropic）。
       section: "ai_fallback",
       fields: [
         { key: "api_url", kind: "text" },
         { key: "api_key", kind: "password" },
-        { key: "model", kind: "text" },
+        { key: "model", kind: "select", dynamic: "models_fallback" },
         { key: "api_format", kind: "select", options: ["openai", "anthropic"] },
       ],
     },
@@ -77,8 +80,10 @@ window.ConfigUI = (() => {
   /** 引擎声明的 harness 字段（运行时拉一次；拉不到就只剩 ai/ui，表单仍可用） */
   let harnessFields = null;
 
-  /** 厂商模型列表（运行时拉一次；拉不到为 null，模型那行退回文本框） */
-  let modelChoices = null;
+  /** 厂商模型列表：`ai` 与 `ai_fallback` 各一份（各探自己的端点）。 */
+  const modelChoices = { ai: null, ai_fallback: null };
+  /** 上一次拉取失败的原因（拿它给用户看"为什么这行是灰的"） */
+  const modelChoiceErrors = { ai: null, ai_fallback: null };
 
   /** 引擎的 kind → 控件类型 */
   function kindOf(kind) {
@@ -127,20 +132,28 @@ window.ConfigUI = (() => {
   /**
    * 拉厂商模型列表（`ai_list_models` → GET /models）。
    *
-   * 失败是**常态**（没配 Key / 断网），所以这里不报错、也不缓存失败结果：
-   * 返回 null 让模型那行退回文本框，用户手填照样能用。
+   * 失败是**常态**（没配 Key / 断网），所以不报错、也**不缓存失败**（下次开表单再试）。
+   * `section` 决定探哪个端点：`ai` 用主用配置、`ai_fallback` 用备用配置。
+   *
+   * 返回 `{ ids, error }`：拿不到时 `error` 是原因 —— 界面要把它显示出来，
+   * **绝不降级成可手填的框**（手填的模型名厂商可能不认，实测就是这么吃到 400 的）。
    */
-  async function loadModelChoices() {
-    if (modelChoices) return modelChoices;
+  async function loadModelChoices(section) {
+    if (modelChoices[section]) return { ids: modelChoices[section], error: null };
     const invoke = getInvoke();
-    if (!invoke) return null;
+    if (!invoke) return { ids: [], error: L("后端不可用", "backend unavailable") };
     try {
-      const ids = await invoke("ai_list_models", { projectRoot: root() });
-      if (Array.isArray(ids) && ids.length) modelChoices = ids.slice();
-    } catch {
-      modelChoices = null;
+      const ids = await invoke("ai_list_models", { projectRoot: root(), section });
+      if (Array.isArray(ids) && ids.length) {
+        modelChoices[section] = ids.slice();
+        modelChoiceErrors[section] = null;
+        return { ids: ids.slice(), error: null };
+      }
+      modelChoiceErrors[section] = L("厂商没返回任何模型", "the vendor returned no models");
+    } catch (e) {
+      modelChoiceErrors[section] = String(e);
     }
-    return modelChoices;
+    return { ids: [], error: modelChoiceErrors[section] };
   }
 
   const NUMERIC = /^-?\d+(\.\d+)?$/;
@@ -211,20 +224,15 @@ window.ConfigUI = (() => {
         inherited: entry ? entry.inherited : null,
         kind: known ? known.kind : guessKind(key, value),
         options: known && known.options ? known.options : null,
+        // 动态枚举（模型列表）：值拿不到时不在这里定，等 `applyModelRows` 按清单+当前值一起判
+        dynamic: known ? known.dynamic || null : null,
+        note: null,
         known: !!known,
       });
     };
 
     for (const s of SCHEMA) {
-      for (const f of s.fields) {
-        // 动态选项：只有真拿到了厂商列表才升级成下拉框（`renderControl` 会顺带
-        // 把枚举外的既有值补进选项，不会把用户已配的模型吞掉）
-        const known =
-          f.dynamic === "models" && modelChoices && modelChoices.length
-            ? { ...f, kind: "select", options: modelChoices }
-            : f;
-        push(s.section, f.key, known, null);
-      }
+      for (const f of s.fields) push(s.section, f.key, f, null);
     }
     // 引擎声明的 harness 字段：section 恒为 `harness`（落盘键 = section + key），
     // group 取 path 第一段，只影响渲染出来的子段标题。
@@ -237,7 +245,53 @@ window.ConfigUI = (() => {
     rows.forEach((r, i) => {
       r.idx = i;
     });
+    applyModelRows(rows);
     return rows;
+  }
+
+  /**
+   * 模型行：**只许从厂商清单里选**（用户口径）。
+   *
+   * 两条分支，都不给手输：
+   *   · 拿到清单 → 下拉框；当前值**没配**或**不在清单里**（真实例：`model = "on"`）
+   *     就落到**第一个**，并把"原来是什么 / 为什么换"写在行下 —— 换可以，**静默换不行**；
+   *   · 拉不到清单 → **只读**（禁用 + 原因 + 怎么重试）。旧行为是「降级成可手填的框」，
+   *     那正是 `model = "on"` 的来源：厂商对不认识的名字只回一句 400，用户还问不到该填什么。
+   */
+  function applyModelRows(rows) {
+    for (const r of rows) {
+      if (!r.dynamic) continue;
+      const section = r.dynamic === "models_fallback" ? "ai_fallback" : "ai";
+      const ids = (modelChoices[section] || []).slice();
+      const error = modelChoiceErrors[section];
+      r.kind = "select";
+      if (ids.length) {
+        r.options = ids.slice();
+        if (!r.initial || !ids.includes(r.initial)) {
+          const was = r.initial;
+          r.initial = ids[0];
+          r.note = was
+            ? L(
+                `原值「${was}」不在厂商模型列表里 → 已改为第一个：${ids[0]}（保存后生效）`,
+                `"${was}" is not in the vendor's model list → switched to the first one: ${ids[0]} (applies on save)`
+              )
+            : L(
+                `未设置 → 默认用第一个：${ids[0]}（保存后生效）`,
+                `unset → defaults to the first one: ${ids[0]} (applies on save)`
+              );
+        }
+      } else {
+        // 只读：值仍显示（用户知道自己现在配的是什么），但不给改
+        r.options = r.initial ? [r.initial] : [];
+        r.readonly = true;
+        r.note = L(
+          `拉不到厂商模型列表（${error || "未知原因"}）—— 这行不给手输：手填的名字厂商可能不认（实测会 400）。` +
+            `先修好上面的 api_url / api_key，再点「取消」重开表单重试。`,
+          `cannot fetch the vendor model list (${error || "unknown"}) — this field does not accept typed input ` +
+            `(a hand-typed name may be rejected with 400). Fix api_url / api_key above, then press Cancel to reopen and retry.`
+        );
+      }
+    }
   }
 
   /** 按"段 + 子组"聚类：harness 会拆成 harness.llm / harness.sandbox / … 便于阅读 */
@@ -424,7 +478,8 @@ window.ConfigUI = (() => {
       const opts = options
         .map((o) => `<option value="${esc(o)}"${o === val ? " selected" : ""}>${esc(o)}</option>`)
         .join("");
-      return `<select class="config-input config-input--select" data-row="${n}">` +
+      return `<select class="config-input config-input--select" data-row="${n}"` +
+        `${row.readonly ? " disabled" : ""}>` +
         `<option value=""${val ? "" : " selected"}>${L("（未设置）", "(unset)")}</option>` +
         `${opts}</select>`;
     }
@@ -455,6 +510,7 @@ window.ConfigUI = (() => {
       (row.known ? "" : `<span class="config-tag">${L("扫描", "scanned")}</span>`) +
       `</div>` +
       `<div class="config-field-body">${renderControl(row, val)}${inherited}` +
+      (row.note ? `<div class="config-field-note">${esc(row.note)}</div>` : "") +
       (hasDesc ? `<div class="config-field-desc">${esc(desc)}</div>` : "") +
       `</div></div>`;
   }
@@ -591,7 +647,8 @@ window.ConfigUI = (() => {
     const [dump] = await Promise.all([
       load(scope),
       loadHarnessFields(),
-      loadModelChoices(),
+      loadModelChoices("ai"),
+      loadModelChoices("ai_fallback"),
     ]);
     if (!dump) return;
 

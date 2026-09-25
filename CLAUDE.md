@@ -419,6 +419,11 @@ Three scopes with prefix `ruyix.code`:
 
 Known config keys:
 - `ruyix.code.ai.api_key` / `api_url` / `model` / `api_format`（`openai` 默认 / `anthropic`）
+  —— **`model` 只许从厂商 `GET /models` 里选，配置表单不接受手输**（ISSUE-5，见下）。
+  拉不到清单就 fail-closed（禁用 + 原因 + 怎么重试）；当前值没配/不在清单里则落到**第一个**并写明；
+  备用 LLM 的清单探**它自己的**端点（`ai_list_models(section="ai_fallback")`）。
+  引擎另有一条兜网（`llm::model_retry_cfg`）：真被厂商因模型名打回时用清单第一个重试一次并留痕 —— 
+  **只在异常路径探测清单，正常路径一次额外请求都不发**（放在 happy path 上会把本地桩测试打挂，真踩过）。
 - `ruyix.code.ai_fallback.api_url` / `api_key` / `model` / `api_format`（v0.5 备用 LLM；配了才启用故障切换，全空 = 不切换）
 - `ruyix.code.ui.lang`
 - `ruyix.code.run.target<N>.cmd` / `target<N>.name`
@@ -453,6 +458,7 @@ Known config keys:
 | `config_form_load` | `(scope, project_root?)` → `ScopeEntriesDump` | Scans a scope + its fallback chain into flat entries `{section,key,full_key,value,inherited?}` for the config form; excludes structured files (projects/execute/mcp/a2a/tools/skills) |
 | `config_form_save` | `(scope, entries, project_root?)` → `ScopeSaveReport` | Incremental write of the submitted keys (empty value = delete key); preserves non-scalar content in touched sections; rejects run targets in global scope |
 | `config_form_apply` | `(scope, entries, project_root?)` → `ScopeSaveReport` | Same as save **plus** refreshes the in-memory runtime object for every non-empty value (highest lookup priority, lost on restart) |
+| `ai_list_models` | `(project_root?, section?)` → `Vec<String>` | 厂商模型清单（配置表单模型下拉框的数据源）。`section="ai_fallback"` 时探**备用端点自己**的 `/models`；拿不到就报错（**绝不虚构清单**，也绝不让前端退回文本框） |
 | `ai_translate` | `(input, project_root?)` → `String` | Calls LLM |
 | `highlight_code` | `(language, code)` → `Vec<LineHighlight>` | tree-sitter |
 | `run_target` | `(cmd, project_root?, bind?)` → `RunOutput` | One-shot, not interactive. cwd = directory of the `bind` manifest file (`resolve_run_dir()`), else project root |

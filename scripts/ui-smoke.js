@@ -497,8 +497,8 @@ function runStaticChecks() {
     /key: "model".*dynamic: "models"/.test(cfgJs2),
     "ai.model 要标成动态选项（选项来自厂商 /models）");
   check("U35", "web-search-toggle",
-    /f\.dynamic === "models" && modelChoices && modelChoices\.length/.test(cfgJs2),
-    "只有真拿到厂商列表才升级成下拉框 —— 拿不到就退回文本框，别给一份可能跑不通的清单");
+    /function applyModelRows/.test(cfgJs2) && /r\.readonly = true/.test(cfgJs2) && !/退回文本框/.test(cfgJs2),
+    "拿不到厂商列表时必须 fail-closed（只读行），不许退回文本框让用户手填模型名");
   check("U35", "web-search-toggle", /ai_list_models/.test(cfgJs2),
     "模型列表要从后端 ai_list_models 取，不许前端硬编码");
 
@@ -1620,6 +1620,115 @@ function parseControls(html) {
   return out;
 }
 
+/**
+ * U62 config-model-fail-closed-replay：**拿不到厂商清单时**模型行长什么样（回放真 config.js）。
+ *
+ * 为什么要单独回放这一段：静态断言只能证明"代码里没有文本框分支"，证明不了"真跑起来是只读的"。
+ * 这里把 `ai_list_models` 打成抛错（真实场景：没配 Key / 断网），看渲染结果：
+ *   · 两个模型行都必须是**禁用**的 select，且**没有**可输入的 input；
+ *   · 必须把原因显示出来（"拉不到厂商模型列表（…）"），并说清怎么重试；
+ *   · dump 里那个 `model = "on"`（用户报的那个值）**不许**变成可编辑文本框 —— 它只该被如实显示。
+ */
+async function runConfigModelFailClosedChecks() {
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl(id));
+    return elements.get(id);
+  };
+  const bodyEl = el("config-body");
+  bodyEl.querySelectorAll = (sel) => {
+    if (sel !== "[data-row]") return [];
+    bodyEl._controls = parseControls(bodyEl.innerHTML);
+    return bodyEl._controls;
+  };
+  el("config-view").dataset = {};
+
+  const dump = {
+    scope: "global",
+    dir: "C:\\Users\\test",
+    entries: [
+      { section: "ai", key: "model", full_key: "ruyix.code.ai.model", value: "on", inherited: null },
+      { section: "ai_fallback", key: "model", full_key: "ruyix.code.ai_fallback.model", value: "", inherited: null },
+    ],
+  };
+  const calls = [];
+  const appState = { tabs: [], activeTabId: null, currentProject: null };
+  const i18n = {
+    getLang: () => "zh-CN",
+    t(key, params) {
+      let s = zh[key] ?? key;
+      for (const [k, v] of Object.entries(params || {})) s = s.replaceAll(`{${k}}`, String(v));
+      return s;
+    },
+  };
+  if (!RE_STATE_EXPORT.test(read("ui/main.js"))) return;
+  const sandbox = {
+    I18N: i18n,
+    window: { state: appState, I18N: i18n, ConfigUI: null },
+    document: {
+      getElementById: el,
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    },
+    getTauriInvoke: () => async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "config_form_load") return dump;
+      if (cmd === "config_schema") return [];
+      if (cmd === "ai_list_models") throw new Error("尚未配置 DeepSeek API Key");
+      return { saved: 0, removed: 0, applied: 0 };
+    },
+    setStatus() {},
+    renderTabs() {},
+    switchTab(id) {
+      appState.activeTabId = id;
+      const t = appState.tabs.find((x) => x.id === id);
+      if (t && t._isConfig) sandbox.window.ConfigUI.render(t);
+    },
+    showConfirm: async () => true,
+  };
+  const saved = ["window", "document", "getTauriInvoke", "setStatus", "renderTabs", "switchTab", "I18N"]
+    .map((k) => [k, globalThis[k]]);
+  Object.assign(globalThis, sandbox);
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(read("ui/config.js"))();
+    sandbox.window.ConfigUI.attach();
+    await sandbox.window.ConfigUI.handleCommand("form global");
+    const html = el("config-body").innerHTML;
+    const ctrls = el("config-body")._controls || [];
+    // 定位「模型行」：**禁用**的 select 就是它们（其它 select 是 api_format / tool_protocol，
+    // 那些本来就该可选）。用行号再回查「这一行里有没有 input」，比按 HTML 结构切块稳
+    // （第一版按 <div class="config-field 切，结果 note 那个 div 自己也匹配了切分前缀）。
+    const lockedRows = [...html.matchAll(/<select[^>]*data-row="(\d+)"[^>]*disabled[^>]*>/g)]
+      .map((m) => m[1]);
+    check("U62", "config-model-fail-closed-replay",
+      lockedRows.length === 2,
+      `拿不到清单时该有 2 个禁用的模型下拉（主用 / 备用），实际 ${lockedRows.length}`);
+    check("U62", "config-model-fail-closed-replay",
+      lockedRows.every((n) => !new RegExp(`<input[^>]*data-row="${n}"`).test(html)),
+      "模型行里出现了 input —— 手输模型名这条路必须不存在");
+    check("U62", "config-model-fail-closed-replay",
+      lockedRows.every((n) => {
+        const at = html.indexOf(`data-row="${n}"`);
+        return at >= 0 && html.slice(at, at + 900).includes("config-field-note");
+      }),
+      "禁用了却没给说明 —— 灰掉一个字段而不说为什么，用户只会以为坏了");
+    check("U62", "config-model-fail-closed-replay",
+      has(html, "拉不到厂商模型列表") && has(html, "尚未配置 DeepSeek API Key") &&
+        has(html, "取消") ,
+      "拿不到清单时要把原因与重试方式写出来（不是沉默地灰掉）");
+    check("U62", "config-model-fail-closed-replay",
+      has(html, "on"),
+      "既有值要如实显示（哪怕它是个错值）—— 灰掉不等于把用户配的东西藏起来");
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete globalThis[k];
+      else globalThis[k] = v;
+    }
+  }
+}
+
 async function runConfigChecks() {
   const zh = JSON.parse(read("ui/lang/zh-CN.json"));
   const elements = new Map();
@@ -1719,6 +1828,9 @@ async function runConfigChecks() {
       calls.push({ cmd, args });
       if (cmd === "config_form_load") return dump;
       if (cmd === "config_schema") return engineSchema;
+      // 厂商模型清单（下拉框的数据源）：给一份**不含 dump 里那个 "old-model"** 的清单 ——
+      // 正好用来验"配的名字不在清单里 → 落到第一个并说明"
+      if (cmd === "ai_list_models") return ["deepseek-flash", "deepseek-v4-pro"];
       // 模拟后端写回：空值 = 删键（与 config.rs 的增量语义一致），供重扫读回
       for (const e of args.entries) {
         const i = dump.entries.findIndex((x) => x.section === e.section && x.key === e.key);
@@ -1796,9 +1908,23 @@ async function runConfigChecks() {
     check("U11", "config-render", Object.values(bits).every(Boolean),
       `既有值 / 继承提示 / 密钥掩码 / 密码框 / 开关勾选: ${JSON.stringify(bits)}`);
 
+    // ---- U62：模型行**只许选不许输**（用户口径）----
+    // 这一段同时也是 U12 的前置：改动的就是模型行，但改法是"从下拉里换一个"，
+    // 不再是"手输一个新的名字"（后者已按需求彻底关掉）。
+    const modelCtrl = ctrls.find((c) => c.type === "select" && c.value === "deepseek-flash");
+    check("U62", "config-model-replay-select",
+      !!modelCtrl && /<select[^>]*data-row/.test(html) && has(html, "已改为第一个"),
+      "模型行没渲染成下拉框 / 清单外的旧值没有被换成第一个并说明");
+    check("U62", "config-model-replay-no-input",
+      !new RegExp(`<input[^>]*data-row="${modelCtrl ? modelCtrl.id.replace("select-", "") : "-1"}"`).test(html),
+      "模型行渲染出了可输入的 input —— 手输模型名这条路必须不存在");
+    check("U62", "config-model-replay-fallback-section",
+      calls.some((c) => c.cmd === "ai_list_models" && c.args.section === "ai_fallback"),
+      "备用 LLM 的模型清单没按 section=ai_fallback 去探它自己的端点");
+
     // ---- U12：保存只提交改动行 ----
-    const modelIdx = ctrls.findIndex((c) => c.value === "old-model");
-    ctrls[modelIdx].value = "new-model";
+    const modelIdx = ctrls.findIndex((c) => c === modelCtrl);
+    modelCtrl.value = "deepseek-v4-pro";
     el("config-view").listeners.input[0]();
     check("U12", "config-dirty",
       ConfigUI.isDirty() === true && el("config-btn-save").disabled === false,
@@ -1808,11 +1934,11 @@ async function runConfigChecks() {
     const saveArgs = calls.find((c) => c.cmd === "config_form_save")?.args;
     check("U12", "config-save",
       !!saveArgs && saveArgs.entries.length === 1 &&
-        saveArgs.entries[0].key === "model" && saveArgs.entries[0].value === "new-model",
-      `保存应只提交 1 行改动，实际: ${JSON.stringify(saveArgs?.entries)}`);
+        saveArgs.entries[0].key === "model" && saveArgs.entries[0].value === "deepseek-v4-pro",
+      `保存应只提交 1 行改动（从下拉里选中的那个），实际: ${JSON.stringify(saveArgs?.entries)}`);
     check("U12", "config-save",
       calls.some((c) => c.cmd === "config_form_load") &&
-        has(el("config-body").innerHTML, "new-model") && ConfigUI.isDirty() === false,
+        has(el("config-body").innerHTML, "deepseek-v4-pro") && ConfigUI.isDirty() === false,
       "保存后未重新扫描 / 未刷新出新值 / 脏标记未清");
 
     // ---- U12：应用提交整表（把值刷进运行时对象） ----
@@ -1826,7 +1952,7 @@ async function runConfigChecks() {
 
     // ---- U13：取消丢弃改动 ----
     const ctrls2 = el("config-body")._controls;
-    const idx2 = ctrls2.findIndex((c) => c.value === "new-model");
+    const idx2 = ctrls2.findIndex((c) => c.value === "deepseek-v4-pro");
     ctrls2[idx2].value = "oops";
     el("config-view").listeners.input[0]();
     calls.length = 0;
@@ -3746,6 +3872,65 @@ function runVoiceButtonChecks() {
 }
 
 /**
+ * U62 config-model-no-typing：**模型名永不接受手输**（用户报的 bug，2026-09-25）。
+ *
+ * 真实故障：配置里出现 `model = "on"`（一个根本不是模型名的值）→ 请求原样发给厂商 →
+ * 400 `The supported API model names are … but you passed on.` 用户不但跑不了，
+ * 还**问不到「那我该填什么」**。根因不是某个值，而是**这条路允许手输**：
+ * 旧契约写的是「拿不到厂商列表就退回文本框」（fail-open）。
+ *
+ * 新契约四条（缺一条就等于把这条路又打开了）：
+ *   ① 两个模型字段（主用 / 备用）都是 `dynamic` 下拉，**代码里没有把它们渲染成文本框的分支**；
+ *   ② 拉不到清单 → **只读**（disabled）＋ 把原因显示出来 ＋ 说清怎么重试，**绝不 fail-open**；
+ *   ③ 拿到清单时若当前值没配 / 不在清单里 → **落到第一个**，并把「原值是什么、为什么换」
+ *      显示在行下（换可以，静默换不行）；拿不到清单**不许虚构选项**；
+ *   ④ 备用 LLM 的清单探**它自己的端点**（`ai_list_models` 带 section），不拿主用的清单凑。
+ * 另外引擎侧有一条兜网（`llm.rs`）：真被厂商因为模型名打回时，用清单第一个**重试一次**并留痕
+ * —— 手改 toml 绕过了表单也不至于卡死。
+ */
+function runConfigModelChecks() {
+  const cfgJs = read("ui/config.js");
+  const mainRs = read("src-tauri/src/main.rs");
+  const llmRs = read("crates/harness-engine/src/llm.rs");
+
+  check("U62", "config-model-no-typing",
+    /key: "model", kind: "select", dynamic: "models"/.test(cfgJs) &&
+      /key: "model", kind: "select", dynamic: "models_fallback"/.test(cfgJs),
+    "两个模型字段都必须是动态下拉（主用 models / 备用 models_fallback）");
+  check("U62", "config-model-no-text-fallback",
+    !/退回文本框/.test(cfgJs) && !/kind: "text", dynamic/.test(cfgJs) &&
+      /r\.kind = "select";/.test(cfgJs),
+    "代码里不许再有把模型渲染成文本框的分支 —— 手输这条路必须彻底关掉");
+  check("U62", "config-model-fail-closed",
+    /r\.readonly = true/.test(cfgJs) && /这行不给手输/.test(cfgJs),
+    "拉不到清单要 fail-closed：只读 + 说清为什么 + 怎么重试");
+  check("U62", "config-model-default-first",
+    /r\.initial = ids\[0\]/.test(cfgJs) && /已改为第一个/.test(cfgJs) && /未设置 → 默认用第一个/.test(cfgJs),
+    "没配 / 配的名字不在清单里时要落到第一个，并把原值与原因写在行下（静默换不行）");
+  check("U62", "config-model-note-rendered",
+    /config-field-note/.test(cfgJs) && /config-field-note/.test(read("ui/styles.css")),
+    "那一行说明要有渲染位（config-field-note 的 DOM 与样式）");
+  check("U62", "config-model-no-fake-list",
+    /厂商没返回任何模型/.test(cfgJs) && /error \|\| "未知原因"/.test(cfgJs),
+    "拿不到清单不许编一份可能跑不通的选项（要把原因原样显示出来）");
+  check("U62", "config-model-fallback-own-endpoint",
+    /section: Option<String>/.test(mainRs) && /cfg\.llm_fallback/.test(mainRs) &&
+      /ai_list_models", \{ projectRoot: root\(\), section \}/.test(cfgJs),
+    "备用 LLM 的清单要探它自己的端点（ai_list_models 带 section）");
+  check("U62", "config-model-engine-net",
+    /fn pick_model/.test(llmRs) && /fn model_retry_cfg/.test(llmRs) &&
+      /observe_model_corrected/.test(llmRs),
+    "引擎侧要有兜网：模型名被厂商拒绝时用清单第一个重试一次，并留痕（手改 toml 也能救）");
+  check("U62", "config-model-engine-no-probe-on-happy-path",
+    (() => {
+      const tail = llmRs.split("pub async fn chat_with_tools")[1] || "";
+      const head = tail.split("let (out, last_err)")[0] || "";
+      return !/model_retry_cfg|model_hint_on_error|resolve_model/.test(head);
+    })(),
+    "正常路径不许探测模型清单 —— 每次调用多打一发 /models 会拖慢、还会把本地桩测试打挂（真踩过）");
+}
+
+/**
  * U61 local-transcription：录音 → **本机转写** → 文本进输入框（这条链路的契约）。
  *
  * 三层都要钉住，因为每一层都出过真错：
@@ -4533,6 +4718,8 @@ async function main() {
     ["U59", "model-dropdown", runModelDropdownChecks],
     ["U60", "voice-button", runVoiceButtonChecks],
     ["U61", "voice-transcribe", runVoiceTranscribeChecks],
+    ["U62", "config-model-no-typing", runConfigModelChecks],
+    ["U62", "config-model-fail-closed", runConfigModelFailClosedChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {

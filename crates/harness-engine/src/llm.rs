@@ -1154,11 +1154,39 @@ pub async fn chat_with_tools(
             "尚未配置 DeepSeek API Key（设置面板里填，或设环境变量 DEEPSEEK_API_KEY）".into(),
         );
     }
-
     let (out, last_err) =
         attempt_loop(cfg, messages, json_mode, tool_names, fallback.is_some()).await;
     if let Some(o) = out {
         return Ok(o);
+    }
+
+    // 失败的第一嫌疑是**模型名不对**（配置里手填过 / 旧配置 / 填错了字段）：厂商对不认识的名字
+    // 只回一句 400（真实例：`supported API model names are …, but you passed on`），
+    // 而用户拿不到"那我该填什么"。所以这里做一件比报错更有用的事 ——
+    // **拿厂商清单的第一个重试一次**（这就是"默认第一个模型"的落点）。
+    // 只在异常路径探清单（缓存 10 分钟）：正常调用一次额外请求都不发。
+    if let Some(fixed) = model_retry_cfg(cfg, &last_err).await {
+        let (out2, err2) =
+            attempt_loop(&fixed, messages, json_mode, tool_names, fallback.is_some()).await;
+        if let Some(o) = out2 {
+            observe_model_corrected(
+                &fixed,
+                &format!(
+                    "模型名「{}」被厂商拒绝 → 已按厂商清单改用「{}」重试成功",
+                    cfg.model.trim(),
+                    fixed.model
+                ),
+            );
+            return Ok(o);
+        }
+        let tail = format!(
+            "（已按厂商清单把模型名换成「{}」重试过一次，仍失败）",
+            fixed.model
+        );
+        return Err(match model_hint_on_error(&fixed, &err2).await {
+            Some(h) => format!("{err2}\n{tail}\n{h}"),
+            None => format!("{err2}\n{tail}"),
+        });
     }
 
     // 主用已失败。两条"不切"的先挡住 —— 都在 return 里把**主用的原始错误**原样抛出去，
@@ -1327,7 +1355,12 @@ async fn attempt_loop(
         }
     }
 
-    let wrapped = format!("DeepSeek 调用失败（已重试 {max_attempts} 次）: {last_err}");
+    let mut wrapped = format!("DeepSeek 调用失败（已重试 {max_attempts} 次）: {last_err}");
+    // 错在模型名的话，顺手把**厂商认的名字**贴进错误里（异常路径才探一次，且用缓存）
+    if let Some(hint) = model_hint_on_error(cfg, &wrapped).await {
+        wrapped.push('\n');
+        wrapped.push_str(&hint);
+    }
     (None, wrapped)
 }
 
@@ -1531,6 +1564,20 @@ fn observe_llm_fail(
     );
 }
 
+/// 记一次"模型名被校准"：配置里的名字厂商不认，本次按清单第一个跑。
+///
+/// 为什么必须留痕（而不是悄悄换）：用户看到的模型名与他配的不一样时，
+/// 唯一的解释来源就是这里 —— 没有这条记录，"怎么跟我设的不一样"就成了悬案。
+fn observe_model_corrected(cfg: &LlmConfig, note: &str) {
+    let a = crate::observe::attrs(&[
+        ("model", cfg.model.as_str()),
+        ("endpoint", cfg.base_url.as_str()),
+        ("note", note),
+    ]);
+    crate::observe::span_once("llm-model-corrected", "used-first-from-vendor", "ok", 0, a);
+    crate::debug::note(&format!("----- 模型名校准 -----\n  {note}"));
+}
+
 /// 记一次故障切换：主用不可用、已切到备用并成功拿到回复。
 fn observe_failover(primary: &LlmConfig, fb: &LlmConfig, messages: &[ChatMessage]) {
     let a = crate::observe::attrs(&[
@@ -1697,6 +1744,120 @@ pub async fn probe(cfg: &LlmConfig) -> Result<Vec<String>, String> {
     Ok(models(cfg).await?.into_iter().map(|m| m.id).collect())
 }
 
+// ============================================
+// 模型名校准：**配置里那个名字，厂商未必认**
+// ============================================
+//
+// 真实的 400（用户报的）：配置里 `model = "on"`（一个根本不是模型名的值，像是填错了字段），
+// 请求原样发出去，厂商回：
+//   "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed on."
+// —— 用户看到的是"我传错了"，但他**问不到"那我该填什么"**（除非自己去翻文档）。
+//
+// 所以进入请求前先校准一次。三条口径：
+//   1. 名字在厂商清单里 → 原样用（绝大多数情况，零额外动作）；
+//   2. 名字为空 / 不在清单里 → 用**第一个**，并**照实记一笔**（`llm-model-corrected` 观察点
+//      + 一句人话）—— 换掉可以，**静默换掉不行**：用户得知道跑的不是他配的那个；
+//   3. **拿不到清单**（断网 / Key 没配 / 端点不支持 `/models`）→ **原样用**。
+//      这条是底线：拉不到清单不等于配置错，绝不能因为"我问不到"就擅自换掉用户的模型。
+//
+// 清单按 `端点 + 协议` 缓存（同一进程里反复调用只探一次）。
+
+/// 清单缓存 TTL。厂商上新模型不会分钟级发生，10 分钟足够；也避免每次调用都打一发 `/models`。
+const MODEL_LIST_TTL: Duration = Duration::from_secs(600);
+
+/// 清单缓存的形状：`端点|协议` → （取回时刻，模型 id 列表）。
+/// 抽成别名不只是为了过 clippy —— 这种嵌套类型直接写在签名里没人读得下去。
+type ModelListCache = std::sync::Mutex<std::collections::HashMap<String, (Instant, Vec<String>)>>;
+
+static MODEL_LISTS: std::sync::OnceLock<ModelListCache> = std::sync::OnceLock::new();
+
+fn model_lists() -> &'static ModelListCache {
+    MODEL_LISTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 带缓存的厂商清单（缓存键含协议：同一个端点两条协议能看到的模型可能不同）。
+async fn cached_models(cfg: &LlmConfig) -> Result<Vec<String>, String> {
+    let key = format!("{}|{}", cfg.base_url.trim(), cfg.api_format.trim());
+    if let Ok(g) = model_lists().lock()
+        && let Some((at, list)) = g.get(&key)
+        && at.elapsed() < MODEL_LIST_TTL
+    {
+        return Ok(list.clone());
+    }
+    let list = probe(cfg).await?;
+    if let Ok(mut g) = model_lists().lock() {
+        g.insert(key, (Instant::now(), list.clone()));
+    }
+    Ok(list)
+}
+
+/// 从厂商清单里挑一个**一定跑得通**的模型名（纯函数 —— 判据要能在没有网络的地方被测）。
+///
+/// 返回 `(要用的名字, 一句说明)`；说明只在"换过 / 为空"时非空。
+pub fn pick_model(current: &str, list: &[String]) -> (String, Option<String>) {
+    let cur = current.trim();
+    if list.is_empty() {
+        return (cur.to_string(), None);
+    }
+    if !cur.is_empty() && list.iter().any(|m| m == cur) {
+        return (cur.to_string(), None);
+    }
+    let first = list[0].clone();
+    let note = if cur.is_empty() {
+        format!("未配置模型名 → 本次用厂商列表的第一个：{first}")
+    } else {
+        format!("配置里的模型名「{cur}」不在厂商列表 {list:?} 里 → 本次改用第一个：{first}")
+    };
+    (first, Some(note))
+}
+
+/// 失败后判断值不值得"换个模型名再试一次"：像模型名的问题 **且** 当前名字确实不在清单里。
+///
+/// 两道都要过：只看错误文本会误伤（有些 400 的正文里带 "model" 字样但与名字无关）；
+/// 只看清单会白试（名字本来就对，换了也一样失败）。所以 `pick_model` 说"需要改"才动手。
+async fn model_retry_cfg(cfg: &LlmConfig, err: &str) -> Option<LlmConfig> {
+    let e = err.to_ascii_lowercase();
+    let modelish =
+        e.contains("model") && (e.contains("400") || e.contains("invalid") || e.contains("422"));
+    if !modelish {
+        return None;
+    }
+    let list = cached_models(cfg).await.ok()?;
+    let (fixed, note) = pick_model(&cfg.model, &list);
+    note.map(|_| LlmConfig {
+        model: fixed,
+        ..cfg.clone()
+    })
+}
+
+/// 请求被厂商打回时，若错在模型名，**顺手把厂商认的名字贴进错误里**。
+///
+/// 为什么值得：用户看到的原始 400 只有厂商那句英文（"supported API model names are A, B,
+/// but you passed C"），他拿不到"那我该填什么"。这里用**已经缓存的**清单补一句
+/// （异常路径才走，成功路径一次都不探）；拿不到清单就什么都不加 —— **不许瞎猜**。
+pub async fn model_hint_on_error(cfg: &LlmConfig, err: &str) -> Option<String> {
+    let e = err.to_ascii_lowercase();
+    if !(e.contains("model") && (e.contains("400") || e.contains("invalid") || e.contains("422"))) {
+        return None;
+    }
+    match cached_models(cfg).await {
+        Ok(list) if !list.is_empty() => Some(format!(
+            "（厂商认的模型名有：{}；配置里现在是「{}」—— 打开配置表单，从下拉里选一个）",
+            list.join("、"),
+            cfg.model.trim()
+        )),
+        _ => None,
+    }
+}
+
+/// 把配置里的模型名校准成厂商一定认得的名字（拿不到清单就原样返回，见上面的第 3 条）。
+pub async fn resolve_model(cfg: &LlmConfig) -> (String, Option<String>) {
+    match cached_models(cfg).await {
+        Ok(list) => pick_model(&cfg.model, &list),
+        Err(_) => (cfg.model.trim().to_string(), None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,6 +1868,37 @@ mod tests {
             web_search: web_search.to_string(),
             ..LlmConfig::default()
         }
+    }
+
+    /// 校准模型名的三条口径（真机上就是这条把 `model = "on"` 的 400 挡下来的）。
+    /// 纯函数、不吃网络 —— 因此可以断言"拿不到清单时原样用"这种**不许擅自换模型**的底线。
+    #[test]
+    fn pick_model_三条口径() {
+        let list: Vec<String> = ["deepseek-flash", "deepseek-v4-pro"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // ① 在清单里 → 原样、无话
+        assert_eq!(
+            pick_model("deepseek-v4-pro", &list),
+            ("deepseek-v4-pro".into(), None)
+        );
+        // ② 不在清单里（用户报的真实值 "on"）→ 换第一个 + 说清
+        let (m, note) = pick_model("on", &list);
+        assert_eq!(m, "deepseek-flash");
+        let note = note.expect("换过就必须有说明 —— 静默换掉用户的模型是不许的");
+        assert!(
+            note.contains("on") && note.contains("deepseek-flash"),
+            "{note}"
+        );
+        // ②′ 名字为空 → 也用第一个，且说明里不该出现"配置里的模型名"这种话（它压根没配）
+        let (m2, note2) = pick_model("   ", &list);
+        assert_eq!(m2, "deepseek-flash");
+        assert!(note2.unwrap().contains("未配置"));
+        // ③ **拿不到清单 → 原样用**（这条是底线：问不到不等于配置错）
+        assert_eq!(pick_model("on", &[]), ("on".into(), None));
+        // ③′ 拿不到清单且名字为空 → 也原样（空字符串交给下游按默认处理）
+        assert_eq!(pick_model("", &[]), ("".into(), None));
     }
 
     #[test]
