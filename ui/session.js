@@ -1061,7 +1061,9 @@
     try {
       // Agent 工具循环（Read/Write/Execute/Connect）：问答会自己 read 项目，
       // 任务会改文件并验证，项目外的事交给 connect（MCP 工具 / 远端 Agent）
-      rep = await invoke("agent_reply", { task: text, history, mode, projectRoot: root() });
+      // sessionId 是转录压实收据的**坐标**（"打开会话 X 的第 a..b 条"）：不带就只能退回
+      // "任务前缀"，换回时人要自己找。注意这行**保持单行** —— U16 认的就是这个形状。
+      rep = await invoke("agent_reply", { task: text, history, mode, projectRoot: root(), sessionId: (s && s.id) || null });
       placeholder.text = rep.answer || L("（空回复）", "(empty reply)");
       // 验证 / 复核结论挂在这条助手消息上（持久化后重开也能看到"这轮验过没有"）
       placeholder.verify = rep.verifications ?? [];

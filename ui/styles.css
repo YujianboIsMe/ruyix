@@ -4294,6 +4294,48 @@ html, body {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
+  /* 固定布局 + 允许任意断行：长键/长值必须**换行**，不许把表格撑到比容器宽
+     （真实布局探针实测：845px 的表格塞进 620px 的容器 —— Node 桩量不出来） */
+  table-layout: fixed;
+}
+
+.mem-table th,
+.mem-table td {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 列宽按表给：五列（当前信念 / 时间点）与七列（修订链）的比例不一样 */
+.mem-table--now th:nth-child(1),
+.mem-table--asof th:nth-child(1) {
+  width: 24%;
+}
+
+.mem-table--now th:nth-child(2),
+.mem-table--asof th:nth-child(2) {
+  width: 36%;
+}
+
+.mem-table--why th:nth-child(1) {
+  width: 6%;
+}
+
+.mem-table--why th:nth-child(2) {
+  width: 14%;
+}
+
+.mem-table--why th:nth-child(3),
+.mem-table--why th:nth-child(4),
+.mem-table--why th:nth-child(6) {
+  width: 9%;
+}
+
+.mem-table--why th:nth-child(5) {
+  width: 26%;
+}
+
+.mem-table--why th:nth-child(7) {
+  width: 27%;
 }
 
 .mem-table thead th {
@@ -4348,3 +4390,4 @@ html, body {
   font-size: 12px;
   padding: 6px 0;
 }
+

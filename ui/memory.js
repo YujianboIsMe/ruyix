@@ -89,7 +89,7 @@ window.MemoryUI = (() => {
       <div class="mem-body">
         <div class="mem-section">
           <div class="mem-section-title" data-i18n="mem.sectionNow"></div>
-          <table class="mem-table"><thead><tr>
+          <table class="mem-table mem-table--now"><thead><tr>
             <th data-i18n="mem.colKey"></th><th data-i18n="mem.colValue"></th>
             <th data-i18n="mem.colStatus"></th><th data-i18n="mem.colProv"></th>
             <th data-i18n="mem.colActions"></th>
@@ -98,7 +98,7 @@ window.MemoryUI = (() => {
         </div>
         <div class="mem-section" id="mem-why-section" style="display:none">
           <div class="mem-section-title" id="mem-why-title"></div>
-          <table class="mem-table"><thead><tr>
+          <table class="mem-table mem-table--why"><thead><tr>
             <th data-i18n="mem.colSeq"></th><th data-i18n="mem.colWhen"></th>
             <th data-i18n="mem.colKind"></th><th data-i18n="mem.colOp"></th>
             <th data-i18n="mem.colValue"></th><th data-i18n="mem.colOrigin"></th>
@@ -112,7 +112,7 @@ window.MemoryUI = (() => {
             <button class="mem-btn" id="mem-asof-go" data-i18n="mem.asOfGo"></button>
             <span class="mem-hint" data-i18n="mem.asOfHint"></span>
           </div>
-          <table class="mem-table"><thead><tr>
+          <table class="mem-table mem-table--asof"><thead><tr>
             <th data-i18n="mem.colKey"></th><th data-i18n="mem.colValue"></th>
             <th data-i18n="mem.colStatus"></th><th data-i18n="mem.colFrom"></th>
             <th data-i18n="mem.colTo"></th>
@@ -120,7 +120,7 @@ window.MemoryUI = (() => {
         </div>
         <div class="mem-section">
           <div class="mem-section-title" data-i18n="mem.sectionReceipts"></div>
-          <table class="mem-table"><thead><tr>
+          <table class="mem-table mem-table--receipts"><thead><tr>
             <th data-i18n="mem.colWhen"></th><th data-i18n="mem.colKind"></th>
             <th data-i18n="mem.colDropped"></th><th data-i18n="mem.colRehydrate"></th>
           </tr></thead><tbody id="mem-receipts-body"></tbody></table>

@@ -2668,6 +2668,38 @@ function runNavLayoutProbe() {
  * 探针在无头 Edge 里用**真的 xterm** 走一遍"宽屏 → 缩小 → 放大"，见 scripts/terminal-layout.js。
  * 本机没 Edge/Chrome 时该脚本自行 SKIP（"没跑"与"通过"必须能分辨）。
  */
+/**
+ * U55 memory-layout-real：记忆面板的**真实几何**（真 index.html + 真 styles.css + 真 memory.js）。
+ *
+ * 四问（当前信念 / 凭什么 / 那时是什么 / 丢过什么）全是表格，而"表格会不会被长键长值撑破、
+ * 面板是不是只占半宽、展开修订链会不会冒出横向滚动条"这些问题**只存在于布局引擎里** ——
+ * Node 的 DOM 桩量不到像素（bug 3 的并排半宽就是这一类）。
+ *
+ * 该探针上线第一轮就抓到真缺陷：信念表在 620px 容器里宽到 **845px**（长键 + 长值把表格撑破），
+ * 修法是 `table-layout: fixed` + `overflow-wrap: anywhere` + 按表给列宽。判据里那条
+ * "内容区没有东西出界"用的不是 `scrollW <= clientW`（Chrome 会把右内边距算进去，窄屏恒定多 4px），
+ * 而是**元素右边缘 + 单元格文本**两条实测口径。
+ *
+ * 本机没 Edge/Chrome 时该脚本自行 SKIP（"没跑"与"通过"必须能分辨）。
+ */
+function runMemoryLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "memory-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U55 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|memory-layout|宽屏)/.test(l))
+    .join(" ⏐ ");
+  check("U55", "memory-layout-real",
+    r.status === 0,
+    "记忆面板真实布局探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
 function runTerminalLayoutProbe() {
   const script = path.join(ROOT, "scripts", "terminal-layout.js");
   const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
@@ -4009,6 +4041,13 @@ async function runMemoryPanelChecks() {
   check(
     "U54",
     "memory-panel",
+    has(read("ui/session.js"), "sessionId") &&
+      has(read("src-tauri/src/agent/mod.rs"), "session_id: Option<String>"),
+    "UI 必须把会话 id 传给 agent_reply（否则转录压实的收据坐标只能退回到任务前缀）",
+  );
+  check(
+    "U54",
+    "memory-panel",
     panelMainRs.includes("mem_record,") && panelMainRs.includes("mem_status,"),
     "main.rs 必须注册 mem_* 命令（面板读不到就只是块空壳）",
   );
@@ -4157,6 +4196,7 @@ async function main() {
     ["U41", "session-trace", runSessionTraceChecks],
     ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
     ["U43", "terminal-layout-real", runTerminalLayoutProbe],
+    ["U55", "memory-layout-real", runMemoryLayoutProbe],
     ["U44", "nav-layout-real", runNavLayoutProbe],
     ["U45", "tab-context-menu", runTabContextMenuChecks],
     ["U46", "tab-menu-real", runTabMenuLayoutProbe],
