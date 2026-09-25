@@ -490,6 +490,8 @@
       const pcm = await blobToPcmBase64(blob);
       if (pcm.error) return status(pcm.error, "error");
       const audioSecs = Math.round(pcm.secs || 0);
+      // 先说"要等多久"：数字按 release 的实测倍率（约 3×）；构建形态由后端在
+      // `voice://stage` / `stages.debug_build` 里如实说（debug 慢十几倍，别替它圆场）
       status(
         L(
           `本机转写中…（${audioSecs} 秒音频，本机推理约需 ${Math.max(2, Math.round(audioSecs * 3))} 秒）`,

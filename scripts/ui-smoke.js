@@ -3911,6 +3911,10 @@ function runVoiceThreadChecks() {
   check("U63", "voice-stage-listened",
     /listen\("voice:\/\/stage"/.test(sessJs),
     "前端要收 voice://stage，否则事件发了没人看");
+  check("U63", "voice-debug-build-warned",
+    /cfg!\(debug_assertions\)/.test(mainRs) && /语音建议用 release 跑/.test(mainRs),
+    "debug 构建下要把「推理慢十几倍」说出来 —— 不然用户看到的就是又一次「卡死」");
+
   check("U63", "voice-eta-shown",
     /本机推理约需/.test(sessJs),
     "状态行要给「大概等多久」（音频时长 × 本机 RTF），让用户能判断该不该等");

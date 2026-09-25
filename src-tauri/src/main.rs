@@ -1942,10 +1942,18 @@ async fn voice_transcribe(
         }
         let load_ms = t.elapsed().as_millis();
 
+        // debug 构建下的 candle 推理慢十几倍（实测同一段 3.77 秒音频：release 12.3 秒、
+        // debug 200 秒都没完）。**必须说出来** —— 否则用户看到的就是"又卡住了"，
+        // 而真相只是"这个构建形态本来就慢"。这句话是"别再报一次同样的 bug"的全部成本。
+        let slow = if cfg!(debug_assertions) {
+            "（debug 构建：本地推理慢十几倍，语音建议用 release 跑）"
+        } else {
+            ""
+        };
         stage(
             "infer",
             format!(
-                "识别中（{} 秒音频，本机推理）…",
+                "识别中（{} 秒音频，本机推理）…{slow}",
                 pcm.len() as f32 / harness_engine::voice::asr::SAMPLE_RATE as f32
             ),
         );
@@ -1963,6 +1971,7 @@ async fn voice_transcribe(
                 "load_ms": load_ms,
                 "loaded_now": loaded,
                 "total_ms": t_all.elapsed().as_millis(),
+                "debug_build": cfg!(debug_assertions),
             },
         }))
     })
