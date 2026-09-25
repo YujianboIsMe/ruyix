@@ -135,7 +135,11 @@ AI配置同样遵循配置四级配置机制。
 
 > Anthropic 协议与 OpenAI 兼容的差异：鉴权用 `x-api-key` + `anthropic-version` 头；
 > `system` 提示词提到顶层、不放进 `messages`；没有 `response_format`（JSON 模式靠提示词保证）；
-> **不支持服务端联网检索**（`llm.web_search` 对它一律视为关闭）。
+> **联网检索走它自己的服务端工具**：OpenAI 兼容路是 `/responses` + `{"type":"web_search"}`，
+> anthropic 路是 `/v1/messages` + `{"type":"web_search_20250305"}`（带版本的类型名，
+> 写 `web_search` 会被 422 打回）。两条协议的工具名与能力都**按协议分开记**
+> （`llm::web_search_capable`）—— 实测同一个模型可能在一条路上能搜、在另一条路上搜不了。
+> 详见 ISSUE-3（`doc/v1.1/bugs.md`）。
 
 ### 备用 AI（故障切换，`ai_fallback`）
 
