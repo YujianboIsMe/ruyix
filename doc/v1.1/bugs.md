@@ -7,7 +7,25 @@
 
 ## ISSUE-1：进程表的"测试隔离锁"锁的不是进程表 —— 两条 agent 用例并行跑会间歇性红
 
-**状态**：**未修**（根因已定，改法已写，留给下一轮；登记即为此）
+**状态**：**已修**（2026-09-25）。
+
+修复落在三处：
+1. **按 handle 查进程限定项目**：新增 `by_handle_in` / `by_handle_in_mut`，
+   `status` / `log_tail` / `stop` / `info_of` / `set_state` 全部改成 `(proj, handle)`；
+   **删掉了全局扫描的 `by_handle`**（留着它迟早有人再按名字扫一遍）。
+2. **面向模型的三个入口**（`tool_proc`）把项目一路透传下来（宿主/子步骤/批处理三条路径）。
+3. **`table_lock()` 的注释改成实话**：它是"单测串行锁"，锁的**不是**进程表本身
+   （测试不能持表锁 —— std `Mutex` 不可重入，会死锁）。
+
+**门禁（已跑）**：
+
+```bash
+cargo test --workspace     # 连跑 3 遍：373 / 160 全绿（此前间歇性红的那两条都稳了）
+```
+
+新增判据 `a_handle_lookup_must_not_reach_across_projects`（agent/tests.rs）：
+拿项目 A 的 handle 去项目 B 查 status / log / stop，**三条都必须失败**。
+这条判据在修之前**必然红**（那时是按名字扫全局表），修完才绿 —— 所以它是这条缺陷的门禁形状。
 
 ### 症状（可复现）
 
@@ -65,3 +83,23 @@ cargo test --workspace          # 第 1 遍 exit=101；第 2 遍红的是另一�
   门禁就得是"重复跑"这种形状，因为缺陷本身是时序的）；
 - 新增一条判据：**按 handle 查进程必须带项目作用域**（`by_handle_in` 存在且三个入口都用它）；
 - `ui-smoke` 无需改（进程表是引擎侧）。
+
+### 补充（修复后仍观察到）：这条用例还有**第二条**通路
+
+修复（按项目限定 handle）之后，`a_handle_lookup_must_not_reach_across_projects` 稳定绿；
+但 `a_missed_criterion_carries_the_port_comparison` **仍会间歇性红**（连跑 4 遍里出现过 1 遍，
+其余多轮全绿）。
+
+**本次抓到的新证据**：
+
+```text
+thread 'agent::tests::a_missed_criterion_carries_the_port_comparison' (25056) panicked at crates\harness-engine\src\agent\tests.rs:2218:48: 判据没命中不等于启动失败: "handle=p1 的进程已被停止，本次等待中止" note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace  
+```
+
+**已排除**：项目路径撞车。`TempDir::new` 带 pid + 纳秒（agent/tests.rs:5-16、workspace.rs:300-311），
+路径唯一，不存在"两个用例共用同一个项目根、互相收进程"。
+
+**下一步（未做）**：这条用例的 `tool_exec_bg` 在一次调用**内部**就把进程表项丢了，
+嫌疑集中在 `refresh_all` 之后的容量腾位（`proc.rs` 的 `while live_in(..) >= max` 会 remove 死条目）
+与 `set_state` 的状态推进顺序；要的是一份"表项什么时候被谁删"的时序日志，而不是再加一把锁。
+**在修掉之前，别把 `cargo test --workspace` 单跑一次的结果当作门禁结论** —— 连跑三遍才算。

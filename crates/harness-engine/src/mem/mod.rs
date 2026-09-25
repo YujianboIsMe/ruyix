@@ -22,6 +22,7 @@
 //! 与 git 的分工（论文对照讨论的结论）：**代码事实归 git**（它本来就有账本与修订代数），
 //! 这里只装"仓库记不住的东西" + 引擎自己的决策。
 
+pub mod compact;
 pub mod embed;
 pub mod fold;
 pub mod ledger;
@@ -33,6 +34,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 
+pub use compact::{Compaction, compact_history, record_compaction};
 pub use ledger::{Event, EventKind, Origin};
 pub use retrieve::{Hit, Receipt};
 
@@ -329,14 +331,22 @@ pub fn scope() -> String {
 /// 记忆是辅助，不该有能力把一次 run 弄挂。
 pub fn prompt_block_for_current() -> Option<String> {
     let m = current()?;
+    let sc = scope();
     let mut out = m
-        .block_for_prompt(&scope(), PROMPT_BLOCK_BUDGET_CHARS)
+        .block_for_prompt(&sc, PROMPT_BLOCK_BUDGET_CHARS)
         .ok()
         .flatten();
     if let Ok(Some(g)) = m.block_for_prompt(GLOBAL_SCOPE, PROMPT_BLOCK_BUDGET_CHARS / 2) {
         out = Some(match out {
             Some(s) => format!("{s}\n{g}"),
             None => g,
+        });
+    }
+    // 有压实就直说：收据在账本里，说的是"注意力丢了什么"（切片 3）
+    if let Some(n) = compact::compaction_note(m, &sc) {
+        out = Some(match out {
+            Some(s) => format!("{s}\n\n{n}"),
+            None => n,
         });
     }
     out

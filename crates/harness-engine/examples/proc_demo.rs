@@ -131,7 +131,7 @@ fn main() {
 
     // ② 查状态
     println!("\n--- ② status ---");
-    match proc::status(&out.info.handle) {
+    match proc::status(&proj, &out.info.handle) {
         Ok(i) => println!(
             "state={} elapsed={}ms keep_alive={}",
             i.state, i.elapsed_ms, i.keep_alive
@@ -141,7 +141,7 @@ fn main() {
 
     // ③ 看日志尾（证据在文件里 —— 这正是实测那次"服务其实起来了、模型看不见"的病根）
     println!("\n--- ③ log：日志尾部 ---");
-    match proc::log_tail(&out.info.handle, 20) {
+    match proc::log_tail(&proj, &out.info.handle, 20) {
         Ok(t) => println!("{}", t.trim_end()),
         Err(e) => println!("{e}"),
     }
@@ -156,7 +156,7 @@ fn main() {
 
     // ⑤ 停（连子进程树一起）
     println!("\n--- ⑤ stop：连子进程树一起停 ---");
-    match proc::stop(&out.info.handle) {
+    match proc::stop(&proj, &out.info.handle) {
         Ok(i) => println!("已停 handle={} state={}", i.handle, i.state),
         Err(e) => println!("{e}"),
     }
@@ -175,7 +175,7 @@ fn main() {
             for i in &stopped {
                 println!("  ✗ {} pid={} state={}", i.handle, i.pid, i.state);
             }
-            if let Ok(i) = proc::status(&o2.info.handle) {
+            if let Ok(i) = proc::status(&proj, &o2.info.handle) {
                 println!("被收掉的那个，现在 state={}", i.state);
             }
         }
@@ -230,7 +230,7 @@ fn main() {
     //    再拿**同一条命令**配**正确**的判据 → 应当 Ready（证明闸门没误伤、happy path 没坏）
     println!("\n--- ⑨ 阳性对照：同一条命令 + 正确的判据（应 Ready）---");
     if let Some(h) = &wrong_handle {
-        match proc::stop(h) {
+        match proc::stop(&proj, h) {
             Ok(i) => println!("先收掉 ⑧ 那个：handle={} state={}", i.handle, i.state),
             Err(e) => println!("{e}"),
         }

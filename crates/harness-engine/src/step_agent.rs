@@ -319,7 +319,7 @@ async fn step_exec_one(
         StepAction::Proc(op, handle) => (
             "execute".into(),
             format!("execute {} {handle}", proc_op_name(op)),
-            tool_proc(op, &handle),
+            tool_proc(cx.project_root(), op, &handle),
         ),
         StepAction::Unsupported(name) => (
             name.to_string(),
@@ -445,8 +445,9 @@ async fn run_step_wave(
             let hp: Vec<_> = procs
                 .iter()
                 .map(|(i, op, handle)| {
-                    let (i, op, handle) = (*i, *op, handle.clone());
-                    (i, s.spawn(move || tool_proc(op, &handle)))
+                    // 项目根也 clone 进来：外层是 FnMut，把 proj 移出去会被借用检查挡住
+                    let (i, op, handle, proj) = (*i, *op, handle.clone(), proj.clone());
+                    (i, s.spawn(move || tool_proc(&proj, op, &handle)))
                 })
                 .collect();
             for (i, h) in hw {

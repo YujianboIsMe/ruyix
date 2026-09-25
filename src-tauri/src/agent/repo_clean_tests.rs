@@ -128,7 +128,7 @@ mod tests {
         };
         let started =
             harness_engine::proc::start(&proj, &spec, 4, 10, &state_dir).expect("托管进程应当起来");
-        let _ = harness_engine::proc::stop(&started.info.handle);
+        let _ = harness_engine::proc::stop(&proj, &started.info.handle);
 
         // ---- ⑤ 验证：真跑一次（产物必须落在项目桶的 verify/，不是项目里）----
         let mut cfg = harness_engine::config::AppConfig::default();

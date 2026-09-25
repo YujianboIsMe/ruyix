@@ -674,3 +674,78 @@ fn 同一条证据重复到达不产生新槽位() {
     );
     assert!(hits[0].prov.contains(&a.id));
 }
+
+/// **切片 3（转录压实）**：压了就必须留收据，且"最新一句话"永远不许被压掉。
+#[test]
+fn 转录压实必须留收据且最新一句原样保留() {
+    use crate::agent::HistoryMsg;
+    let m = mem("compact");
+    let scope = "s-compact";
+    let history: Vec<HistoryMsg> = (0..60)
+        .map(|i| HistoryMsg {
+            role: if i % 2 == 0 {
+                "user".into()
+            } else {
+                "assistant".into()
+            },
+            text: format!("第 {i} 轮：{}", "内容".repeat(60)),
+        })
+        .collect();
+
+    let c = compact_history(&history, 4_000);
+    assert!(c.happened(), "预算 4000 装不下 60 轮，必须压");
+    assert_eq!(
+        c.kept.last().map(|m| m.text.clone()),
+        history.last().map(|m| m.text.clone()),
+        "最新一句必须**原样**保留（压掉它就是答非所问）"
+    );
+    assert!(
+        c.kept.len() + c.dropped == history.len(),
+        "条数守恒：压掉的 + 留下的 == 原来"
+    );
+    let head: String = history[0].text.chars().take(30).collect();
+    assert!(
+        c.extractive.iter().any(|l| l.contains(&head)),
+        "被抽走的必须留**逐字前缀**（不许生成式总结）：{:?}",
+        c.extractive.first()
+    );
+
+    let note = record_compaction(&m, scope, "sess-42", &c).expect("写收据");
+    assert!(
+        note.contains("转录压实") && note.contains("sess-42"),
+        "{note}"
+    );
+    let rs = m.receipts(scope, 10).expect("读收据");
+    let r = rs
+        .iter()
+        .find(|r| r.kind == compact::KIND)
+        .expect("必须有收据");
+    assert!(!r.dropped.is_empty(), "收据要写清丢了什么");
+    // **换回**：收据给的坐标能从原历史里取回原话（转录不复制进账本）
+    let addr = r.rehydrate.clone();
+    let (a, b) = (
+        addr.split("第 ")
+            .nth(1)
+            .and_then(|s| s.split("..").next())
+            .and_then(|s| s.trim().parse::<usize>().ok()),
+        addr.split("..")
+            .nth(1)
+            .and_then(|s| s.split(" 条").next())
+            .and_then(|s| s.trim().parse::<usize>().ok()),
+    );
+    let (a, b) = (a.expect("坐标 a"), b.expect("坐标 b"));
+    assert!(
+        a >= 1 && b >= a && b <= history.len(),
+        "坐标要落在原历史范围内：{addr}"
+    );
+    assert!(
+        history[a - 1]
+            .text
+            .starts_with(&history[a - 1].text.chars().take(10).collect::<String>()),
+        "按坐标取回的就是原话"
+    );
+    assert!(
+        compact::compaction_note(&m, scope).is_some(),
+        "注入块要能说出：压实过"
+    );
+}

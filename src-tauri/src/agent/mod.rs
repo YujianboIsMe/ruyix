@@ -177,6 +177,8 @@ pub async fn agent_reply(
     history: Vec<engine::agent::HistoryMsg>,
     mode: Option<String>,
     project_root: Option<String>,
+    // 会话 id（UI 传；没有就退回"任务前缀"当坐标 —— 换回的依据必须具体到能翻到）
+    session_id: Option<String>,
 ) -> Result<ReplyAgent, String> {
     let Some(root) = project_root.filter(|s| !s.trim().is_empty()) else {
         return Err("未打开项目 —— Agent 工具循环需要一个项目作为工作区".into());
@@ -186,6 +188,26 @@ pub async fn agent_reply(
         return Err(format!("项目目录不存在: {root}"));
     }
     // 记忆作用域 = 项目 key（一个库、按 scope 隔离）；机器级事实走 GLOBAL_SCOPE
+
+    // 转录压实（切片 3）：历史超出预算就压，**压了必留收据** ——
+    // 收据说的是"注意力丢了什么、去哪儿取回来"（转录本身不复制进账本）。
+    let compacted_history = {
+        let c = engine::mem::compact_history(&history, engine::mem::compact::DEFAULT_BUDGET_CHARS);
+        if c.happened()
+            && let Some(m) = engine::mem::current()
+        {
+            // 坐标：有会话 id 就用它；没有就用"任务前缀"，人照着也能翻到
+            let head: String = task.chars().take(20).collect();
+            let sess_ref = session_id
+                .clone()
+                .unwrap_or_else(|| format!("会话（以「{head}」开头那条）"));
+            if let Err(e) = engine::mem::record_compaction(m, &engine::mem::scope(), &sess_ref, &c)
+            {
+                eprintln!("[mem] 压实收据没写成（继续跑，但这次压实无迹可查）：{e}");
+            }
+        }
+        c.kept
+    };
     engine::mem::set_scope(&crate::paths::Paths::from_root(&root).project_key(&root));
     let cfg = build_cfg(&config, Some(&root))?;
     let policy = match mode.as_deref() {
@@ -216,7 +238,7 @@ pub async fn agent_reply(
         &cfg,
         proj,
         &task,
-        &history,
+        &compacted_history,
         policy,
         &conn,
         &asker,

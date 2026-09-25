@@ -758,9 +758,51 @@ fn background_start_goes_through_the_same_gate_and_switch() {
 /// 句柄不存在 = 请求不合法（与解析报错同类），不该记成一次成功的工具调用。
 #[test]
 fn handle_ops_treat_an_unknown_handle_as_a_request_error() {
-    assert!(tool_proc(ProcOp::Status, "p999999").is_err());
-    assert!(tool_proc(ProcOp::Log, "p999999").is_err());
-    assert!(tool_proc(ProcOp::Stop, "p999999").is_err());
+    let d = TempDir::new("unknown-handle");
+    assert!(tool_proc(&d.0, ProcOp::Status, "p999999").is_err());
+    assert!(tool_proc(&d.0, ProcOp::Log, "p999999").is_err());
+    assert!(tool_proc(&d.0, ProcOp::Stop, "p999999").is_err());
+}
+
+/// **ISSUE-1 的门禁（doc/v1.1/bugs.md）**：按 handle 查进程必须**限定项目**。
+///
+/// handle 是全局递增的短名，两个项目各有一个 "p1" 是正常状态；只按名字扫全局表
+/// 会让项目 B 读到 / 停掉项目 A 的服务。这条判据直接钉住"跨项目不许命中"：
+/// 拿 A 的 handle 去 B 查，**必须**是"没这个进程"。
+#[test]
+fn a_handle_lookup_must_not_reach_across_projects() {
+    let _g = crate::proc::table_lock();
+    let a = TempDir::new("scope-a");
+    let b = TempDir::new("scope-b");
+    let cfg = AppConfig::default();
+    let sleeper = if cfg!(windows) {
+        "ping -n 30 127.0.0.1"
+    } else {
+        "sleep 30"
+    };
+    let spec = crate::proc::StartSpec {
+        cmd: sleeper.into(),
+        ready_cmd: Some(r#"netstat -ano | findstr ":65532" | findstr "LISTENING""#.into()),
+        ready_timeout_secs: Some(2),
+        keep_alive: false,
+    };
+    let started = crate::proc::start(&a.0, &spec, cfg.proc.max, cfg.proc.ready_timeout_secs, &a.0)
+        .expect("起一个不监听端口的进程（判据没命中不等于失败）");
+    let h = started.info.handle.clone();
+    assert!(
+        crate::proc::status(&a.0, &h).is_ok(),
+        "自己的项目里必须查得到 handle={h}"
+    );
+    assert!(
+        crate::proc::status(&b.0, &h).is_err(),
+        "跨项目 status 必须失败：handle 是短名，不许按名字扫全局表命中别人的进程"
+    );
+    assert!(
+        crate::proc::log_tail(&b.0, &h, 5).is_err(),
+        "跨项目 log 必须失败"
+    );
+    assert!(crate::proc::stop(&b.0, &h).is_err(), "跨项目 stop 必须失败");
+    crate::proc::shutdown_for(&a.0, false);
 }
 
 /// 提示词必须把后台模式说清 —— 不说，模型就还用 start / Start-Process 那套花招，

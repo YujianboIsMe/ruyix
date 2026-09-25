@@ -1716,7 +1716,7 @@ async fn exec_one(
         }
         Action::Proc(op, handle) => {
             let brief = format!("execute {} {handle}", proc_op_name(op));
-            ("execute".into(), brief, tool_proc(op, &handle))
+            ("execute".into(), brief, tool_proc(proj, op, &handle))
         }
         Action::Connect(ca) => connect_step(conn, ca).await,
         // 控制动作进不了批（parse_actions 已当面拒）；这条分支只为让 match 穷尽
@@ -1854,7 +1854,7 @@ async fn run_wave(
             .iter()
             .map(|(i, op, handle)| {
                 let (i, op, handle) = (*i, *op, handle.clone());
-                (i, s.spawn(move || tool_proc(op, &handle)))
+                (i, s.spawn(move || tool_proc(proj, op, &handle)))
             })
             .collect();
         for (i, h) in hw {
@@ -2926,10 +2926,10 @@ pub(crate) fn tool_exec_bg(
 }
 
 /// 托管进程的句柄操作：查状态 / 读日志尾 / 停掉（连子进程树）。
-pub(crate) fn tool_proc(op: ProcOp, handle: &str) -> Result<String, String> {
+pub(crate) fn tool_proc(proj: &Path, op: ProcOp, handle: &str) -> Result<String, String> {
     match op {
         ProcOp::Status => {
-            let i = crate::proc::status(handle)?;
+            let i = crate::proc::status(proj, handle)?;
             let ready = i.ready_cmd.clone().unwrap_or_else(|| "（无）".into());
             let mut s = format!(
                 "handle={} {} pid={} 已跑 {:.1}s\n命令：{}\n就绪判据：{ready}\n日志：{}",
@@ -2956,8 +2956,8 @@ pub(crate) fn tool_proc(op: ProcOp, handle: &str) -> Result<String, String> {
             Ok(s)
         }
         ProcOp::Log => {
-            let i = crate::proc::status(handle)?;
-            let tail = crate::proc::log_tail(handle, crate::proc::LOG_TAIL_LINES)?;
+            let i = crate::proc::status(proj, handle)?;
+            let tail = crate::proc::log_tail(proj, handle, crate::proc::LOG_TAIL_LINES)?;
             let what = if tail.trim().is_empty() {
                 "（空 —— 进程可能还没吐东西）"
             } else {
@@ -2969,7 +2969,7 @@ pub(crate) fn tool_proc(op: ProcOp, handle: &str) -> Result<String, String> {
             ))
         }
         ProcOp::Stop => {
-            let i = crate::proc::stop(handle)?;
+            let i = crate::proc::stop(proj, handle)?;
             Ok(format!(
                 "✓ 已停止 handle={} pid={}（连子进程树一起杀，端口会立刻释放）\n日志留着：{}",
                 i.handle, i.pid, i.log

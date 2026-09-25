@@ -177,8 +177,28 @@ fn by_handle_mut<'a>(t: &'a mut HashMap<u32, Managed>, handle: &str) -> Option<&
     t.values_mut().find(|m| m.handle == handle)
 }
 
-fn by_handle<'a>(t: &'a HashMap<u32, Managed>, handle: &str) -> Option<&'a Managed> {
-    t.values().find(|m| m.handle == handle)
+/// 按 handle 找，**限定项目**（ISSUE-1 / `doc/v1.1/bugs.md`）。
+///
+/// handle 是全局递增的短名（`p1`/`p2`…），所以"两个项目各有一个 `p1`"是正常状态。
+/// 只按名字扫全局表会命中**别人的**那条：轻则读到别的项目的日志，重则把别人的服务停掉。
+/// 三个面向模型的入口（status / log / stop）因此都必须过这一层。
+fn by_handle_in<'a>(
+    t: &'a HashMap<u32, Managed>,
+    proj: &Path,
+    handle: &str,
+) -> Option<&'a Managed> {
+    t.values()
+        .find(|m| m.proj.as_path() == proj && m.handle == handle)
+}
+
+/// 同上，可变版本。
+fn by_handle_in_mut<'a>(
+    t: &'a mut HashMap<u32, Managed>,
+    proj: &Path,
+    handle: &str,
+) -> Option<&'a mut Managed> {
+    t.values_mut()
+        .find(|m| m.proj.as_path() == proj && m.handle == handle)
 }
 
 /// 当前时刻（UNIX 毫秒）。时钟回拨时退成 0 —— 面板少显示一个时间，
@@ -767,16 +787,16 @@ pub fn read_log_chunk(pid: u32, offset: Option<u64>, max_bytes: usize) -> Result
     read_chunk(&path, offset, max_bytes, &state)
 }
 
-fn info_of(handle: &str) -> Result<ProcInfo, String> {
+fn info_of(proj: &Path, handle: &str) -> Result<ProcInfo, String> {
     let t = lock()?;
-    by_handle(&t, handle)
+    by_handle_in(&t, proj, handle)
         .map(Managed::info)
         .ok_or_else(|| format!("handle={handle} 已从进程表移除"))
 }
 
-fn set_state(handle: &str, state: &str) {
+fn set_state(proj: &Path, handle: &str, state: &str) {
     if let Ok(mut t) = lock()
-        && let Some(m) = by_handle_mut(&mut t, handle)
+        && let Some(m) = by_handle_in_mut(&mut t, proj, handle)
     {
         m.state = state.to_string();
     }
@@ -928,7 +948,7 @@ pub fn start(
             Ok(Some(code)) => {
                 let tail = read_log_tail(&log_path, LOG_TAIL_LINES);
                 return Ok(StartOutcome {
-                    info: info_of(&handle)?,
+                    info: info_of(proj, &handle)?,
                     kind: StartKind::Exited {
                         code,
                         tail,
@@ -946,9 +966,9 @@ pub fn start(
                 let hit = p.hit;
                 last = Some(p.detail.clone());
                 if hit {
-                    set_state(&handle, "ready");
+                    set_state(proj, &handle, "ready");
                     return Ok(StartOutcome {
-                        info: info_of(&handle)?,
+                        info: info_of(proj, &handle)?,
                         kind: StartKind::Ready { evidence: p.detail },
                         waited_ms: started.elapsed().as_millis(),
                     });
@@ -966,7 +986,7 @@ pub fn start(
                         started.elapsed().as_secs_f64(),
                     );
                     return Ok(StartOutcome {
-                        info: info_of(&handle)?,
+                        info: info_of(proj, &handle)?,
                         kind: StartKind::NotReady {
                             evidence: p.detail,
                             tail,
@@ -979,7 +999,7 @@ pub fn start(
             None => {
                 if started.elapsed() >= NO_READY_GRACE {
                     return Ok(StartOutcome {
-                        info: info_of(&handle)?,
+                        info: info_of(proj, &handle)?,
                         kind: StartKind::Started,
                         waited_ms: started.elapsed().as_millis(),
                     });
@@ -991,13 +1011,13 @@ pub fn start(
 }
 
 /// 查一个托管进程。句柄不存在时，报错里带上**当前有哪些** —— 光说"没有"治不了瞎猜。
-pub fn status(handle: &str) -> Result<ProcInfo, String> {
+pub fn status(proj: &Path, handle: &str) -> Result<ProcInfo, String> {
     let mut t = lock()?;
     let live: Vec<ProcInfo> = {
         refresh_all(&mut t);
         live_of(&t).iter().map(|m| m.info()).collect()
     };
-    let Some(m) = by_handle(&t, handle) else {
+    let Some(m) = by_handle_in(&t, proj, handle) else {
         return Err(format!(
             "没有 handle={handle} 这个托管进程。当前：{}",
             render_listing(&live)
@@ -1020,10 +1040,10 @@ pub fn status_pid(pid: u32) -> Result<ProcInfo, String> {
 }
 
 /// 读某个托管进程的日志尾部（已按活动代码页解码）。
-pub fn log_tail(handle: &str, lines: usize) -> Result<String, String> {
+pub fn log_tail(proj: &Path, handle: &str, lines: usize) -> Result<String, String> {
     let path = {
         let t = lock()?;
-        by_handle(&t, handle)
+        by_handle_in(&t, proj, handle)
             .map(|m| m.log.clone())
             .ok_or_else(|| format!("没有 handle={handle} 这个托管进程"))?
     };
@@ -1034,10 +1054,10 @@ pub fn log_tail(handle: &str, lines: usize) -> Result<String, String> {
 /// Unix 对进程组发 SIGKILL）。
 ///
 /// 这是必需项不是优化项：只杀 `mvn` 不杀 `java`，就是又造一个占着端口的孤儿。
-pub fn stop(handle: &str) -> Result<ProcInfo, String> {
+pub fn stop(proj: &Path, handle: &str) -> Result<ProcInfo, String> {
     let found = {
         let t = lock()?;
-        by_handle(&t, handle).map(|m| m.pid)
+        by_handle_in(&t, proj, handle).map(|m| m.pid)
     };
     match found {
         Some(pid) => stop_pid(pid),
@@ -1153,6 +1173,12 @@ pub fn shutdown_all(honor_keep_alive: bool) -> (Vec<ProcInfo>, Vec<ProcInfo>) {
 /// 因此凡是动这份表的测试都要先拿这把锁，**包括别的模块里真起后台进程的测试**
 /// （如 agent 的交付对账回归：它得等进程活过 run 结束，被别人 clear 掉就成了假失败）。
 #[cfg(test)]
+/// **单测串行锁**（注意：它锁的**不是**进程表本身）。
+///
+/// 进程表由 [`table()`] 的那把锁保护，而测试里的引擎调用会自己去拿那把锁 ——
+/// 所以测试不能持有表锁（std `Mutex` 不可重入，会死锁）。这把独立的 `G` 只做一件事：
+/// **让拿了它的测试之间互不并行**。它排除不了"没拿它的测试"—— 这一点曾经被误解，
+/// 见 `doc/v1.1/bugs.md` ISSUE-1（根因的另一半是 handle 的全局线性扫描，已按项目限定修掉）。
 pub(crate) fn table_lock() -> std::sync::MutexGuard<'static, ()> {
     static G: OnceLock<Mutex<()>> = OnceLock::new();
     G.get_or_init(|| Mutex::new(()))
@@ -1413,9 +1439,9 @@ mod tests {
         assert!(out.info.log.ends_with(".log"));
         // 退出码缺席也算"没死"，与 is_dead 的判据一致
         assert!(!is_dead(&out.info.state));
-        let st = status(&out.info.handle).expect("查得到");
+        let st = status(&proj, &out.info.handle).expect("查得到");
         assert_eq!(st.state, "ready");
-        stop(&out.info.handle).expect("停得掉");
+        stop(&proj, &out.info.handle).expect("停得掉");
         cleanup(&proj);
     }
 
@@ -1449,7 +1475,7 @@ mod tests {
         let out = start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("应当起来");
         assert!(matches!(out.kind, StartKind::Started));
         assert_eq!(out.info.state, "running");
-        stop(&out.info.handle).expect("停得掉");
+        stop(&proj, &out.info.handle).expect("停得掉");
         cleanup(&proj);
     }
 
@@ -1473,8 +1499,8 @@ mod tests {
         }
         assert!(is_dead(&out.info.state), "状态要落成 exited");
         // 已退出的进程仍然可查、可读日志 —— 不然模型拿不到失败原因
-        assert!(status(&out.info.handle).is_ok());
-        let tail = log_tail(&out.info.handle, LOG_TAIL_LINES).expect("读得到");
+        assert!(status(&proj, &out.info.handle).is_ok());
+        let tail = log_tail(&proj, &out.info.handle, LOG_TAIL_LINES).expect("读得到");
         assert!(tail.contains("boom-proc"));
         cleanup(&proj);
     }
@@ -1502,7 +1528,7 @@ mod tests {
         }
         // 关键：判据没命中不等于进程死了，状态仍应是"活着"，否则模型会以为启动失败
         assert!(!is_dead(&out.info.state), "{}", out.info.state);
-        stop(&out.info.handle).expect("停得掉");
+        stop(&proj, &out.info.handle).expect("停得掉");
         cleanup(&proj);
     }
 
@@ -1533,7 +1559,7 @@ mod tests {
         );
         assert!(err.contains("当前托管"), "报错要带证据: {err}");
 
-        stop(&first.info.handle).expect("停得掉");
+        stop(&proj, &first.info.handle).expect("停得掉");
         cleanup(&proj);
     }
 
@@ -1545,7 +1571,7 @@ mod tests {
         let err =
             start(&proj, &spec(sleeper().into(), None, false), 1, 5).expect_err("到上限就该拒");
         assert!(err.contains(&a.info.handle), "报错要点名在跑的句柄: {err}");
-        stop(&a.info.handle).expect("停得掉");
+        stop(&proj, &a.info.handle).expect("停得掉");
         cleanup(&proj);
     }
 
@@ -1554,11 +1580,14 @@ mod tests {
         let _g = table_lock();
         let proj = tmp_proj("stophandle");
         let a = start(&proj, &spec(sleeper().into(), None, false), 4, 5).expect("应当起来");
-        let stopped = stop(&a.info.handle).expect("停得掉");
+        let stopped = stop(&proj, &a.info.handle).expect("停得掉");
         assert_eq!(stopped.state, "stopped");
-        assert!(status(&a.info.handle).is_err(), "停掉的句柄不该再查得到");
-        assert!(stop(&a.info.handle).is_err(), "再停一次也该报错");
-        let err = status("p999999").expect_err("不存在的句柄要报错");
+        assert!(
+            status(&proj, &a.info.handle).is_err(),
+            "停掉的句柄不该再查得到"
+        );
+        assert!(stop(&proj, &a.info.handle).is_err(), "再停一次也该报错");
+        let err = status(&proj, "p999999").expect_err("不存在的句柄要报错");
         assert!(err.contains("p999999") && err.contains("当前"), "{err}");
         cleanup(&proj);
     }
