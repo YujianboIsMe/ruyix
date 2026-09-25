@@ -75,6 +75,7 @@ window.MemoryUI = (() => {
           <span class="mem-title" data-i18n="mem.title"></span>
           <span class="mem-scope" id="mem-scope"></span>
           <span class="mem-embed" id="mem-embed"></span>
+          <button class="mem-btn" id="mem-fetch" data-i18n="mem.fetchModel"></button>
           <span class="mem-spacer"></span>
           <button class="mem-btn" id="mem-add" data-i18n="mem.add"></button>
           <button class="mem-btn" id="mem-rebuild" data-i18n="mem.rebuild"></button>
@@ -136,6 +137,30 @@ window.MemoryUI = (() => {
     el("mem-asof-go")?.addEventListener("click", () => void refreshAsOf());
     el("mem-add")?.addEventListener("click", () => void addOne());
     el("mem-rebuild")?.addEventListener("click", () => void rebuild());
+    el("mem-fetch")?.addEventListener("click", () => void fetchModel());
+    // 模型下载进度（`mem://model`）：96MB 的下载必须看得见，否则用户以为卡死了
+    const listen = window.__TAURI__?.event?.listen;
+    if (listen) {
+      listen("mem://model", (ev) => {
+        const p = ev.payload ?? {};
+        const line = el("mem-embed");
+        if (!line) return;
+        if (p.phase === "start") line.textContent = T("mem.fetchStart");
+        else if (p.phase === "progress") {
+          line.textContent = T("mem.fetchProgress", {
+            file: p.file,
+            done: (Number(p.done) / 1e6).toFixed(1),
+            total: (Number(p.total) / 1e6).toFixed(1),
+          });
+        } else if (p.phase === "done") {
+          line.textContent = T("mem.fetchDone", { n: p.fetched });
+          void refresh();
+        } else if (p.phase === "error") {
+          line.textContent = T("mem.fetchFailed", { line: p.line || "" });
+        }
+        if (typeof setStatus === "function") setStatus(line.textContent, p.phase === "error" ? "error" : "info");
+      }).catch(() => {});
+    }
     el("mem-now-body")?.addEventListener("click", (e) => {
       const tr = e.target.closest("tr[data-key]");
       if (tr) void showWhy(tr.dataset.key);
@@ -180,6 +205,9 @@ window.MemoryUI = (() => {
         : T("mem.embedOff", { reason: st.embed_reason || "?" });
       el("mem-embed").textContent = emb;
       el("mem-embed").dataset.ok = st.embed_available ? "1" : "0";
+      // 缺模型才露出〔取模型〕：一键把语义检索补齐（单 exe 也是这样装起来的）
+      const fetchBtn = el("mem-fetch");
+      if (fetchBtn) fetchBtn.style.display = st.embed_available ? "none" : "";
       setStatus(
         T("mem.statLine", {
           events: st.events,
@@ -308,6 +336,18 @@ window.MemoryUI = (() => {
     try {
       await api("mem_record", { key, value, projectRoot: projectRoot() });
       await refresh();
+    } catch (e) {
+      setStatus(errText(e), false);
+    }
+  }
+
+  /** 一键取模型：96MB 下载走后台，进度由 `mem://model` 事件推回来（命令立即返回） */
+  async function fetchModel() {
+    const api = invoke();
+    if (!api) return;
+    try {
+      const r = await api("mem_model_fetch");
+      if (el("mem-embed")) el("mem-embed").textContent = r.line || T("mem.fetchStart");
     } catch (e) {
       setStatus(errText(e), false);
     }

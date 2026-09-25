@@ -552,5 +552,10 @@
   "mem.rebuilt": "Rebuilt the derived layer by replaying {n} events",
   "mem.embedOn": "Semantic search: on",
   "mem.embedOff": "Semantic search: off ({reason}) — lexical only",
-  "mem.statLine": "ledger {events} · current beliefs {active}/{all} · receipts {receipts} · vectors {vectors}"
+  "mem.statLine": "ledger {events} · current beliefs {active}/{all} · receipts {receipts} · vectors {vectors}",
+  "mem.fetchModel": "Get model",
+  "mem.fetchStart": "Fetching the model (96MB, you can keep working)…",
+  "mem.fetchProgress": "Fetching the model: {file} {done}/{total} MB",
+  "mem.fetchDone": "Model in place (fetched {n} files) — semantic search is on",
+  "mem.fetchFailed": "Model fetch failed: {line}"
 }

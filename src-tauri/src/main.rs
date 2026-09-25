@@ -968,6 +968,81 @@ fn mem_root() -> crate::paths::Paths {
     crate::paths::Paths::discover(&exe_dir)
 }
 
+/// 模型自检：装着没有 / 装坏了 / 就绪，**带一句人话**（面板与状态栏都用它）。
+#[tauri::command]
+fn mem_model_status() -> serde_json::Value {
+    let st = harness_engine::mem::fetch::status();
+    serde_json::json!({
+        "ready": st.is_ready(),
+        "line": st.line(),
+        "dir": harness_engine::mem::fetch::target_dir().ok().map(|d| d.display().to_string()),
+        "need_bytes": harness_engine::mem::fetch::required_bytes(),
+    })
+}
+
+/// 一条命令把模型补齐（面板上的〔取模型〕）。**立即返回**，进度走 `mem://model` 事件 ——
+/// 96MB 的下载不该把界面卡住，也不该让命令挂在那儿。
+#[tauri::command]
+async fn mem_model_fetch(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let st = harness_engine::mem::fetch::status();
+    if st.is_ready() {
+        return Ok(serde_json::json!({ "started": false, "line": st.line() }));
+    }
+    let h = app.clone();
+    let h2 = app.clone();
+    let start_line = st.line();
+    // spawn 是 async move：给它一份自己的，函数出口那份留给返回值
+    let line_for_task = start_line.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = h.emit(
+            "mem://model",
+            serde_json::json!({ "phase": "start", "line": line_for_task }),
+        );
+        let res = harness_engine::mem::fetch::fetch(|p| {
+            let _ = h2.emit(
+                "mem://model",
+                serde_json::json!({
+                    "phase": "progress",
+                    "file": p.file, "index": p.index, "of": p.of,
+                    "done": p.done, "total": p.total, "tag": p.tag,
+                }),
+            );
+        })
+        .await;
+        match res {
+            Ok(rep) => {
+                if let Some(m) = harness_engine::mem::current() {
+                    let where_ = harness_engine::mem::fetch::target_dir()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default();
+                    let _ = m.record_obs(
+                        harness_engine::mem::GLOBAL_SCOPE,
+                        "mem.embed.model",
+                        &where_,
+                        harness_engine::mem::Origin::Probe,
+                        &[],
+                        None,
+                    );
+                }
+                let _ = h.emit(
+                    "mem://model",
+                    serde_json::json!({
+                        "phase": "done",
+                        "fetched": rep.fetched.len(), "skipped": rep.skipped.len(), "bytes": rep.bytes,
+                    }),
+                );
+            }
+            Err(e) => {
+                let _ = h.emit(
+                    "mem://model",
+                    serde_json::json!({ "phase": "error", "line": e }),
+                );
+            }
+        }
+    });
+    Ok(serde_json::json!({ "started": true, "line": start_line }))
+}
+
 /// 记忆库状态：账本/信念/收据/向量条数 + 向量腿是否可用（**带人话原因**）。
 #[tauri::command]
 fn mem_status(project_root: Option<String>) -> Result<serde_json::Value, String> {
@@ -2250,6 +2325,77 @@ fn main() {
             // 只有 Rust 侧的 Builder 挂得上 on_navigation，也就是外链的道闸，详见 build_main_window
             build_main_window(app.handle())?;
 
+            // 模型运行时兜底（切片 4）：**单 exe 也要能自检并下载模型**。
+            // 形态是"一个可执行文件 + global/ + projects/ + plugins/"，所以"只有单 exe"是主路径之一；
+            // 此前只有打包期的取模型步骤 ⇒ 单 exe 用户拿到的是**静默降级**（语义检索关着，没出口打开它）。
+            // 规格（文件名/体积/sha256/来源 URL）是编译进二进制的，所以 exe 自己知道该取什么。
+            // 开关：`--no-fetch` 关掉自动取（绿色手动路线），`--fetch-model` 强制取一次（幂等，已装就跳过）。
+            {
+                let args: Vec<String> = std::env::args().collect();
+                let no_fetch = args.iter().any(|a| a == "--no-fetch");
+                let force = args.iter().any(|a| a == "--fetch-model");
+                let st = harness_engine::mem::fetch::status();
+                if force || (!no_fetch && !st.is_ready()) {
+                    let h = app.handle().clone();
+                    let h2 = app.handle().clone();
+                    let start_line = st.line();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = h.emit(
+                            "mem://model",
+                            serde_json::json!({ "phase": "start", "line": start_line.clone() }),
+                        );
+                        let res = harness_engine::mem::fetch::fetch(|p| {
+                            let _ = h2.emit(
+                                "mem://model",
+                                serde_json::json!({
+                                    "phase": "progress",
+                                    "file": p.file,
+                                    "index": p.index,
+                                    "of": p.of,
+                                    "done": p.done,
+                                    "total": p.total,
+                                    "tag": p.tag,
+                                }),
+                            );
+                        })
+                        .await;
+                        match res {
+                            Ok(rep) => {
+                                // 进账本：**这台机器上模型在哪**是一件值得记住的事实（探针即证据）
+                                if let Some(m) = harness_engine::mem::current() {
+                                    let where_ = harness_engine::mem::fetch::target_dir()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_default();
+                                    let _ = m.record_obs(
+                                        harness_engine::mem::GLOBAL_SCOPE,
+                                        "mem.embed.model",
+                                        &where_,
+                                        harness_engine::mem::Origin::Probe,
+                                        &[],
+                                        None,
+                                    );
+                                }
+                                let _ = h.emit(
+                                    "mem://model",
+                                    serde_json::json!({
+                                        "phase": "done",
+                                        "fetched": rep.fetched.len(),
+                                        "skipped": rep.skipped.len(),
+                                        "bytes": rep.bytes,
+                                    }),
+                                );
+                            }
+                            Err(e) => {
+                                let _ = h.emit(
+                                    "mem://model",
+                                    serde_json::json!({ "phase": "error", "line": e }),
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+
             // 注册原生 Ctrl+S 快捷键 — 即使 WebView2 拦截了 JS 的 Ctrl+S，
             // 原生菜单 accelerator 仍能在 OS 层面捕获该组合键
             let save = MenuItemBuilder::with_id("save", "保存")
@@ -2297,6 +2443,8 @@ fn main() {
             run_target,
             proc_list,
             mem_status,
+            mem_model_status,
+            mem_model_fetch,
             mem_beliefs,
             mem_why,
             mem_as_of,

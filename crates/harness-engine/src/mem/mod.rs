@@ -24,6 +24,7 @@
 
 pub mod compact;
 pub mod embed;
+pub mod fetch;
 pub mod fold;
 pub mod ledger;
 pub mod retrieve;

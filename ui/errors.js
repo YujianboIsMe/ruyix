@@ -34,6 +34,15 @@
   // 词典：动词（`X 失败` / `无法 X` / `读取 X` 里的动作）
   // ============================================
   const VERBS = {
+    "建目录": "create directory",
+    "改名": "rename",
+    "写盘": "write to disk",
+    "落盘": "flush to disk",
+    "体积": "size",
+    "不符": "mismatch",
+    "客户端": "client",
+    "清单": "manifest",
+    "建": "create",
     "读向量": "read the vector",
     "查信念": "query beliefs",
     "改信念": "update the belief",
@@ -212,6 +221,9 @@
     "空命令": "empty command",
     "空路径": "empty path",
     "路径为空": "empty path",
+    "未配置模型目录（宿主未设、也没有 RUYIX_MEM_MODEL_DIR）":
+      "the model directory is not configured (the host did not set it, and RUYIX_MEM_MODEL_DIR is unset)",
+    "体积不符：拿到 {done}，清单写 {}": "size mismatch: got {done}, the manifest says {}",
     "本构建未编入向量腿（cargo feature `embed` 关闭）—— 记忆会退化为纯词法检索": "this build has no vector leg (cargo feature `embed` is off) — memory falls back to lexical search",
     "向量腿未编入": "the vector leg is not compiled in",
     "as-of 查询失败: {e}": "as-of query failed: {e}",

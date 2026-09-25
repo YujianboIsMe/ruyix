@@ -552,5 +552,10 @@
   "mem.rebuilt": "已从账本重放 {n} 条事件重建派生层",
   "mem.embedOn": "语义检索：开",
   "mem.embedOff": "语义检索：关（{reason}）—— 退化为纯词法",
-  "mem.statLine": "账本 {events} 条 · 当前信念 {active}/{all} · 收据 {receipts} · 向量 {vectors}"
+  "mem.statLine": "账本 {events} 条 · 当前信念 {active}/{all} · 收据 {receipts} · 向量 {vectors}",
+  "mem.fetchModel": "取模型",
+  "mem.fetchStart": "正在取模型（96MB，可关掉窗口继续下载）…",
+  "mem.fetchProgress": "正在取模型：{file} {done}/{total} MB",
+  "mem.fetchDone": "模型已就位（新下 {n} 个文件）—— 语义检索已打开",
+  "mem.fetchFailed": "取模型失败：{line}"
 }
