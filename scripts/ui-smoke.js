@@ -6,7 +6,7 @@
  * Tauri 窗口又无法从外部驱动。因此分两层覆盖：
  *   1) 契约静态断言 —— 前后端契约（DOM 锚点 / 命令动词 / 事件名 / 命令名 / i18n）
  *      的文本级一致性，任何一侧改名都会在这里红；
- *   2) 面板回放 —— 用微型 DOM stub 在 Node 里加载 ui/session.js、ui/config.js，
+ *   2) 面板回放 —— 用微型 DOM stub 在 Node 里加载 ui/scripts/session.js、ui/scripts/config.js，
  *      驱动其真实交互路径（发消息 / 扫描配置 → 改 → 保存 / 应用 / 取消），断言渲染与出参。
  * 真实引擎链路（真调 LLM）由 harness-engine 的 example / 单测覆盖，不在本脚本。
  *
@@ -170,7 +170,7 @@
 
 
 
- *                     文件（`ui/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
+ *                     文件（`ui/packages/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
  *                     曾把编辑器打崩 —— 背板要塞进 28 万字符的 `.code-line`（+ 十万级 span），
  *                     textarea 里还装着同长度的单行原文；纵向虚拟化对"整个文件就是一行"无效。
  *                     判据：阈值逐列（2000 不触发 / 2001 触发）、顶部虚拟横幅不进行号（gutter
@@ -194,7 +194,7 @@
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /
  *                     图标是否被挤到另一行。本机没有 Edge/Chrome 时该脚本自行 SKIP。
  *   U52 backend-msg-i18n 后端消息在英文界面不露中文（bug 1/2 的收尾门禁）：逐条扫后端源码里
- *                    会返回给前端的 Err 中文文案，要求 ui/errors.js 的规则能覆盖；
+ *                    会返回给前端的 Err 中文文案，要求 ui/scripts/errors.js 的规则能覆盖；
  *                    并核对翻译层真接上了显示收口（setStatus）
  *   U51 terminal-targets 终端目标**可添加**（bug 4 的回归门禁）：面板有添加入口、用户条目由 get_term_targets
  *                    渲染、增删改全部走命令系统（面板不直接写配置）、后端与运行目标共用同一份扫描器、
@@ -260,10 +260,10 @@ const readLf = (p) => read(p).replace(/\r\n/g, "\n");
  * 定义 window.L，而 main.js 里用的是裸 `L()`。只把 main.js 丢进裸环境的话，`L` 会落到本进程的
  * globalThis 上 = undefined ⇒ 命中那条路径时当场 ReferenceError，判据假红。
  * （ISSUE-2 的连带教训：声明位置一改，回放环境也得跟着补装配。）
- * 这里**跑真的 ui/command.js** 取它的 window.L —— 不另抄一份定义（抄了就会漂）。
+ * 这里**跑真的 ui/scripts/command.js** 取它的 window.L —— 不另抄一份定义（抄了就会漂）。
  */
 function realL(win, doc, i18n) {
-  new Function("window", "document", "console", "I18N", readLf("ui/command.js"))(
+  new Function("window", "document", "console", "I18N", readLf("ui/scripts/command.js"))(
     win,
     doc,
     console,
@@ -297,7 +297,7 @@ function has(text, needle) {
 
 function runStaticChecks() {
   const html = read("ui/index.html");
-  const commandJs = read("ui/command.js");
+  const commandJs = read("ui/scripts/command.js");
   const mainRs = read("src-tauri/src/main.rs");
   const sinkRs = read("src-tauri/src/agent/sink.rs");
 
@@ -331,9 +331,9 @@ function runStaticChecks() {
       ["mcp", "a2a", "tools", "skills"].every((c) => has(html, `data-cap="${c}"`)),
     "index.html 缺少「能力」菜单或其四个子菜单项");
   check("U1", "agent-dom",
-    has(html, 'src="session.js"') && has(html, 'src="mcp.js"') && has(html, 'src="a2a.js"') &&
-      has(html, 'src="capability.js"'),
-    "index.html 未加载 session.js / mcp.js / a2a.js / capability.js");
+    has(html, 'src="scripts/session.js"') && has(html, 'src="scripts/mcp.js"') &&
+      has(html, 'src="scripts/a2a.js"') && has(html, 'src="scripts/capability.js"'),
+    "index.html 未加载 scripts/session.js / scripts/mcp.js / scripts/a2a.js / scripts/capability.js");
 
   // U2 agent-verb：命令栏 `agent/mcp/a2a` 动词路由
   check("U2", "agent-verb",
@@ -350,7 +350,7 @@ function runStaticChecks() {
 
   // U3 event-contract：会话模型折叠显示进度 —— stage/log 必须被 session.js 监听
   // （plan/step 同样必需：大纲区任务列表靠它们驱动；lint/repair 允许无人监听：细节在 run 产物中回看）
-  const sessionJs = read("ui/session.js");
+  const sessionJs = read("ui/scripts/session.js");
   const emitted = new Set([...sinkRs.matchAll(/emit\(\s*"agent:\/\/(\w+)"/g)].map((m) => m[1]));
   const listened = new Set([...sessionJs.matchAll(/"agent:\/\/(\w+)"/g)].map((m) => m[1]));
   const required = ["stage", "log", "plan", "step", "verify", "reflect"].filter((e) => !listened.has(e));
@@ -361,8 +361,8 @@ function runStaticChecks() {
   check("U3", "event-contract", gateEvents.length === 0,
     `sink.rs 未发出质量门禁事件: [${gateEvents}]`);
   // a2a://status：main.rs emit 与 a2a.js listen 一致
-  const mcpJs = read("ui/mcp.js");
-  const a2aJs = read("ui/a2a.js");
+  const mcpJs = read("ui/scripts/mcp.js");
+  const a2aJs = read("ui/scripts/a2a.js");
   const a2aEmitted = [...mainRs.matchAll(/"a2a:\/\/(\w+)"/g)].map((m) => m[1]);
   const a2aListened = [...a2aJs.matchAll(/"a2a:\/\/(\w+)"/g)].map((m) => m[1]);
   check("U3", "event-contract",
@@ -392,7 +392,7 @@ function runStaticChecks() {
   check("U4", "cmd-contract", notRegistered.length === 0,
     `main.rs 未注册: ${notRegistered.join(", ")}`);
   // 三个面板 JS 里出现的命令名必须都在注册集内
-  const capJs = read("ui/capability.js");
+  const capJs = read("ui/scripts/capability.js");
   const invoked = new Set([
     ...[...sessionJs.matchAll(/"(agent_\w+)"/g)].map((m) => m[1]),
     ...[...mcpJs.matchAll(/"(mcp_\w+)"/g)].map((m) => m[1]),
@@ -429,7 +429,7 @@ function runStaticChecks() {
       !it.cls.includes("file-only") && !it.cls.includes("folder-only"),
       `[${action}] 挂了 file-only/folder-only —— 文件和文件夹上都要能看到它（class="${it.cls}"）`);
   }
-  const ctxMainJs = readLf("ui/main.js");
+  const ctxMainJs = readLf("ui/scripts/main.js");
   check("U33", "ctx-copy-path",
     /case\s+"copy-path":/.test(ctxMainJs) && /case\s+"copy-full-path":/.test(ctxMainJs),
     "main.js 的右键 switch 没有 copy-path / copy-full-path 两个分支");
@@ -470,7 +470,7 @@ function runStaticChecks() {
   // ① 按钮存在且走 runtime 作用域写 llm.web_search（本次会话生效、不落盘）；
   // ② 模型没这能力时必须禁用 —— 不给一个按下去没反应的按钮；
   // ③ 模型下拉框只在真拿到厂商列表时才升级成 select。
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
   check("U35", "web-search-toggle", /data-web/.test(sessJs),
     "session.js 工具栏里没有 🌏 联网按钮（data-web）");
   // 切片终点锚在**运行按钮**上：它是这个块之后的第一个 `wrap.querySelector("[data-…]")`。
@@ -492,7 +492,7 @@ function runStaticChecks() {
   check("U35", "web-search-toggle",
     /session-web--on/.test(sessJs) && /session-web--on/.test(read("ui/styles.css")),
     "开/关要有可见区别（session-web--on 的 class 与样式都要有）");
-  const cfgJs2 = read("ui/config.js");
+  const cfgJs2 = read("ui/scripts/config.js");
   check("U35", "web-search-toggle",
     /key: "model".*dynamic: "models"/.test(cfgJs2),
     "ai.model 要标成动态选项（选项来自厂商 /models）");
@@ -503,7 +503,7 @@ function runStaticChecks() {
     "模型列表要从后端 ai_list_models 取，不许前端硬编码");
 
   // U9 config-form：配置表单的 DOM 锚点 / 脚本 / config 子动词路由
-  const configJs = read("ui/config.js");
+  const configJs = read("ui/scripts/config.js");
   const cfgAnchors = [
     "config-view", "config-scope-title", "config-dir", "config-dirty", "config-hint",
     "config-btn-save", "config-btn-apply", "config-btn-cancel", "config-body",
@@ -512,7 +512,7 @@ function runStaticChecks() {
   check("U9", "config-form", missCfg.length === 0,
     `index.html 缺少配置表单锚点: ${missCfg.join(", ")}`);
   check("U9", "config-form",
-    has(html, 'src="config.js"') && has(configJs, "window.ConfigUI =") &&
+    has(html, 'src="scripts/config.js"') && has(configJs, "window.ConfigUI =") &&
       has(commandJs, "ConfigUI?.handleCommand("),
     "config.js 未加载 / 未暴露 ConfigUI / config.js 子动词未在 command.js 路由");
 
@@ -555,9 +555,9 @@ function runStaticChecks() {
   // （顶层 const 只进全局词法环境，不挂 window —— 漏导出时 root() 恒为 null，
   //   表现为"已打开项目却提示未打开项目"。stub 会伪造 window.state，所以必须静态断言。）
   const stateReaders = ["config.js", "mcp.js", "a2a.js", "capability.js"]
-    .filter((f) => has(read("ui/" + f), "window.state"));
+    .filter((f) => has(read("ui/scripts/" + f), "window.state"));
   check("U10", "config-contract",
-    stateReaders.length > 0 && RE_STATE_EXPORT.test(read("ui/main.js")),
+    stateReaders.length > 0 && RE_STATE_EXPORT.test(read("ui/scripts/main.js")),
     `main.js 未导出 window.state，但 ${stateReaders.join(", ")} 依赖它（项目作用域会全部失效）`);
 
   // U14 apply-writeback：产物写回真实项目的链路契约（Agent 工具循环 + 三模式）。
@@ -612,7 +612,7 @@ function runStaticChecks() {
     `帮助源文件不是有效的 markdown（缺标题或表格）: ${badMd.map((f) => f.p).join(", ")}`);
   check("U22", "help-markdown", !has(commandJs, "getHelpText"),
     "command.js 仍在拼接纯文本帮助（getHelpText）——正文应只维护 md 源文件");
-  const mainJs = read("ui/main.js");
+  const mainJs = read("ui/scripts/main.js");
   check("U22", "help-markdown",
     has(mainJs, "async function loadHelpDoc()") && has(mainJs, "markdownToHtml") &&
       has(mainJs, "window.markdownit") && has(mainJs, "help-zh.md") && has(mainJs, "help-en.md"),
@@ -640,9 +640,9 @@ function runStaticChecks() {
     "main.rs 未注册 proc_list / proc_stop（服务面板读不到也停不掉）");
   check("U23", "service-panel",
     ["menu-service", "service-view", "service-body", "service-btn-refresh"]
-      .every((id) => has(html, `id="${id}"`)) && has(html, 'src="service.js"'),
+      .every((id) => has(html, `id="${id}"`)) && has(html, 'src="scripts/service.js"'),
     "index.html 缺少服务菜单 / 服务视图容器 / service.js");
-  const serviceJs = read("ui/service.js");
+  const serviceJs = read("ui/scripts/service.js");
   check("U23", "service-panel",
     ["service.th_pid", "service.th_started", "service.th_cmd"].every((k) => has(serviceJs, k)),
     "服务表的字段必须是 PID / 启动时间 / 完整命令行三项");
@@ -669,7 +669,7 @@ function runStaticChecks() {
   //     · 出口是 open_external（白名单 http/https/mailto + 系统默认处理程序，不走 shell）；
   //     · 前端另有一重捕获阶段拦截，判定表与后端一致（改一处必须同步另一处）。
   const confJson = read("src-tauri/tauri.conf.json");
-  const extJs = read("ui/external.js");
+  const extJs = read("ui/scripts/external.js");
   check("U24", "external-link",
     has(mainRs, "fn build_main_window") && has(mainRs, "on_navigation") &&
       has(mainRs, "on_new_window") && !/"windows"\s*:\s*\[\s*\{/.test(confJson),
@@ -683,7 +683,7 @@ function runStaticChecks() {
       has(mainRs, "ShellExecuteW") && has(mainRs, "open_external,"),
     "外链出口必须是 open_external（白名单 + 系统默认处理程序），且已注册到 invoke_handler");
   check("U24", "external-link",
-    has(html, 'src="external.js"') && has(mainJs, "ExternalLinks?.install") &&
+    has(html, 'src="scripts/external.js"') && has(mainJs, "ExternalLinks?.install") &&
       has(commandJs, 'case "url":') && has(commandJs, '"open_external"'),
     "前端外链链路不完整（external.js 未加载/未安装、命令栏缺 open url、或没接上 open_external）");
   check("U24", "external-link",
@@ -724,7 +724,7 @@ function runStaticChecks() {
   // 链路五环缺一不可：引擎发 plan 事件 → sink emit → session.js 监听并渲染 → main.js 会话分支调用
   // → run 收尾时 settle_steps 把每个步骤都落到终态（否则没轮到派发的步骤会永远停在
   //   ⌛「等待执行」，实测 run agent-20260920-091436 就是 2/3 + 永久沙漏）。
-  const uiMainJs = read("ui/main.js");
+  const uiMainJs = read("ui/scripts/main.js");
   const stylesCss = read("ui/styles.css");
   check("U15", "outline-plan",
     has(sinkRs, 'emit("agent://plan"') &&
@@ -1228,9 +1228,9 @@ function runStaticChecks() {
   //   缺失时**图标换了也不生效**（窗口图标取自它，exe 资源也是它）。
   //   所以这条契约钉四件事：四个矢量变体都在 / 两处字母轮廓必须逐字节相同（防止只手改一份）
   //   / bundle.icon 非空且每个文件真的在磁盘上 / Windows ico 是多尺寸（单尺寸 ico 在任务栏会糊）。
-  const LOGO_FILES = ["ui/logo.svg", "ui/logo-light.svg", "ui/logo-mark.svg", "ui/logo-mono.svg"];
-  const logoSvg = read("ui/logo.svg");
-  const markSvg = read("ui/logo-mark.svg");
+  const LOGO_FILES = ["ui/logo/logo.svg", "ui/logo/logo-light.svg", "ui/logo/logo-mark.svg", "ui/logo/logo-mono.svg"];
+  const logoSvg = read("ui/logo/logo.svg");
+  const markSvg = read("ui/logo/logo-mark.svg");
   // 注意正则要限定 ` d="`：`id="tile"` 里也含 `d="` 子串，宽松匹配会把渐变 id 当成路径。
   const dOf = (s) => (s.match(/\sd="[^"]+"/g) || []).join("|");
   check("U27", "logo-assets",
@@ -1258,7 +1258,7 @@ function runStaticChecks() {
       fs.existsSync(path.join(ROOT, "tools/logo/build_logo.py")),
     "本仓库只做桌面端：cargo tauri icon 顺带生成的 ios/ android/ 不该入库；生成器 tools/logo/build_logo.py 必须在");
   check("U27", "logo-assets",
-    has(html, 'rel="icon"') && has(html, 'href="logo.svg"'),
+    has(html, 'rel="icon"') && has(html, 'href="logo/logo.svg"'),
     "index.html 没挂 favicon（浏览器直开 UI 时页签上是空白图标）");
 
   // U28 session-persistence：会话历史必须活过重启（v0.9）。
@@ -1311,7 +1311,7 @@ function runStaticChecks() {
   //       最后一行没换行"永远看不到；
   //     · xterm 的 `convertEol` 必须有：日志是 LF，而 xterm 里 `\n` 只下移不回列首，
   //       不转换整屏输出会斜成阶梯。
-  const procLogJs = read("ui/proc-log.js");
+  const procLogJs = read("ui/scripts/proc-log.js");
   const zhJson = JSON.parse(read("ui/lang/zh-CN.json"));
   const enJson = JSON.parse(read("ui/lang/en.json"));
   check("U30", "proc-log",
@@ -1324,7 +1324,7 @@ function runStaticChecks() {
     "main.rs 没注册 proc_log_read —— 前端拿不到日志");
   check("U30", "proc-log",
     ["menu-service", "service-view", "proc-log-view", "proc-log-panes"]
-      .every((id) => has(html, `id="${id}"`)) && has(html, 'src="proc-log.js"'),
+      .every((id) => has(html, `id="${id}"`)) && has(html, 'src="scripts/proc-log.js"'),
     "index.html 缺少输出视图容器（proc-log-view / proc-log-panes）或没挂 proc-log.js");
   check("U30", "proc-log",
     has(procLogJs, "convertEol") && has(procLogJs, '"proc_log_read"') &&
@@ -1336,7 +1336,7 @@ function runStaticChecks() {
       /_isProcLog\)\s*return/.test(mainJs),
     "main.js 缺输出标签页分支：切走不停轮询 / 关标签页不 dispose（后台会一直问后端）");
   check("U30", "proc-log",
-    has(read("ui/service.js"), "data-output") && has(read("ui/service.js"), "openLog") &&
+    has(read("ui/scripts/service.js"), "data-output") && has(read("ui/scripts/service.js"), "openLog") &&
       has(commandJs, '"log"') && has(commandJs, "ServiceUI?.openLog"),
     "服务表缺「输出」入口，或命令栏没有 `service log <pid>`");
   check("U30", "proc-log",
@@ -1530,7 +1530,7 @@ async function runSessionChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/session.js"))();
+    new Function(read("ui/scripts/session.js"))();
     const SessionUI = sandbox.window.SessionUI;
 
     // ---- U6：模块导出 + attach 初始态 ----
@@ -1585,7 +1585,7 @@ async function runSessionChecks() {
 }
 
 // ============================================
-// 场景 3：配置表单回放（微型 DOM stub 驱动 ui/config.js）
+// 场景 3：配置表单回放（微型 DOM stub 驱动 ui/scripts/config.js）
 //   U11 config-replay  扫描 → 表单渲染（已知项 + 扫描项 + 继承提示）
 //   U12 config-save    保存只提交改动行；应用提交整表（刷运行时对象）
 //   U13 config-cancel  取消丢弃改动并重扫
@@ -1669,7 +1669,7 @@ async function runConfigModelFailClosedChecks() {
       return s;
     },
   };
-  if (!RE_STATE_EXPORT.test(read("ui/main.js"))) return;
+  if (!RE_STATE_EXPORT.test(read("ui/scripts/main.js"))) return;
   const sandbox = {
     I18N: i18n,
     window: { state: appState, I18N: i18n, ConfigUI: null },
@@ -1699,7 +1699,7 @@ async function runConfigModelFailClosedChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/config.js"))();
+    new Function(read("ui/scripts/config.js"))();
     sandbox.window.ConfigUI.attach();
     await sandbox.window.ConfigUI.handleCommand("form global");
     const html = el("config-body").innerHTML;
@@ -1780,7 +1780,7 @@ async function runConfigChecks() {
   // 契约对齐：面板读 window.state，而 main.js 的顶层 const 不会挂到 window 上，
   // 必须靠 `window.state = state` 显式导出。这里按真实契约对齐 stub —— 没导出就不给
   // window.state，让回放如实暴露"项目作用域失效"，而不是被 stub 凭空喂好掩盖掉。
-  const exportsState = RE_STATE_EXPORT.test(read("ui/main.js"));
+  const exportsState = RE_STATE_EXPORT.test(read("ui/scripts/main.js"));
   if (!exportsState) {
     // 没有 window.state 时 config.js 会直接抛错，先明确记一条失败，别让整个场景崩掉
     check("U11", "config-module", false,
@@ -1869,7 +1869,7 @@ async function runConfigChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/config.js"))();
+    new Function(read("ui/scripts/config.js"))();
     const ConfigUI = sandbox.window.ConfigUI;
     const fns = ["attach", "handleCommand", "render", "stash", "open", "save", "apply", "cancel"];
     check("U11", "config-module", !!ConfigUI && fns.every((f) => typeof ConfigUI[f] === "function"),
@@ -2002,7 +2002,7 @@ async function runConfigChecks() {
  * 配最小 DOM stub + 真 markdown-it + 假 fetch（喂 ui/help-*.md 的真实内容）。
  */
 async function runHelpChecks() {
-  const mainJs = read("ui/main.js");
+  const mainJs = read("ui/scripts/main.js");
   const start = mainJs.indexOf("/** markdown-it 渲染器懒构造");
   const endMark = mainJs.indexOf("// 编辑器 textarea 同步");
   const end = endMark > 0 ? mainJs.lastIndexOf("// ====", endMark) : -1;
@@ -2018,7 +2018,7 @@ async function runHelpChecks() {
   mdCtx.window = mdCtx;
   mdCtx.self = mdCtx;
   require("vm").createContext(mdCtx);
-  require("vm").runInContext(read("ui/markdown-it.min.js"), mdCtx);
+  require("vm").runInContext(read("ui/packages/markdown-it.min.js"), mdCtx);
   const markdownit = mdCtx.window.markdownit;
 
   const elements = new Map();
@@ -2120,7 +2120,7 @@ async function runHelpChecks() {
 }
 
 /**
- * U23 service-replay：服务面板回放 —— 真的加载 ui/service.js，喂两条托管进程，
+ * U23 service-replay：服务面板回放 —— 真的加载 ui/scripts/service.js，喂两条托管进程，
  * 断言三列表格、时间格式（到秒 + h/m/s 时长）、按 pid 停止、以及"离开面板就停刷新"。
  */
 async function runServiceChecks() {
@@ -2212,7 +2212,7 @@ async function runServiceChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/service.js"))();
+    new Function(read("ui/scripts/service.js"))();
     const ServiceUI = sandbox.window.ServiceUI;
     check("U23", "service-replay", !!ServiceUI && typeof ServiceUI.open === "function",
       "service.js 未暴露 ServiceUI.open");
@@ -2269,7 +2269,7 @@ async function runServiceChecks() {
 }
 
 /**
- * U31 editor-virtual-render：编辑器虚拟化 —— 真加载 ui/main.js，喂一个 5000 行的 tab，
+ * U31 editor-virtual-render：编辑器虚拟化 —— 真加载 ui/scripts/main.js，喂一个 5000 行的 tab，
  * 断言「只画了可视窗口」并且「几何不变量没破」。
  *
  * 为什么断言这三样：
@@ -2320,7 +2320,7 @@ async function runEditorChecks() {
   try {
     // 往源码尾部追加导出：main.js 的函数在 new Function 作用域里，外面拿不到
     const src =
-      read("ui/main.js") +
+      read("ui/scripts/main.js") +
       "\nwindow.__ed = { renderPlainCode: renderPlainCode, renderHighlightedCode: renderHighlightedCode," +
       " setupEditorVirtualScroll: setupEditorVirtualScroll, model: () => editorModel };\n";
     // eslint-disable-next-line no-new-func
@@ -2474,7 +2474,7 @@ function runEditorLayoutProbe() {
 /**
  * U47 wide-line-real：宽行只读视图的**真实几何**（真浏览器 + 真 main.js）。
  *
- * 打开单行 283KB 的文件（`ui/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
+ * 打开单行 283KB 的文件（`ui/packages/xterm.js`：283,404 字节、2 行、最长行 283,184 字符 ≈ 2.2e6 px）
  * 曾把编辑器打崩：背板那一刻要塞进一条 28 万字符的 `.code-line`（高亮时还是十万级 span），
  * textarea 里又装着同长度的单行原文 —— 而纵向虚拟化对"整个文件就是一行"完全无效
  * （那一行永远在可视窗口里，必须整行建 DOM）。修法是**宽行只读视图**；
@@ -2541,7 +2541,7 @@ function runSessionTraceLayoutProbe() {
  *      "计划为空 ⇒ 隐藏"是这条单子最初的错法：右键最左标签看不到【关闭左侧】，被当成缺功能报上来。
  */
 async function runTabContextMenuChecks() {
-  const mainSrc = readLf("ui/main.js");
+  const mainSrc = readLf("ui/scripts/main.js");
   const start = mainSrc.indexOf("function closePlan(ids, targetId, mode) {");
   const end = mainSrc.indexOf("\nfunction setupContextMenu(", start);
   check("U45", "tab-context-menu", start >= 0 && end > start,
@@ -2873,7 +2873,7 @@ function runTerminalLayoutProbe() {
 }
 
 /**
- * U30 proc-log-replay：输出面板回放 —— 真加载 ui/service.js + ui/proc-log.js，配上假 xterm
+ * U30 proc-log-replay：输出面板回放 —— 真加载 ui/scripts/service.js + ui/scripts/proc-log.js，配上假 xterm
  * 与假后端，走一遍"服务表点输出 → 增量跟随 → 进程退出收尾"。
  *
  * 断言的是**喂进终端的文字**与**带回去的 offset**，不是"有没有调用某个函数"：
@@ -3013,9 +3013,9 @@ async function runProcLogChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/service.js"))();
+    new Function(read("ui/scripts/service.js"))();
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/proc-log.js"))();
+    new Function(read("ui/scripts/proc-log.js"))();
     const ProcLogUI = sandbox.window.ProcLogUI;
     const ServiceUI = sandbox.window.ServiceUI;
     check("U30", "proc-log-replay", !!ProcLogUI && typeof ProcLogUI.open === "function",
@@ -3115,7 +3115,7 @@ async function runProcLogChecks() {
 }
 
 /**
- * U24 external-link-replay：外链闸门回放 —— 真加载 ui/external.js，喂几条链接按下"点击"，
+ * U24 external-link-replay：外链闸门回放 —— 真加载 ui/scripts/external.js，喂几条链接按下"点击"，
  * 断言：点下去既不导航 WebView（preventDefault）也不静默吃掉，而是走命令系统交给系统浏览器；
  * 白名单之外的 scheme 与自家文档里的非文档路径被拦下并给出说明；锚点与自家文档放行。
  */
@@ -3146,7 +3146,7 @@ async function runExternalLinkChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/external.js"))();
+    new Function(read("ui/scripts/external.js"))();
     const EL = sandbox.window.ExternalLinks;
     check("U24", "external-link-replay", !!EL && typeof EL.install === "function",
       "external.js 未暴露 ExternalLinks.install");
@@ -3226,7 +3226,7 @@ async function runExternalLinkChecks() {
  * toRelativePath / copyToClipboard / handleContextCopyPath 源码（切片 + new Function），不另抄一份。
  */
 async function runContextMenuChecks() {
-  const mainSrc = readLf("ui/main.js");
+  const mainSrc = readLf("ui/scripts/main.js");
   const start = mainSrc.indexOf("function toRelativePath(fullPath) {");
   const anchor = mainSrc.indexOf("async function handleContextCopyPath(");
   const end = anchor >= 0 ? mainSrc.indexOf("\n}\n", anchor) : -1;
@@ -3321,7 +3321,7 @@ async function runContextMenuChecks() {
 
 /**
  * U38 open-project-args：`open project` 的路径参数回放。
- * 真加载 ui/command.js，驱动 handleCommand 走完整分发（哑空白切分入口 → handleOpenCommand），
+ * 真加载 ui/scripts/command.js，驱动 handleCommand 走完整分发（哑空白切分入口 → handleOpenCommand），
  * 断言后端 invoke("open_project") 收到的是**还原后**的路径：
  * ① 下拉形态（main.js escArg 转义过的带引号串）→ 引号剥掉、\\ 还原成单反斜杠；
  * ② 手打带引号 + 含空格路径 → 整段还原；
@@ -3362,7 +3362,7 @@ async function runOpenProjectArgsChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/command.js") +
+    new Function(read("ui/scripts/command.js") +
       "\n;globalThis.__CmdAPI = { handleCommand };")();
     const handleCommand = globalThis.__CmdAPI.handleCommand;
 
@@ -3428,7 +3428,7 @@ async function runOpenProjectArgsChecks() {
  * 门禁照样绿。"绿得没有理由"就是这么来的。
  */
 async function runFailoverChecks() {
-  const configJs = read("ui/config.js");
+  const configJs = read("ui/scripts/config.js");
   const bridgeRs = read("src-tauri/src/agent/config_bridge.rs");
   const engineCfg = read("crates/harness-engine/src/config.rs");
   const prodEnd = bridgeRs.indexOf("#[cfg(test)]");
@@ -3486,7 +3486,7 @@ async function runFailoverChecks() {
  * 这里把「表单可选项 = 引擎合法值 = 引擎真实现的协议要素」三段钉在一起。
  */
 async function runAnthropicFormatChecks() {
-  const configJs = read("ui/config.js");
+  const configJs = read("ui/scripts/config.js");
   const llmRs = read("crates/harness-engine/src/llm.rs");
   const engineCfg = read("crates/harness-engine/src/config.rs");
   const zh = JSON.parse(read("ui/lang/zh-CN.json"));
@@ -3557,7 +3557,7 @@ function cssRule(css, sel) {
  */
 async function runSessionTraceChecks() {
   // ---- 静态契约：三处缺一不可 ----
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
   const css = read("ui/styles.css");
   const sessRs = read("src-tauri/src/agent/sessions.rs");
 
@@ -3657,7 +3657,7 @@ async function runSessionTraceChecks() {
       "跑起来的那一刻气泡里没有轨迹小节（用户又只能看见三个点）");
 
     // 真事件：阶段 → 计划 → 一次成功调用（长行）→ 一次失败调用 → 收尾
-    const LONG = "ui/session.js（905-1145）" + "很长的补充说明".repeat(12);
+    const LONG = "ui/scripts/session.js（905-1145）" + "很长的补充说明".repeat(12);
     const fire = (name, payload) => handlers.get(name)({ payload });
     fire("agent://stage", { stage: "agent", status: "start", detail: "工具循环（最多 40 轮，写入策略：Confirm）" });
     fire("agent://plan", { steps: [{ id: 1, title: "读现有渲染" }, { id: 2, title: "加轨迹" }] });
@@ -3791,7 +3791,7 @@ async function runSessionTraceChecks() {
  * 行为侧（真点两次）在 U41 的活体 wrap 里验，见 runSessionTraceChecks 末尾。
  */
 function runChatToolbarChecks() {
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
   const css = read("ui/styles.css");
   check("U58", "single-run-button-src",
     sessJs.includes('class="agent-btn agent-btn--run session-run" data-run') &&
@@ -3826,7 +3826,7 @@ function runChatToolbarChecks() {
  *      选一个可能跑不通的模型。
  */
 function runModelDropdownChecks() {
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
   check("U59", "model-dropdown", sessJs.includes('class="session-model-select" data-model'),
     "会话工具栏里没有模型下拉框（data-model）");
   check("U59", "model-dropdown",
@@ -3864,7 +3864,7 @@ function runModelDropdownChecks() {
  * 录音一个字节都不出本机 —— 这比「发给模型」反而是好处。判据钉的就是这条链路**不许假装**。
  */
 function runVoiceButtonChecks() {
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
   check("U60", "voice-button", sessJs.includes('data-mic') && sessJs.includes('session-mic--rec'),
     "工具栏没有录音按钮（data-mic / session-mic--rec 样式钩子）");
   check("U60", "voice-button-modality-gated",
@@ -3928,7 +3928,7 @@ async function runConfigSmearChecks() {
       return s;
     },
   };
-  if (!RE_STATE_EXPORT.test(read("ui/main.js"))) return;
+  if (!RE_STATE_EXPORT.test(read("ui/scripts/main.js"))) return;
   const schema = [
     { path: "sandbox.image", kind: "text", default: "rust:1", ui: true, options: [] },
     { path: "verify.python_bin", kind: "text", default: "python", ui: true, options: [] },
@@ -3963,7 +3963,7 @@ async function runConfigSmearChecks() {
   Object.assign(globalThis, sandbox);
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/config.js"))();
+    new Function(read("ui/scripts/config.js"))();
     const ConfigUI = sandbox.window.ConfigUI;
     ConfigUI.attach();
     await ConfigUI.handleCommand("form global");
@@ -4013,7 +4013,7 @@ async function runConfigSmearChecks() {
  */
 function runConfigEventChecks() {
   const mainRs = read("src-tauri/src/main.rs");
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
 
   check("U64", "config-changed-emitted",
     /fn emit_config_changed/.test(mainRs) &&
@@ -4065,7 +4065,7 @@ function runConfigEventChecks() {
 function runVoiceThreadChecks() {
   const mainRs = read("src-tauri/src/main.rs");
   const storeRs = read("crates/harness-engine/src/modelstore.rs");
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
 
   check("U63", "voice-status-async",
     /async fn voice_status\(\)/.test(mainRs) && /spawn_blocking\(\|\|/.test(mainRs),
@@ -4115,7 +4115,7 @@ function runVoiceThreadChecks() {
  * —— 手改 toml 绕过了表单也不至于卡死。
  */
 function runConfigModelChecks() {
-  const cfgJs = read("ui/config.js");
+  const cfgJs = read("ui/scripts/config.js");
   const mainRs = read("src-tauri/src/main.rs");
   const llmRs = read("crates/harness-engine/src/llm.rs");
 
@@ -4171,7 +4171,7 @@ function runConfigModelChecks() {
  *      （中文音频转出 "Thank you."），**不报错、只能靠实测抓**。所以这条要机械化。
  */
 function runVoiceTranscribeChecks() {
-  const sessJs = read("ui/session.js");
+  const sessJs = read("ui/scripts/session.js");
   const mainRs = read("src-tauri/src/main.rs");
   const asrRs = read("crates/harness-engine/src/voice/asr.rs");
   const fetchRs = read("crates/harness-engine/src/voice/fetch.rs");
@@ -4229,8 +4229,8 @@ function runVoiceTranscribeChecks() {
 }
 
 async function runBucketPanelChecks() {
-  const commandJs = readLf("ui/command.js");
-  const mainSrc = readLf("ui/main.js");
+  const commandJs = readLf("ui/scripts/command.js");
+  const mainSrc = readLf("ui/scripts/main.js");
   const pathsRs = readLf("src-tauri/src/paths.rs");
   const mainRs = readLf("src-tauri/src/main.rs");
 
@@ -4292,7 +4292,7 @@ async function runI18nSweepChecks() {
   ];
   const offenders = [];
   for (const f of files) {
-    readLf("ui/" + f)
+    readLf("ui/scripts/" + f)
       .split("\n")
       .forEach((line, i) => {
         const s = line.trim();
@@ -4335,7 +4335,7 @@ async function runHighlightPluginChecks() {
     "index.html 里出现了 .tok-* 规则");
 
   // ---- ② 静态：语言的唯一来源在后端
-  const mjs = readLf("ui/main.js");
+  const mjs = readLf("ui/scripts/main.js");
   check("U53", "language-resolved-server-side",
     mjs.includes('invoke("highlight_plugins")') && mjs.includes("path: tab?.path || null"),
     "前端没有向插件注册表要语言表，或没把 path 交给后端解析语言");
@@ -4419,7 +4419,7 @@ async function runHighlightPluginChecks() {
         "console",
         "I18N",
         "L",
-        readLf("ui/main.js") +
+        readLf("ui/scripts/main.js") +
           "\n;window.__probe = { loadHighlightPlugins, fileIcon, get state() { return state; } };"
       )(sandboxWin, sandboxDoc, console, sandboxWin.I18N, L);
       await sandboxWin.__probe.loadHighlightPlugins();
@@ -4524,7 +4524,7 @@ async function runPaneExclusiveChecks() {
   try {
     // main.js 的函数在 new Function 作用域里，外面拿不到 —— 尾部追加导出
     const src =
-      read("ui/main.js") +
+      read("ui/scripts/main.js") +
       "\nwindow.__pane = { showPane: showPane, hidePane: hidePane, EDITOR_PANES: EDITOR_PANES," +
       " showConfigView: showConfigView, showServiceView: showServiceView," +
       " showSessionView: showSessionView, hideConfigView: hideConfigView };\n";
@@ -4596,8 +4596,8 @@ async function runPaneExclusiveChecks() {
  */
 async function runTerminalTargetChecks() {
   const html = readLf("ui/index.html");
-  const mainSrc = readLf("ui/main.js");
-  const cmdSrc = readLf("ui/command.js");
+  const mainSrc = readLf("ui/scripts/main.js");
+  const cmdSrc = readLf("ui/scripts/command.js");
   const rustMain = readLf("src-tauri/src/main.rs");
   const rustCfg = readLf("src-tauri/src/config.rs");
   const zh = JSON.parse(readLf("ui/lang/zh-CN.json"));
@@ -4659,14 +4659,15 @@ async function runTerminalTargetChecks() {
  * 判据：跨文件顶层 const/let/class 不许重名；全局 L 只许有一处定义，且必须挂 window。
  */
 function runStartupScopeChecks() {
-  const vendored = ["xterm.js", "markdown-it.min.js"];
+  // 一方脚本现在住在 `ui/scripts/`（vendored 的在 `ui/packages/`，天然不在这一层）——
+  // 顶层声明冲突只在**同一次页面加载的经典脚本**之间发生，所以只扫这一层就够。
   const files = fs
-    .readdirSync(path.join(ROOT, "ui"))
-    .filter((f) => f.endsWith(".js") && !vendored.includes(f))
+    .readdirSync(path.join(ROOT, "ui", "scripts"))
+    .filter((f) => f.endsWith(".js"))
     .sort();
   const owner = new Map(); // 名字 -> [文件]
   for (const f of files) {
-    const src = read("ui/" + f);
+    const src = read("ui/scripts/" + f);
     for (const m of src.matchAll(/^(?:const|let|class|var)\s+([A-Za-z_$][\w$]*)/gm)) {
       const n = m[1];
       if (!owner.has(n)) owner.set(n, []);
@@ -4682,8 +4683,8 @@ function runStartupScopeChecks() {
       dup.map(([n, list]) => `\n      ${n}: ${list.join(", ")}`).join("") +
       "\n      改法：只留一处定义；共享的挂到 window 上（如 window.L）",
   );
-  const cmdJs = read("ui/command.js");
-  const mainJs = read("ui/main.js");
+  const cmdJs = read("ui/scripts/command.js");
+  const mainJs = read("ui/scripts/main.js");
   check(
     "U56",
     "startup-scope",
@@ -4728,9 +4729,9 @@ async function runMemoryPanelChecks() {
   //   七环：面板存在且调真命令 · 只走唯一入口 showPane（否则和服务面板并排各半，bug 3 同病）·
   //   命令动词注册 · 文案两种语言齐（U49 的老病）· 缺模型要说人话 · 后端注册 ·
   //   **记忆不许被插件化**（用户拍板：核心模块）。
-  const memJs = read("ui/memory.js");
-  const panelMainJs = read("ui/main.js");
-  const panelCmdJs = read("ui/command.js");
+  const memJs = read("ui/scripts/memory.js");
+  const panelMainJs = read("ui/scripts/main.js");
+  const panelCmdJs = read("ui/scripts/command.js");
   const panelMainRs = read("src-tauri/src/main.rs");
   check(
     "U54",
@@ -4741,7 +4742,7 @@ async function runMemoryPanelChecks() {
       has(memJs, "mem_as_of") &&
       has(memJs, "mem_receipts") &&
       has(memJs, "mem_rebuild"),
-    "ui/memory.js 必须存在且调齐 mem_status/mem_why/mem_as_of/mem_receipts/mem_rebuild",
+    "ui/scripts/memory.js 必须存在且调齐 mem_status/mem_why/mem_as_of/mem_receipts/mem_rebuild",
   );
   check(
     "U54",
@@ -4772,7 +4773,7 @@ async function runMemoryPanelChecks() {
   check(
     "U54",
     "memory-panel",
-    has(read("ui/session.js"), "sessionId") &&
+    has(read("ui/scripts/session.js"), "sessionId") &&
       has(read("src-tauri/src/agent/mod.rs"), "session_id: Option<String>"),
     "UI 必须把会话 id 传给 agent_reply（否则转录压实的收据坐标只能退回到任务前缀）",
   );
@@ -4795,23 +4796,23 @@ async function runMemoryPanelChecks() {
  * U52 backend-msg-i18n（bug 1/2 的收尾门禁）：**后端来的消息在英文界面下不露中文**。
  *
  * 后端（Rust）有 200 多条中文错误文案，带插值、散在宿主与引擎两处。把它们改成"错误码 + 参数"
- * 是一大改，所以翻译落在**显示层唯一收口**（`setStatus`，见 `ui/errors.js`）。
+ * 是一大改，所以翻译落在**显示层唯一收口**（`setStatus`，见 `ui/scripts/errors.js`）。
  * 代价是"这张表会腐烂" —— 没人会记得加了新错误就去补一条翻译，而腐烂**没有任何症状**
  * （只在英文界面下偶尔冒出一句中文）。
  *
  * 所以这条门禁按后端源码**逐条**要求：每个会返回给前端的 `Err(...)` 中文文案，
  * 都必须能被翻译规则覆盖（`translate(原文) !== 原文`）。漏一条就红，并把它打出来。
- * 扫描口径与 ui/errors.js 顶部注释一致：只看非测试代码里的 `Err(` / `map_err` / `ok_or` / `bail!`，
+ * 扫描口径与 ui/scripts/errors.js 顶部注释一致：只看非测试代码里的 `Err(` / `map_err` / `ok_or` / `bail!`，
  * 跳过日志与断言（那两类不进界面）。
  */
 async function runBackendMsgChecks() {
-  // 页面里加载 ui/errors.js，拿它的 translate
+  // 页面里加载 ui/scripts/errors.js，拿它的 translate
   const win = { I18N: { t: (k) => k, getLang: () => "zh-CN" } };
   const saved = [["window", globalThis.window]];
   Object.assign(globalThis, { window: win });
   try {
     // eslint-disable-next-line no-new-func
-    new Function(read("ui/errors.js"))();
+    new Function(read("ui/scripts/errors.js"))();
   } finally {
     for (const [k, v] of saved) {
       if (v === undefined) delete globalThis[k];
@@ -4823,7 +4824,7 @@ async function runBackendMsgChecks() {
     "U52",
     "backend-msg-module",
     !!api && typeof api.translate === "function",
-    "ui/errors.js 没导出 BackendMsg.translate（被改名 / 没被 index.html 加载？）"
+    "ui/scripts/errors.js 没导出 BackendMsg.translate（被改名 / 没被 index.html 加载？）"
   );
   if (!api) return;
 
@@ -4831,7 +4832,7 @@ async function runBackendMsgChecks() {
   check(
     "U52",
     "backend-msg-hooked",
-    has(readLf("ui/main.js"), "BackendMsg.translate(") &&
+    has(readLf("ui/scripts/main.js"), "BackendMsg.translate(") &&
       has(readLf("ui/index.html"), "errors.js"),
     "翻译层没接上显示收口（setStatus）或页面没加载 errors.js —— 表再全也不会生效"
   );

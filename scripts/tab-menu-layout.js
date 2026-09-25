@@ -57,7 +57,7 @@ if (!browser) {
   process.exit(0);
 }
 
-const mainSrc = read("ui/main.js");
+const mainSrc = read("ui/scripts/main.js");
 const start = mainSrc.indexOf("function closePlan(ids, targetId, mode) {");
 const end = mainSrc.indexOf("\nfunction setupContextMenu(", start);
 if (start < 0 || end <= start) {

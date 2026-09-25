@@ -72,7 +72,7 @@ content = """
 - 菜单栏「能力 ▾」（项目 / 配置 / **能力** / 语言 / 帮助），四个子菜单
   `data-cap="mcp|a2a|tools|skills"`，点击 → 激活导航「能力」面板并切到对应子页。
 - 导航区**单个**「能力」tab：面板内部以子标签（MCP / A2A / 工具 / 技能，
-  `.cap-sub-tab` / `#cap-sub-*`）切换四个子面板（`ui/capability.js`，
+  `.cap-sub-tab` / `#cap-sub-*`）切换四个子面板（`ui/scripts/capability.js`，
   `ToolsUI` / `SkillsUI`）——四个独立 tab 会让导航膨胀到 9 个，收拢为一个。
 - **智能体（agent）只在打开项目后可用**（引擎任务依赖项目上下文）：
   `setNavigatorMode("projects")` 隐藏「智能体」tab 并收起控制台；

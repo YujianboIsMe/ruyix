@@ -887,7 +887,7 @@
     rerenderRun();
   }
 
-  // Agent 输出是 markdown：markdown-it 渲染（vendor 自 ui/markdown-it.min.js，
+  // Agent 输出是 markdown：markdown-it 渲染（vendor 自 ui/packages/markdown-it.min.js，
   // html:false —— 产物里的原生 HTML 一律转义，与 esc 同一安全底线）
   const md = window.markdownit
     ? window.markdownit({ html: false, breaks: true, linkify: true })

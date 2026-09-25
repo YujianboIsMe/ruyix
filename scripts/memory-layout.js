@@ -244,8 +244,8 @@ html = html.replace(
     `<style>${css}</style>` +
     `<script>${i18nStub}</script>` +
     `<script>${stubs}</script>` +
-    `<script>eval(${enc(read("ui/main.js"))})</script>` +
-    `<script>eval(${enc(read("ui/memory.js"))})</script>` +
+    `<script>eval(${enc(read("ui/scripts/main.js"))})</script>` +
+    `<script>eval(${enc(read("ui/scripts/memory.js"))})</script>` +
     `<script>${driver}</script></body>`
 );
 

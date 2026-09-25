@@ -33,7 +33,7 @@ const QUIET = process.argv.includes("--quiet");
 const CLI_FILES = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 
 /** 第三方 vendored 库保持原样，不校验 */
-const VENDORED = new Set(["ui/xterm.js", "ui/xterm.css", "ui/markdown-it.min.js"]);
+const VENDORED = new Set(["ui/packages/xterm.js", "ui/packages/xterm.css", "ui/packages/markdown-it.min.js"]);
 
 const EXTS = [".js", ".css", ".html", ".json"];
 

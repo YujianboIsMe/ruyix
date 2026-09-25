@@ -80,7 +80,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
 | 10,000 | 78 | 161 | 3.8ms | 6.3ms |
 | 25,000 | 78 | 161 | 9.1ms | 13.0ms |
 
-> 改动位置：`ui/main.js` 的 `setEditorContent` / `paintEditorWindow` / `syncCodeWidth` /
+> 改动位置：`ui/scripts/main.js` 的 `setEditorContent` / `paintEditorWindow` / `syncCodeWidth` /
 > `setupEditorVirtualScroll`（三个渲染入口 `renderHighlightedCode`、`renderPlainCode`、
 > `renderTerminalOutput` **都必须**走 `setEditorContent`）。
 > 门禁 `node scripts/ui-smoke.js` 的 U31 覆盖行为与样式两侧，U32 覆盖"真实布局"（滚动条 /
@@ -91,7 +91,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
 > **任一行视觉列 > 2000 列**（`EDITOR_WIDE_MAX_COLS`，判据 `isWideText`）→ 整个标签页进入
 > **宽行只读视图**，容器宽**不再**等于内容宽。这是唯一被允许开口子的地方。
 
-为什么必须开口子：`ui/xterm.js`（283,404 字节、**2 行**、最长行 283,184 字符 ≈ 2.2e6 px）
+为什么必须开口子：`ui/packages/xterm.js`（283,404 字节、**2 行**、最长行 283,184 字符 ≈ 2.2e6 px）
 一打开就把编辑器打崩。注意变量**不是"文件大"**：同样 28 万字节，`agent.rs`（3,586 行、
 最长行 295 字符）打开毫无问题 —— 差的是**最长行**（2.2e6 px vs 2.3e3 px，960 倍）。
 
@@ -141,7 +141,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
 6. java文件（`.java`）
 
 > 新增语言的落地位置：`src-tauri/Cargo.toml` 的 arborium `lang-*` feature、
-> `ui/main.js` 的 `extToLanguage()`（扩展名 → arborium 语言名）与 `fileIcon()`（标签页/文件树图标）。
+> `ui/scripts/main.js` 的 `extToLanguage()`（扩展名 → arborium 语言名）与 `fileIcon()`（标签页/文件树图标）。
 > 三者缺一，表现为"打开文件没有高亮"。
 
 ### 载荷形状：`{ tags, lines }`（不回传正文）

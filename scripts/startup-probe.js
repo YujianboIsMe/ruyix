@@ -12,7 +12,7 @@
  * 为什么现有门禁全都漏了它（这是本探针存在的理由）：
  *   · ui-smoke 的面板回放把脚本 `eval()` 进 Node —— eval 有自己的一层作用域，撞不上；
  *   · 布局探针（memory-layout.js 等）更彻底：先把 index.html 的 <script> 全删掉，再
- *     `eval(read("ui/main.js"))` —— 既不加载 command.js，也不让**浏览器**去求值脚本，
+ *     `eval(read("ui/scripts/main.js"))` —— 既不加载 command.js，也不让**浏览器**去求值脚本，
  *     等于把病灶藏起来。它们量的是几何，不是"这份文档能不能起来"。
  *   只有"按 index.html 的真实顺序、把真实的那些文件交给真浏览器当经典脚本执行"才看得见。
  *
@@ -76,14 +76,16 @@ say(
 );
 say(dup.length === 0, `A1b 没有重复 include` + (dup.length ? ` —— 重复: ${dup.join(", ")}` : ""));
 
+// 一方脚本住在 `ui/scripts/`（vendored 在 `ui/packages/`）——清单从目录来，
+// 这样"新增一个一方脚本却忘了挂进 index.html"仍然会被 A2 抓住。
 const firstParty = fs
-  .readdirSync(UI)
+  .readdirSync(path.join(UI, "scripts"))
   .filter((f) => f.endsWith(".js") && !VENDORED.includes(f))
   .sort();
-const unwired = firstParty.filter((f) => !srcs.includes(f));
+const unwired = firstParty.filter((f) => !srcs.includes("scripts/" + f));
 say(
   unwired.length === 0,
-  `A2  ui/ 下每个一方脚本都被 index.html 引用（${firstParty.length} 个）` +
+  `A2  ui/scripts/ 下每个一方脚本都被 index.html 引用（${firstParty.length} 个）` +
     (unwired.length ? ` —— 漏挂: ${unwired.join(", ")}` : "")
 );
 

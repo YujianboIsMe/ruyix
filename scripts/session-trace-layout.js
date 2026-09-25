@@ -7,7 +7,7 @@
  * 在 Node 的微型 DOM 桩里根本量不到（没有布局引擎）。它已经在别处出过事故：
  * 编辑器那对滚动条、光标与字形错位，全是同一类"桩里量不到"的坏。
  *
- * 做法：把**真实的** ui/index.html（剥掉 <script>/<link>）+ ui/styles.css + ui/session.js
+ * 做法：把**真实的** ui/index.html（剥掉 <script>/<link>）+ ui/styles.css + ui/scripts/session.js
  * 拼成一个自包含页面，在无头 Edge 里打开；用真 Tauri 事件桩把会话跑到"跑着呢"那一帧
  * （`agent_reply` 挂着不兑现），再喂几条真事件，最后逐元素量 offset/client/scroll。
  *
@@ -58,7 +58,7 @@ let html = read("ui/index.html")
   .replace(/<link[^>]*>/g, "");
 const css = read("ui/styles.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
-const sessionSrc = read("ui/session.js");
+const sessionSrc = read("ui/scripts/session.js");
 
 const driver = `
 (async function () {
@@ -120,7 +120,7 @@ const driver = `
     for (let i = 0; i < 30; i++) await Promise.resolve();
 
     // 喂真事件：阶段 / 计划 / 两条长调用 / 一条失败 / 收尾
-    const LONG = "ui/session.js（905-1145）" + "很长的补充说明".repeat(12);
+    const LONG = "ui/scripts/session.js（905-1145）" + "很长的补充说明".repeat(12);
     const fire = (n, p) => handlers.get(n)({ payload: p });
     fire("agent://stage", { stage: "agent", status: "start", detail: "工具循环（最多 40 轮，写入策略：Confirm）" });
     fire("agent://plan", { steps: [{ id: 1, title: "读现有渲染" }, { id: 2, title: "加轨迹" }] });

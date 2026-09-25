@@ -61,7 +61,7 @@
 
 正文不再写在 `index.html` 里（原手写表格）、也不再由 `command.js` 拼纯文本
 （原 `getHelpText()` 已删）——要改文案就改 md 文件。渲染器沿用会话气泡那个
-vendor 的 `ui/markdown-it.min.js`（`html: false`，不执行内嵌 HTML）。
+vendor 的 `ui/packages/markdown-it.min.js`（`html: false`，不执行内嵌 HTML）。
 
 帮助页内容：
 1. 命令系统
@@ -125,7 +125,7 @@ stdout + stderr 重定向进去，`ProcInfo.log` 连绝对路径都带回来了�
 | 层 | 位置 | 职责 |
 |:--:|------|------|
 | 兜底 | `src-tauri/src/main.rs::nav_verdict` + 窗口的 `on_navigation` | 任何来源的导航都要过它（`a` 标签 / `location.href` / form / `window.open` / 以后某个忘了拦的角落） |
-| 显式 | `ui/external.js`（捕获阶段点 `click` / `auxclick`） | 在按下那一刻就 `preventDefault`，把"打开链接"变成"交给系统浏览器"，并给拦下的链接一句说明 |
+| 显式 | `ui/scripts/external.js`（捕获阶段点 `click` / `auxclick`） | 在按下那一刻就 `preventDefault`，把"打开链接"变成"交给系统浏览器"，并给拦下的链接一句说明 |
 
 两个后果值得记住：
 

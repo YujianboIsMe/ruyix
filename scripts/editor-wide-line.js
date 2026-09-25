@@ -2,12 +2,12 @@
 /**
  * 编辑器**宽行只读视图**探针（真浏览器结构/几何门禁，v0.13；需要本机装了 Edge/Chromium）
  *
- * 为什么需要它：`ui/xterm.js`（283,404 字节、**2 行**、最长行 283,184 字符 ≈ 2.2e6 px）
+ * 为什么需要它：`ui/packages/xterm.js`（283,404 字节、**2 行**、最长行 283,184 字符 ≈ 2.2e6 px）
  * 一打开就把编辑器打崩。纵向虚拟化救不了 —— 那里只有一行，"可见行"就是那一行本身。
  * 修法是宽行只读视图：超长行切成显示段、textarea 退出布局、顶部加一条不编号的虚拟横幅。
  * 这几件事**全都只存在于布局引擎里**（Node 的 DOM 桩量不到），所以门禁必须是真浏览器。
  *
- * 做法：把**真实的** ui/index.html（剥 <script>/<link>）+ ui/styles.css + ui/main.js
+ * 做法：把**真实的** ui/index.html（剥 <script>/<link>）+ ui/styles.css + ui/scripts/main.js
  * 拼成一个自包含页面（main.js 的引导块剥掉，只借函数），在无头 Edge 里跑四个臂：
  *
  *   臂 1  2000 列   → **不该**触发（阈值是「> 2000」）
@@ -69,7 +69,7 @@ const css = read("ui/styles.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
 
 // main.js 的引导块剥掉：只借函数声明，不要它去初始化整个应用（没有 Tauri 后端）
-const mainSrc = read("ui/main.js").replace(
+const mainSrc = read("ui/scripts/main.js").replace(
   /if \(document\.readyState === "loading"\) \{[\s\S]*?initApp\(\);[\s\S]*?\n\}/,
   "/* 引导块被探针剥掉 */"
 );

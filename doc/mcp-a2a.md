@@ -31,7 +31,7 @@ ruyix (mcp.rs McpManager)
 **命令**（7 个）：`mcp_servers / mcp_add_server / mcp_remove_server / mcp_start /
 mcp_stop / mcp_tools / mcp_call_tool`。
 
-**前端**：导航「MCP」面板（`ui/mcp.js`）——服务器列表（启停态/工具数）、添加表单、
+**前端**：导航「MCP」面板（`ui/scripts/mcp.js`）——服务器列表（启停态/工具数）、添加表单、
 连接/断开、工具列表、调用表单与结果区；命令动词 `mcp [list | call <srv> <tool> {json}]`。
 
 **测试**：配置合并纯函数 + tools 解析；live 测试 `mcp_live_python_echo_server`
@@ -59,7 +59,7 @@ mcp_stop / mcp_tools / mcp_call_tool`。
 
 **命令**（4 个）：`a2a_agents / a2a_discover / a2a_remove / a2a_send`。
 
-**前端**：导航「A2A」面板（`ui/a2a.js`）——agent 卡片列表（技能 chips）、发现表单、
+**前端**：导航「A2A」面板（`ui/scripts/a2a.js`）——agent 卡片列表（技能 chips）、发现表单、
 任务委托（状态行 + 结果区）；命令动词 `a2a [list | send <name> <text>]`。
 
 **测试**：card 映射 / 文本提取优先级 / 终态判定纯函数；`send_task` 走本地

@@ -178,7 +178,7 @@ ruyix 集成的 agent 引擎（`crates/harness-engine`）**没有自己的配置
 
 **键集是单源的**：哪些键、什么类型、默认值多少，**只有引擎自己知道** ——
 由 `harness-engine/src/config.rs::schema()` 从 `AppConfig::default()` 推导出来。
-宿主桥（`src-tauri/src/agent/config_bridge.rs`）和配置表单（`ui/config.js`）
+宿主桥（`src-tauri/src/agent/config_bridge.rs`）和配置表单（`ui/scripts/config.js`）
 都从 `schema()` 派生，所以引擎新增一个字段 = 表单里自动多一行、桥自动能读到，
 **不存在"引擎加了键、宿主忘了同步"这种漂移**（这正是旧设计的病根）。
 
@@ -343,4 +343,4 @@ files_count = 312
 `config_schema()` → `Vec<KeySpec>`（引擎的键 schema；表单据此渲染 `harness.*` 分组下的行）
 
 实现见 `src-tauri/src/config.rs`（通用读写）与 `src-tauri/src/agent/config_bridge.rs`（引擎桥），
-前端见 `ui/config.js`。
+前端见 `ui/scripts/config.js`。

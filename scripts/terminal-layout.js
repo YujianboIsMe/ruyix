@@ -67,7 +67,7 @@ const NARROW = 720; // 缩小后的宽度
 let html = read("ui/index.html")
   .replace(/<script[\s\S]*?<\/script>/g, "")
   .replace(/<link[^>]*>/g, "");
-const css = read("ui/styles.css") + "\n" + read("ui/xterm.css");
+const css = read("ui/styles.css") + "\n" + read("ui/packages/xterm.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
 
 // 桩：Tauri（记录 pty_* 调用）+ I18N（不拉语言文件）。必须在 main.js 之前执行。
@@ -182,8 +182,8 @@ html = html.replace(
   () =>
     `<style>${css}</style>` +
     `<script>${stubs}</script>` +
-    `<script>eval(${enc(read("ui/xterm.js"))})</script>` +
-    `<script>eval(${enc(read("ui/main.js"))})</script>` +
+    `<script>eval(${enc(read("ui/packages/xterm.js"))})</script>` +
+    `<script>eval(${enc(read("ui/scripts/main.js"))})</script>` +
     `<script>${driver}</script></body>`
 );
 

@@ -1,4 +1,4 @@
-<img src="ui/logo.svg" width="112" alt="RYX — ruyix" />
+<img src="ui/logo/logo.svg" width="112" alt="RYX — ruyix" />
 
 # ruyix
 
@@ -100,7 +100,7 @@ token 配色全在插件里，IDE 只提供把它跑起来的机制。所以有�
 
 ### 其他说明
 
-- 仓库内第三方内容版权归其原作者，遵循各自许可证（如 vendored 的 `ui/xterm.js`、`ui/xterm.css` 为 MIT）
+- 仓库内第三方内容版权归其原作者，遵循各自许可证（如 vendored 的 `ui/packages/xterm.js`、`ui/packages/xterm.css` 为 MIT）
 - 感谢原作者的开源贡献
 - 如对来源或署名有异议，请提 issue 联系更正
 

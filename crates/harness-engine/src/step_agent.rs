@@ -15,7 +15,7 @@
 //!    仍留在覆盖层里（与 `settle_steps` 的"文件全落地就算数"一致）。只有"致命模型错误"
 //!    上抛 `Err`，由父循环决定是中断整个 run 还是记一条失败 —— 这与主循环今天的语义相同。
 //!
-//! 本模块**不发 `sink.step`**：`ui/session.js` 用一维 index（`s._plan[index-1]`）认步骤，
+//! 本模块**不发 `sink.step`**：`ui/scripts/session.js` 用一维 index（`s._plan[index-1]`）认步骤，
 //! 子步骤自报事件会撞掉父的 index。步骤进度由父循环在派发前/返回后统一发。
 
 use crate::agent::{

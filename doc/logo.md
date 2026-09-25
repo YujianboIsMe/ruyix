@@ -16,10 +16,10 @@ X 的两条斜线与 Y 的两臂同倾角 —— 三个字要是一套东西，�
 
 | 产物 | 用途 |
 |---|---|
-| `ui/logo.svg` | 应用图标（深底）—— 主用，README 与 favicon 都用它 |
-| `ui/logo-light.svg` | 浅底版，给浅色文档 / 白底投影稿用 |
-| `ui/logo-mark.svg` | 只有字母（透明底、带渐变），放界面内用 |
-| `ui/logo-mono.svg` | 只有字母、`stroke="currentColor"`，跟着父元素染色 |
+| `ui/logo/logo.svg` | 应用图标（深底）—— 主用，README 与 favicon 都用它 |
+| `ui/logo/logo-light.svg` | 浅底版，给浅色文档 / 白底投影稿用 |
+| `ui/logo/logo-mark.svg` | 只有字母（透明底、带渐变），放界面内用 |
+| `ui/logo/logo-mono.svg` | 只有字母、`stroke="currentColor"`，跟着父元素染色 |
 | `src-tauri/icons/*` | Tauri 要的那一整套 PNG / ICO / ICNS（桌面端） |
 
 ```bash
@@ -34,7 +34,7 @@ python tools/logo/build_logo.py --check    # 只校验 SVG 是否与几何一致
 ### 重新生成 Tauri 图标
 
 ```bash
-cargo tauri icon ui/logo.svg -o src-tauri/icons
+cargo tauri icon ui/logo/logo.svg -o src-tauri/icons
 ```
 
 `cargo tauri icon` 认 SVG（内部走 resvg），所以**不需要**中间 PNG。

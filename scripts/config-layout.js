@@ -10,7 +10,7 @@
  * 静态门禁守不住这个（它只能守住"别写 innerHTML"），所以必须真跑一遍。
  *
  * 做法：把**真实的** ui/index.html（剥掉 <script>/<link>）+ ui/styles.css +
- * ui/config.js + 真实的 zh-CN.json 拼成一个自包含页面，在无头 Edge 里喂一份
+ * ui/scripts/config.js + 真实的 zh-CN.json 拼成一个自包含页面，在无头 Edge 里喂一份
  * 接近真机的配置 schema（25 个键 → 十几个块），然后：
  *
  * 判据（任何一条不成立即退出码 1）：
@@ -58,7 +58,7 @@ let html = read("ui/index.html")
   .replace(/<link[^>]*>/g, "");
 const css = read("ui/styles.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
-const cfgSrc = read("ui/config.js");
+const cfgSrc = read("ui/scripts/config.js");
 // 注意是 **JSON.parse 之后**再嵌：直接把文件文本嵌进去，页面里拿到的是一个字符串，
 // 查键永远落空 → 所有文案静默退化成原始键名，探针却"看起来在跑"。
 const zh = JSON.parse(read("ui/lang/zh-CN.json"));

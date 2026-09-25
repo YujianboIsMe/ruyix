@@ -198,7 +198,7 @@ Uncaught SyntaxError: Identifier 'L' has already been declared (at main.js:1:1)
 | 门禁 | 为什么看不见 |
 |---|---|
 | `ui-smoke` 面板回放 | 把脚本 `eval()` 进 Node —— **eval 有自己的一层作用域**，两个文件各自 eval 也不会撞 |
-| `scripts/memory-layout.js` 等布局探针 | 更彻底：先把 `index.html` 的 `<script>` **全删掉**，再 `eval(read("ui/main.js"))` —— 既不加载 `command.js`，也不让**浏览器**去求值脚本 |
+| `scripts/memory-layout.js` 等布局探针 | 更彻底：先把 `index.html` 的 `<script>` **全删掉**，再 `eval(read("ui/scripts/main.js"))` —— 既不加载 `command.js`，也不让**浏览器**去求值脚本 |
 | 布局探针的判据 | 它们量的是**几何**（宽高/溢出/滚动条），不是"这份文档能不能起来" |
 
 **教训**：`eval()` 真源码只能验**行为**，验不了**装载**（脚本清单、加载顺序、全局作用域冲突）。
@@ -233,10 +233,10 @@ PASS  A5  脚本真的执行到了（state=true showPane=true L=true EDITOR_PANE
 
 ### 改法
 
-1. **全局 L 只留一处定义，并挂到 `window` 上**（`ui/command.js`）：`window.L = (zh, en) => …`。
+1. **全局 L 只留一处定义，并挂到 `window` 上**（`ui/scripts/command.js`）：`window.L = (zh, en) => …`。
    挂 window 才是"定义一次"的硬事实 —— 属性不是词法绑定，重复赋值也不冲突；
    `session.js` / `mcp.js`（分别用 108 / 33 次裸 `L(`，本来就没有自己的声明）照旧拿得到。
-2. **删掉 `ui/main.js` 的重复声明**，原地留一条注释说明它从哪来、为什么不能再写一次。
+2. **删掉 `ui/scripts/main.js` 的重复声明**，原地留一条注释说明它从哪来、为什么不能再写一次。
 3. 两个文件的行为一字未变（同一个函数，只是装配方式变了）。
 
 ### 门禁（已跑）
@@ -387,7 +387,7 @@ DEEPSEEK_API_KEY=sk-xxx cargo test -p harness-engine --test web_search_live -- -
 
 ### 根因
 
-`ui/session.js::msgHtml` 的拼接顺序：
+`ui/scripts/session.js::msgHtml` 的拼接顺序：
 
 ```js
 bubble + (mine ? "" : gateHtml(m) + askHtml(m) + traceHtml(m, live)) + meta
@@ -429,7 +429,7 @@ deepseek-v4-pro, but you passed on.","type":"invalid_request_error"}}
 
 ### 根因：不是那个值，是**这条路允许手输**
 
-`ui/config.js` 的 `ai.model` 是自由文本框，注释与宿主那句还把它写成了**设计**：
+`ui/scripts/config.js` 的 `ai.model` 是自由文本框，注释与宿主那句还把它写成了**设计**：
 
 > `model: "text", dynamic: "models"` + ……「取不到就退回文本框 —— 让用户手填」
 
@@ -613,7 +613,7 @@ const el = controls[row.idx];                                 // 按 row 下标�
 ### 改法（四层，缺一层都不够）
 
 1. **按 `data-row` 属性寻址**（`Map<下标, 元素>`）—— 构造上正确，DOM 顺序怎么变都读不错；
-   这是真防线（`ui/config.js::render`）。
+   这是真防线（`ui/scripts/config.js::render`）。
 2. **提交前的类型闸**（`firstInvalid`）：数字键必须能解析成数字、枚举键必须落白名单、
    开关行走勾选态 —— 有一行说不通就**整单不提交**，并说出**是哪一行、为什么**。
 3. **读侧的 `acceptable` 加类型校验**（`config_bridge.rs`）：一份**已经坏掉**的配置不该把引擎带偏

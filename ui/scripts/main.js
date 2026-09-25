@@ -821,7 +821,7 @@ const EDITOR_FALLBACK_VH = 600;
 /**
  * 超长行触发「宽行只读视图」的阈值（**视觉列**，尺子是 editorVisualCols）。
  * 2000 列 ≈ 15.6k px —— 正常代码最长行不过几百列，2000 列已经是"压缩文件"的地盘。
- * 实测的边界（v0.13）：ui/xterm.js 283,404 字节只有 2 行，最长行 283,184 列 ≈ 2.2e6 px，
+ * 实测的边界（v0.13）：ui/packages/xterm.js 283,404 字节只有 2 行，最长行 283,184 列 ≈ 2.2e6 px，
  * 打开即崩编辑器 —— 那一行同时喂给背板（一条 28 万字符的 .code-line + 十万级 span）
  * 和 textarea（原文即 28 万字符的单行）。纵向虚拟化对它无效：它就是"可见行"。
  */
@@ -2100,7 +2100,7 @@ function setupHelpMenu() {
   document.getElementById("btn-help-back")?.addEventListener("click", () => hideHelpPage());
 }
 
-/** markdown-it 渲染器懒构造（vendor 自 ui/markdown-it.min.js） */
+/** markdown-it 渲染器懒构造（vendor 自 ui/packages/markdown-it.min.js） */
 let _mdRenderer = null;
 
 /** markdown → HTML；无渲染器时退化为转义文本（保留换行） */
@@ -4315,7 +4315,7 @@ async function autoOpenLastProject() {
 
 function setStatus(message, level = "info") {
   const el = document.querySelector("#statusbar .status-item");
-  // 后端来的错误文案是中文，这里**唯一**收口翻一次（见 ui/errors.js 与 ui-smoke U52）：
+  // 后端来的错误文案是中文，这里**唯一**收口翻一次（见 ui/scripts/errors.js 与 ui-smoke U52）：
   // 显示层是唯一收口，所以翻译放这里就够 —— 不必让 168 处调用点各自记得翻。
   const shown = window.BackendMsg ? BackendMsg.translate(message) : message;
   if (el) {
