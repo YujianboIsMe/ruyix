@@ -119,8 +119,9 @@ fn main() -> Result<(), String> {
 
     let t0 = Instant::now();
     let mut asr = Asr::load(&dir)?;
+    // 别在打印里写死体积：这个探针可以指向任意模型目录（换臂对照时那行会变成假话）
     println!(
-        "加载耗时: {} ms（权重 453MB，进程里只做一次）",
+        "加载耗时: {} ms（权重只加载一次，进程内复用）",
         t0.elapsed().as_millis()
     );
 
