@@ -41,6 +41,21 @@ pub enum Window {
     Trim,
 }
 
+impl Window {
+    /// 从配置值解析窗口策略（`voice.window`）。
+    ///
+    /// **未知值一律当 `Trim`**：这是读侧的兜底 —— 一份被写坏的配置不许改变行为
+    /// （`"on"`、`"TRUE "`、空串、拼错的 `"trimmed"` 都落到默认）。认得出 `full` 才用 `full`，
+    /// 因为它是那个"更慢但更贴官方"的选项，**永远不该因为解析意外而被选中**。
+    pub fn from_cfg(v: &str) -> Window {
+        if v.trim().eq_ignore_ascii_case("full") {
+            Window::Full
+        } else {
+            Window::Trim
+        }
+    }
+}
+
 /// 一次转写的结果（**把耗时一起带回来**：本地推理的速度是选型时的关键事实，不该只活在日志里）。
 #[derive(Debug, Clone)]
 pub struct Transcript {
@@ -454,6 +469,24 @@ mod tests {
     ///
     /// 1. 稳定纯音的同一 mel 通道在**各帧上应几乎相等**（错位/转置会让它剧烈起伏）；
     /// 2. 高频音的峰值应落在**更高的 mel 通道**（转置会让两者反过来或挤在一起）。
+    #[test]
+    fn window_from_cfg_only_full_opts_in() {
+        assert_eq!(Window::from_cfg("full"), Window::Full);
+        assert_eq!(
+            Window::from_cfg(" full "),
+            Window::Full,
+            "两端空白不该改变判读"
+        );
+        assert_eq!(Window::from_cfg("FULL"), Window::Full, "大小写不敏感");
+        // 其余全部回落 trim：默认值、空串、写坏的值（`on` 就是真事故里那个值）
+        for bad in ["", "trim", "on", "true", "TRUE", "Full2", "fuller", "0"] {
+            assert_eq!(Window::from_cfg(bad), Window::Trim, "`{bad}` 必须回落 trim");
+        }
+    }
+
+    /// `voice.window` 的读侧口径：**只有明确写 `full` 才走全窗**，其余一律 `trim`。
+    /// 这条判据护的是一个不对称的代价：解析意外把用户推进 `full` 会让每次转写慢 6 倍，
+    /// 而意外留在 `trim` 只是"没享受加速"（且默认本就是它）。
     #[test]
     fn mel_前端的物理意义必须成立_纯音跨帧稳定且高频落在高通道() {
         let cfg = Config {

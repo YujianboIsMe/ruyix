@@ -557,5 +557,8 @@
   "mem.fetchStart": "正在取模型（96MB，可关掉窗口继续下载）…",
   "mem.fetchProgress": "正在取模型：{file} {done}/{total} MB",
   "mem.fetchDone": "模型已就位（新下 {n} 个文件）—— 语义检索已打开",
-  "mem.fetchFailed": "取模型失败：{line}"
+  "mem.fetchFailed": "取模型失败：{line}",
+  "config.section.harness.voice": "本地语音",
+  "config.field.harness.voice.window": "编码窗口",
+  "config.desc.harness.voice.window": "trim = 按真实音频长度编码（快 6.5×，默认，实测识别内容与官方口径一致）；full = whisper 官方口径（恒补零到 30 秒，慢）。两者**不是逐位等价**（中英边界可能差一个空格/词形）——哪天某句因 trim 变了形，切回 full 即可。"
 }

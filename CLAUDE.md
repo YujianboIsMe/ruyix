@@ -469,6 +469,7 @@ Known config keys:
 - `ruyix.code.harness.discover.enabled` / `discover.ttl_secs` / `discover.extra`（v0.5 命令发现；`extra` 逗号分隔，追加工具表没覆盖的命令）
 - `ruyix.code.harness.env.install_enabled`（v0.5 环境准备：缺失工具按需安装；默认开，关掉后宿主不再把 env 目标摆进 connect 清单）
 - `ruyix.code.harness.proc.enabled` / `proc.max` / `proc.ready_timeout_secs`（v0.6 常驻服务托管；默认开，`max` 上限 16，`ready_timeout_secs` 范围 1~600）
+- `ruyix.code.harness.voice.window` = `trim`（默认）| `full`（v1.1 本地语音的**编码窗口**：trim 按真实长度编码、快 6.5×；full 是 whisper 官方 30 秒口径。两者**识别内容一致但不是逐位等价**——中英边界可能差一个空格，所以留了这个一键回官方口径的开关。读侧兜底：只有明确写 `full` 才用 full，其余一律 trim）
 
 ## Tauri Commands (main.rs)
 

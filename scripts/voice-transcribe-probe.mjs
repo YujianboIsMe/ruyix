@@ -23,6 +23,7 @@
  *   cargo run -p ruyix
  * # 2) 另开一个终端（wav 必须是 **16kHz 单声道 16bit**）
  * node scripts/voice-transcribe-probe.mjs <某个.wav>
+ * node scripts/voice-transcribe-probe.mjs <某个.wav> --check-window   # 另验编码窗口开关（多花约 1 分钟：full 那臂更慢）
  * ```
  *
  * 需要 Node 22+（内置 fetch / WebSocket，零 npm 依赖 —— 与本项目"零 npm"一致）。
@@ -210,6 +211,57 @@ async function main() {
       if (un) { try { un(); } catch {} }
     }
   })()`;
+  // ⑤（可选，`--check-window`）：编码窗口开关**真的能切**吗？
+  // 这条之所以值得常驻：`voice.window` 的两个目标（快 / 与官方逐位对齐）都合理，
+  // 而"读侧只认 full、其余一律 trim"是个**不对称**口径 —— 必须证明它没有反着实现。
+  if (process.argv.includes("--check-window")) {
+    const setWin = async (value) => {
+      const entry = `[{ "section": "harness", "key": "voice.window", "value": "${value}" }]`;
+      await evaluate(
+        cdp,
+        `window.__TAURI__.core.invoke("config_form_apply", { scope: "runtime", entries: ${entry}, projectRoot: null })`
+      );
+    };
+    const txWindow = async () =>
+      evaluate(
+        cdp,
+        `(async () => { const r = await window.__TAURI__.core.invoke("voice_transcribe", {
+             data: "${base64}", language: null, projectRoot: null });
+           return { window: r.window, text: r.text, ms: r.elapsed_ms }; })()`
+      );
+    const base = await txWindow();
+    await setWin("full");
+    const full = await txWindow();
+    await setWin("on");
+    const bad = await txWindow();
+    await setWin("");
+    const cleared = await txWindow();
+    report("voice-window-default-trim", base.window === "trim", `默认 return.window=${base.window}`);
+    report("voice-window-full-opts-in", full.window === "full", `显式 full → return.window=${full.window}`);
+    report(
+      "voice-window-bad-value-falls-back",
+      bad.window === "trim",
+      `坏值 on → return.window=${bad.window}（必须 trim：解析意外推进 full 会让每次慢 6 倍）`
+    );
+    report("voice-window-clear-restores", cleared.window === "trim", `清掉 runtime 键 → ${cleared.window}`);
+    // 判据是**归一化后内容一致**，不是逐位相同 —— 这条差别是实测出来的、且必须写进判据：
+    // 两种窗口的 log-mel 归一化各取自己窗口内的 max，中英边界那个空格/词形会翻转
+    // （实测 trim 吐 `Cargo Build`、full 吐 `CargoBuild`）。把"内容一致"写成"逐字相同"
+    // 就是过度声称 —— 探针的判据先犯过一次，这里钉住正确的那个。
+    const norm = (s) => String(s || "").replace(/[ \t]+/g, "").toLowerCase();
+    report(
+      "voice-window-content-matches",
+      norm(base.text) === norm(full.text) && norm(base.text).length > 0,
+      `归一化后内容一致？trim="${base.text}" / full="${full.text}"` +
+        `（**逐位不相同是已知且可解释的**：差在中英边界那个空格，见 §6）`
+    );
+    report(
+      "voice-window-full-is-slower",
+      full.ms > base.ms * 2,
+      `full ${full.ms}ms vs trim ${base.ms}ms（full 按官方 30 秒口径编码，本就更慢）`
+    );
+  }
+
   const tx = await evaluate(cdp, expr);
   if (tx.error) {
     report("voice-transcribe-returns", false, `转写报错（不是挂起，但也没成）：${tx.error}`);

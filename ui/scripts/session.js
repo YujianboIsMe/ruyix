@@ -500,7 +500,8 @@
       );
       let out = null;
       try {
-        out = await invoke("voice_transcribe", { data: pcm.data, language: null });
+        // projectRoot 要带上：`voice.window` 可能配在项目作用域
+        out = await invoke("voice_transcribe", { data: pcm.data, language: null, projectRoot: root() });
       } catch (e) {
         // 转写失败**不能把用户说的话弄丢**：留一份音频在项目桶里，并说明为什么没转成
         try {

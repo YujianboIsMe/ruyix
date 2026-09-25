@@ -557,5 +557,8 @@
   "mem.fetchStart": "Fetching the model (96MB, you can keep working)…",
   "mem.fetchProgress": "Fetching the model: {file} {done}/{total} MB",
   "mem.fetchDone": "Model in place (fetched {n} files) — semantic search is on",
-  "mem.fetchFailed": "Model fetch failed: {line}"
+  "mem.fetchFailed": "Model fetch failed: {line}",
+  "config.section.harness.voice": "Local speech",
+  "config.field.harness.voice.window": "Encoding window",
+  "config.desc.harness.voice.window": "trim = encode by real audio length (6.5x faster, default; measured content matches the official window); full = whisper's official 30-second window (slower). They are NOT bit-identical (an EN/CJK boundary may differ by a space or word form) — switch to full if a sentence ever comes out wrong under trim."
 }
