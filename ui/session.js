@@ -216,9 +216,10 @@
       `<option value="write" title="${L("Agent 改动直接写入项目（覆盖前备份到 .ruyix/backups）", "Agent writes land directly (backed up to .ruyix/backups first)")}">✍️ ${L("写入模式", "Write")}</option>` +
       `<option value="auto" title="${L("同写入模式：改动直接落盘并自行动验证", "Same as write mode: changes land directly and the agent verifies itself")}">🚀 ${L("自主模式", "Autonomous")}</option>` +
       `</select>` +
+      `<select class="session-model-select" data-model></select>` +
       `<button class="agent-btn session-web" data-web title="${L("服务端联网检索（按模型能力决定可用与否）", "Server-side web search (availability depends on the model)")}">🌏</button>` +
-      `<button class="agent-btn agent-btn--run session-send" data-send>▶</button>` +
-      `<button class="agent-btn agent-btn--cancel session-cancel" data-cancel disabled>✕</button>` +
+      `<button class="agent-btn session-mic" data-mic hidden>🎙</button>` +
+      `<button class="agent-btn agent-btn--run session-run" data-run title="${L("发送（Ctrl+Enter）", "Send (Ctrl+Enter)")}">▶</button>` +
       `</div></div>`;
     fillMsgs(wrap, s);
 
@@ -226,7 +227,12 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        wrap.querySelector("[data-send]").click();
+        // Ctrl+Enter = 发送（**不是**那颗按钮的 click）：运行中那颗按钮是"停止"，
+        // 手快连按 Ctrl+Enter 不该把正在跑的任务停掉。
+        const text = input.value.trim();
+        if (!text || busy) return;
+        input.value = "";
+        sendMessage(s, wrap, text);
       }
     });
     // 模式随会话记忆（重开 tab 不丢；不持久化到磁盘 —— 每次新对话该想一下用哪种）
@@ -286,7 +292,180 @@
       }
       paintWeb();
     });
-    (async () => {
+    // ---- 模型下拉框（需求：探测厂商模型列表，在会话界面就能换模型）----
+    //
+    // 数据源是**厂商的** `GET /models`（宿主 `ai_models`，与配置表单同一个引擎函数）——
+    // 前端不维护模型名单，厂商加一个模型这里就多一项（实测 DeepSeek 今天只有
+    // `deepseek-flash` / `deepseek-v4-pro` 两个，而能力表里还留着两个已退役的旧名）。
+    // 每一项的 title 写清能力（联网 / 读图 / 录音 / 上下文），用户不必去配置面板猜。
+    const modelSel = wrap.querySelector("[data-model]");
+    wrap._models = null;
+    const paintModel = () => {
+      const cur = (wrap._webCaps && wrap._webCaps.model) || "";
+      const list = wrap._models;
+      if (!list || !list.length) {
+        // 拿不到厂商列表**不许编**：只留当前模型一项并说清为什么换不了
+        modelSel.innerHTML = `<option>${esc(cur || L("（模型未知）", "(model unknown)"))}</option>`;
+        modelSel.disabled = true;
+        modelSel.title = L(
+          "拿不到厂商模型列表（没配 Key / 网络不通 / 该端点没有 /models）—— 默认模型在配置面板里改",
+          "Vendor model list unavailable (no key / offline / no /models endpoint) — set the default in the config panel"
+        );
+        return;
+      }
+      const capText = (m) =>
+        [m.web_search ? L("联网", "web") : null, m.multimodal ? L("读图", "vision") : null,
+         m.audio ? L("录音", "audio") : null].filter(Boolean).join(" · ") || L("纯文本", "text only");
+      const label = (m) => {
+        const ctx = m.context_window ? ` · ${Math.round(m.context_window / 1024)}K` : "";
+        return `${m.name || m.id}（${m.id}）— ${capText(m)}${ctx}`;
+      };
+      let opts = list
+        .map((m) => `<option value="${esc(m.id)}" title="${esc(label(m))}">${esc(m.name || m.id)}</option>`)
+        .join("");
+      // 当前模型不在厂商列表里（配置里留着一个退役旧名）也要看得见：补一项并标明，
+      // 否则 select 会静默跳到列表第一项，用户以为模型被换了。
+      if (cur && !list.some((m) => m.id === cur)) {
+        opts = `<option value="${esc(cur)}" title="${esc(cur + L("（不在厂商列表里）", " (not in the vendor list)"))}">` +
+          `${esc(cur)}${L("（不在厂商列表）", " (not listed)")}</option>` + opts;
+      }
+      modelSel.innerHTML = opts;
+      modelSel.disabled = false;
+      modelSel.value = cur || list[0].id;
+      modelSel.title = L(
+        "本次会话使用的模型（默认模型在配置面板里改；此项只影响本次运行）",
+        "Model for this session (change the default in the config panel)"
+      );
+    };
+
+    // ---- 🎙 录音按钮（需求：多模态模型才出现；能不能真用看厂商声明的输入模态）----
+    //
+    // 判据取自厂商 `GET /models` 的 `input_modalities` —— 实测 DeepSeek 的合法取值只有
+    // `text` / `image`，**没有任何模型声明 audio**，它的 `/files` 也只收
+    // webp/png/jpeg/gif（音频文件被明确打回）。所以今天这颗按钮对所有 DeepSeek 模型都是
+    // "可见但禁用 + 说清原因"：需求要它出现（多模态模型上），但"按下去没反应的按钮"
+    // 在本项目是禁止项 —— 两件事只能这样同时成立。
+    const micBtn = wrap.querySelector("[data-mic]");
+    /**
+     * 🎙 的两件事分开判（这是本功能唯一诚实的做法）：
+     *   · **能不能录**（按钮出现/可点）看模型是不是**多模态** —— 用户口径："多模态模型显示录音按钮"；
+     *   · **能不能发给模型**看厂商 `GET /models` 声明的 `input_modalities` 里有没有 `audio`。
+     * 今天 DeepSeek 两者不同真：flash 声明 `text,image`（多模态 ✓）、音频**没有任何模型声明**
+     * （实测 `/files` 只收 webp/png/jpeg/gif，WAV 被明确打回；`/audio/transcriptions` 是 404；
+     * 文档里 `input_modalities` 的合法取值也只有 text / image）。所以按钮**能录**、录音**不发给模型**，
+     * 落盘到项目桶并告诉用户为什么 —— 而不是假装发了（那才是"配置在撒谎"）。
+     * 供应商将来声明 audio，这里自动变成直发，代码不用再动。
+     */
+    const paintMic = () => {
+      const caps = wrap._webCaps;
+      const sel = (wrap._models || []).find((m) => caps && m.id === caps.model);
+      const multim = !!(caps && (caps.multimodal || (sel && sel.multimodal)));
+      const audio = !!(sel && sel.audio);
+      micBtn.hidden = !multim;
+      if (!multim) return;
+      micBtn.disabled = false;
+      if (rec) return; // 录音中：title 由计时器接管
+      micBtn.title = audio
+        ? L("录音：把这段语音发给模型", "Record: send this clip to the model")
+        : L(
+            `录音（存在项目桶里，暂不发往模型）：当前模型 ${caps.model} 不接受音频输入 —— ` +
+              "厂商 /models 只声明 text/image，音频文件也会被它的 /files 打回",
+            `Record (kept in the project bucket, not sent): model ${caps.model} does not accept audio — ` +
+              "the vendor only declares text/image and rejects audio uploads"
+          );
+    };
+
+    // ---- 录音本体（MediaRecorder → 项目桶）----
+    let rec = null; // 录音中：{ mr, chunks, stream, t0, tick }
+    function pickMime() {
+      const cands = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+      const MR = window.MediaRecorder;
+      return (MR && cands.find((m) => MR.isTypeSupported && MR.isTypeSupported(m))) || "";
+    }
+    function releaseStream() {
+      if (rec && rec.stream) rec.stream.getTracks().forEach((t) => t.stop());
+    }
+    async function startRec() {
+      // 环境缺件时说清楚缺的是什么，别只说"失败"
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return status(L("这个环境没有麦克风接口（navigator.mediaDevices 缺失）", "no microphone API here"), "error");
+      }
+      if (!window.MediaRecorder) {
+        return status(L("这个环境没有 MediaRecorder（录不了）", "MediaRecorder unavailable"), "error");
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mime = pickMime();
+        const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+        rec = { mr, chunks: [], stream, t0: Date.now(), tick: null };
+        mr.addEventListener("dataavailable", (e) => {
+          if (e.data && e.data.size) rec.chunks.push(e.data);
+        });
+        mr.addEventListener("stop", () => finishRec());
+        mr.start();
+        micBtn.classList.add("session-mic--rec");
+        const paint = () => {
+          if (!rec) return;
+          const secs = ((Date.now() - rec.t0) / 1000).toFixed(0);
+          micBtn.title = L(`录音中 ${secs}s —— 再点一次结束并保存`, `recording ${secs}s — click again to save`);
+        };
+        paint();
+        rec.tick = setInterval(paint, 500);
+        status(L("录音中…（再点一次结束）", "Recording… (click again to stop)"));
+      } catch (e) {
+        // 权限被拒 / 没有输入设备都从这里出来
+        rec = null;
+        micBtn.classList.remove("session-mic--rec");
+        const why = (e && (e.name || e.message)) || String(e);
+        status(L(`打不开麦克风：${why}`, `microphone unavailable: ${why}`), "error");
+        paintMic();
+      }
+    }
+    async function finishRec() {
+      const r = rec;
+      rec = null;
+      if (!r) return;
+      if (r.tick) clearInterval(r.tick);
+      micBtn.classList.remove("session-mic--rec");
+      releaseStream();
+      paintMic();
+      const blob = new Blob(r.chunks, { type: (r.mr && r.mr.mimeType) || "audio/webm" });
+      const secs = ((Date.now() - r.t0) / 1000).toFixed(1);
+      if (!blob.size) return status(L("这段录音是空的（没采到数据）", "empty recording"), "error");
+      const invoke = getInvoke();
+      if (!invoke || !root()) return;
+      try {
+        const b64 = await new Promise((res, rej) => {
+          const fr = new FileReader();
+          fr.onload = () => res(String(fr.result || "").split(",")[1] || "");
+          fr.onerror = () => rej(new Error("读不出录音数据"));
+          fr.readAsDataURL(blob);
+        });
+        const saved = await invoke("voice_save", { data: b64, ext: "webm", projectRoot: root() });
+        const kb = Math.max(1, Math.round(saved.bytes / 1024));
+        s.messages.push({
+          role: "system",
+          text: L(
+            `🎙 录音已保存（${secs}s · ${kb}KB）：${saved.path}` +
+              "\n（当前模型不接受音频输入，所以没有发往模型；厂商支持后这里会直接发送）",
+            `🎙 Recording saved (${secs}s · ${kb}KB): ${saved.path}` +
+              "\n(not sent — the current model does not accept audio input)"
+          ),
+          ts: nowHms(), run_id: null, status: null,
+        });
+        fillMsgs(wrap, s);
+        await persist(s);
+        status(L("录音已保存到项目桶（当前模型不支持音频，未发往模型）", "saved to the project bucket (not sent: model takes no audio)"));
+      } catch (e) {
+        status(String(e), "error");
+      }
+    }
+    micBtn.addEventListener("click", () => {
+      if (rec) return void rec.mr.stop();
+      startRec();
+    });
+
+    async function refreshCaps() {
       const invoke = getInvoke();
       if (!invoke) return;
       try {
@@ -295,17 +474,44 @@
         wrap._webCaps = null;
       }
       paintWeb();
+      paintMic();
+      paintModel();
+    }
+    (async () => {
+      const invoke = getInvoke();
+      if (!invoke) return;
+      try {
+        wrap._models = await invoke("ai_models", { projectRoot: root() });
+      } catch {
+        wrap._models = null;
+      }
+      await refreshCaps();
     })();
+    modelSel.addEventListener("change", async () => {
+      const id = modelSel.value;
+      const invoke = getInvoke();
+      if (!invoke || !id) return;
+      try {
+        // runtime 作用域：只影响本次运行，不落盘改掉用户的默认模型
+        await invoke("config_form_apply", {
+          scope: "runtime",
+          projectRoot: root(),
+          entries: [{ section: "harness", key: "llm.model", value: id }],
+        });
+        // 换模型要**重新问一次能力**：联网/录音的可用性跟着模型走
+        wrap._webCaps = await invoke("ai_model_caps", { model: id, projectRoot: root() });
+      } catch (e) {
+        status(String(e), "error");
+      }
+      paintWeb();
+      paintMic();
+      paintModel();
+    });
+    paintModel();
     paintWeb();
 
-    wrap.querySelector("[data-send]").addEventListener("click", () => {
-      const text = input.value.trim();
-      if (!text) return;
-      if (busy) return status(L("已有任务在跑，请先取消或等待", "A task is already running — cancel it or wait"), "error");
-      input.value = "";
-      sendMessage(s, wrap, text);
-    });
-    wrap.querySelector("[data-cancel]").addEventListener("click", async () => {
+    /** 运行中按同一个按钮 = 停止：取消位 + 一句"已取消"留痕（原 data-cancel 的行为一字未改） */
+    async function stopRun() {
       const invoke = getInvoke();
       if (invoke) invoke("agent_cancel").catch(() => {});
       setBusy(false);
@@ -315,6 +521,14 @@
       });
       fillMsgs(wrap, s);
       await persist(s);
+    }
+    wrap.querySelector("[data-run]").addEventListener("click", () => {
+      // 同一个按钮两件事：运行中 = 停止；空闲 = 发送。判据只有这一个 `busy`。
+      if (busy) return void stopRun();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      sendMessage(s, wrap, text);
     });
     // 提问卡（v0.8 ask_user）：卡片按钮/输入框由 askHtml 在每次重渲染时重建，
     // 所以走**事件委托**（绑在容器上），而不是逐个按钮 addEventListener。
@@ -632,9 +846,15 @@
       : `<div class="session-bubble session-bubble--md">${mdHtml(m.text)}</div>`;
     // 有轨迹的消息放宽一点宽度：轨迹是日志，路径/命令比对话正文长，78% 会一路省略号
     const wide = !mine && (live || (m.trace ?? []).length) ? " session-msg--trace" : "";
+    // 顺序（用户报过 bug 的地方，别改回去）：**过程在上、结论在下** ——
+    //   ① 轨迹（思考 · 执行，工具循环的实时输出）
+    //   ② 提问卡（跑到一半问你的那条，紧跟过程）
+    //   ③ 最终回复（这次交付的正文）
+    //   ④ 验证 / 复核（针对上面那条回复的结论，贴着它）
+    //   ⑤ meta（run id / 状态）
+    // 原先 bubble 在最前面 ⇒ 任务跑完后轨迹追加到气泡**下面**，读起来像"先给结论再做事"。
     return `<div class="session-msg ${mine ? "session-msg--user" : "session-msg--agent"}${wide}">` +
-      bubble +
-      (mine ? "" : gateHtml(m) + askHtml(m) + traceHtml(m, live)) +
+      (mine ? bubble : traceHtml(m, live) + askHtml(m) + gateHtml(m) + bubble) +
       (meta.length ? `<div class="session-meta">${meta.join(" ")}</div>` : "") +
       `</div>`;
   }
@@ -1004,10 +1224,23 @@
     return wrap.querySelector("[data-mode]")?.value || "confirm";
   }
 
+  /**
+   * 发送/停止是**同一个按钮**（用户要求）：空闲时 ▶ = 发送，运行中 ■ = 停止。
+   *
+   * 为什么不摆两个按钮互相禁用（旧样子）：一个永远灰着的按钮既占位又要解释自己为什么灰，
+   * 而"运行中"本来就是一个状态而不是一个功能 —— 状态该改外观，不该换按钮。
+   * 按钮**任何时刻都可点**（灰按钮 = 按下去没反应的按钮，本项目不许有）：
+   * 点下去干什么由 `busy` 决定，键盘 Ctrl+Enter 只走发送（防手快连发）。
+   */
   function setBusy(b) {
     busy = b;
-    document.querySelectorAll(".session-send").forEach((btn) => (btn.disabled = b));
-    document.querySelectorAll(".session-cancel").forEach((btn) => (btn.disabled = !b));
+    document.querySelectorAll(".session-run").forEach((btn) => {
+      btn.classList.toggle("session-run--busy", b);
+      btn.textContent = b ? "■" : "▶";
+      btn.title = b
+        ? L("停止当前任务", "Stop the running task")
+        : L("发送（Ctrl+Enter）", "Send (Ctrl+Enter)");
+    });
   }
 
   /**

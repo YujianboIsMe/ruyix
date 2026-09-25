@@ -1651,6 +1651,125 @@ async fn ai_list_models(
     harness_engine::llm::probe(&cfg.llm).await
 }
 
+/// 保存一段录音（前端 `MediaRecorder` 出来的 webm/opus），返回落盘位置。
+///
+/// 落点 `<便携根>/projects/<项目键>/voice/voice-<毫秒>.webm` —— 与 stage / backups /
+/// sessions **同一个桶族**：v1.0.0 的硬约束是"绝不写进用户仓库"，而录音属于会话状态，
+/// 删掉项目桶就干净（零残留）。
+///
+/// 数据走 base64 而不是 `Vec<u8>`：Tauri 会把 `Vec<u8>` 序列化成 JSON 数字数组，
+/// 一段 1MB 的录音在路上会膨胀成 ~4MB 文本；base64 至少省掉那层膨胀。
+#[tauri::command]
+fn voice_save(
+    data: String,
+    ext: Option<String>,
+    project_root: String,
+) -> Result<VoiceSaved, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|e| format!("录音数据不是合法 base64: {e}"))?;
+    if bytes.is_empty() {
+        return Err("录音是空的（没有采到任何数据）".into());
+    }
+    // 一段正常语音远到不了这个量级；设上限是防"前端传错东西"把盘写满
+    const MAX: usize = 32 * 1024 * 1024;
+    if bytes.len() > MAX {
+        return Err(format!(
+            "录音太大（{} MB，上限 32 MB）",
+            bytes.len() / 1024 / 1024
+        ));
+    }
+    // 扩展名只留字母数字：它会被拼进文件名，别让 `../` 之类的东西进来
+    let ext: String = ext
+        .unwrap_or_else(|| "webm".into())
+        .trim_start_matches('.')
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let ext = if ext.is_empty() {
+        "webm".to_string()
+    } else {
+        ext
+    };
+
+    let dir = paths::current().project_bucket(&project_root, "voice");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建录音目录失败: {e}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file = dir.join(format!("voice-{stamp}.{ext}"));
+    std::fs::write(&file, &bytes).map_err(|e| format!("写录音失败: {e}"))?;
+    Ok(VoiceSaved {
+        path: file.to_string_lossy().to_string(),
+        dir: dir.to_string_lossy().to_string(),
+        bytes: bytes.len(),
+    })
+}
+
+#[derive(serde::Serialize)]
+struct VoiceSaved {
+    /// 录音文件绝对路径（前端把它写给用户看，也留着将来上传用）
+    path: String,
+    /// 所在桶目录（用户想知道"东西存哪了"）
+    dir: String,
+    bytes: usize,
+}
+
+/// 厂商模型列表**带能力**（会话工具栏的模型下拉框用它）。
+///
+/// 与 `ai_list_models`（只要 id，配置表单用）**同源**：都走 `llm::models`，所以
+/// 两处的"有哪些模型"永远一致 —— 各拉一份的口径差就会变成"配置里选得到、会话里没有"。
+///
+/// 为什么把 `input_modalities` 一起给前端：那是**厂商自己声明的**"收什么输入"（实测
+/// DeepSeek 是 text/image）。录音按钮该不该出现、能不能点，必须由这份声明决定，
+/// 而不是由我们猜 —— 猜错的代价是一个按下去什么都没发生的按钮。
+#[tauri::command]
+async fn ai_models(
+    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    project_root: Option<String>,
+) -> Result<Vec<AiModelInfo>, String> {
+    let cfg = {
+        let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
+        agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
+    };
+    let list = harness_engine::llm::models(&cfg.llm).await?;
+    Ok(list
+        .into_iter()
+        .map(|m| {
+            let caps = harness_engine::llm::model_caps(&m.id);
+            AiModelInfo {
+                web_search: harness_engine::llm::web_search_capable(&m.id, &cfg.llm.api_format),
+                // 读图：能力表说能、或厂商声明里就有 image（两处任一为真都算有能力）
+                multimodal: caps.multimodal || m.accepts("image"),
+                // 收音频：**只看厂商声明**（能力表里没有这一维，也不该靠猜）
+                audio: m.accepts("audio"),
+                name: m.display_name().to_string(),
+                id: m.id,
+                input_modalities: m.input_modalities,
+                context_window: m.context_window,
+            }
+        })
+        .collect())
+}
+
+#[derive(serde::Serialize)]
+struct AiModelInfo {
+    id: String,
+    /// 显示名（厂商给的，如 `DeepSeek-V4.1-Flash`）
+    name: String,
+    /// 厂商声明的输入模态（空 = 厂商没声明）
+    input_modalities: Vec<String>,
+    context_window: Option<u64>,
+    /// 按**当前协议**算的服务端联网能力（与 🌏 按钮同一口径）
+    web_search: bool,
+    /// 读图
+    multimodal: bool,
+    /// 收音频（录音按钮据此出现/启用）
+    audio: bool,
+}
+
 /// 某个模型具备哪些服务端能力（联网 / 多模态）。
 ///
 /// 能力表在引擎里（`llm::model_caps`），宿主不抄一份 —— 否则加一个模型要改两处，
@@ -2493,6 +2612,8 @@ fn main() {
             config_schema,
             ai_translate,
             ai_list_models,
+            ai_models,
+            voice_save,
             ai_model_caps,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,

@@ -1542,49 +1542,159 @@ fn observe_failover(primary: &LlmConfig, fb: &LlmConfig, messages: &[ChatMessage
     crate::observe::span_once("llm-failover", "switched-to-backup", "ok", 0, a);
 }
 
-/// 连通性 + 鉴权自检：拿模型列表，比"跑一个真实任务才发现 key 错"友好得多。
+/// 厂商模型列表里的一条（`GET /models` 的 `data[]` 元素）。
 ///
-/// 协议感知：anthropic 走 `/v1/models` + `x-api-key` + `anthropic-version`；否则
-/// `/models` + Bearer。响应体都是 `data:[{id}]`，解析共用。
-pub async fn probe(cfg: &LlmConfig) -> Result<Vec<String>, String> {
+/// 为什么要整条留下而不是只要 `id`：厂商在这一条里**已经声明了能力**。实测 DeepSeek 的
+/// 响应带 `input_modalities: ["text","image"]`（flash）与 `["text"]`（pro）、`name`、
+/// `context_window` —— 这是"这个模型收什么输入"的一手证据，比我们那张手工维护的能力表硬。
+/// 界面据此决定"要不要出现录音按钮"这类问题（见 `ModelInfo::accepts`）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub id: String,
+    /// 厂商给的显示名（如 `DeepSeek-V4.1-Flash`）；没有就退回 `id`
+    pub name: Option<String>,
+    /// 厂商声明的输入模态。**空 = 没声明**（不等于"没有模态"），所以判据一律走 `accepts`
+    pub input_modalities: Vec<String>,
+    pub context_window: Option<u64>,
+}
+
+impl ModelInfo {
+    /// 该模型是否声明接受某种输入模态（大小写不敏感）。
+    ///
+    /// 厂商没声明时一律 `false` —— **不许把"没声明"当"支持"**：发一个服务端不认的
+    /// 音频块只会换来 422，而用户看到的是"按了录音却什么也没发生"。
+    pub fn accepts(&self, modality: &str) -> bool {
+        self.input_modalities
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(modality))
+    }
+
+    /// 界面显示用的名字（厂商没给就用 id）
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(self.id.as_str())
+    }
+}
+
+/// 某条 URL 的来源（`scheme://host[:port]`）—— 回落用，切掉路径与查询。
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}"))
+}
+
+/// 模型列表的**候选 URL + 鉴权**（按顺序试，第一个成功即返回）。
+///
+/// ① 协议自己的那条：anthropic → `/v1/models` + `x-api-key`；openai → `/models` + Bearer。
+/// ② **回落到主机根**：实测 DeepSeek 的 anthropic 入口
+///    `https://api.deepseek.com/anthropic/v1/models` 是 **404**，而同一家的
+///    `https://api.deepseek.com/models` 是 200 且带完整能力声明。只试 ① 的后果实测过：
+///    anthropic 用户的模型下拉框**静默退回文本框**（配置表单那条路就是这样）。
+///    回落同时带两种鉴权：DeepSeek 那个入口认 Bearer，真 Anthropic 只认 x-api-key。
+fn model_list_candidates(cfg: &LlmConfig) -> Vec<(String, AuthScheme)> {
+    let base = cfg.base_url.trim_end_matches('/');
+    let anthropic = cfg.api_format.trim().eq_ignore_ascii_case("anthropic");
+    let mut out: Vec<(String, AuthScheme)> = Vec::new();
+    if anthropic {
+        out.push((anthropic_models_url(base), AuthScheme::Anthropic));
+    } else {
+        out.push((format!("{base}/models"), AuthScheme::Bearer));
+    }
+    if let Some(origin) = origin_of(base) {
+        // 回落一律 Bearer：这类兼容入口（DeepSeek 的 `/models`）就是 Bearer 用法；
+        // 真 Anthropic 由上面的主候选（x-api-key + `/v1/models`）覆盖。
+        // **同一个 URL 只试一次** —— 换个鉴权再试一遍等于白等一个超时（30s×N 用户等不起）。
+        for path in ["/models", "/v1/models"] {
+            let url = format!("{origin}{path}");
+            if !out.iter().any(|(u, _)| *u == url) {
+                out.push((url, AuthScheme::Bearer));
+            }
+        }
+    }
+    out
+}
+
+/// 拿厂商模型列表（连通性 + 鉴权自检，也是模型下拉框的数据源）。
+///
+/// 失败**不许虚构列表**：让用户以为有得选、选到一个跑不通的模型，比没有下拉框更糟。
+/// 每一条候选都试过才报错，报的是**最后一条**的错（通常就是最有信息量的那条）。
+pub async fn models(cfg: &LlmConfig) -> Result<Vec<ModelInfo>, String> {
     if cfg.api_key.trim().is_empty() {
         return Err("尚未配置 API Key".into());
     }
-    let (url, auth) = if cfg.api_format.trim().eq_ignore_ascii_case("anthropic") {
-        (anthropic_models_url(&cfg.base_url), AuthScheme::Anthropic)
-    } else {
-        (
-            format!("{}/models", cfg.base_url.trim_end_matches('/')),
-            AuthScheme::Bearer,
-        )
-    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
-    let req = client.get(&url).header("Content-Type", "application/json");
-    let req = match auth {
-        AuthScheme::Anthropic => req
-            .header("x-api-key", cfg.api_key.trim())
-            .header("anthropic-version", "2023-06-01"),
-        AuthScheme::Bearer => req.header("Authorization", format!("Bearer {}", cfg.api_key.trim())),
-    };
-    let resp = req.send().await.map_err(|e| format!("网络错误: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let detail = api_error_message(&text).unwrap_or_else(|| crate::exec::clip(&text, 300));
-        return Err(format!("HTTP {status}: {detail}"));
+    let mut last_err = String::from("没有可用的模型列表地址");
+    for (url, auth) in model_list_candidates(cfg) {
+        let req = client.get(&url).header("Content-Type", "application/json");
+        let req = match auth {
+            AuthScheme::Anthropic => req
+                .header("x-api-key", cfg.api_key.trim())
+                .header("anthropic-version", "2023-06-01"),
+            AuthScheme::Bearer => {
+                req.header("Authorization", format!("Bearer {}", cfg.api_key.trim()))
+            }
+        };
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                // 网络层失败（断网 / DNS）：换 URL 也没用，直接说清楚
+                return Err(format!("网络错误: {e}"));
+            }
+        };
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let detail = api_error_message(&text).unwrap_or_else(|| crate::exec::clip(&text, 300));
+            last_err = format!("HTTP {status} {url}: {detail}");
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("解析失败: {e}"))?;
+        let list: Vec<ModelInfo> = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        let id = m.get("id")?.as_str()?.to_string();
+                        Some(ModelInfo {
+                            id,
+                            name: m
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string()),
+                            input_modalities: m
+                                .get("input_modalities")
+                                .and_then(|x| x.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            context_window: m.get("context_window").and_then(|c| c.as_u64()),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if list.is_empty() {
+            last_err = format!("HTTP {status} {url}: 列表为空");
+            continue;
+        }
+        return Ok(list);
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("解析失败: {e}"))?;
-    Ok(v.get("data")
-        .and_then(|d| d.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default())
+    Err(last_err)
+}
+
+/// 只要 id 的老口径（配置表单用）—— 从 [`models`] 推，不另发一次请求、不另写一份解析。
+pub async fn probe(cfg: &LlmConfig) -> Result<Vec<String>, String> {
+    Ok(models(cfg).await?.into_iter().map(|m| m.id).collect())
 }
 
 #[cfg(test)]
@@ -1684,6 +1794,72 @@ mod tests {
         assert!(web_search_on(&forced));
 
         assert!(!known_models().is_empty());
+    }
+
+    /// 模型列表的候选顺序（回落是实测逼出来的：anthropic 入口 `/v1/models` 在 DeepSeek 上 404，
+    /// 而主机根 `/models` 200）—— 顺序错了等于这条回落不存在。
+    #[test]
+    fn model_list_falls_back_to_the_host_root() {
+        let mut cfg = cfg_anthropic();
+        cfg.base_url = "https://api.deepseek.com/anthropic".into();
+        let c = model_list_candidates(&cfg);
+        assert_eq!(c[0].0, "https://api.deepseek.com/anthropic/v1/models");
+        assert!(matches!(c[0].1, AuthScheme::Anthropic));
+        // ② 主机根必须出现在候选里（否则 anthropic 用户的模型下拉框会静默退回文本框）
+        assert!(
+            c.iter()
+                .any(|(u, _)| u == "https://api.deepseek.com/models"),
+            "缺少主机根回落: {:?}",
+            c.iter().map(|(u, _)| u.clone()).collect::<Vec<_>>()
+        );
+        // 回落要带 Bearer（DeepSeek 的 /models 认它）
+        assert!(c.iter().any(
+            |(u, a)| u == "https://api.deepseek.com/models" && matches!(a, AuthScheme::Bearer)
+        ));
+
+        // openai 协议：主候选就是 /models；同一个 URL 不许试两遍
+        let mut o = cfg_at("https://api.deepseek.com", "auto");
+        o.api_format = "openai".into();
+        let co = model_list_candidates(&o);
+        assert_eq!(co[0].0, "https://api.deepseek.com/models");
+        let mut urls: Vec<&String> = co.iter().map(|(u, _)| u).collect();
+        let total = urls.len();
+        urls.sort();
+        urls.dedup();
+        assert_eq!(
+            urls.len(),
+            total,
+            "候选里出现了重复 URL（白试一遍 = 白等一个超时）"
+        );
+        // 而且是**可数个**：URL 数量就是用户要等的最坏请求数
+        assert!(
+            co.len() <= 3,
+            "候选太多（{} 条）：每次失败都是 30s 起",
+            co.len()
+        );
+    }
+
+    /// 厂商声明的输入模态是**能力的一手证据**：没声明 ≠ 支持。
+    #[test]
+    fn model_info_reads_modalities_and_never_assumes_the_missing_ones() {
+        let flash = ModelInfo {
+            id: "deepseek-flash".into(),
+            name: Some("DeepSeek-V4.1-Flash".into()),
+            input_modalities: vec!["text".into(), "image".into()],
+            context_window: Some(1048576),
+        };
+        assert!(flash.accepts("image"));
+        assert!(flash.accepts("IMAGE"), "大小写不敏感");
+        // 音频：厂商没声明 → 一律 false（发一个不认的音频块只会换来 422）
+        assert!(!flash.accepts("audio"));
+        assert_eq!(flash.display_name(), "DeepSeek-V4.1-Flash");
+
+        let bare = ModelInfo {
+            id: "custom".into(),
+            ..Default::default()
+        };
+        assert!(!bare.accepts("image") && !bare.accepts("audio"));
+        assert_eq!(bare.display_name(), "custom", "厂商没给名字就用 id");
     }
 
     #[test]

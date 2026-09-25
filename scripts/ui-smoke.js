@@ -473,8 +473,10 @@ function runStaticChecks() {
   const sessJs = read("ui/session.js");
   check("U35", "web-search-toggle", /data-web/.test(sessJs),
     "session.js 工具栏里没有 🌏 联网按钮（data-web）");
+  // 切片终点锚在**运行按钮**上：它是这个块之后的第一个 `wrap.querySelector("[data-…]")`。
+  // （原先锚 `data-send]` —— 发送/停止并成一颗 `data-run` 之后锚点失效，这里跟着改。）
   const webStart = sessJs.indexOf('wrap.querySelector("[data-web]")');
-  const webEnd = webStart >= 0 ? sessJs.indexOf("data-send]", webStart) : -1;
+  const webEnd = webStart >= 0 ? sessJs.indexOf('wrap.querySelector("[data-run]")', webStart) : -1;
   const webBody = webStart >= 0 && webEnd > webStart ? sessJs.slice(webStart, webEnd) : "";
   check("U35", "web-search-toggle", webStart >= 0 && webEnd > webStart,
     "session.js 里定位不到 🌏 的处理块（切片锚点失效）");
@@ -3564,6 +3566,22 @@ async function runSessionTraceChecks() {
         !after.includes('data-trace-live="1"'),
       "跑完之后轨迹不该消失（只是从 live 变成静态块），正文要换成真答复");
 
+    // ---- 顺序（用户报的 bug）：跑完之后**过程在上、结论在下** ----
+    // 判据落在**真渲染出来的 HTML**上，不是源码里的拼接顺序 —— 后者只能证明"代码那么写了"，
+    // 前者才证明"用户看到的顺序对了"。两个索引都要在：只有一个出现就说明渲染路径漏了半截。
+    const iTrace = after.indexOf('class="session-trace"');
+    const iBubble = after.indexOf('class="session-bubble session-bubble--md"');
+    const iAnswer = after.indexOf("改好了：气泡下面多了一块轨迹");
+    check("U41", "trace-before-answer",
+      iTrace >= 0 && iBubble > iTrace && iAnswer > iBubble,
+      `气泡里的顺序不对（trace@${iTrace} bubble@${iBubble} answer@${iAnswer}）：` +
+        "工具循环输出必须在上、最终回复在下 —— 反过来读起来像『先给结论再做事』");
+
+    // 反面：正文不许被渲染**进**轨迹块（那样"过程在上"就变成"结论被当成过程"了）
+    check("U41", "answer-not-in-trace",
+      !after.slice(iTrace, iBubble).includes("改好了：气泡下面多了一块轨迹"),
+      "最终回复被渲染进轨迹块里了 —— 正文该在轨迹之外的独立气泡里");
+
     const save = calls.filter((c) => c.cmd === "agent_session_save").pop();
     let savedTrace = null;
     try {
@@ -3586,6 +3604,34 @@ async function runSessionTraceChecks() {
         msgs.innerHTML.includes("session-trace-row--think"),
       "白名单外的 kind 没被挡住：原型链上的名字（constructor 等）会被当成合法 kind，" +
         "图标格里漏出函数源码、class 也拼成垃圾");
+
+    // ---- U58 发送/停止合并成一颗按钮（用户要求）：行为用**真渲染路径**试两种身份 ----
+    const runBtn = wrap.querySelector("[data-run]");
+    check("U58", "single-run-button",
+      !!runBtn && !sessJs.includes("data-send]") && !sessJs.includes("data-cancel]"),
+      "会话工具栏必须是**一颗**运行按钮（data-run）—— 两个互相禁用的按钮是旧样子");
+
+    // ① 空闲 + 输入为空：点下去什么都不该发生（既不发送也不取消）
+    const cancelsBefore = calls.filter((c) => c.cmd === "agent_cancel").length;
+    runBtn.click();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    check("U58", "idle-click-does-not-cancel",
+      calls.filter((c) => c.cmd === "agent_cancel").length === cancelsBefore,
+      "空闲时点运行按钮走了取消分支（判据只该看 busy）");
+
+    // ② 运行中（新起一次 run，agent_reply 仍挂着 = 跑着呢）：点同一颗按钮 = 停止
+    const second = SessionUI.sendMessage(s, wrap, "第二次：这次我要中途停掉它");
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    runBtn.click();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    check("U58", "busy-click-stops",
+      calls.filter((c) => c.cmd === "agent_cancel").length === cancelsBefore + 1,
+      "运行中点同一颗按钮没走取消（agent_cancel 没被调用）—— 合并时把停止入口弄丢了");
+    check("U58", "stop-leaves-a-record",
+      s.messages.some((m) => m.role === "system" && m.status === "canceled"),
+      "停止后要留一句『已取消』（原 data-cancel 的行为不许在合并时丢掉）");
+    finishReply({ answer: "（第二次被取消）", verifications: [], reflections: [], asks: [] });
+    await second;
   } finally {
     for (const [k, v] of saved) {
       if (v === undefined) delete globalThis[k];
@@ -3600,6 +3646,118 @@ async function runSessionTraceChecks() {
  * 这里钉住四件事：后端命令在册；`paths::delete_bucket` 自己挡路径逃逸；前端删除**只走命令系统**
  * （面板里不许直接 `invoke("project_bucket_delete")`，那正是"AI 集成盲点"的成因）；文案中英对齐。
  */
+/**
+ * U58 chat-toolbar：会话工具栏的**形状**约束。
+ *
+ * 用户要求把"发送"和"停止"并成**一颗**按钮。为什么不摆两个互相禁用的按钮：
+ * 一个永远灰着的按钮既占位又要解释自己为什么灰，而"运行中"是一个**状态**而不是一个功能 ——
+ * 状态该改外观（▶ → ■ · 变红 · 换 title），不该换按钮。所以判据有三条：
+ *   ① 工具栏只有一颗 `data-run`，旧的两个 attribute 不许残留；
+ *   ② `setBusy` 只切外观、**从不禁用**（"按下去没反应的按钮"在本项目是禁止项）；
+ *   ③ 点击分支**只看 busy**：运行中 = agent_cancel，空闲 = 发送。
+ * 行为侧（真点两次）在 U41 的活体 wrap 里验，见 runSessionTraceChecks 末尾。
+ */
+function runChatToolbarChecks() {
+  const sessJs = read("ui/session.js");
+  const css = read("ui/styles.css");
+  check("U58", "single-run-button-src",
+    sessJs.includes('class="agent-btn agent-btn--run session-run" data-run') &&
+      !sessJs.includes("session-send") && !sessJs.includes("session-cancel"),
+    "session.js 里不是一颗 data-run 按钮（旧的 session-send / session-cancel 残留了？）");
+
+  const start = sessJs.indexOf("function setBusy(b) {");
+  const end = sessJs.indexOf("function appendGate(", start);
+  const body = start >= 0 && end > start ? sessJs.slice(start, end) : "";
+  check("U58", "setBusy-only-repaints",
+    body.includes('querySelectorAll(".session-run")') &&
+      body.includes("session-run--busy") && body.includes("textContent") &&
+      !body.includes("disabled"),
+    "setBusy 必须只切外观（class/图标/title）**从不禁用** —— 运行中它得能当停止键用");
+  check("U58", "click-branches-on-busy",
+    /if \(busy\) return void stopRun\(\);/.test(sessJs) &&
+      sessJs.includes('invoke("agent_cancel")'),
+    "点击处理器没有按 busy 分叉（运行中必须走 agent_cancel）");
+  check("U58", "busy-look-exists",
+    /\.agent-btn--run\.session-run--busy\s*\{/.test(css),
+    "运行中的样子没有样式（`session-run--busy`）—— 同一颗按钮就看不出变了");
+}
+
+/**
+ * U59 model-dropdown：会话工具栏的**模型下拉框**（用户需求：探测供应商模型列表，在对话界面就能换）。
+ *
+ * 判据四条，每条对应一个真会出事的坏法：
+ *   ① 数据源是**厂商的** `/models`（宿主 `ai_models`），前端不维护名单 —— 名单进前端就会漂；
+ *   ② 换模型写 **runtime** 作用域（`llm.model`）：落盘会把一次试探变成长期默认；
+ *   ③ 换完要**重新问能力**（联网/录音的可用性跟着模型走），否则按钮状态停在旧模型上；
+ *   ④ 拿不到列表**不许编**：只留当前模型一项并说清为什么 —— 编一份清单等于让用户
+ *      选一个可能跑不通的模型。
+ */
+function runModelDropdownChecks() {
+  const sessJs = read("ui/session.js");
+  check("U59", "model-dropdown", sessJs.includes('class="session-model-select" data-model'),
+    "会话工具栏里没有模型下拉框（data-model）");
+  check("U59", "model-dropdown",
+    /invoke\("ai_models"\s*,\s*\{\s*projectRoot: root\(\)\s*\}\)/.test(sessJs),
+    "下拉框没从宿主 ai_models（厂商 /models）取列表 —— 前端不许自己维护模型名单");
+  const applyStart = sessJs.indexOf('modelSel.addEventListener("change"');
+  const applyBody = applyStart >= 0 ? sessJs.slice(applyStart, applyStart + 900) : "";
+  check("U59", "model-dropdown-runtime-scope",
+    applyBody.includes('key: "llm.model"') && applyBody.includes('scope: "runtime"'),
+    "换模型必须写 runtime 作用域的 llm.model（落盘会把一次试探变成长期默认）");
+  check("U59", "model-dropdown-reprobe-caps",
+    applyBody.includes("ai_model_caps"),
+    "换完模型没重新问能力 —— 联网/录音按钮会停在旧模型的状态上");
+  check("U59", "model-dropdown-no-fake-list",
+    /modelSel\.disabled = true/.test(sessJs) && sessJs.includes("拿不到厂商模型列表"),
+    "拿不到厂商列表时必须降级（只留当前模型 + 说明），不许编一份可能跑不通的清单");
+  const mainRs = read("src-tauri/src/main.rs");
+  check("U59", "model-dropdown-backend",
+    mainRs.includes("ai_models,") && mainRs.includes("pub async fn models(") === false,
+    "宿主没注册 ai_models 命令");
+  check("U59", "model-dropdown-vendor-modalities",
+    mainRs.includes("input_modalities") && read("crates/harness-engine/src/llm.rs").includes("pub fn accepts("),
+    "列表条目没带厂商声明的 input_modalities —— 录音/读图这些判断就只能靠猜");
+}
+
+/**
+ * U60 voice-button：录音按钮（用户需求：多模态模型显示录音按钮，把语音发给模型；先只兼容 DeepSeek）。
+ *
+ * **实测结论写在判据里**（2026-09-25，四种入口全打了一遍）：
+ *   · `/models` 的 `input_modalities` 合法取值只有 `text` / `image`，**没有任何模型声明 audio**；
+ *   · `/audio/transcriptions` → 404（没有 ASR 入口）；
+ *   · chat/completions 的 content 块只认 `text` / `image_url` / `file`，`input_audio` → 422；
+ *   · `/files` 只收 webp/png/jpeg/gif —— WAV 与 TXT 都被同一句话打回（类型白名单，不是形状问题）。
+ * 所以本版本的口径是：**能录（多模态就出现）、不假装发给模型**（落项目桶 + 说清原因），
+ * 等厂商声明 audio 那天自动变成直发。判据钉的就是"不许假装"。
+ */
+function runVoiceButtonChecks() {
+  const sessJs = read("ui/session.js");
+  const mainRs = read("src-tauri/src/main.rs");
+  check("U60", "voice-button", sessJs.includes('data-mic') && sessJs.includes('session-mic--rec'),
+    "工具栏没有录音按钮（data-mic / session-mic--rec 样式钩子）");
+  check("U60", "voice-button-modality-gated",
+    sessJs.includes("micBtn.hidden = !multim") && sessJs.includes("rec) return; // 录音中"),
+    "录音按钮没按多模态门控（不是多模态的模型上不该出现）");
+  check("U60", "voice-button-both-truths",
+    sessJs.includes("不接受音频输入") && sessJs.includes("厂商 /models 只声明 text/image"),
+    "录音按钮的说明没写清「能不能发给模型」这一层 —— 用户会以为录了就等于发出去了");
+  check("U60", "voice-button-recorder",
+    sessJs.includes("MediaRecorder") && sessJs.includes("getUserMedia") && sessJs.includes("isTypeSupported"),
+    "录音实现缺件（MediaRecorder / getUserMedia / 编码协商）");
+  check("U60", "voice-button-saved-not-sent",
+    sessJs.includes('invoke("voice_save"') && sessJs.includes("没有发往模型"),
+    "录音没有落盘入口，或落盘后没告诉用户「没发出去」（静默丢数据 = 更坏）");
+  check("U60", "voice-save-command",
+    mainRs.includes("fn voice_save(") && mainRs.includes("voice_save,"),
+    "宿主没有 voice_save 命令或没注册");
+  check("U60", "voice-save-into-bucket",
+    /paths::current\(\)\.project_bucket\(&project_root, "voice"\)/.test(mainRs),
+    "录音必须落进**项目桶**（<便携根>/projects/<键>/voice）—— 写进用户仓库违反零残留约束");
+  check("U60", "voice-save-guards",
+    mainRs.includes("is_ascii_alphanumeric()") && mainRs.includes("32 * 1024 * 1024"),
+    "voice_save 缺守卫：扩展名要做字母数字过滤（它会被拼进文件名），数据要有体积上限");
+}
+
 async function runBucketPanelChecks() {
   const commandJs = readLf("ui/command.js");
   const mainSrc = readLf("ui/main.js");
@@ -4312,6 +4470,9 @@ async function main() {
     ["U52", "backend-msg-i18n", runBackendMsgChecks],
     ["U54", "memory-panel", runMemoryPanelChecks],
     ["U56", "startup-scope", runStartupScopeChecks],
+    ["U58", "chat-toolbar", runChatToolbarChecks],
+    ["U59", "model-dropdown", runModelDropdownChecks],
+    ["U60", "voice-button", runVoiceButtonChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {
