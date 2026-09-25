@@ -1770,6 +1770,143 @@ struct AiModelInfo {
     audio: bool,
 }
 
+// ============================================
+// 语音输入（本地转写：candle whisper，纯 Rust）
+// ============================================
+
+/// 进程级的 whisper 实例缓存。**加载一次几百 MB 权重**，而转写是"按住说一句"级别的频繁动作
+/// —— 每次重载会让每次转写都多花好几秒。
+///
+/// 为什么可以是 `static`：candle 的 `Tensor` 与 `tokenizers::Tokenizer` 都是 `Send + Sync`，
+/// 而 `transcribe` 要 `&mut self`（KV cache 是可变状态）⇒ 外面套 `Mutex` 串行化。
+/// 串行化在这里不是缺陷：CPU 上本来就该一次跑一段（并行只会互相抢核）。
+static VOICE_ASR: std::sync::OnceLock<std::sync::Mutex<Option<harness_engine::voice::Asr>>> =
+    std::sync::OnceLock::new();
+
+fn voice_asr_cell() -> &'static std::sync::Mutex<Option<harness_engine::voice::Asr>> {
+    VOICE_ASR.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 语音模型自检：没装 / 装坏了 / 就绪（带一句人话，界面直接显示它）。
+#[tauri::command]
+fn voice_status() -> serde_json::Value {
+    let st = harness_engine::voice::fetch::status();
+    serde_json::json!({
+        "ready": st.is_ready(),
+        "line": st.voice_line(),
+        "dir": harness_engine::voice::fetch::target_dir().ok().map(|d| d.display().to_string()),
+        "need_bytes": harness_engine::voice::fetch::required_bytes(),
+    })
+}
+
+/// 按需下载语音模型（453MB）。**立即返回**，进度走 `voice://model` 事件 ——
+/// 与记忆的 `mem_model_fetch` 同一套形状（这里更该如此：几百 MB 的下载绝不能把界面卡住）。
+#[tauri::command]
+async fn voice_model_fetch(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let st = harness_engine::voice::fetch::status();
+    if st.is_ready() {
+        return Ok(serde_json::json!({ "started": false, "line": st.voice_line() }));
+    }
+    let h = app.clone();
+    let h2 = app.clone();
+    let start_line = st.voice_line();
+    let line_for_task = start_line.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = h.emit(
+            "voice://model",
+            serde_json::json!({ "phase": "start", "line": line_for_task }),
+        );
+        let res = harness_engine::voice::fetch::fetch(|p| {
+            let _ = h2.emit(
+                "voice://model",
+                serde_json::json!({
+                    "phase": "progress",
+                    "file": p.file, "index": p.index, "of": p.of,
+                    "done": p.done, "total": p.total, "tag": p.tag,
+                }),
+            );
+        })
+        .await;
+        match res {
+            Ok(rep) => {
+                let _ = h.emit(
+                    "voice://model",
+                    serde_json::json!({
+                        "phase": "done",
+                        "files": rep.fetched.len(), "skipped": rep.skipped.len(),
+                        "from": rep.from, "line": harness_engine::voice::fetch::status().voice_line(),
+                    }),
+                );
+            }
+            Err(e) => {
+                let _ = h.emit(
+                    "voice://model",
+                    serde_json::json!({ "phase": "error", "line": e }),
+                );
+            }
+        }
+    });
+    Ok(serde_json::json!({ "started": true, "line": start_line }))
+}
+
+/// 转写一段 **16kHz 单声道 f32 PCM**（前端用 WebAudio 解码 + 重采样后交过来）。
+///
+/// 为什么传 base64 而不是 `Vec<f32>`：Tauri 会把 `Vec<f32>` 序列化成 JSON 数字数组，
+/// 30 秒音频（48 万个 float）会膨胀成 ~5MB 文本；原始字节 + base64 只膨胀 4/3。
+/// 音频**不出本机**：这里全程本地推理，一个字节都不发往任何服务。
+#[tauri::command]
+async fn voice_transcribe(
+    data: String,
+    language: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let st = harness_engine::voice::fetch::status();
+    if !st.is_ready() {
+        // 没装 / 装坏了 / 没配目录：三种说法的下一步不一样，一律照实说
+        return Err(st.voice_line());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|e| format!("PCM 数据不是合法 base64: {e}"))?;
+    if bytes.is_empty() {
+        return Err("没收到音频数据".into());
+    }
+    if !bytes.len().is_multiple_of(4) {
+        return Err(format!("PCM 数据长度不是 4 的倍数（{} 字节）", bytes.len()));
+    }
+    let pcm: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // 0.2 秒以下基本是误触：直接说清楚，别让模型去猜一段噪音
+    if pcm.len() < harness_engine::voice::asr::SAMPLE_RATE / 5 {
+        return Err("录音太短（不到 0.2 秒）".into());
+    }
+
+    // CPU 密集（编码 + 解码循环，还可能含首次加载 453MB）：放到阻塞线程池，
+    // 别占住 async 运行时 —— 那会让整个应用的 IPC 在这几秒里变慢。
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let cell = voice_asr_cell();
+        let mut guard = cell.lock().map_err(|e| e.to_string())?;
+        if guard.is_none() {
+            let dir = harness_engine::voice::fetch::target_dir()?;
+            *guard = Some(harness_engine::voice::Asr::load(&dir)?);
+        }
+        let asr = guard.as_mut().expect("上面刚填过");
+        let r = asr.transcribe(&pcm, language.as_deref())?;
+        Ok(serde_json::json!({
+            "text": r.text,
+            "language": r.language,
+            "audio_secs": r.audio_secs,
+            "elapsed_ms": r.elapsed_ms,
+            "tokens": r.tokens,
+            "truncated": r.truncated,
+        }))
+    })
+    .await
+    .map_err(|e| format!("转写任务失败: {e}"))?
+}
+
 /// 某个模型具备哪些服务端能力（联网 / 多模态）。
 ///
 /// 能力表在引擎里（`llm::model_caps`），宿主不抄一份 —— 否则加一个模型要改两处，
@@ -2448,6 +2585,13 @@ fn main() {
             Err(e) => eprintln!("[mem] 记忆库打开失败（继续跑，记忆不参与本轮）：{e}"),
         }
     }
+    // 语音模型根（语音输入）：与记忆同族的便携布局 —— `<根>/global/voice/model/`。
+    // 与记忆**刻意不同**：这里**不自动下载**（权重 453MB，比记忆模型大近 5 倍）——
+    // 用户点了「下载语音模型」才开始下。缺模型时录音照样能用（存进项目桶），只是转不成文字。
+    harness_engine::voice::fetch::set_model_root(
+        root_paths.global_dir().join("voice").join("model"),
+    );
+
     let plugin_reg = Mutex::new(reload_plugins(
         &plugins_root,
         root_paths.root(),
@@ -2614,6 +2758,9 @@ fn main() {
             ai_list_models,
             ai_models,
             voice_save,
+            voice_status,
+            voice_model_fetch,
+            voice_transcribe,
             ai_model_caps,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,

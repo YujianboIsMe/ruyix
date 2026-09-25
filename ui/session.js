@@ -347,36 +347,36 @@
     // 在本项目是禁止项 —— 两件事只能这样同时成立。
     const micBtn = wrap.querySelector("[data-mic]");
     /**
-     * 🎙 的两件事分开判（这是本功能唯一诚实的做法）：
-     *   · **能不能录**（按钮出现/可点）看模型是不是**多模态** —— 用户口径："多模态模型显示录音按钮"；
-     *   · **能不能发给模型**看厂商 `GET /models` 声明的 `input_modalities` 里有没有 `audio`。
-     * 今天 DeepSeek 两者不同真：flash 声明 `text,image`（多模态 ✓）、音频**没有任何模型声明**
-     * （实测 `/files` 只收 webp/png/jpeg/gif，WAV 被明确打回；`/audio/transcriptions` 是 404；
-     * 文档里 `input_modalities` 的合法取值也只有 text / image）。所以按钮**能录**、录音**不发给模型**，
-     * 落盘到项目桶并告诉用户为什么 —— 而不是假装发了（那才是"配置在撒谎"）。
-     * 供应商将来声明 audio，这里自动变成直发，代码不用再动。
+     * 🎙 语音输入 = **录音 → 本机转写 → 文本填进输入框**（音频一个字节都不出本机）。
+     *
+     * 为什么不是"把录音发给模型"：实测 DeepSeek 四条入口全都不收音频（2026-09-25）——
+     * `/models` 的 `input_modalities` 合法取值只有 text/image（**没有任何模型声明 audio**）、
+     * `/audio/transcriptions` 是 404、chat 塞 `input_audio` 是 422、`/files` 只收
+     * webp/png/jpeg/gif。所以"发给模型"这条腿今天根本不存在；能做的是**本地转写**
+     * （candle 的 whisper，纯 Rust、不联网、权重按需下载）——
+     * 录音不出本机这一步反而是好处：语音不会经过任何第三方。
+     *
+     * 按钮的可见性只看**多模态**（用户口径），能不能真用看**模型装没装**：
+     * 没装就点一下问用户要不要下（453MB，得先告诉代价），而不是静默失败。
      */
     const paintMic = () => {
       const caps = wrap._webCaps;
       const sel = (wrap._models || []).find((m) => caps && m.id === caps.model);
       const multim = !!(caps && (caps.multimodal || (sel && sel.multimodal)));
-      const audio = !!(sel && sel.audio);
       micBtn.hidden = !multim;
       if (!multim) return;
       micBtn.disabled = false;
       if (rec) return; // 录音中：title 由计时器接管
-      micBtn.title = audio
-        ? L("录音：把这段语音发给模型", "Record: send this clip to the model")
-        : L(
-            `录音（存在项目桶里，暂不发往模型）：当前模型 ${caps.model} 不接受音频输入 —— ` +
-              "厂商 /models 只声明 text/image，音频文件也会被它的 /files 打回",
-            `Record (kept in the project bucket, not sent): model ${caps.model} does not accept audio — ` +
-              "the vendor only declares text/image and rejects audio uploads"
-          );
+      micBtn.title = L(
+        "语音输入：录一段话 → 本机转写成文字 → 填进输入框（音频不出本机，也不发给模型）",
+        "Voice input: record → transcribe on this machine → fill the input box (audio never leaves your machine)"
+      );
     };
 
-    // ---- 录音本体（MediaRecorder → 项目桶）----
+    // ---- 录音本体（MediaRecorder → 解码 → 本地转写）----
     let rec = null; // 录音中：{ mr, chunks, stream, t0, tick }
+    let voiceModel = null; // 语音模型状态（缺它就只能录、不能转）
+
     function pickMime() {
       const cands = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
       const MR = window.MediaRecorder;
@@ -385,6 +385,58 @@
     function releaseStream() {
       if (rec && rec.stream) rec.stream.getTracks().forEach((t) => t.stop());
     }
+
+    /**
+     * 录音 blob → 16kHz 单声道 f32 → base64。
+     *
+     * 解码与重采样都用 **WebView 自带的 WebAudio**：这样 Rust 侧一个音频编解码依赖都不用引，
+     * 它只吃 16k 单声道浮点数组（`pcm_to_mel` 的入参形状）。上下文就建在 16kHz ——
+     * `decodeAudioData` 会顺带把采样率重采样过去。
+     */
+    async function blobToPcmBase64(blob) {
+      const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      if (!OAC) return { error: L("这个环境没有 WebAudio（解不了录音）", "no WebAudio here") };
+      const buf = await blob.arrayBuffer();
+      const ctx = new OAC(1, 16000, 16000);
+      const audio = await ctx.decodeAudioData(buf);
+      const f32 = audio.getChannelData(0);
+      const bytes = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      return { data: btoa(bin), secs: f32.length / 16000 };
+    }
+
+    /** 缺模型时问一句再下（453MB，不能悄悄下）：进度由 `voice://model` 推到状态栏。 */
+    async function ensureVoiceModel() {
+      const invoke = getInvoke();
+      if (!invoke) return false;
+      try {
+        voiceModel = await invoke("voice_status");
+      } catch {
+        voiceModel = null;
+      }
+      if (voiceModel && voiceModel.ready) return true;
+      const line = (voiceModel && voiceModel.line) || L("语音模型状态未知", "voice model status unknown");
+      const mb = voiceModel && voiceModel.need_bytes ? Math.round(voiceModel.need_bytes / 1e6) : 453;
+      const ok = await showConfirm(
+        L("下载语音模型？", "Download the speech model?"),
+        L(
+          `${line}\n\n本地转写需要 whisper 权重（约 ${mb} MB，装好后离线可用、音频不出本机）。现在下吗？`,
+          `${line}\n\nLocal transcription needs the whisper weights (about ${mb} MB, fetched once, then offline). Download now?`
+        )
+      );
+      if (!ok) return false;
+      try {
+        await invoke("voice_model_fetch");
+        status(L("语音模型开始下载（进度在状态栏）", "downloading the speech model (progress in the status bar)"));
+      } catch (e) {
+        status(String(e), "error");
+      }
+      return false; // 下载是异步的：这一轮先不录，下完再点一次
+    }
+
     async function startRec() {
       // 环境缺件时说清楚缺的是什么，别只说"失败"
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -407,11 +459,11 @@
         const paint = () => {
           if (!rec) return;
           const secs = ((Date.now() - rec.t0) / 1000).toFixed(0);
-          micBtn.title = L(`录音中 ${secs}s —— 再点一次结束并保存`, `recording ${secs}s — click again to save`);
+          micBtn.title = L(`录音中 ${secs}s —— 再点一次结束并转写`, `recording ${secs}s — click again to transcribe`);
         };
         paint();
         rec.tick = setInterval(paint, 500);
-        status(L("录音中…（再点一次结束）", "Recording… (click again to stop)"));
+        status(L("录音中…（再点一次结束并转写）", "Recording… (click again to transcribe)"));
       } catch (e) {
         // 权限被拒 / 没有输入设备都从这里出来
         rec = null;
@@ -421,6 +473,7 @@
         paintMic();
       }
     }
+
     async function finishRec() {
       const r = rec;
       rec = null;
@@ -430,38 +483,44 @@
       releaseStream();
       paintMic();
       const blob = new Blob(r.chunks, { type: (r.mr && r.mr.mimeType) || "audio/webm" });
-      const secs = ((Date.now() - r.t0) / 1000).toFixed(1);
       if (!blob.size) return status(L("这段录音是空的（没采到数据）", "empty recording"), "error");
       const invoke = getInvoke();
       if (!invoke || !root()) return;
+
+      const pcm = await blobToPcmBase64(blob);
+      if (pcm.error) return status(pcm.error, "error");
+      status(L("本机转写中…", "transcribing locally…"));
+      let out = null;
       try {
-        const b64 = await new Promise((res, rej) => {
-          const fr = new FileReader();
-          fr.onload = () => res(String(fr.result || "").split(",")[1] || "");
-          fr.onerror = () => rej(new Error("读不出录音数据"));
-          fr.readAsDataURL(blob);
-        });
-        const saved = await invoke("voice_save", { data: b64, ext: "webm", projectRoot: root() });
-        const kb = Math.max(1, Math.round(saved.bytes / 1024));
-        s.messages.push({
-          role: "system",
-          text: L(
-            `🎙 录音已保存（${secs}s · ${kb}KB）：${saved.path}` +
-              "\n（当前模型不接受音频输入，所以没有发往模型；厂商支持后这里会直接发送）",
-            `🎙 Recording saved (${secs}s · ${kb}KB): ${saved.path}` +
-              "\n(not sent — the current model does not accept audio input)"
-          ),
-          ts: nowHms(), run_id: null, status: null,
-        });
-        fillMsgs(wrap, s);
-        await persist(s);
-        status(L("录音已保存到项目桶（当前模型不支持音频，未发往模型）", "saved to the project bucket (not sent: model takes no audio)"));
+        out = await invoke("voice_transcribe", { data: pcm.data, language: null });
       } catch (e) {
-        status(String(e), "error");
+        // 转写失败**不能把用户说的话弄丢**：留一份音频在项目桶里，并说明为什么没转成
+        try {
+          const saved = await invoke("voice_save", { data: pcm.data, ext: "webm", projectRoot: root() });
+          status(L(`转写失败（${e}）—— 录音已存到 ${saved.path}`, `transcription failed (${e}) — audio kept at ${saved.path}`), "error");
+        } catch {
+          status(L(`转写失败：${e}`, `transcription failed: ${e}`), "error");
+        }
+        return;
       }
+      const text = String((out && out.text) || "").trim();
+      if (!text) {
+        return status(L("没听出内容（可能太短或太吵）—— 再录一次试试", "nothing recognised — try again"), "error");
+      }
+      // 填进输入框而**不自动发送**：转写可能有个别字错，用户该有机会改一下再发
+      input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
+      input.focus();
+      const secs = ((out.elapsed_ms || 0) / 1000).toFixed(1);
+      status(
+        L(`本地转写完成（${secs}s · 音频没出本机）—— 确认后发送`, `transcribed locally (${secs}s · audio never left) — review then send`),
+        "info"
+      );
     }
-    micBtn.addEventListener("click", () => {
+
+    micBtn.addEventListener("click", async () => {
       if (rec) return void rec.mr.stop();
+      // 先确认模型在不在：缺就**问一句再下**（453MB 不能悄悄下），这一轮不录
+      if (!(await ensureVoiceModel())) return;
       startRec();
     });
 
@@ -1448,6 +1507,27 @@
         listen("agent://reflect", (ev) => appendGate(ev.payload ?? {}, "reflect"));
         // 提问（v0.8）：模型问需求歧义 → 会话里弹问题卡，等你答完它继续做
         listen("agent://ask", (ev) => showAskCard(ev.payload ?? {}));
+  // 语音模型下载进度（`voice://model`）：453MB 的下载必须看得见，否则用户以为卡死了
+  listen("voice://model", (ev) => {
+    const p = ev.payload ?? {};
+    if (p.phase === "progress") {
+      const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+      const mb = (v) => Math.max(1, Math.round(v / 1048576));
+      status(
+        L(
+          `语音模型下载 ${p.file} ${pct}%（${mb(p.done)}/${mb(p.total)} MB）`,
+          `downloading voice model ${p.file} ${pct}% (${mb(p.done)}/${mb(p.total)} MB)`
+        ),
+        "info"
+      );
+    } else if (p.phase === "start") {
+      status(p.line || L("语音模型开始下载", "downloading the voice model"), "info");
+    } else if (p.phase === "done") {
+      status(p.line || L("语音模型已就绪", "voice model ready"), "info");
+    } else if (p.phase === "error") {
+      status(String(p.line || L("语音模型下载失败", "voice model download failed")), "error");
+    }
+  });
       }
     } catch {
       // 浏览器模式无 Tauri 事件

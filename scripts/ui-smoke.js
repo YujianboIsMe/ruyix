@@ -3720,42 +3720,101 @@ function runModelDropdownChecks() {
 }
 
 /**
- * U60 voice-button：录音按钮（用户需求：多模态模型显示录音按钮，把语音发给模型；先只兼容 DeepSeek）。
+ * U60 voice-input：录音按钮（需求：多模态模型显示录音按钮；本版本改成「本机转写」）。
  *
- * **实测结论写在判据里**（2026-09-25，四种入口全打了一遍）：
+ * **先说清为什么不是「把录音发给模型」**（2026-09-25 四种入口全打了一遍，实测）：
  *   · `/models` 的 `input_modalities` 合法取值只有 `text` / `image`，**没有任何模型声明 audio**；
  *   · `/audio/transcriptions` → 404（没有 ASR 入口）；
  *   · chat/completions 的 content 块只认 `text` / `image_url` / `file`，`input_audio` → 422；
  *   · `/files` 只收 webp/png/jpeg/gif —— WAV 与 TXT 都被同一句话打回（类型白名单，不是形状问题）。
- * 所以本版本的口径是：**能录（多模态就出现）、不假装发给模型**（落项目桶 + 说清原因），
- * 等厂商声明 audio 那天自动变成直发。判据钉的就是"不许假装"。
+ * 所以能做的是**本机转写**：candle 的 whisper（纯 Rust、不联网、权重按需下载），
+ * 录音一个字节都不出本机 —— 这比「发给模型」反而是好处。判据钉的就是这条链路**不许假装**。
  */
 function runVoiceButtonChecks() {
   const sessJs = read("ui/session.js");
-  const mainRs = read("src-tauri/src/main.rs");
   check("U60", "voice-button", sessJs.includes('data-mic') && sessJs.includes('session-mic--rec'),
     "工具栏没有录音按钮（data-mic / session-mic--rec 样式钩子）");
   check("U60", "voice-button-modality-gated",
     sessJs.includes("micBtn.hidden = !multim") && sessJs.includes("rec) return; // 录音中"),
     "录音按钮没按多模态门控（不是多模态的模型上不该出现）");
-  check("U60", "voice-button-both-truths",
-    sessJs.includes("不接受音频输入") && sessJs.includes("厂商 /models 只声明 text/image"),
-    "录音按钮的说明没写清「能不能发给模型」这一层 —— 用户会以为录了就等于发出去了");
   check("U60", "voice-button-recorder",
     sessJs.includes("MediaRecorder") && sessJs.includes("getUserMedia") && sessJs.includes("isTypeSupported"),
     "录音实现缺件（MediaRecorder / getUserMedia / 编码协商）");
-  check("U60", "voice-button-saved-not-sent",
-    sessJs.includes('invoke("voice_save"') && sessJs.includes("没有发往模型"),
-    "录音没有落盘入口，或落盘后没告诉用户「没发出去」（静默丢数据 = 更坏）");
-  check("U60", "voice-save-command",
-    mainRs.includes("fn voice_save(") && mainRs.includes("voice_save,"),
-    "宿主没有 voice_save 命令或没注册");
-  check("U60", "voice-save-into-bucket",
-    /paths::current\(\)\.project_bucket\(&project_root, "voice"\)/.test(mainRs),
-    "录音必须落进**项目桶**（<便携根>/projects/<键>/voice）—— 写进用户仓库违反零残留约束");
-  check("U60", "voice-save-guards",
-    mainRs.includes("is_ascii_alphanumeric()") && mainRs.includes("32 * 1024 * 1024"),
-    "voice_save 缺守卫：扩展名要做字母数字过滤（它会被拼进文件名），数据要有体积上限");
+  check("U60", "voice-button-records-not-mute",
+    sessJs.includes("这段录音是空的") && sessJs.includes("打不开麦克风"),
+    "录音的空数据/权限失败必须有话说（静默失败＝用户以为说完了其实没录上）");
+}
+
+/**
+ * U61 local-transcription：录音 → **本机转写** → 文本进输入框（这条链路的契约）。
+ *
+ * 三层都要钉住，因为每一层都出过真错：
+ *   1. **前端**：解码/重采样交给 WebAudio（Rust 侧才不用引音频编解码依赖）；
+ *      转写结果**填进输入框而不是自动发送**（转写会错字，得给用户改的机会）；
+ *      缺模型**先问再下**（453MB 不能悄悄下）；转写失败**不能把用户说的话弄丢**。
+ *   2. **宿主**：没装 / 装坏了 / 没配目录三种要照实说；PCM 长度与时长要有守卫；
+ *      CPU 密集的活必须在 spawn_blocking 里（占住 async 运行时会让整个 IPC 变慢）。
+ *   3. **引擎**：`pcm_to_mel` 的输出是 `[mel][frame]` 且**恒补到 30 秒**（3000 帧）——
+ *      按真实长度编码必须**自己按该布局切片**。踩过的坑：把整块 mel 交给更小的 shape，
+ *      `from_vec` 取前 N 个元素（不是截断时间轴，是把 mel 轴切掉），模型听见噪声并幻觉
+ *      （中文音频转出 "Thank you."），**不报错、只能靠实测抓**。所以这条要机械化。
+ */
+function runVoiceTranscribeChecks() {
+  const sessJs = read("ui/session.js");
+  const mainRs = read("src-tauri/src/main.rs");
+  const asrRs = read("crates/harness-engine/src/voice/asr.rs");
+  const fetchRs = read("crates/harness-engine/src/voice/fetch.rs");
+  const melRs = read("crates/harness-engine/src/voice/mel.rs");
+
+  // ── 前端 ──
+  check("U61", "voice-pcm-via-webaudio",
+    sessJs.includes("OfflineAudioContext") && sessJs.includes("decodeAudioData") &&
+      sessJs.includes("new OAC(1, 16000, 16000)"),
+    "录音解码/重采样没交给 WebAudio（16k 单声道口径）—— 那样 Rust 侧就得引音频编解码依赖");
+  check("U61", "voice-transcribe-call",
+    /invoke\("voice_transcribe"/.test(sessJs) && sessJs.includes("voice_status") && sessJs.includes("voice_model_fetch"),
+    "前端没接上 voice_transcribe / voice_status / voice_model_fetch");
+  const fill = sessJs.indexOf("input.value = input.value.trim() ?");
+  check("U61", "voice-fill-not-autosend",
+    fill > 0 && !/send\w*\(/.test(sessJs.slice(fill, fill + 400)),
+    "转写结果必须**填进输入框**（转写会错字，用户要能改）—— 不许直接自动发送");
+  check("U61", "voice-model-ask-before-download",
+    sessJs.includes("showConfirm(") && /need_bytes/.test(sessJs) && sessJs.includes("现在下吗"),
+    "缺模型时没有先问再下（453MB 的下载不能悄悄发生）");
+  check("U61", "voice-failure-keeps-audio",
+    sessJs.includes('invoke("voice_save"') && sessJs.includes("录音已存到"),
+    "转写失败时没有兜底保存录音 —— 用户说的话不能因为转写失败就丢了");
+  check("U61", "voice-progress-visible",
+    /listen\("voice:\/\/model"/.test(sessJs) && sessJs.includes("语音模型下载"),
+    "语音模型下载进度没接到状态栏（几百 MB 的下载看不见＝以为卡死了）");
+
+  // ── 宿主 ──
+  check("U61", "voice-commands-registered",
+    ["voice_status,", "voice_model_fetch,", "voice_transcribe,"].every((c) => mainRs.includes(c)),
+    "宿主没注册 voice_status / voice_model_fetch / voice_transcribe");
+  check("U61", "voice-transcribe-says-which",
+    /if !st\.is_ready\(\)/.test(mainRs) && mainRs.includes("st.voice_line()"),
+    "转写入口没把装没装/坏没坏/配没配照实说清楚（三种的下一步不一样）");
+  check("U61", "voice-transcribe-pcm-guards",
+    mainRs.includes("不是 4 的倍数") && mainRs.includes("录音太短"),
+    "PCM 入口缺守卫（长度要对齐 f32、时长要有个下限，否则一段噪音也送去推理）");
+  check("U61", "voice-transcribe-offloads-cpu",
+    /spawn_blocking\(move \|\| -> Result<serde_json::Value, String> \{/.test(mainRs) && mainRs.includes("VOICE_ASR"),
+    "转写（含首次加载 453MB）必须在 spawn_blocking 里且复用进程级实例 —— 否则每次重载权重、还会占住 async 运行时");
+  check("U61", "voice-model-not-autofetched",
+    mainRs.includes("不自动下载") && !/voice_model_fetch\(\)/.test(mainRs.split("fn voice_model_fetch")[0] || ""),
+    "语音模型不许像记忆模型那样开机自动取（453MB）；必须用户点一下才下");
+
+  // ── 引擎（mel 的那个坑必须机械化）──
+  check("U61", "voice-mel-sliced-per-channel",
+    asrRs.includes("fn slice_mel(") && /slice_mel\(&mel_v, n_mels, n_frames\)/.test(asrRs),
+    "按真实长度编码前没有按 [mel][frame] 布局切片 —— from_vec 会静默取前 N 个元素，模型听见噪声并幻觉");
+  check("U61", "voice-mel-filters-embedded",
+    melRs.includes('include_bytes!("mel-filters.bin")') && fs.existsSync(path.join(ROOT, "crates/harness-engine/src/voice/mel-filters.bin")),
+    "mel 滤波器表没编进二进制（自己算的公式实测差 0.5%，错了不报错、只会让识别率悄悄变差）");
+  check("U61", "voice-spec-self-contained",
+    fetchRs.includes("voice-spec.json") && fetchRs.includes("required_bytes"),
+    "语音模型规格没编进二进制（单 exe 要能自检并知道该取什么）");
 }
 
 async function runBucketPanelChecks() {
@@ -4473,6 +4532,7 @@ async function main() {
     ["U58", "chat-toolbar", runChatToolbarChecks],
     ["U59", "model-dropdown", runModelDropdownChecks],
     ["U60", "voice-button", runVoiceButtonChecks],
+    ["U61", "voice-transcribe", runVoiceTranscribeChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {

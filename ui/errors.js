@@ -58,6 +58,11 @@
     "读收据": "read the receipt",
     "取向量": "read the vector",
     "加载": "load",
+    "编码": "encode",
+    "解码": "decode",
+    "语言检测": "detect the language",
+    "取模型": "fetch the model",
+    "分词": "tokenize",
     "分词": "tokenize",
     "构造": "build",
     "前向": "forward pass",
@@ -144,6 +149,17 @@
   // 词典：名词（`X 不存在` / `没有 X` / `X 不能为空` 里的东西）
   // ============================================
   const NOUNS = {
+    "权重": "weights",
+    "张量": "tensor",
+    "文本": "text",
+    "不对": "wrong",
+    "步": "step",
+    "音频": "the audio",
+    "抑制表": "the suppression table",
+    "语音模型目录": "the voice model directory",
+    "项目桶": "the project bucket",
+    "文字": "text",
+    "语音模型": "the voice model",
     "MCP服务器": "MCP server",
     "A2Aagent": "A2A agent",
     "项目目录": "project directory",
@@ -218,6 +234,22 @@
   // 精确对照：一次性句子（键是后端原样文案）
   // ============================================
   const EXACT = {
+    "音频是空的": "the audio is empty",
+    "{language}（语言 token 表里没有）": "{language} (not in the language token table)",
+    "不认识的语言标记": "unknown language tag",
+    "所有 token 都被抑制了（抑制表配错？）": "every token was suppressed (bad suppression table?)",
+    "录音太短（不到 0.2 秒）": "the recording is too short (under 0.2s)",
+    "没收到音频数据": "no audio data received",
+    "未配置语音模型目录（宿主未设、也没有 RUYIX_VOICE_MODEL_DIR）": "no voice model directory configured (host did not set one, and RUYIX_VOICE_MODEL_DIR is unset)",
+    "未配置模型目录（宿主未设、也没有 RUYIX_MEM_MODEL_DIR）": "no model directory configured (host did not set one, and RUYIX_MEM_MODEL_DIR is unset)",
+    "{e}；记忆仍按词法模式工作": "{e}; memory stays in lexical mode",
+    "{e}；录音仍会保存到项目桶，只是暂时转不成文字": "{e}; the recording is still saved into the project bucket, it just cannot be turned into text yet",
+    "tokenizer 里找不到语言 token（不是 whisper 的 tokenizer？）": "no language token in the tokenizer (not a whisper tokenizer?)",
+    "这个环境没有 WebAudio（解不了录音）": "no WebAudio here (cannot decode the recording)",
+    "这个环境没有麦克风接口（navigator.mediaDevices 缺失）": "no microphone API here (navigator.mediaDevices missing)",
+    "这个环境没有 MediaRecorder（录不了）": "no MediaRecorder here (cannot record)",
+    "这段录音是空的（没采到数据）": "that recording is empty (no data captured)",
+    "没听出内容（可能太短或太吵）—— 再录一次试试": "nothing recognised (too short or too noisy) — try recording again",
     "空命令": "empty command",
     "空路径": "empty path",
     "路径为空": "empty path",
@@ -334,6 +366,11 @@
     [
       /^(.+?)(?:失败|出错|错误)（(.+?)）[:：]\s*(.+)$/,
       (m) => join(phraseOrNull(m[1]), ` failed (${m[2]}): `, m[3]),
+    ],
+    // ②⁻ `<A>第 <N> 步失败: <原因>`（"解码第 3 步失败: …"）—— 必须排在通用 ② 之前
+    [
+      /^(.+?)第\s*(.+?)\s*步(?:失败|出错|错误)[:：]\s*(.+)$/,
+      (m) => join(phraseOrNull(m[1]), " failed at step ", m[2], ": ", m[3]),
     ],
     // ② `<动词短语>失败{}: <原因>` / `<动词短语>失败: <原因>`
     //    占位符可能夹在"失败"和冒号之间（`写入失败 {}: {e}`、`创建目录失败 {}：{e}`）——

@@ -23,6 +23,7 @@ sha2 = "0.10"
 candle-core = { version = "0.9", optional = true }
 candle-nn = { version = "0.9", optional = true }
 candle-transformers = { version = "0.9", optional = true }
+# safetensors 权重走 candle_nn::VarBuilder::from_mmaped_safetensors（同一份 embed 特性开关）
 tokenizers = { version = "0.21", optional = true, default-features = false, features = ["fancy-regex"] }
 safetensors = { version = "0.6", optional = true }
 
