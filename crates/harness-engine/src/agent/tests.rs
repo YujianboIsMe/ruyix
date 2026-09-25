@@ -802,7 +802,30 @@ fn a_handle_lookup_must_not_reach_across_projects() {
         "跨项目 log 必须失败"
     );
     assert!(crate::proc::stop(&b.0, &h).is_err(), "跨项目 stop 必须失败");
+
+    // 收尾也必须按项目：清理 A 不许把 B 的条目抹掉。
+    // 这一环钉的是残余偶发的**真正病根** —— 曾经的 `clear_table()` 清的是**全表**，
+    // 并跑时把别人的条目一起收了，症状是"handle 的进程已被停止"而进程其实还活着。
+    let spec_b = crate::proc::StartSpec {
+        cmd: sleeper.into(),
+        ready_cmd: Some(r#"netstat -ano | findstr ":65532" | findstr "LISTENING""#.into()),
+        ready_timeout_secs: Some(2),
+        keep_alive: false,
+    };
+    let b_started = crate::proc::start(
+        &b.0,
+        &spec_b,
+        cfg.proc.max,
+        cfg.proc.ready_timeout_secs,
+        &b.0,
+    )
+    .expect("B 也起一个");
     crate::proc::shutdown_for(&a.0, false);
+    assert!(
+        crate::proc::status(&b.0, &b_started.info.handle).is_ok(),
+        "清理 A 不许抹掉 B 的条目（否则并跑用例会互相看不见）"
+    );
+    crate::proc::shutdown_for(&b.0, false);
 }
 
 /// 提示词必须把后台模式说清 —— 不说，模型就还用 start / Start-Process 那套花招，

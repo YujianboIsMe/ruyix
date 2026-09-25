@@ -235,9 +235,9 @@ fn log_dir(state_dir: &Path) -> PathBuf {
 
 /// 轮询一个子进程。`Ok(None)` = 还在跑，`Ok(Some(码))` = 已退出，
 /// `Err(())` = 句柄已不在表里（被 `stop` 了），调用方该停止轮询。
-fn poll_child(handle: &str) -> Result<Option<Option<i32>>, ()> {
+fn poll_child(proj: &Path, handle: &str) -> Result<Option<Option<i32>>, ()> {
     let Ok(mut t) = lock() else { return Err(()) };
-    let Some(m) = by_handle_mut(&mut t, handle) else {
+    let Some(m) = by_handle_in_mut(&mut t, proj, handle) else {
         return Err(());
     };
     if is_dead(&m.state) {
@@ -941,7 +941,7 @@ pub fn start(
 
     let mut last: Option<String> = None;
     loop {
-        match poll_child(&handle) {
+        match poll_child(proj, &handle) {
             // 被别的路径 stop 了（并发场景），别在这儿耗到超时
             Err(()) => return Err(format!("handle={handle} 的进程已被停止，本次等待中止")),
             // 先看死没死：判据没命中就退，正是"启动失败"最常见的长相
@@ -1186,11 +1186,16 @@ pub(crate) fn table_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// 清空进程表（单测隔离用）。**不杀进程** —— 要杀用 [`shutdown_all`]。
+/// 清掉**某个项目**的进程表条目（单测隔离用）。**不杀进程** —— 要杀用 [`shutdown_for`]。
+///
+/// 这里**必须按项目限定**：曾经是 `t.clear()`（清全表），于是任何一个用例跑完的收尾
+/// 都会把并跑用例的条目一起抹掉 —— 表现为"handle 的进程已被停止，本次等待中止"
+/// （进程还在跑，表里却没了）。串行锁只能保护"也拿了锁的人"，收尾动作**本身**
+/// 就该是项目级的，这样即便有人漏拿锁也不会伤到别人（ISSUE-1 残余的正解）。
 #[cfg(test)]
-fn clear_table() {
+fn clear_table_for(proj: &Path) {
     if let Ok(mut t) = lock() {
-        t.clear();
+        t.retain(|_, m| m.proj.as_path() != proj);
     }
 }
 
@@ -1276,7 +1281,7 @@ mod tests {
 
     fn cleanup(proj: &Path) {
         let (_, _) = shutdown_for(proj, false);
-        clear_table();
+        clear_table_for(proj);
         let _ = std::fs::remove_dir_all(proj);
     }
 
@@ -1355,6 +1360,7 @@ mod tests {
     /// `start()` 在最前面就拒：**不 spawn、不占 handle、不写日志**。
     #[test]
     fn a_conflicting_criterion_is_refused_before_spawning() {
+        let _g = table_lock();
         let p = tmp_proj("conflict");
         let s = StartSpec {
             cmd: "cd web && npm run dev -- --port 5174 --strictPort".into(),
