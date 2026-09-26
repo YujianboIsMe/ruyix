@@ -113,7 +113,21 @@ const PRESET = [
   ["global/README.md", "templates/global-README.md"],
   ["projects/README.md", "templates/projects-README.md"],
   ["plugins/README.md", "templates/plugins-README.md"],
+  // GPU 加速插件：目录空着就是纯 CPU，所以包里预置的是一份**说明书**，用户往里拷 DLL 即可。
+  ["plugins/gpu-asr/README.md", "templates/gpu-asr-README.md"],
 ];
+// 忘了登记就是漏发：`templates/` 里每个 .md 都必须被 PRESET 用到（对比"目录列举"而不是写死个数）。
+// 写死个数只会让加模板的人去改数字，抓不到"加了文件却没进包"。
+{
+  const tplDir = path.join(ROOT, "src-tauri", "templates");
+  const used = new Set(PRESET.map((p) => p[1]));
+  for (const f of fs.readdirSync(tplDir)) {
+    if (!f.endsWith(".md")) continue;
+    if (!used.has(path.posix.join("templates", f))) {
+      fail(`templates/${f} 没有被 PRESET 用到 —— 它不会进发行包（要么加进 PRESET，要么删掉）`);
+    }
+  }
+}
 for (const [rel, tpl] of PRESET) {
   const from = path.join(ROOT, "src-tauri", tpl);
   if (!fs.existsSync(from)) fail(`模板缺失：${from}`);

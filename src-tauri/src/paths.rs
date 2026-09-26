@@ -447,6 +447,12 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
         "plugins/README.md",
         include_str!("../templates/plugins-README.md"),
     ),
+    (
+        // GPU 加速是**可选插件**：目录空着 = 纯 CPU（合法默认）。
+        // 说明与打包脚本预置的是同一份文本，见 scripts/package-portable.js 的 PRESET。
+        "plugins/gpu-asr/README.md",
+        include_str!("../templates/gpu-asr-README.md"),
+    ),
 ];
 
 // ============================================
@@ -865,19 +871,29 @@ mod tests {
     }
 
     /// 模板文本与打包脚本用的是同一份文件（`include_str!`）——
-    /// 这条钉住"两处各写一份文案"的漂移：模板存在且非空、且三条路径都在清单里
+    /// 这条钉住"两处各写一份文案"的漂移：模板存在且非空、且覆盖三处根目录。
+    ///
+    /// 计数**不写死**：原来写死 3，加一份 GPU 插件说明就红 —— 那种红只说明测试老了，
+    /// 不说明有 bug。"新加了模板文件却忘了登记"由 U66（对照 `templates/` 目录列举）与
+    /// 打包脚本负责抓，这里只管每份的质量与覆盖面。
     #[test]
     fn template_files_are_embedded_not_duplicated() {
-        assert_eq!(TEMPLATE_FILES.len(), 3);
+        assert!(TEMPLATE_FILES.len() >= 3);
         for (rel, body) in TEMPLATE_FILES {
             assert!(rel.ends_with("README.md"), "{rel}");
             assert!(body.len() > 80, "{rel} 的模板文本太短：{} 字符", body.len());
             assert!(body.starts_with('#'), "{rel} 应当是 markdown：{body:.20}");
         }
-        assert!(
-            TEMPLATE_FILES.iter().any(|(r, _)| *r == "global/README.md"),
-            "三份模板的路径要覆盖 global / projects / plugins"
-        );
+        for want in [
+            "global/README.md",
+            "projects/README.md",
+            "plugins/README.md",
+        ] {
+            assert!(
+                TEMPLATE_FILES.iter().any(|(r, _)| *r == want),
+                "模板路径要覆盖 global / projects / plugins，缺 {want}"
+            );
+        }
     }
 
     // ---- 静态门禁：路径只许在这里拼 ----

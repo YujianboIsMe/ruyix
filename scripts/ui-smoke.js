@@ -4015,6 +4015,8 @@ function runGpuDeviceChecks() {
   const main = read("src-tauri/src/main.rs");
   const machine = read("src-tauri/src/agent/machine.rs");
   const sess = read("ui/scripts/session.js");
+  const paths = read("src-tauri/src/paths.rs");
+  const pkg = read("scripts/package-portable.js");
 
   check("U66", "cuda-feature-declared",
     /^cuda\s*=\s*\[/m.test(cargo) && /candle-core\/cuda/.test(cargo),
@@ -4056,6 +4058,26 @@ function runGpuDeviceChecks() {
   check("U66", "gpu-config-key-is-an-enum",
     /\("voice\.gpu", &\["auto", "off"\]\)/.test(cfg) && /cfg\.voice\.gpu != "off"/.test(main),
     "voice.gpu = auto|off 进枚举表（表单自动出下拉）；读侧只有明确 off 才关");
+
+  check("U66", "gpu-plugin-dir-ships-a-readme",
+    /templates\/gpu-asr-README\.md/.test(paths) && /plugins\/gpu-asr\/README\.md/.test(paths) &&
+      /templates\/gpu-asr-README\.md/.test(pkg) && /plugins\/gpu-asr\/README\.md/.test(pkg),
+    "可选插件要随包预置一份说明书（打包脚本与首启写的是同一份模板，两处各写一份迟早漂移）");
+
+  // 「忘了登记」必须被抓到，而且**不能靠写死个数**（写死个数只会让加模板的人去改数字）。
+  // 预期来自目录列举：templates/ 里每个 .md 都要出现在两条清单里（paths.rs 与打包脚本）。
+  const tplDir = path.join(ROOT, "src-tauri", "templates");
+  const tplFiles = fs.readdirSync(tplDir).filter((f) => f.endsWith(".md"));
+  const unlisted = tplFiles.filter(
+    (f) => !paths.includes(`templates/${f}`) || !pkg.includes(`templates/${f}`)
+  );
+  check("U66", "every-template-is-registered",
+    tplFiles.length > 0 && unlisted.length === 0,
+    `${tplFiles.length} 份模板都要被 paths.rs 与打包脚本同时引用；漏的：${JSON.stringify(unlisted)}`);
+
+  check("U66", "gpu-plugin-readme-template-exists",
+    fs.existsSync(path.join(ROOT, "src-tauri", "templates", "gpu-asr-README.md")),
+    "模板文件必须在，否则 include_str! 直接编译不过");
 }
 
 /**
