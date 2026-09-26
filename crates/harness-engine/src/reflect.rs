@@ -177,6 +177,11 @@ pub struct ReflectInput<'a> {
     pub changes: &'a [FileChange],
     /// 主循环这一轮读过哪些文件（依据核对的"证据集合"）
     pub read_paths: &'a [String],
+    /// 本 run 已记录的结论（`record_findings` 的产出）。
+    ///
+    /// 无改动场景（纯问答）靠它对齐“答复里的断言 ↔ 主循环自己认下的事实”：
+    /// 没有它，复核只能从答复反推证据，实测出现过“复核未完成”而用户拿不到裁决。
+    pub findings: &'a [String],
     /// 主循环这一轮跑过哪些命令、各自输出了什么（**依据核对的另一半证据集合**）
     ///
     /// 没有它，"今天星期几""端口谁占着""进程还在不在"这类**只能靠命令取证**的答复，
@@ -223,6 +228,12 @@ pub fn build_user_prompt(inp: &ReflectInput<'_>) -> String {
         Rubric::Evidence => {
             s.push_str("【本轮答复（待核对依据）】\n");
             s.push_str(inp.answer.unwrap_or("（空）").trim());
+            if !inp.findings.is_empty() {
+                s.push_str("\n\n【主循环自己记下的事实（record_findings）】\n");
+                for f in inp.findings.iter().take(40) {
+                    s.push_str(&format!("- {f}\n"));
+                }
+            }
             s.push_str("\n\n");
             s.push_str("【它这一轮读过的文件】\n");
             if inp.read_paths.is_empty() {
@@ -658,6 +669,7 @@ mod tests {
             project_root: proj,
             changes: &changes,
             read_paths: &[],
+            findings: &[],
             probes: &[],
             answer: None,
             verifications: &ver,
@@ -675,6 +687,7 @@ mod tests {
             project_root: proj,
             changes: &[],
             read_paths: &reads,
+            findings: &[],
             probes: &probes,
             answer: Some("用的是 Axum"),
             verifications: &[],
@@ -761,6 +774,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            findings: &[],
             probes: &[],
             answer: None,
             verifications: &[],
@@ -788,6 +802,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            findings: &[],
             probes: &[],
             answer: Some("答案"),
             verifications: &[],
@@ -842,6 +857,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            findings: &[],
             probes: &probes,
             answer: Some("3911.87 点"),
             verifications: &[],
@@ -876,6 +892,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            findings: &[],
             probes: &probes,
             answer: Some("今天是星期二（2026-09-22）"),
             verifications: &[],
@@ -915,6 +932,7 @@ mod tests {
             project_root: Path::new("."),
             changes: &[],
             read_paths: &[],
+            findings: &[],
             probes: &[],
             answer: Some("今天是星期二（2026-09-22）"),
             verifications: &[],

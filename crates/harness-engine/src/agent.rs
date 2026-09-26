@@ -456,6 +456,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 - record_findings 记下**你已经确认的事实**（本 run 的进展记忆，**永不折叠**）：record_findings(items=[{"claim":"结论一句话","evidence":"path:line 或 命令+退出码","supersedes":"F3"}]).
   **每读出一件会改变后续决策的事实就立刻记**（宁多勿少）：对话正文里的老轮次会被折成一行摘要（只留"你读过什么"、不留"你读到了什么"），而这里记下的条目下一轮照样在场，所以**不必靠重读回忆**。
   证据必填（给不出证据的断言不要记）；要修正旧结论就用 supersedes 指向它的 id（提示词块和工具结果里都有）。**取代不改历史**：旧条留在账本里，只是不再出现在你眼前。
+  **理由与推理写 note 字段** —— 协议不认散文，note 是你唯一能“想”的地方，别省着不写。
   可以和其他调用同批发出（搭车记录不多花一轮）。
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 plan(steps=[{"title":"短标题","detail":"做什么","files":["相对路径"]}])，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
@@ -3238,11 +3239,13 @@ struct RoundSlot {
 /// 只喊"你必须 final"会让模型把同一段探索换个说法再写一遍 —— 那正是它绕不出来的地方。
 fn stall_instruction(rounds: usize) -> String {
     format!(
-        "（停滞守卫：连续 {rounds} 轮既没有新结论、也没有文件变更。\n\
-         本轮**不再接受任何工具调用**。必须立刻给出 final：\n\
-         ① 已确认的事实（引用 findings 的 id 与证据指针）；\n\
-         ② 卡在哪 —— 具体缺哪条信息、试过什么；\n\
-         ③ 需要用户提供什么才能继续。）"
+        "（停滞守卫：连续 {rounds} 轮既没有新结论、也没有文件变更。本轮**不再接受任何工具调用**，\
+         按两步收尾：\n\
+         1) 先调 record_findings 记下你**已经确认的事实**（每条 claim + 证据指针 path:line 或 命令+退出码）。\
+         这一步**不需要**完整答案，只需要事实 —— 卡住时你一定至少确认过一些东西；\n\
+         2) 再用 final 交付 **当前最佳答案**（允许不完整），并写清**还缺哪条信息、需要用户提供什么**。\n\
+         硬性要求：final 必须走工具调用形状 {{\"final\":\"…\"}} —— **不要直接把正文写进 content**，\
+         协议不认正文（那会被判『无法解析』而白烧一轮）。）"
     )
 }
 
@@ -3811,6 +3814,13 @@ async fn gate_before_final(
     if cfg.reflect.enabled && gate.reflect_rounds < cfg.reflect.max_rounds && !is_cancelled(cancel)
     {
         let rubric = reflect::select_rubric(has_changes);
+        // 复核也要看得到本 run 自己认下的事实（纯问答场景的对齐靠它，见 ReflectInput::findings）
+        let findings_lines: Vec<String> = ctx
+            .progress()
+            .in_prompt()
+            .iter()
+            .map(|f| f.line())
+            .collect();
         let input = reflect::ReflectInput {
             task,
             rubric,
@@ -3819,6 +3829,7 @@ async fn gate_before_final(
             read_paths,
             probes: ctx.probes(),
             answer: if has_changes { None } else { Some(answer) },
+            findings: &findings_lines,
             verifications: &out.verifications,
             gate_note: gate.notes.last().cloned(),
         };

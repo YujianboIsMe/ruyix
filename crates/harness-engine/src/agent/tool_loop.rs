@@ -729,11 +729,28 @@ pub async fn run_with_ask(
                     let end = start
                         .saturating_add(spec.limit.unwrap_or(400).min(u32::MAX as usize) as u32)
                         .saturating_sub(1);
-                    if let Some(earlier) =
-                        ctx.progress_mut().note_read(&spec.path, start, end, step)
-                    {
-                        let note = ctx.progress().repeat_read_note(&spec.path, earlier);
-                        repeat_notes.push((i, note));
+                    match ctx.progress_mut().note_read(&spec.path, start, end, step) {
+                        Some(earlier) => {
+                            let note = ctx.progress().repeat_read_note(&spec.path, earlier);
+                            repeat_notes.push((i, note));
+                        }
+                        // 首次读、且结果不短 ⇒ 追加一次「该沉淀了」的节拍。
+                        //
+                        // 实测补的：某次 run 43 次工具调用、**0 条 findings** —— 工具在场上却没人用，
+                        // 于是"读文件"退化成"再搜一遍"。教训与 step 光标同一条：**引擎自己握节拍**，
+                        // 不等模型自觉。这一步零额外轮次，只在结果尾部加一句话。
+                        None => {
+                            let long = matches!(&results[i].2, Ok(t) if t.chars().count() >= 600);
+                            if long {
+                                repeat_notes.push((
+                                    i,
+                                    "\n（读完就问自己一句：**这改变了什么？** 改变了就立刻 \
+                                     record_findings（claim + 证据指针 path:line），没有改变就别记；\
+                                     理由与思路写进 note 字段。）"
+                                        .to_string(),
+                                ));
+                            }
+                        }
                     }
                 }
             }
