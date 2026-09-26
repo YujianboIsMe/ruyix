@@ -846,6 +846,7 @@ fn tool_read_file_dir_overlay_and_jail() {
     let d = TempDir::new("read");
     d.write("src/main.rs", "fn main() {}");
     let mut ctx = Ctx {
+        progress: Progress::new(),
         proj: &d.0,
         probes: Vec::new(),
         overlay: BTreeMap::new(),
@@ -878,6 +879,7 @@ fn write_policies_stage_vs_apply() {
     let d = TempDir::new("policy-stage");
     d.write("keep.txt", "old");
     let mut ctx = Ctx {
+        progress: Progress::new(),
         proj: &d.0,
         probes: Vec::new(),
         overlay: BTreeMap::new(),
@@ -911,6 +913,7 @@ fn write_policies_stage_vs_apply() {
     let d2 = TempDir::new("policy-apply");
     d2.write("keep.txt", "old");
     let mut ctx2 = Ctx {
+        progress: Progress::new(),
         proj: &d2.0,
         probes: Vec::new(),
         overlay: BTreeMap::new(),
@@ -1341,6 +1344,7 @@ fn ctx_with<'a>(proj: &'a Path, changes: Vec<FileChange>, policy: WritePolicy) -
         overlay: BTreeMap::new(),
         changes,
         probes: Vec::new(),
+        progress: Progress::new(),
         policy,
         backup_dir: None,
         state_root: None,
@@ -2482,6 +2486,7 @@ fn parallel_reads_land_in_declared_order() {
     d.write("b.txt", "BBB");
     d.write("c.txt", "CCC");
     let ctx = Ctx {
+        progress: Progress::new(),
         proj: &d.0,
         probes: Vec::new(),
         overlay: BTreeMap::new(),
@@ -2758,6 +2763,7 @@ fn the_batch_hint_follows_the_switch() {
 /// 建一个只读上下文（`Ctx` 的字段列表只在这里出现一次：加字段时只改这一处）
 fn ctx_for(d: &TempDir) -> Ctx<'_> {
     Ctx {
+        progress: Progress::new(),
         proj: &d.0,
         probes: Vec::new(),
         overlay: BTreeMap::new(),
@@ -3072,9 +3078,20 @@ fn old_tool_results_are_folded_out_of_the_request() {
         last.contains("第 1 轮结果"),
         "折叠后仍要留下「读过什么」的痕迹：{last}"
     );
+    // **措辞是判据的一部分**（ISSUE-8）：旧摘要在字面上邀请模型重读
+    // （「正文已从上下文移除，需要时重新 read」），那正是 96 轮 0 结论的生成机制。
+    // 现在必须把"要读就精确读"与"得出过结论就先记下来"讲清楚，而不是请它再读一遍。
     assert!(
-        last.contains("正文已从上下文移除"),
-        "还要说清正文去哪了、要看就重新 read"
+        last.contains("正文已折叠"),
+        "折叠后仍要说清正文去哪了：{last}"
+    );
+    assert!(
+        last.contains("record_findings"),
+        "折叠后的摘要必须指向进展记忆（结论先落，再谈重读）：{last}"
+    );
+    assert!(
+        !last.contains("需要时重新 read"),
+        "不许再出现「需要时重新 read」这种**邀请重读**的措辞：{last}"
     );
 }
 
@@ -3132,4 +3149,147 @@ fn prompt_advertises_both_write_shapes_and_the_read_window() {
     assert!(crate::step_agent::STEP_SYSTEM.contains("edits"));
     assert!(crate::step_agent::STEP_SYSTEM.contains("offset"));
     assert!(!crate::step_agent::STEP_SYSTEM.contains("交回的必须是整份内容"));
+}
+
+// ============================================================================
+// 进展记忆与循环守卫（v1.1）
+// 见 `doc/v1.1/需求-Agent-进展记忆与循环守卫-v1.1.md` §6.3
+// ============================================================================
+
+fn prog() -> super::findings::Progress {
+    let mut p = super::findings::Progress::new();
+    p.set_cap(8192);
+    p
+}
+
+/// 取代**不改历史**：旧条从提示词里退出、但仍留在账本里（`supersede` 的语义边界）。
+#[test]
+fn superseded_findings_leave_prompt_but_stay_in_ledger() {
+    let mut p = prog();
+    let a = p
+        .record("旧结论：模型名来自硬编码表", "src/a.rs:12", "", None)
+        .unwrap();
+    let b = p
+        .record(
+            "新结论：模型名来自 ai_list_models",
+            "ui/session.js:303",
+            "",
+            Some(&a),
+        )
+        .unwrap();
+    assert_eq!((a.as_str(), b.as_str()), ("F1", "F2"));
+    let block = p.render();
+    assert!(block.contains("新结论"), "新条必须在场：{block}");
+    assert!(
+        !block.contains("旧结论"),
+        "被取代的条不该再出现在提示词里：{block}"
+    );
+    assert_eq!(p.all().len(), 2, "**不物理删除**：两条都在账本里");
+    assert_eq!(p.superseded_count(), 1);
+    // 取代一个不存在的 id：必须当面拒（而不是默默新记一条）
+    assert!(p.record("x", "y", "", Some("F99")).is_err());
+    // 没有证据的断言一律拒 —— findings 的价值全在可核对
+    assert!(p.record("只有结论没有证据", "   ", "", None).is_err());
+    assert_eq!(p.all().len(), 2, "被拒的条目不该入库");
+}
+
+/// 超上限：最老的 active **落盘** + 提示词里留指针。落盘 ≠ 删除。
+#[test]
+fn findings_over_cap_spill_with_pointer() {
+    let dir = std::env::temp_dir().join(format!("ruyix-findings-spill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut p = super::findings::Progress::new();
+    p.set_cap(400); // 小上限逼它落盘
+    for i in 0..12 {
+        p.record(
+            &format!("结论 {i}：这是一条足够长的结论用来把上限撑开，长度大约六十个字符左右吧"),
+            &format!("src/f{i}.rs:{}", i * 10),
+            "",
+            None,
+        )
+        .unwrap();
+    }
+    let spilled = p.prompt_block(Some(&dir));
+    assert!(spilled.is_some(), "超上限必须落盘");
+    let block = p.render();
+    assert!(block.contains("已落盘"), "提示词里要留指针：{block}");
+    assert!(
+        p.active_bytes() <= 400,
+        "落盘后必须回到上限内：{}",
+        p.active_bytes()
+    );
+    assert_eq!(p.all().len(), 12, "落盘的条目仍在账本里（不删除）");
+    let file = dir.join("findings.md");
+    let text = std::fs::read_to_string(&file).expect("落盘文件必须写出来");
+    // 落盘文件里要能读到那些被移出提示词的条目（否则"指针"就是死链）
+    assert!(text.contains("结论 0"), "最早的那条要落到文件里：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 重复读守卫：同一 `(path, 区间)` 第二次读要**被指名**（区间相交也算）。
+#[test]
+fn repeated_read_of_same_range_is_called_out() {
+    let mut p = prog();
+    assert_eq!(
+        p.note_read("ui/session.js", 296, 334, 12),
+        None,
+        "首读不该有意见"
+    );
+    // 重合区间（330-390 与 296-334 相交）也算"又读了一遍同一块地方"
+    assert_eq!(p.note_read("ui/session.js", 330, 390, 40), Some(12));
+    // 不同文件不算重复
+    assert_eq!(p.note_read("src/main.rs", 1, 60, 41), None);
+    // 提示里要说清是第几轮读过、以及当时有没有落结论
+    let note = p.repeat_read_note("ui/session.js", 12);
+    assert!(note.contains("第 12 轮"), "{note}");
+    assert!(
+        note.contains("record_findings"),
+        "要告诉它该做什么，而不只是「你读过了」：{note}"
+    );
+    p.record(
+        "会话工具栏的模型名来自 wrap._webCaps.model",
+        "ui/session.js:303",
+        "",
+        None,
+    )
+    .unwrap();
+    let note2 = p.repeat_read_note("ui/session.js", 12);
+    assert!(
+        note2.contains("F1"),
+        "有相关结论时要点名（模型据此决定要不要取代）：{note2}"
+    );
+}
+
+/// 停滞判据：只数"既没有新结论、也没有文件变更"的**连续**轮次。
+#[test]
+fn stall_counts_only_rounds_without_progress() {
+    let mut p = prog();
+    for r in 1..=3 {
+        p.note_round(r, false, false);
+    }
+    assert_eq!(p.stalled(3), 3);
+    // 第 4 轮写了文件 ⇒ 进展清零
+    p.note_round(4, true, false);
+    assert_eq!(p.stalled(4), 0, "有新结论就算进展");
+    for r in 5..=9 {
+        p.note_round(r, false, false);
+    }
+    assert_eq!(p.stalled(9), 5, "从第 4 轮之后开始数");
+}
+
+/// `record_findings` 能搭车进批（对外部世界没有副作用、没有顺序风险），
+/// 而不是像 plan/final 那样被当面拒。
+#[test]
+fn record_findings_rides_along_in_a_batch() {
+    let raw = r#"{"actions":[{"tool":"read","args":{"path":"a.rs"}},{"tool":"record_findings","args":{"items":[{"claim":"a.rs 里有 X","evidence":"a.rs:3"}]}}]}"#;
+    let acts = parse_actions(raw, 8, true).expect("批里带 record_findings 应当被受理");
+    assert_eq!(acts.len(), 2);
+    assert!(matches!(acts[1], Action::Findings(ref v) if v.len() == 1));
+    // 单个条目直接给（不套 items）也要认 —— 少写一层包装不该白费一轮
+    let one =
+        parse_action(r#"{"tool":"record_findings","args":{"claim":"c","evidence":"e"}}"#).unwrap();
+    assert!(matches!(one, Action::Findings(ref v) if v.len() == 1));
+    // 空 items 一律拒（空调用是无意义的一轮，要变成一句明确的纠正）
+    assert!(parse_action(r#"{"tool":"record_findings","args":{"items":[]}}"#).is_err());
 }

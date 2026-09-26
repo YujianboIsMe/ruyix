@@ -554,7 +554,14 @@ pub const WEB_SEARCH_MAX_USES: u32 = 5;
 /// 拆出它是因为 `tools` 现在按**调用方需要的子集**声明：主循环给全套，复核员只给 `read`
 /// （它只能读，给了 `write` 等于把只读约束交给模型自觉）。
 pub const TOOL_NAMES_ALL: &[&str] = &[
-    "read", "write", "execute", "connect", "plan", "ask_user", "final",
+    "read",
+    "write",
+    "execute",
+    "connect",
+    "plan",
+    "ask_user",
+    "record_findings",
+    "final",
 ];
 
 /// 声明给模型的工具（表驱动）。
@@ -634,6 +641,11 @@ const TOOL_DECLS: &[(&str, &str, &str)] = &[
         "ask_user",
         "需求有歧义、且猜错会白做时，问委托人（独占一轮）。必须给 why：说明这个答案会决定接下来的什么动作。答案不构成任何授权。",
         r#"{"type":"object","properties":{"question":{"type":"string","description":"要问的问题"},"why":{"type":"string","description":"为什么必须问（决定接下来什么动作）"},"options":{"type":"array","items":{"type":"string"},"description":"候选答案（最多 5 个，用户也可自由输入）"},"default_index":{"type":"integer","description":"推荐第几个选项（0 起）"}},"required":["question","why"]}"#,
+    ),
+    (
+        "record_findings",
+        "把**你已确认的事实**记进本 run 的进展记忆（永不折叠，下一轮仍可见）。每读出一件会改变后续决策的事实就记一条；claim 一句话，evidence 给 path:line 或 命令+退出码。修正旧结论时用 supersedes 指向旧条目 id（旧条留在账本里、不再出现在你眼前）。可与其它调用同批发出。",
+        r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"claim":{"type":"string"},"evidence":{"type":"string"},"note":{"type":"string"},"supersedes":{"type":"string"}},"required":["claim","evidence"]}}},"required":["items"]}"#,
     ),
     (
         "final",
@@ -2208,14 +2220,21 @@ mod tests {
             .map(|t| t["function"]["name"].as_str().unwrap().to_string())
             .collect();
         for want in [
-            "read", "write", "execute", "connect", "plan", "ask_user", "final",
+            "read",
+            "write",
+            "execute",
+            "connect",
+            "plan",
+            "ask_user",
+            "record_findings",
+            "final",
         ] {
             assert!(
                 names.contains(&want.to_string()),
                 "工具表缺 {want}：{names:?}"
             );
         }
-        assert_eq!(names.len(), 7, "表里多了没被解析器认识的名字：{names:?}");
+        assert_eq!(names.len(), 8, "表里多了没被解析器认识的名字：{names:?}");
         // 名字清单与表**必须一一对齐**（子集声明按名字过滤：漏一个就是静默少声明一个工具）
         assert_eq!(
             names,

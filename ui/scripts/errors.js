@@ -233,6 +233,11 @@
   // 精确对照：一次性句子（键是后端原样文案）
   // ============================================
   const EXACT = {
+    // 进展记忆 / 循环守卫（v1.1）—— 这些会原样进聊天，必须能翻
+    "findings 的 claim 不能为空": "a finding needs a claim",
+    "findings 的 evidence 不能为空（给 path:line 或 命令+退出码）":
+      "a finding needs evidence (path:line, or a command with its exit code)",
+    "`{old}` 已经被取代过了，别再取代它": "`{old}` has already been superseded — don't supersede it again",
     // GPU：构建没带 cuda 特性 —— 这句会经 `device_note` 显示在状态栏，英文界面下必须能翻
     "构建未带 cuda 特性（要 --features cuda，且需要 CUDA Toolkit）":
       "this build has no cuda feature (rebuild with --features cuda and the CUDA Toolkit)",

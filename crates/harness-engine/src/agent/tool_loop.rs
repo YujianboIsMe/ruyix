@@ -67,6 +67,8 @@ pub async fn run_with_ask(
     let mut read_paths: Vec<String> = Vec::new();
     // 本轮跑过哪些工具轮次（历史折叠的账本：老轮次的正文不再每轮重发）
     let mut round_slots: Vec<RoundSlot> = Vec::new();
+    // 停滞守卫已触发 ⇒ 下一轮只收 `final`（模型再发工具调用就终止本轮 run）
+    let mut force_final = false;
     // 连续模型调用失败计数：成功一轮即清零
     let mut llm_failures: u32 = 0;
 
@@ -133,6 +135,8 @@ pub async fn run_with_ask(
     );
 
     for step in 1..=MAX_STEPS {
+        // 这一轮有没有记下新结论（停滞判据的一半）
+        let mut new_findings_this_round = false;
         // 取消位：长动作（编译/测试/复核）都在这一层之下，先拦住再谈别的
         if is_cancelled(cancel) {
             out.answer = format!(
@@ -263,6 +267,28 @@ pub async fn run_with_ask(
             continue;
         }
 
+        // ---- 进展记忆：每轮重建 system **尾部** ----
+        //
+        // 位置固定（前缀不变、只有块本身会变）⇒ 对提示词缓存友好；放 system 而不是对话流里，
+        // 是因为那两类消息会被 `fold_history` 折叠 —— 而"证据被折掉"正是本机制要治的病（ISSUE-8）。
+        if cfg.agent.findings_enabled {
+            let spill = ctx.state_root().join("findings");
+            if ctx.progress_mut().prompt_block(Some(&spill)).is_some() {
+                sink.log(
+                    "info",
+                    clip(
+                        &format!("[agent] 第 {step} 轮 {}", ctx.progress().byte_account()),
+                        240,
+                    ),
+                );
+            }
+            msgs[0] = ChatMessage::system(format!(
+                "{}{}",
+                agent_system_prompt(),
+                ctx.progress().render()
+            ));
+        }
+
         let reply = match llm::chat(
             &cfg.llm,
             cfg.llm_fallback.as_ref(),
@@ -371,6 +397,18 @@ pub async fn run_with_ask(
         };
         // 这一轮解析成功 ⇒ 连续失败计数清零（偶发一次格式烂不该累计成"病"）。
         unparsed_streak = 0;
+        // ---- 停滞守卫的硬终止：上一轮已判停滞，这一轮模型又发工具调用 ⇒ 立刻收手 ----
+        //
+        // 必须硬：模型不照做就终止，而不是再等一轮 —— "守卫能被绕过"等于没守卫。
+        // `break`（不是 return）：收尾的 settle_steps / 进程回收 / 门禁补注都还得跑。
+        if force_final && !actions.iter().any(|a| matches!(a, Action::Final(_))) {
+            sink.log(
+                "warn",
+                format!("[agent] 第 {step} 轮 停滞守卫：模型仍发工具调用，终止本轮 run"),
+            );
+            out.answer = stall_report(cfg, &ctx, step);
+            break;
+        }
         // 迁移期的观测点：这一轮的动作是从哪条协议来的。`兼容层`只可能出现在
         // `tool_protocol=false`（回滚）那一侧 —— 严格模式下 content 通道在上一段就被拒了。
         sink.log(
@@ -590,7 +628,7 @@ pub async fn run_with_ask(
                 .await;
             }
         }
-        let results: Vec<CallResult> = slots
+        let mut results: Vec<CallResult> = slots
             .into_iter()
             .enumerate()
             .map(|(i, o)| {
@@ -666,6 +704,72 @@ pub async fn run_with_ask(
             );
         }
 
+        // ---- 引擎账本 + 进展记账（与 findings 共用一份状态；**不折叠**）----
+        if cfg.agent.findings_enabled {
+            let mut wrote_this_round = false;
+            // 重复读守卫要往**结果正文**里追加一行，而这里正持着 `results` 的不可变借用
+            // ⇒ 先收集、再统一追加（同一轮里同一文件读两次也只追加一次）。
+            let mut repeat_notes: Vec<(usize, String)> = Vec::new();
+            for (i, (tool, brief, res)) in results.iter().enumerate() {
+                let ok = res.is_ok();
+                if *tool == "write" && ok {
+                    wrote_this_round = true;
+                }
+                if *tool == "findings" {
+                    new_findings_this_round = true;
+                }
+                // 账本一行 = **形状 + 结局**，刻意**不含结果内容**：
+                // 带上"结果第一行"看着很有用，实际是偷偷绕过折叠（旧结果的头 100 字符永远在场），
+                // 而且账本会随轮数线性涨。要内容就去 findings（模型写的结论）或重新精确读。
+                ctx.progress_mut()
+                    .ledger_line(ledger_line_for(step, tool, brief, res));
+                // 重复读守卫：同一 (path, 区间) 本 run 第二次读 ⇒ 在该条结果后追加一行
+                if let Action::Read(spec) = &actions[i] {
+                    let start = spec.offset.unwrap_or(1).max(1).min(u32::MAX as usize) as u32;
+                    let end = start
+                        .saturating_add(spec.limit.unwrap_or(400).min(u32::MAX as usize) as u32)
+                        .saturating_sub(1);
+                    if let Some(earlier) =
+                        ctx.progress_mut().note_read(&spec.path, start, end, step)
+                    {
+                        let note = ctx.progress().repeat_read_note(&spec.path, earlier);
+                        repeat_notes.push((i, note));
+                    }
+                }
+            }
+            for (i, note) in repeat_notes {
+                if let Ok(text) = &mut results[i].2 {
+                    text.push_str(&note);
+                }
+            }
+            ctx.progress_mut()
+                .note_round(step, new_findings_this_round, wrote_this_round);
+            if new_findings_this_round {
+                sink.log(
+                    "info",
+                    clip(
+                        &format!("[agent] 第 {step} 轮 {}", ctx.progress().byte_account()),
+                        240,
+                    ),
+                );
+            }
+            // 停滞判据：连续 K 轮既没有新结论、也没有文件变更 ⇒ 下一轮强制 final
+            if cfg.agent.stall_rounds > 0
+                && ctx.progress().stalled(step) >= cfg.agent.stall_rounds
+                && !force_final
+            {
+                force_final = true;
+                sink.log(
+                    "warn",
+                    format!(
+                        "[agent] 第 {step} 轮 停滞守卫触发：连续 {} 轮无新结论、无文件变更 ⇒ 强制 final",
+                        cfg.agent.stall_rounds
+                    ),
+                );
+                msgs.push(ChatMessage::user(stall_instruction(cfg.agent.stall_rounds)));
+            }
+        }
+
         // execute_plan 下步骤状态由派发逻辑报告（引擎知道"这一步跑完了"这个事实，比
         // "声明文件是否落地"的推断准得多），两条通道混用只会互相打架
         if !cfg.step.execute_plan && !plan_steps.is_empty() && any_write_ok {
@@ -719,7 +823,9 @@ pub async fn run_with_ask(
             result: msgs.len() - 1,
             call_digest: format!("{{\"folded\":\"第 {step} 轮调用（{shape}）—— 请求正文已折叠\"}}"),
             outcome_digest: format!(
-                "{{\"ok\":{all_ok},\"folded\":\"第 {step} 轮结果（{outcome}）—— 正文已从上下文移除，需要时重新 read\"}}"
+                "{{\"ok\":{all_ok},\"folded\":\"第 {step} 轮结果（{outcome}）正文已折叠。\
+                 **若这段得出了结论，请立刻 record_findings（claim + 证据 path:line）**；\
+                 确需正文时用 read 带精确区间取回，别整文件重读。\"}}"
             ),
         });
         if cfg.agent.history_trim {

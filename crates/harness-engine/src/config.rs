@@ -382,6 +382,20 @@ pub struct AgentConfig {
     /// 最近几轮的正文**不动**（更老的才折叠）。数字越大越安全、上下文越贵。
     #[serde(default = "d_agent_history_keep_rounds")]
     pub history_keep_rounds: usize,
+    /// **进展记忆**（`record_findings` + 引擎账本 + 两条守卫）。关掉即回到老行为（一行回滚）。
+    ///
+    /// 见 `doc/v1.1/需求-Agent-进展记忆与循环守卫-v1.1.md`：折叠只该折噪声，
+    /// 而"结论"与"已做过什么"永不折 —— 现状（ISSUE-8）是反的。
+    #[serde(default = "d_true")]
+    pub findings_enabled: bool,
+    /// 提示词里 findings 块的字节上限。超出时把最老的 active 条目**落盘**并留指针行
+    /// （`落盘 ≠ 删除`）。**0 = 不限**。
+    #[serde(default = "d_agent_findings_max_bytes")]
+    pub findings_max_bytes: usize,
+    /// **停滞守卫**：连续多少轮既没有新结论、也没有文件变更 ⇒ 判为停滞并**强制 final**。
+    /// 默认 8。**0 = 关掉守卫**（只关守卫，不关账本与 findings）。
+    #[serde(default = "d_agent_stall_rounds")]
+    pub stall_rounds: usize,
 }
 
 impl Default for AgentConfig {
@@ -393,8 +407,22 @@ impl Default for AgentConfig {
             batch_parallel: d_agent_batch_parallel(),
             history_trim: d_true(),
             history_keep_rounds: d_agent_history_keep_rounds(),
+            findings_enabled: d_true(),
+            findings_max_bytes: d_agent_findings_max_bytes(),
+            stall_rounds: d_agent_stall_rounds(),
         }
     }
+}
+
+/// 8KB：够放下几十条结论，又远小于上下文 —— 它到顶就说明该做的是"收敛"而不是"继续记"。
+fn d_agent_findings_max_bytes() -> usize {
+    8192
+}
+
+/// 8 轮：与 `history_keep_rounds` 同量级 —— 连着这么久的窗口里什么新东西都没有，
+/// 再跑下去就是换着法子重读，该收手问清楚了。
+fn d_agent_stall_rounds() -> usize {
+    8
 }
 
 fn d_agent_max_elapsed_secs() -> u64 {

@@ -433,7 +433,7 @@ fn connect_note(targets: &[ConnectTarget]) -> Option<String> {
     Some(s.trim_end().to_string())
 }
 
-pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过工具循环完成用户的工作。**动作一律用工具调用表达** —— 引擎已声明 read / write / execute / connect / plan / ask_user / final 七个工具，参数名与说明见工具声明。只有四种原子能力：
+pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过工具循环完成用户的工作。**动作一律用工具调用表达** —— 引擎已声明 read / write / execute / connect / plan / ask_user / record_findings / final 八个工具，参数名与说明见工具声明。只有四种原子能力：
 
 - read    读项目：read(path="src/ 或 src/main.rs") —— 目录给结构树，文件给内容；Git 历史用 execute 跑 git log / git show 查。
   文件大、只要一段：read(path="src/big.rs", offset=120, limit=60) —— 从第 120 行起读 60 行（行号从 1 起，一次上限 400 行）。表头上写着「第 a-b 行 / 共 N 行；还有 M 行，接着读用 offset=X」，照着它接着读就能把缺口补齐。
@@ -453,6 +453,10 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
   **keep_alive 决定它活不活得过本次 run**：不写就是 false —— 本次 run 一结束，引擎就把它收掉（连子进程树）。用户要的是“把服务跑起来”（让我访问 / 留着跑 / 等会儿用）→ **必须**写 keep_alive=true：它会留在引擎进程表里，用户在【服务】面板能看到、能按 pid 停掉，IDE 退出时一并收。只是验证它起不起得来、随后就停 → 别写，并在 final 里说明“本次结束已自动收掉”。**报“已启动”时它必须还活着**：不带 keep_alive 却报“服务已启动”，用户 netstat 一看就是空的 —— 那是谎报，不是措辞问题。
   之后用 execute(op="status", handle="p1") 查状态（它会告诉你这个进程有没有声明 keep_alive）、op="log" 读日志尾、op="stop" 停掉（连子进程树一起杀）。重启同一个服务前先 status / stop：端口被上一次的进程占着时，"起不来"是假的。
 - connect 连外部能力：connect(action="list") 先看有哪些可连；调 MCP 工具用 connect(action="call", server="服务器名", tool="工具名", arguments={})；把任务委托给远端 Agent 用 connect(action="send", agent="名字", text="任务描述")。可用清单在提示词里给过，没有的就别硬猜名字。
+- record_findings 记下**你已经确认的事实**（本 run 的进展记忆，**永不折叠**）：record_findings(items=[{"claim":"结论一句话","evidence":"path:line 或 命令+退出码","supersedes":"F3"}]).
+  **每读出一件会改变后续决策的事实就立刻记**（宁多勿少）：对话正文里的老轮次会被折成一行摘要（只留"你读过什么"、不留"你读到了什么"），而这里记下的条目下一轮照样在场，所以**不必靠重读回忆**。
+  证据必填（给不出证据的断言不要记）；要修正旧结论就用 supersedes 指向它的 id（提示词块和工具结果里都有）。**取代不改历史**：旧条留在账本里，只是不再出现在你眼前。
+  可以和其他调用同批发出（搭车记录不多花一轮）。
 - plan    任务清单（不是第五种能力，只是给用户看进度）：要动多个文件时先 plan(steps=[{"title":"短标题","detail":"做什么","files":["相对路径"]}])，用户会在大纲区看到进度。files 只列**这一步真的会写（新建或整文件重写）**的文件；只是要读一读、参考一下的，或者已经躺在项目里不用改的，都不要列 —— 大纲的进度是拿这份清单对账的，列多了会让做完的步骤看起来没做完。
 
 规则：
@@ -709,6 +713,22 @@ impl WriteSpec {
     }
 }
 
+/// `record_findings` 的一条入参：**结论 + 证据指针**。
+///
+/// `evidence` 必填（空则在引擎侧被拒）：findings 的价值全在"可核对"，
+/// 收下一句没有证据的断言，只是把幻觉抬进提示词。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FindingSpec {
+    pub claim: String,
+    #[serde(default)]
+    pub evidence: String,
+    #[serde(default)]
+    pub note: String,
+    /// 要取代的旧条目 id（`F3`）—— 从提示词块或工具结果里拿
+    #[serde(default)]
+    pub supersedes: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 enum Action {
     Final(String),
@@ -729,6 +749,12 @@ enum Action {
     /// 三者都只会从"环境"取答案，任何组合都取不到它。它同时是**控制动作**（停下来让出方向盘）
     /// 与**效果**（取信息），也是唯一"另一端是人"的动作 —— 答案可能永远不来，且能改变任务本身。
     Ask(AskSpec),
+    /// **进展记忆**（v1.1）：模型把自己确认的事实记下来 —— 引擎永不折叠它。
+    ///
+    /// 它不是第五种能力（对外部世界没有副作用），也不是控制动作（不停下来）：
+    /// 它是**记忆**。允许进批（`plan`/`final` 那类控制动作不许），
+    /// 因为搭车记录不该多花一轮。
+    Findings(Vec<FindingSpec>),
 }
 
 /// 一次提问的规格（模型侧 `ask_user` 的 args）。
@@ -1179,6 +1205,9 @@ fn parse_one(v: &serde_json::Value) -> Result<Action, String> {
     }
     let tool = name;
     match tool.as_str() {
+        // 进展记忆：允许进批（无副作用、无顺序风险）。也认 `findings` 这个短名 ——
+        // 模型少写一个前缀不该白费一轮。
+        "record_findings" | "findings" => parse_findings(&args),
         "read" => parse_read(&args),
         // write 两副面孔：content（整份）或 edits（锚点）。形状判断在 parse_write 里一处收口 ——
         // 与 read 的窗口参数同款：参数形状变了，能力没变。
@@ -1317,6 +1346,13 @@ fn shape_of(a: &Action) -> Shape<'_> {
             path: None,
             write: false,
             proc: true,
+        },
+        // 进展记忆：没有路径、不写磁盘、不动进程 ⇒ **与谁都不冲突**（放哪一波都合法）。
+        // 真正的执行在主波之后同步做：它写的是共享的 `progress`，不能进并发波。
+        Action::Findings(_) => Shape {
+            path: None,
+            write: false,
+            proc: false,
         },
         Action::Execute(..)
         | Action::Connect(_)
@@ -1694,6 +1730,38 @@ async fn exec_one(
     action: Action,
 ) -> (String, String, Result<String, String>) {
     match action {
+        Action::Findings(items) => {
+            let brief = format!("record_findings {} 条", items.len());
+            let mut ids: Vec<String> = Vec::new();
+            let mut errs: Vec<String> = Vec::new();
+            for it in &items {
+                match ctx.record_finding(it) {
+                    Ok(id) => ids.push(id),
+                    Err(e) => errs.push(e),
+                }
+            }
+            let mut text = if ids.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "已记录：{}。\n{}",
+                    ids.join("、"),
+                    ctx.progress().byte_account()
+                )
+            };
+            if !errs.is_empty() {
+                // 部分失败也必须说清是哪条：只回一句"出错了"会让模型以为全记上了。
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!("被拒 {} 条：{}", errs.len(), errs.join("；")));
+                return ("findings".into(), brief, Err(text));
+            }
+            text.push_str(
+                "\n（下一轮你仍会看到这些条目；**别**为了回忆它们去重读文件。要修正就用 supersedes 指向它的 id。）",
+            );
+            ("findings".into(), brief, Ok(text))
+        }
         Action::Read(spec) => {
             let brief = format!("read {}", spec.brief());
             ("read".into(), brief, ctx.tool_read(&spec))
@@ -1767,6 +1835,8 @@ async fn run_wave(
     let mut procs: Vec<(usize, ProcOp, String)> = Vec::new();
     let mut conn_briefs: Vec<(usize, String)> = Vec::new();
     let mut conn_futs: Vec<ConnectFuture<'_, String>> = Vec::new();
+    // 进展记忆：先收集、波后同步落（见下面 `findings` 那段的说明）
+    let mut finds: Vec<(usize, Vec<FindingSpec>)> = Vec::new();
 
     for &i in wave {
         match &actions[i] {
@@ -1790,6 +1860,8 @@ async fn run_wave(
                 conn_briefs.push((i, connect_brief(ca)));
                 conn_futs.push(connect_future(conn, ca.clone()));
             }
+            // 进展记忆：**不进并发波**（它写的是共享 `progress`），先收进列表，主波跑完再同步落。
+            Action::Findings(v) => finds.push((i, v.clone())),
             // 控制动作进不了多人波（parse_actions 已拒批里的 plan / final）
             Action::Plan(_) | Action::Final(_) | Action::Ask(_) => {
                 slots[i] = Some((
@@ -1912,6 +1984,32 @@ async fn run_wave(
             slots[*i] = Some(("connect".into(), brief.clone(), r));
         }
     }
+    // 进展记忆：并发部分**全部收敛之后**再同步落。
+    //
+    // 为什么不进并发波：记账是顺序动作 —— 同一批里两条 findings 会一起写 `progress`，
+    // 并发会让顺序与 id 漂移，而 id 正是模型用来 `supersede` 的锚。
+    for (i, items) in finds {
+        let mut ids: Vec<String> = Vec::new();
+        let mut errs: Vec<String> = Vec::new();
+        for it in &items {
+            match ctx.record_finding(it) {
+                Ok(id) => ids.push(id),
+                Err(e) => errs.push(e),
+            }
+        }
+        let brief = format!("record_findings {} 条", items.len());
+        let res = if errs.is_empty() {
+            Ok(format!(
+                "已记录：{}。\n{}\n（下一轮你仍会看到这些条目；**别**为了回忆它们去重读文件。）",
+                ids.join("、"),
+                ctx.progress().byte_account()
+            ))
+        } else {
+            // 部分失败要指名到条：只回"出错了"会让模型以为全记上了
+            Err(format!("被拒 {} 条：{}", errs.len(), errs.join("；")))
+        };
+        slots[i] = Some(("findings".into(), brief, res));
+    }
 }
 
 /// 正整数字段（`offset` / `limit` 这类）。0 与负数都当场拒 ——
@@ -1936,6 +2034,31 @@ fn get_pos_usize(args: &serde_json::Value, key: &str) -> Result<Option<usize>, S
 ///
 /// 窗口只对**文件**有意义；目录给的本来就是结构树，窗口参数在那边被忽略（不报错：
 /// 报错会换来一轮无效往返，而模型"想看看某个目录的一段"的意图本身没有歧义）。
+/// `record_findings` 的参数：`{"items":[{"claim":…,"evidence":…,"note":?,"supersedes":?}]}`。
+///
+/// 也认"单个条目直接给"（`{"claim":…}`）与"items 给了一个对象"—— 少写一层包装不该白费一轮；
+/// 但**空 items 一律拒**（空调用是无意义的一轮，要把它变成一句明确的纠正）。
+fn parse_findings(args: &serde_json::Value) -> Result<Action, String> {
+    let items = match args.get("items") {
+        Some(serde_json::Value::Array(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+        None => vec![args.clone()],
+    };
+    if items.is_empty() {
+        return Err("record_findings 的 items 为空（要给 claim + evidence）".into());
+    }
+    let mut out = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let spec: FindingSpec = serde_json::from_value(it.clone())
+            .map_err(|e| format!("items 第 {} 条解析失败：{e}", i + 1))?;
+        if spec.claim.trim().is_empty() {
+            return Err(format!("items 第 {} 条的 claim 为空", i + 1));
+        }
+        out.push(spec);
+    }
+    Ok(Action::Findings(out))
+}
+
 fn parse_read(args: &serde_json::Value) -> Result<Action, String> {
     let path = get_str(args, "path")?;
     let offset = get_pos_usize(args, "offset")?;
@@ -2070,6 +2193,10 @@ fn to_step_action(a: Action) -> StepAction {
         Action::Connect(_) => StepAction::Unsupported("connect"),
         // 子步没有交互权：它的 messages 是干净上下文，一问就破了"一轮 = 一步"的派发语义
         Action::Ask(_) => StepAction::Unsupported("ask_user"),
+        // 子步不记 findings：它读到的事实经**引擎写的步骤摘要**与共享账本回到主干
+        // （子步骤借的是同一个 `&mut Ctx`，账本天然共享）。给它开这个口子会让
+        // "子步的一轮 = 一步"这条派发语义多出一个不产生交付物的动作。
+        Action::Findings(_) => StepAction::Unsupported("record_findings"),
     }
 }
 
@@ -2133,6 +2260,7 @@ fn action_name(a: &Action) -> &'static str {
         Action::Execute(..) | Action::ExecBg(_) | Action::Proc(..) => "execute",
         Action::Connect(_) => "connect",
         Action::Ask(_) => "ask_user",
+        Action::Findings(_) => "record_findings",
     }
 }
 
@@ -2305,6 +2433,9 @@ pub struct Ctx<'a> {
     probes: Vec<Probe>,
     policy: WritePolicy,
     backup_dir: Option<PathBuf>,
+    /// 本 run 的进展（结论 + 引擎账本 + 读取索引）。主循环与 step 子步骤**共用同一份**
+    /// （子步骤借的是同一个 `&mut Ctx`），所以不需要第二套机制。
+    progress: Progress,
     /// **项目状态根**（宿主注入；暂存与备份落这里，绝不落进项目）。
     /// `None` = 走兜底（临时目录）—— 引擎单测与"宿主没注入"的情况都走它。
     state_root: Option<PathBuf>,
@@ -2317,6 +2448,7 @@ impl<'a> Ctx<'a> {
             overlay: BTreeMap::new(),
             changes: Vec::new(),
             probes: Vec::new(),
+            progress: Progress::new(),
             policy,
             backup_dir: None,
             state_root: None,
@@ -2348,6 +2480,25 @@ impl<'a> Ctx<'a> {
 
     /// 留一次取证。两端都要裁剪：命令可能特长、输出可能是一份几千行的编译日志，
     /// 而它是要进复核员上下文的。
+    /// 进展状态（主循环与子步骤共用）
+    pub(crate) fn progress(&self) -> &Progress {
+        &self.progress
+    }
+
+    pub(crate) fn progress_mut(&mut self) -> &mut Progress {
+        &mut self.progress
+    }
+
+    /// 记一条结论（`record_findings` 的落点）
+    pub(crate) fn record_finding(&mut self, spec: &FindingSpec) -> Result<String, String> {
+        self.progress.record(
+            &spec.claim,
+            &spec.evidence,
+            &spec.note,
+            spec.supersedes.as_deref(),
+        )
+    }
+
     pub(crate) fn note_probe(&mut self, cmd: &str, output: &str) {
         self.probes.push(Probe {
             cmd: clip(cmd, PROBE_CMD_CLIP),
@@ -3081,6 +3232,76 @@ struct RoundSlot {
 }
 
 /// 一轮调用的形状摘要（**不带正文**）：折叠后模型仍认得出自己那一轮调了什么。
+/// 停滞守卫触发时回灌给模型的那条**硬指令**。
+///
+/// 措辞刻意"指名要什么"：① 已确认的事实（引用 findings id）② 卡在哪 ③ 需要用户给什么。
+/// 只喊"你必须 final"会让模型把同一段探索换个说法再写一遍 —— 那正是它绕不出来的地方。
+fn stall_instruction(rounds: usize) -> String {
+    format!(
+        "（停滞守卫：连续 {rounds} 轮既没有新结论、也没有文件变更。\n\
+         本轮**不再接受任何工具调用**。必须立刻给出 final：\n\
+         ① 已确认的事实（引用 findings 的 id 与证据指针）；\n\
+         ② 卡在哪 —— 具体缺哪条信息、试过什么；\n\
+         ③ 需要用户提供什么才能继续。）"
+    )
+}
+
+/// 硬终止时交给用户的诚实报告（模型不听守卫，就由引擎把账本说清楚）。
+fn stall_report(cfg: &AppConfig, ctx: &Ctx<'_>, step: usize) -> String {
+    let mut s = format!(
+        "（停滞守卫：连续 {} 轮没有新结论、也没有文件变更，本 run 已停止 —— \
+         再跑下去只会换着法子重读同一批文件。本 run 共 {} 轮。",
+        cfg.agent.stall_rounds, step
+    );
+    let items = ctx.progress().in_prompt();
+    if items.is_empty() {
+        s.push_str("\n期间**没有记下任何确认的事实**（record_findings 为空），所以给不出结论。");
+    } else {
+        s.push_str("\n已确认的事实：");
+        for f in items.iter().take(12) {
+            s.push_str(&format!("\n- {}", f.line()));
+        }
+    }
+    let ledger = ctx.progress().ledger();
+    if !ledger.is_empty() {
+        s.push_str("\n已做过的事（引擎账本，尾部 12 条）：");
+        for l in ledger.iter().rev().take(12).rev() {
+            s.push_str(&format!("\n- {l}"));
+        }
+    }
+    s.push_str("\n\n请直接告诉我下一步该怎么走，或补上我缺的那条信息。）");
+    s
+}
+
+/// 引擎账本的一行：**只记形状与结局，不记内容**。
+///
+/// - `read`：`r12 read ui/scripts/session.js (296-334) ✓` —— 只到"读过这一段"为止；
+/// - `execute`：`r13 execute cargo test ✓` / `✗ 退出码 101` —— 退出码是**结局**，
+///   不是内容，所以留；命令自身的输出不留（要去 findings 里写结论，或重新精确读）。
+///
+/// 为什么这么做：把结果首行塞进账本看着有用，实际是**绕过折叠** —— 旧结果的头 100 字符
+/// 会永远在场、账本也随轮数线性涨。这一条是被单测抓出来的（`old_tool_results_are_folded_out_of_the_request`）。
+fn ledger_line_for(step: usize, tool: &str, brief: &str, res: &Result<String, String>) -> String {
+    let verdict = if res.is_ok() { "✓" } else { "✗" };
+    let mut line = format!("r{step} {tool} {brief} {verdict}");
+    if tool == "execute" {
+        // 退出码/失败原因：从结果文本里认（引擎的执行回灌里带着它）
+        let text = match res {
+            Ok(t) => t.as_str(),
+            Err(e) => e.as_str(),
+        };
+        if let Some(seg) = text
+            .lines()
+            .find(|l| l.contains("退出码") || l.contains("exit"))
+        {
+            line.push_str(&format!(" {}", clip(seg.trim(), 60)));
+        } else if res.is_err() {
+            line.push_str(&format!(" {}", clip(text, 60)));
+        }
+    }
+    line
+}
+
 fn call_shape(actions: &[Action]) -> String {
     let one = |a: &Action| match a {
         Action::Read(s) => format!("read {}", s.brief()),
@@ -3091,6 +3312,7 @@ fn call_shape(actions: &[Action]) -> String {
         Action::Connect(_) => "connect".to_string(),
         Action::Plan(p) => format!("plan {} 步", p.len()),
         Action::Ask(_) => "ask_user".to_string(),
+        Action::Findings(v) => format!("record_findings {} 条", v.len()),
         Action::Final(_) => "final".to_string(),
     };
     if actions.len() == 1 {
@@ -3651,8 +3873,16 @@ pub async fn run(
 
 // 循环本体在 `agent/tool_loop.rs` —— 那 780 行搬出去之后，这个文件回到 3.5k 量级。
 // 子模块用 `use super::*` 就能看到这里的一切（含私有项），所以是文件切分、不是可见性改造。
+pub use findings::Progress;
+
 mod tool_loop;
 pub use tool_loop::run_with_ask;
+
+/// 进展记忆与循环守卫（`record_findings` + 引擎账本 + 两条守卫）
+///
+/// 见 `doc/v1.1/需求-Agent-进展记忆与循环守卫-v1.1.md`。与 `tool_loop` 一样是**文件切分**，
+/// 子模块用 `use super::*` 看到这里的一切。
+pub mod findings;
 
 #[cfg(test)]
 mod tests;
