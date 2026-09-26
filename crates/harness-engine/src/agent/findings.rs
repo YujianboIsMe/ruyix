@@ -90,7 +90,7 @@ const LEDGER_KEEP: usize = 60;
 
 /// 本 run 的进展状态：结论 + 账本 + 读取索引。**step 子步骤与主循环共用同一份**
 /// （子步骤借的是同一个 `&mut Ctx`，所以这里天然共享，不需要再造一套）。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Progress {
     findings: Vec<Finding>,
     /// 引擎账本（已做过什么）。只增不改。
@@ -98,6 +98,11 @@ pub struct Progress {
     rounds: Vec<RoundMark>,
     reads: Vec<ReadMark>,
     next_id: usize,
+    /// 本 run 跑过的命令（去重）。调研型任务的主力是 `git grep` 这类 `execute`：
+    /// 只把 `read` 算进展，会把"查得很对"判成停滞（实测 22 轮 / 40 轮两次都死在这儿）。
+    cmds: Vec<String>,
+    /// 本轮是否跑过新命令（由 `ledger_line` 置位、`note_round` 消费）
+    fresh_cmd: bool,
     /// 上一次"有进展"的轮次（新增结论或文件变更）
     last_progress: usize,
     /// 落盘文件（一旦写过就固定，避免每轮换路径）
@@ -105,6 +110,30 @@ pub struct Progress {
     /// 提示词里 findings 块的字节上限（0 = 不限）。放在状态里而不是每次传参：
     /// `byte_account` 与 `prompt_block` 必须用同一个数，否则账与行为会各说各话。
     cap_bytes: usize,
+}
+
+/// findings 块的默认字节上限 —— **与引擎配置的默认值保持一致**（`d_agent_findings_max_bytes` = 8192）。
+/// 写成常量而不是散字面量：两边一旦不一致，"账"与"行为"就会各说各话。
+///
+/// 0 = 不限，是合法值。**显示上不许把它印成 `0.0KB`** —— 用户实测就是这么读错的
+/// （"一个字都不许记？"），而实际上一个字都没少记。
+pub const DEFAULT_FINDINGS_CAP_BYTES: usize = 8192;
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            findings: Vec::new(),
+            ledger: Vec::new(),
+            rounds: Vec::new(),
+            reads: Vec::new(),
+            next_id: 0,
+            last_progress: 0,
+            spill_file: None,
+            cap_bytes: DEFAULT_FINDINGS_CAP_BYTES,
+            cmds: Vec::new(),
+            fresh_cmd: false,
+        }
+    }
 }
 
 impl Progress {
@@ -217,8 +246,22 @@ impl Progress {
     // ---------------------------------------------------------------- 账本
 
     /// 引擎写一行账（每轮调用形状 + 退出码/命中摘要）。只增不改。
+    ///
+    /// 顺带把这轮的 `execute` 命令去重记下 —— 它能回答「我是不是在重复同一件事」。
     pub fn ledger_line(&mut self, line: impl Into<String>) {
-        self.ledger.push(line.into());
+        let line = line.into();
+        if let Some(rest) = line.split(" execute ").nth(1) {
+            let cmd = rest
+                .trim_end_matches('\u{2713}')
+                .trim_end_matches('\u{2717}')
+                .trim()
+                .to_string();
+            if !cmd.is_empty() && !self.cmds.iter().any(|c| c == &cmd) {
+                self.cmds.push(cmd);
+                self.fresh_cmd = true;
+            }
+        }
+        self.ledger.push(line);
     }
 
     pub fn ledger(&self) -> &[String] {
@@ -255,6 +298,9 @@ impl Progress {
     /// 模型分 8 段系统地读 `main.js`，到第 8 轮被判"连续 8 轮无进展"直接掐掉 ✗）。
     /// 收集信息就是进展；只有"没读新东西、没新结论、也没改文件"才是真在原地打转。
     pub fn note_round(&mut self, round: usize, new_finding: bool, wrote: bool, new_read: bool) {
+        // 新命令 = 拿到了新信息（调研型任务的主力就是 execute 式检索）。
+        let new_read = new_read || self.fresh_cmd;
+        self.fresh_cmd = false;
         if new_finding || wrote || new_read {
             self.last_progress = round;
         }
