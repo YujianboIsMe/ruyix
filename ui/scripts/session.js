@@ -548,9 +548,13 @@
       const lp = Number((out && out.avg_logprob) ?? 0);
       if (lp < -1.0) notes.push(L("⚠ 置信度偏低，请核对", "⚠ low confidence — please review"));
       const tail = notes.length ? ` · ${notes.join(" · ")}` : "";
+      // 跑在哪**必须显示**：GPU 与 CPU 差一个量级，用户觉得"慢"时第一个要问的就是这个。
+      const dev = out && out.device === "cuda" ? "GPU" : "CPU";
+      const devWhy =
+        out && out.device_note ? L(`（未用 GPU：${out.device_note}）`, ` (GPU unused: ${out.device_note})`) : "";
       status(
-        L(`本地转写完成（${secs}s · 音频没出本机）${tail} —— 确认后发送`,
-          `transcribed locally (${secs}s · audio never left)${tail} — review then send`),
+        L(`本地转写完成（${secs}s · ${dev}${devWhy} · 音频没出本机）${tail} —— 确认后发送`,
+          `transcribed locally (${secs}s · ${dev}${devWhy} · audio never left)${tail} — review then send`),
         out && out.truncated ? "warn" : "info"
       );
     }

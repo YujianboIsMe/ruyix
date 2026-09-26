@@ -3998,6 +3998,67 @@ async function runConfigSmearChecks() {
 }
 
 /**
+ * U66 gpu-device-plumbing：GPU 是**可选插件**，而且探测与回落每一步都要有话说。
+ *
+ * 用户原话：「为什么用CPU进行ASR？主动探测，用GPU不行吗？项目中已有探测GPU的代码。」
+ * 三句都要落到代码里：
+ *   · 主动探测 —— 复用**已有**那套 nvidia-smi（machine::nvidia_gpu_present），
+ *     绝不许在别处再 spawn 一次（两套探测就会有两种答案）；
+ *   · 用 GPU —— 设备是**编译期特性**（cuda），运行时只负责「真去试一次」（pick_device）；
+ *   · 可选插件 —— CUDA 运行时 DLL 放 plugins/gpu-asr/ 并前置进 PATH，
+ *     **不许**丢在 exe 根目录（那会毁掉「一个 exe + global + projects + plugins」的形态）。
+ */
+function runGpuDeviceChecks() {
+  const cargo = read("crates/harness-engine/Cargo.toml");
+  const asr = read("crates/harness-engine/src/voice/asr.rs");
+  const cfg = read("crates/harness-engine/src/config.rs");
+  const main = read("src-tauri/src/main.rs");
+  const machine = read("src-tauri/src/agent/machine.rs");
+  const sess = read("ui/scripts/session.js");
+
+  check("U66", "cuda-feature-declared",
+    /^cuda\s*=\s*\[/m.test(cargo) && /candle-core\/cuda/.test(cargo),
+    "引擎要有 cuda 特性（可选构建）：没有它，Device::Cuda 在这个二进制里根本不存在");
+
+  check("U66", "device-pick-tries-then-falls-back",
+    /pub fn pick_device\(prefer_gpu: bool\)/.test(asr) &&
+      /pub fn decide_kind\(prefer_gpu: bool, cuda_built: bool, cuda_ok: bool\)/.test(asr) &&
+      /fn try_cuda\(\)/.test(asr),
+    "要主动真去建一次 CUDA 设备（失败回落 CPU），而不是「配了就当在用」");
+
+  check("U66", "no-second-gpu-probe",
+    /pub fn nvidia_gpu_present\(\)/.test(machine) &&
+      /machine::nvidia_gpu_present/.test(main) &&
+      !/"nvidia-smi"/.test(main),
+    // ↑ 只禁**字符串字面量**：注释里提它一句没关系，宿主真去 spawn 才是第二套探测
+    "复用已有那套探测（machine 里唯一一份）；宿主不许自己再 spawn 一次 nvidia-smi");
+
+  check("U66", "gpu-runtime-is-an-optional-plugin",
+    /plugins_root\.join\("gpu-asr"\)/.test(main) && /set_var\("PATH"/.test(main),
+    "CUDA 运行时 DLL 走 plugins/gpu-asr/ + 前置 PATH；不许往 exe 根目录塞");
+
+  check("U66", "device-is-reported-not-silent",
+    /"device": r\.device/.test(main) &&
+      /pub device: String/.test(asr) &&
+      /out\.device === "cuda"/.test(sess),
+    "实际跑在哪要一路回报到界面（以为在用 GPU 其实在跑 CPU 是最坏的一种沉默）");
+
+  check("U66", "gpu-unused-reason-surfaces",
+    /"device_note": r\.device_note/.test(main) &&
+      /pub device_note: Option<String>/.test(asr) &&
+      /out\.device_note \?/.test(sess),
+    "回落了要说为什么（DLL 缺 / 驱动旧 / 没编进构建），原因要显示给用户");
+
+  check("U66", "pref-change-reloads-model",
+    /a\.wants_gpu\(\) != want_gpu/.test(main) && /pub fn wants_gpu\(&self\)/.test(asr),
+    "改了 voice.gpu 要重载（权重的设备是加载时定死的，不重载等于配置改了没反应）");
+
+  check("U66", "gpu-config-key-is-an-enum",
+    /\("voice\.gpu", &\["auto", "off"\]\)/.test(cfg) && /cfg\.voice\.gpu != "off"/.test(main),
+    "voice.gpu = auto|off 进枚举表（表单自动出下拉）；读侧只有明确 off 才关");
+}
+
+/**
  * U64 config-change-refresh：配置改完要**发事件**，会话面板**按事件重取**（用户报的）。
  *
  * 真实场景：用户在配置里填完 API Key → 回到会话面板，那排 chip 里还写着「✗ key 未配置」。
@@ -4950,6 +5011,7 @@ async function main() {
     ["U63", "voice-no-main-thread-block", runVoiceThreadChecks],
     ["U64", "config-change-refresh", runConfigEventChecks],
     ["U65", "config-form-no-value-smear", runConfigSmearChecks],
+    ["U66", "gpu-device-plumbing", runGpuDeviceChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {

@@ -564,5 +564,8 @@
   "config.field.harness.voice.vad": "剪静音",
   "config.desc.harness.voice.vad": "转写前把静音/气口剪掉再喂模型（默认开）。whisper 在静音上会幻觉（实测吐出 Thank you.），而录音两头必然是静音。关掉它的唯一理由：说话声很小被误判成静音 —— 那时设 false 退回整段喂。",
   "config.field.harness.voice.max_secs": "最长转写秒数",
-  "config.desc.harness.voice.max_secs": "单次最多处理多少秒（默认 120），超出部分如实标注 truncated、绝不悄悄截断。这是体验闸不是技术限制：本地 CPU 大约 3 倍实时，再长用户会以为程序死了。"
+  "config.desc.harness.voice.max_secs": "单次最多处理多少秒（默认 120），超出部分如实标注 truncated、绝不悄悄截断。这是体验闸不是技术限制：本地 CPU 大约 3 倍实时，再长用户会以为程序死了。",
+  "config.section.harness.voice.gpu": "GPU 加速",
+  "config.field.harness.voice.gpu": "主设备",
+  "config.desc.harness.voice.gpu": "auto = 主动探测 + 真试一次，成了就用 GPU、不成回落 CPU 并说明原因；off = 一律 CPU。注意：只有带 cuda 特性的构建才可能用上 GPU，默认构建里探测到多好的卡也只能跑 CPU。"
 }

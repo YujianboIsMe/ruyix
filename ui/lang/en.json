@@ -564,5 +564,8 @@
   "config.field.harness.voice.vad": "Trim silence",
   "config.desc.harness.voice.vad": "Drop silence/pauses before feeding the model (default on). Whisper hallucinates on silence (measured: it printed \"Thank you.\"), and every recording has silence at both ends. Only disable it if quiet speech gets misclassified as silence.",
   "config.field.harness.voice.max_secs": "Max seconds",
-  "config.desc.harness.voice.max_secs": "How many seconds to transcribe per call (default 120); anything beyond is honestly reported as truncated, never silently cut. This is a UX guard, not a technical limit: local CPU runs ~3x real time, longer would look like a hang."
+  "config.desc.harness.voice.max_secs": "How many seconds to transcribe per call (default 120); anything beyond is honestly reported as truncated, never silently cut. This is a UX guard, not a technical limit: local CPU runs ~3x real time, longer would look like a hang.",
+  "config.section.harness.voice.gpu": "GPU acceleration",
+  "config.field.harness.voice.gpu": "Primary device",
+  "config.desc.harness.voice.gpu": "auto = probe and really try once: use the GPU if it works, otherwise fall back to CPU and say why; off = CPU only. Note: only a build with the cuda feature can use a GPU — otherwise even a great card stays idle."
 }

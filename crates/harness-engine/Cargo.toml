@@ -30,4 +30,9 @@ safetensors = { version = "0.6", optional = true }
 [features]
 # 记忆是**核心模块**（不可插件化）：向量腿默认编入。关掉它 = 记忆退化为纯词法检索。
 default = ["embed"]
+# GPU 加速（**可选插件形态**）：candle 的 CUDA 走 cudarc 的**动态加载** ⇒ 同一个 exe
+# 在能加载到 CUDA 运行时 DLL 时用 GPU、加载不到就回落 CPU（见 voice/asr.rs::pick_device）。
+# 构建需要 CUDA Toolkit（nvcc）；运行需要 plugins/gpu-asr/ 下的 cublas/cudart/nvrtc DLL。
+# 实测数字待装完工具链补 —— 见 doc/需求-本地语音转写-v1.1.md §8。
+cuda = ["candle-core/cuda", "candle-transformers/cuda"]
 embed = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors"]

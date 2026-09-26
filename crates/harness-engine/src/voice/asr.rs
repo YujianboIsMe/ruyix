@@ -416,6 +416,10 @@ pub struct Transcript {
     /// 各窗口平均对数概率的均值（越接近 0 越有把握）。
     /// **这是"该不该信这句话"的唯一机器判据** —— 低置信度的转写要提示用户核对。
     pub avg_logprob: f32,
+    /// 实际跑在哪：`cpu` / `cuda`。**必须回报** —— "以为在用 GPU、其实在跑 CPU" 是最坏的沉默。
+    pub device: String,
+    /// 请求了 GPU 却没跑上 GPU 的原因（没请求则 None）
+    pub device_note: Option<String>,
 }
 
 /// 把 `pcm_to_mel` 的输出按真实帧数切开（布局 `[mel][frame]`，见 `transcribe_in` 里的注释）。
@@ -502,11 +506,82 @@ pub struct Asr {
     languages: Vec<(String, u32)>,
     /// 抑制表：no-speech / 时间戳 / 配置里的 begin_suppress_tokens
     suppressed: Vec<u32>,
+    /// 实际跑在哪（`pick_device` 的结论；对外回报，好让"以为在用 GPU"这种事不可能发生）
+    kind: DeviceKind,
+    /// 请求了 GPU 却没用上时，这里是原因（DLL 缺 / 驱动旧 / 没编进构建）
+    device_note: Option<String>,
+    /// **用户当时想不想用 GPU**（与"实际跑在哪"分开记：回落成 CPU 时宿主得知道
+    /// "是用户要的、还是本来就没要" —— 否则配置一改就没法判断该不该重载）。
+    wanted_gpu: bool,
 }
 
+/// 跑在哪。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceKind {
+    Cpu,
+    Cuda,
+}
+
+impl DeviceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+        }
+    }
+}
+
+/// **决策表**（纯函数，可测）：用户偏好 × 构建是否带 cuda × CUDA 是否真的起来了 → 最终跑在哪。
+///
+/// 三条不许越过的线：
+/// 1. `voice.gpu = off` ⇒ 一律 CPU（用户说不许用，就不许用）；
+/// 2. 构建没带 `cuda` 特性 ⇒ 一律 CPU（**这个二进制里根本没有 `Device::Cuda`**，
+///    运行时探测到多好的卡都切不过去 —— 这正是一开始"用 CPU 做 ASR"的真原因）；
+/// 3. 带了特性但 `Device::new_cuda` 报错（DLL 缺 / 驱动旧 / 算力代号没编进内核）⇒ CPU，
+///    而且**必须把原因说出来** —— "以为在用 GPU 其实在跑 CPU" 是最坏的一种沉默。
+pub fn decide_kind(prefer_gpu: bool, cuda_built: bool, cuda_ok: bool) -> DeviceKind {
+    if prefer_gpu && cuda_built && cuda_ok {
+        DeviceKind::Cuda
+    } else {
+        DeviceKind::Cpu
+    }
+}
+
+/// 真去建一个 CUDA 设备（只有带 `cuda` 特性时才可能成功）。
+#[cfg(feature = "cuda")]
+fn try_cuda() -> Result<Device, String> {
+    Device::new_cuda(0).map_err(|e| e.to_string())
+}
+
+/// 未带特性：**编译期**就是死路，连编译内核都没有 —— 报错要说清是"没编进去"而不是"卡不行"。
+#[cfg(not(feature = "cuda"))]
+fn try_cuda() -> Result<Device, String> {
+    Err("构建未带 cuda 特性（要 --features cuda，且需要 CUDA Toolkit）".to_string())
+}
+
+/// 选设备：**主动试一次**，失败回落 CPU（绝不因为"想要 GPU"把功能弄坏）。
+/// 返回 `(设备, 实际跑在哪, 没用上 GPU 的原因)`。
+pub fn pick_device(prefer_gpu: bool) -> (Device, DeviceKind, Option<String>) {
+    if !prefer_gpu {
+        return (Device::Cpu, DeviceKind::Cpu, None);
+    }
+    match try_cuda() {
+        Ok(d) => (d, DeviceKind::Cuda, None),
+        Err(e) => (Device::Cpu, DeviceKind::Cpu, Some(e)),
+    }
+}
 impl Asr {
-    /// 从模型目录加载（三个文件：`model.gguf` / `tokenizer.json` / `config.json`）。
+    /// 从模型目录加载（三个文件：`model.gguf` / `tokenizer.json` / `config.json`）—— **CPU**。
     pub fn load(dir: &Path) -> Result<Self, String> {
+        Self::load_on(dir, false)
+    }
+
+    /// 同上，但**允许用 GPU**（`prefer_gpu` 由宿主探测 + `voice.gpu` 配置决定）。
+    ///
+    /// 设备必须在这里定死：权重、内核、KV 缓存都挂在这台设备上，**加载之后不能换**。
+    /// 所以"探测到 GPU"这件事要在加载前做完，而这里只负责"真去试一次 + 失败回落 + 把原因留下"。
+    pub fn load_on(dir: &Path, prefer_gpu: bool) -> Result<Self, String> {
+        let (device, kind, device_note) = pick_device(prefer_gpu);
         let cfg_path = dir.join("config.json");
         let cfg_file: ConfigFile = serde_json::from_str(
             &std::fs::read_to_string(&cfg_path)
@@ -533,7 +608,6 @@ impl Asr {
             .map_err(|e| format!("读 {} 失败: {e}", tok_path.display()))?;
         let gguf = dir.join("model.gguf");
         let safe = dir.join("model.safetensors");
-        let device = Device::Cpu;
         if !gguf.is_file() && safe.is_file() {
             // 这条路**实测跑不通**（2026-09-25，同一段中文音频、同一份代码）：
             // candle 的非量化 whisper 吃 HF 原版 safetensors 时吐不出 EOT，一路解到 448 个 token
@@ -632,7 +706,25 @@ impl Asr {
             no_speech,
             languages,
             suppressed,
+            kind,
+            device_note,
+            wanted_gpu: prefer_gpu,
         })
+    }
+
+    /// 实际跑在哪（`cpu` / `cuda`）
+    pub fn kind(&self) -> DeviceKind {
+        self.kind
+    }
+
+    /// 加载时用户是否要求用 GPU（宿主据此判断"设备偏好变了没"，变了就重载）
+    pub fn wants_gpu(&self) -> bool {
+        self.wanted_gpu
+    }
+
+    /// 请求了 GPU 却没跑上 GPU 的原因（没请求则 None）
+    pub fn device_note(&self) -> Option<&str> {
+        self.device_note.as_deref()
     }
 
     /// 语言 token 的 id（语言检测与提示词都用它）
@@ -670,7 +762,6 @@ impl Asr {
     /// 转写一段 16kHz 单声道 PCM（默认按真实长度编码，见 [`Window`]）。
     ///
     /// `language = None` 时先做一次语言检测（中英混着说也对）；给 `Some("zh")` 就跳过检测。
-    /// 单个窗口：mel + 编码器 → features。
     ///
     /// `Window::Trim` 按**这个窗口自己的长度**编码（多留 1 秒余量防吃字、向上取偶因为
     /// conv2 的 stride=2）；`Window::Full` 是 whisper 官方口径（恒补零到 30 秒）。
@@ -922,6 +1013,8 @@ impl Asr {
                 deduped: 0,
                 avg_logprob: 0.0,
                 truncated: false,
+                device: self.kind.as_str().to_string(),
+                device_note: self.device_note.clone(),
             });
         }
 
@@ -1062,6 +1155,8 @@ impl Asr {
             no_speech: worst_no_speech > 0.6,
             retries: fallbacks,
             deduped: deduped_n,
+            device: self.kind.as_str().to_string(),
+            device_note: self.device_note.clone(),
             avg_logprob: if logprob_n == 0 {
                 0.0
             } else {
@@ -1203,6 +1298,31 @@ mod tests {
         let normal = "帮我把构建命令改成cargo build把库存服务的连接池从20改成50";
         assert_eq!(strip_repeated_tail(normal), normal, "正常多句文本不许误剪");
     }
+    /// 设备决策表：三条线不许越过（关了配置 / 构建没带 cuda / CUDA 起不来 ⇒ 一律 CPU）。
+    #[test]
+    fn device_decision_table() {
+        use super::{DeviceKind, decide_kind};
+        // 想要 GPU、构建带了、真起来了 ⇒ GPU
+        assert_eq!(decide_kind(true, true, true), DeviceKind::Cuda);
+        // 用户关掉（`voice.gpu = off`）⇒ 就算样样具备也不用
+        assert_eq!(decide_kind(false, true, true), DeviceKind::Cpu);
+        // 构建没带 cuda（**我们这个二进制就是这种**）⇒ 探测到多好的卡也只能 CPU
+        assert_eq!(decide_kind(true, false, true), DeviceKind::Cpu);
+        // 带了但起不来（DLL 缺 / 驱动旧 / 算力代号没编进内核）⇒ CPU（原因由调用方带走并回报）
+        assert_eq!(decide_kind(true, true, false), DeviceKind::Cpu);
+    }
+
+    /// 本构建（默认不带 `cuda`）即使要求用 GPU，也必须**回落 CPU 而不是失败**，
+    /// 而且原因要能说出来（"以为在用 GPU" 是最坏的沉默）。
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn without_cuda_feature_we_fall_back_to_cpu_with_a_reason() {
+        let (_, kind, why) = super::pick_device(true);
+        assert_eq!(kind, super::DeviceKind::Cpu);
+        let why = why.expect("回落必须带原因");
+        assert!(why.contains("cuda"), "原因要说清是构建没带特性：{why}");
+    }
+
     /// 拼接：中文直接接、中英之间补空格（别自己**制造**新的边界空格问题）。
     #[test]
     fn join_parts_handles_cjk_and_latin_boundaries() {

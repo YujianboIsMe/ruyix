@@ -235,6 +235,9 @@
   // 精确对照：一次性句子（键是后端原样文案）
   // ============================================
   const EXACT = {
+    // GPU：构建没带 cuda 特性 —— 这句会经 `device_note` 显示在状态栏，英文界面下必须能翻
+    "构建未带 cuda 特性（要 --features cuda，且需要 CUDA Toolkit）":
+      "this build has no cuda feature (rebuild with --features cuda and the CUDA Toolkit)",
     "音频是空的": "the audio is empty",
     "{language}（语言 token 表里没有）": "{language} (not in the language token table)",
     "不认识的语言标记": "unknown language tag",

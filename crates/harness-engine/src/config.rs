@@ -891,6 +891,16 @@ pub struct VoiceConfig {
     /// 这个上限是**体验闸**不是技术限制：本地 CPU 的 RTF ~3×，再长用户会以为程序死了。
     #[serde(default = "d_voice_max_secs")]
     pub max_secs: u32,
+    /// `auto` | `off`：**要不要用 GPU**（默认 `auto`）。
+    ///
+    /// `auto` = 主动探测（宿主 `machine::gpu_desc`：nvidia-smi 说有卡才算数）+ 引擎真去
+    /// `Device::new_cuda(0)` 试一次；**任何一步不成立都回落 CPU，并把原因回报**，绝不静默。
+    /// `off` = 一律 CPU（用户说不许用就不许用）。
+    ///
+    /// ⚠ 这一项**只对带 `cuda` 特性的构建有意义**：默认构建里 `Device::Cuda` 根本不存在，
+    /// 探测到多好的卡也切不过去 —— 这是"为什么一直在用 CPU"的真正原因。
+    #[serde(default = "d_voice_gpu")]
+    pub gpu: String,
 }
 
 impl Default for VoiceConfig {
@@ -899,6 +909,7 @@ impl Default for VoiceConfig {
             window: d_voice_window(),
             vad: d_voice_vad(),
             max_secs: d_voice_max_secs(),
+            gpu: d_voice_gpu(),
         }
     }
 }
@@ -909,6 +920,10 @@ fn d_voice_vad() -> bool {
 
 fn d_voice_max_secs() -> u32 {
     120
+}
+
+fn d_voice_gpu() -> String {
+    "auto".into()
 }
 
 fn d_voice_window() -> String {
@@ -1166,6 +1181,7 @@ const ENUM_KEYS: &[(&str, &[&str])] = &[
     // 本地语音转写的编码窗口（见 `VoiceConfig`）。登记在这里 ⇒ 配置表单出一个下拉、
     // 宿主桥接按白名单校验 —— 不必再写一行 UI。
     ("voice.window", &["trim", "full"]),
+    ("voice.gpu", &["auto", "off"]),
 ];
 
 /// 不进配置表单的键（**前缀匹配**：写 `entropy` 就盖住整段）。

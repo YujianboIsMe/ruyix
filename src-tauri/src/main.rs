@@ -1917,9 +1917,16 @@ async fn voice_transcribe(
     // 编码窗口（`voice.window` = trim | full）在**进阻塞线程之前**读出来：
     // MutexGuard 不是 Send，带不进 `spawn_blocking`；而且这个值在这一轮里不会再变。
     // 读侧兜底交给 `Window::from_cfg`（未知值一律 trim —— 坏配置不许改变行为）。
-    let (window, vad, max_secs) = {
+    let (window, vad, max_secs, want_gpu) = {
         let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
         let cfg = agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?;
+        // 要不要用 GPU：`voice.gpu` = auto | off（**只有明确写 off 才关**，其余一律 auto —— 读侧兜底）。
+        // 探测复用 `machine::nvidia_gpu_present()`（同一套 nvidia-smi，绝不另写一份），
+        // 结果缓存在进程里：显卡不会中途插拔，而配置改了仍然即时生效。
+        // 这里只回答"想不想用"；"能不能用"由引擎真去建一次 CUDA 设备才知道。
+        static GPU_PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let prefer_gpu =
+            cfg.voice.gpu != "off" && *GPU_PRESENT.get_or_init(agent::machine::nvidia_gpu_present);
         (
             harness_engine::voice::asr::Window::from_cfg(&cfg.voice.window),
             cfg.voice.vad,
@@ -1929,6 +1936,7 @@ async fn voice_transcribe(
             } else {
                 cfg.voice.max_secs as f32
             },
+            prefer_gpu,
         )
     };
     let window_line = match window {
@@ -1959,10 +1967,23 @@ async fn voice_transcribe(
         let cell = voice_asr_cell();
         let mut guard = cell.lock().map_err(|e| e.to_string())?;
         let mut loaded = false;
-        if guard.is_none() {
-            stage("load", "首次加载语音模型（约 456MB，之后常驻）…".into());
+        // 设备偏好变了（用户改了 `voice.gpu`）→ 重载：权重挂在哪台设备上是加载时定死的，
+        // 加载一次 0.34 秒，比"配置改了却还是老设备"要好。
+        let needs_reload = guard
+            .as_ref()
+            .map(|a: &harness_engine::voice::Asr| a.wants_gpu() != want_gpu)
+            .unwrap_or(false);
+        if guard.is_none() || needs_reload {
+            stage(
+                "load",
+                if want_gpu {
+                    "首次加载语音模型（约 456MB，之后常驻）—— 试 GPU…".into()
+                } else {
+                    "首次加载语音模型（约 456MB，之后常驻）…".into()
+                },
+            );
             let dir = harness_engine::voice::fetch::target_dir()?;
-            *guard = Some(harness_engine::voice::Asr::load(&dir)?);
+            *guard = Some(harness_engine::voice::Asr::load_on(&dir, want_gpu)?);
             loaded = true;
         }
         let load_ms = t.elapsed().as_millis();
@@ -1975,10 +1996,19 @@ async fn voice_transcribe(
         } else {
             ""
         };
+        // **实际**跑在哪 + 为什么没用上 GPU —— 这两句必须出现在用户看得见的地方。
+        let dev_line = {
+            let a = guard.as_ref().expect("上面刚填过");
+            match (a.kind(), a.device_note()) {
+                (harness_engine::voice::asr::DeviceKind::Cuda, _) => "GPU".to_string(),
+                (_, Some(why)) => format!("CPU（未用 GPU：{why}）"),
+                (_, None) => "CPU".to_string(),
+            }
+        };
         stage(
             "infer",
             format!(
-                "识别中（{} 秒音频，本机推理，{window_line}，{vad_line}）…{slow}",
+                "识别中（{} 秒音频，本机推理，{dev_line}，{window_line}，{vad_line}）…{slow}",
                 pcm.len() as f32 / harness_engine::voice::asr::SAMPLE_RATE as f32
             ),
         );
@@ -2005,6 +2035,8 @@ async fn voice_transcribe(
             "avg_logprob": r.avg_logprob,
             "retries": r.retries,
             "deduped": r.deduped,
+            "device": r.device,
+            "device_note": r.device_note,
             "window": match window {
                 harness_engine::voice::asr::Window::Full => "full",
                 harness_engine::voice::asr::Window::Trim => "trim",
@@ -2718,6 +2750,23 @@ fn main() {
     // 项目级插件按**当前项目**算，所以切项目时要重载（见 `reload_plugins`）。
     let plugins_root = root_paths.plugins_dir();
     let materialized = preinstalled::materialize(&plugins_root);
+    // ---- GPU 加速是**可选插件**：`plugins/gpu-asr/` 在，cudarc 的 dlopen 才找得到
+    // cudart/cublas/nvrtc 那几个 DLL。把该目录前置进 PATH（Windows 的 DLL 搜索含 PATH），
+    // 不在则什么都不做 —— 纯 CPU 照跑。**故意不把这些 DLL 放到 exe 根目录**：
+    // 发行形态是"一个 exe + global/ + projects/ + plugins/"，几百 MB 的 CUDA 运行时
+    // 应该是"想要才装的那一块"，而不是所有人背包里的重量。
+    {
+        let gpu_plugin = plugins_root.join("gpu-asr");
+        if gpu_plugin.is_dir() {
+            let cur = std::env::var("PATH").unwrap_or_default();
+            let head = gpu_plugin.display().to_string();
+            // edition 2024 里 set_var 是 unsafe：这里是启动早期、单线程，且只改自己的环境块
+            unsafe {
+                std::env::set_var("PATH", format!("{head};{cur}"));
+            }
+            println!("[voice] GPU 加速插件已挂上：{head}");
+        }
+    }
     if !materialized.is_empty() {
         println!(
             "[plugin] 预装高亮插件已物化（{} 个文件）：{:?}",
