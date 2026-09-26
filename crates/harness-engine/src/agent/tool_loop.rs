@@ -69,6 +69,8 @@ pub async fn run_with_ask(
     let mut round_slots: Vec<RoundSlot> = Vec::new();
     // 停滞守卫已触发 ⇒ 下一轮只收 `final`（模型再发工具调用就终止本轮 run）
     let mut force_final = false;
+    // 停滞守卫只宽限**一轮**：让它把已确认的事实落进 findings，再强制交付。
+    let mut final_grace_used = false;
     // 连续模型调用失败计数：成功一轮即清零
     let mut llm_failures: u32 = 0;
 
@@ -401,7 +403,20 @@ pub async fn run_with_ask(
         //
         // 必须硬：模型不照做就终止，而不是再等一轮 —— "守卫能被绕过"等于没守卫。
         // `break`（不是 return）：收尾的 settle_steps / 进程回收 / 门禁补注都还得跑。
-        if force_final && !actions.iter().any(|a| matches!(a, Action::Final(_))) {
+        // 强制收尾那轮**允许** record_findings：指令里写的是"先记 findings、再 final"，
+        // 只认 final 会自相矛盾 —— 实测第 22 轮模型正调 record_findings（一条真结论），
+        // 被这一行当场杀掉、连结论一起丢了。允许一轮"只记不答"的宽限，下一轮仍强制 final。
+        let only_findings = !actions.is_empty()
+            && actions
+                .iter()
+                .all(|a| matches!(a, Action::Findings(_) | Action::Plan(_)));
+        if force_final && !final_grace_used && only_findings {
+            final_grace_used = true;
+            sink.log(
+                "info",
+                format!("[agent] 第 {step} 轮停滞守卫：宽限一轮，让它把已确认的事实记下来"),
+            );
+        } else if force_final && !actions.iter().any(|a| matches!(a, Action::Final(_))) {
             sink.log(
                 "warn",
                 format!("[agent] 第 {step} 轮 停滞守卫：模型仍发工具调用，终止本轮 run"),
