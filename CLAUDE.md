@@ -14,6 +14,7 @@ follows Google JS / HTML / CSS / JSON style guides. Full rules: `doc/编码规�
 cargo fmt --check                  # Rust 格式（rustfmt.toml: max_width 100 等）
 node scripts/check-style.js        # JS/HTML/CSS/JSON 风格（零依赖，0 error 才算过）
 node scripts/ui-smoke.js           # UI 冒烟：契约静态断言 + agent 面板演示回放（零依赖）
+node scripts/package-portable.js --no-build  # 出 zip（dist/ruyix-<ver>-win-x64.zip）。**改了打包脚本或模板清单后必须真跑一次** —— 它的错法是顶层 TDZ（const 声明顺序），`node --check` 不报
 node scripts/voice-transcribe-probe.mjs <16k.wav>  # 语音转写活体证明（CDP 连真 WebView2；见 scripts/ 头注释）
 node scripts/editor-layout.js      # 编辑器真实布局（无头 Edge；找不到浏览器时自行 SKIP）
 node scripts/session-trace-layout.js  # 会话执行轨迹的真实布局（同上，省略号/折行/滚动条）

@@ -4075,6 +4075,25 @@ function runGpuDeviceChecks() {
     tplFiles.length > 0 && unlisted.length === 0,
     `${tplFiles.length} 份模板都要被 paths.rs 与打包脚本同时引用；漏的：${JSON.stringify(unlisted)}`);
 
+  // —— 打包脚本：GPU 构建开关 + **顶层 TDZ** 这类只在运行时才炸的错 ——
+  // 教训现场：`ZIP` 的初始化里用了 `MODE`，而 `MODE` 声明在它后面 ⇒ 顶层 const 的 TDZ ⇒
+  // `node scripts/package-portable.js` 一跑就 ReferenceError。`node --check` **不报**这种错，
+  // 而这条命令是出 zip 的唯一入口、平时没人跑，于是坏了很久没人发现。判据只能落在**声明顺序**上。
+  const declOrder = (a, b) => {
+    const ia = pkg.indexOf(`const ${a} `);
+    const ib = pkg.indexOf(`const ${b} `);
+    return ia >= 0 && ib >= 0 && ia < ib;
+  };
+  check("U66", "package-gpu-flag",
+    has(pkg, "--gpu") && has(pkg, "harness-engine/cuda") && has(pkg, "GPU ? \"-gpu\""),
+    "打包脚本必须能出 GPU 版（--gpu → cargo tauri build --features harness-engine/cuda，zip 名带 -gpu 以免与 CPU 版互相盖掉）");
+  check("U66", "package-gpu-needs-build",
+    has(pkg, "NO_BUILD && GPU"),
+    "--no-build 与 --gpu 必须互斥：GPU 是编译期特性，复用旧 exe 只会产出「名字写着 gpu、内容其实 CPU」的包");
+  check("U66", "package-decl-order-no-tdz",
+    declOrder("MODE", "ZIP") && declOrder("GPU", "ZIP") && declOrder("NO_BUILD", "ZIP") && declOrder("STAGE", "ZIP"),
+    "ZIP 的初始化用到 MODE/GPU/STAGE ⇒ 它们必须声明在 ZIP **之前**（声明在后 = 顶层 TDZ = 打包命令直接崩，而 node --check 不报）");
+
   check("U66", "gpu-plugin-readme-template-exists",
     fs.existsSync(path.join(ROOT, "src-tauri", "templates", "gpu-asr-README.md")),
     "模板文件必须在，否则 include_str! 直接编译不过");
