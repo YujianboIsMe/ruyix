@@ -3820,7 +3820,9 @@ function runChatToolbarChecks() {
  *
  * 判据四条，每条对应一个真会出事的坏法：
  *   ① 数据源是**厂商的** `/models`（宿主 `ai_models`），前端不维护名单 —— 名单进前端就会漂；
- *   ② 换模型写 **runtime** 作用域（`llm.model`）：落盘会把一次试探变成长期默认；
+ *   ② 换模型写 **runtime** 作用域的 **`ai.model`**（D8 单一来源：宿主 config_bridge 读 ai.model
+ *      再映射给引擎的 llm.model）—— 落盘会把一次试探变成长期默认；而写 `llm.model` 是**死写** ✗，
+ *      宿主根本不读它（用户实测：「切到 flash」永远不生效，下拉框被弹回去）；
  *   ③ 换完要**重新问能力**（联网/录音的可用性跟着模型走），否则按钮状态停在旧模型上；
  *   ④ 拿不到列表**不许编**：只留当前模型一项并说清为什么 —— 编一份清单等于让用户
  *      选一个可能跑不通的模型。
@@ -3835,8 +3837,8 @@ function runModelDropdownChecks() {
   const applyStart = sessJs.indexOf('modelSel.addEventListener("change"');
   const applyBody = applyStart >= 0 ? sessJs.slice(applyStart, applyStart + 900) : "";
   check("U59", "model-dropdown-runtime-scope",
-    applyBody.includes('key: "llm.model"') && applyBody.includes('scope: "runtime"'),
-    "换模型必须写 runtime 作用域的 llm.model（落盘会把一次试探变成长期默认）");
+    applyBody.includes('key: "ai.model"') && applyBody.includes('scope: "runtime"'),
+    "换模型必须写 runtime 作用域的 ai.model（写 llm.model 是死写：宿主读的是 ai.model）（落盘会把一次试探变成长期默认）");
   check("U59", "model-dropdown-reprobe-caps",
     applyBody.includes("ai_model_caps"),
     "换完模型没重新问能力 —— 联网/录音按钮会停在旧模型的状态上");

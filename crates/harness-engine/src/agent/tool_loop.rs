@@ -707,6 +707,7 @@ pub async fn run_with_ask(
         // ---- 引擎账本 + 进展记账（与 findings 共用一份状态；**不折叠**）----
         if cfg.agent.findings_enabled {
             let mut wrote_this_round = false;
+            let mut new_region_reads = 0usize;
             // 重复读守卫要往**结果正文**里追加一行，而这里正持着 `results` 的不可变借用
             // ⇒ 先收集、再统一追加（同一轮里同一文件读两次也只追加一次）。
             let mut repeat_notes: Vec<(usize, String)> = Vec::new();
@@ -740,6 +741,8 @@ pub async fn run_with_ask(
                         // 于是"读文件"退化成"再搜一遍"。教训与 step 光标同一条：**引擎自己握节拍**，
                         // 不等模型自觉。这一步零额外轮次，只在结果尾部加一句话。
                         None => {
+                            // 读到之前没读过的区域 ⇒ 算进展（否则「系统读完一个文件」会被判成停滞）
+                            new_region_reads += 1;
                             let long = matches!(&results[i].2, Ok(t) if t.chars().count() >= 600);
                             if long {
                                 repeat_notes.push((
@@ -759,8 +762,12 @@ pub async fn run_with_ask(
                     text.push_str(&note);
                 }
             }
-            ctx.progress_mut()
-                .note_round(step, new_findings_this_round, wrote_this_round);
+            ctx.progress_mut().note_round(
+                step,
+                new_findings_this_round,
+                wrote_this_round,
+                new_region_reads > 0,
+            );
             if new_findings_this_round {
                 sink.log(
                     "info",

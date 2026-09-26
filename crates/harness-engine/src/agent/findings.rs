@@ -72,6 +72,8 @@ struct RoundMark {
     new_finding: bool,
     /// 这一轮有没有文件变更
     wrote: bool,
+    /// 这一轮有没有**读到之前没读过的区域**（收集信息就是进展 —— 见 note_round 的注释）
+    new_read: bool,
 }
 
 /// 一次读取（重复读守卫靠它）
@@ -247,14 +249,20 @@ impl Progress {
     // ---------------------------------------------------------------- 停滞
 
     /// 记一轮的产出（新结论 / 文件变更）
-    pub fn note_round(&mut self, round: usize, new_finding: bool, wrote: bool) {
-        if new_finding || wrote {
+    /// 记一轮的产出。
+    ///
+    /// `new_read` = 本轮读到了之前没读过的区域 —— **必须算进展**（用户实测报的 bug：
+    /// 模型分 8 段系统地读 `main.js`，到第 8 轮被判"连续 8 轮无进展"直接掐掉 ✗）。
+    /// 收集信息就是进展；只有"没读新东西、没新结论、也没改文件"才是真在原地打转。
+    pub fn note_round(&mut self, round: usize, new_finding: bool, wrote: bool, new_read: bool) {
+        if new_finding || wrote || new_read {
             self.last_progress = round;
         }
         self.rounds.push(RoundMark {
             round,
             new_finding,
             wrote,
+            new_read,
         });
     }
 
@@ -272,7 +280,7 @@ impl Progress {
             if m.round > round {
                 continue;
             }
-            if m.new_finding || m.wrote {
+            if m.new_finding || m.wrote || m.new_read {
                 break;
             }
             n += 1;

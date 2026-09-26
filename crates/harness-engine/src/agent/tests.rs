@@ -3266,14 +3266,14 @@ fn repeated_read_of_same_range_is_called_out() {
 fn stall_counts_only_rounds_without_progress() {
     let mut p = prog();
     for r in 1..=3 {
-        p.note_round(r, false, false);
+        p.note_round(r, false, false, false);
     }
     assert_eq!(p.stalled(3), 3);
     // 第 4 轮写了文件 ⇒ 进展清零
-    p.note_round(4, true, false);
+    p.note_round(4, true, false, false);
     assert_eq!(p.stalled(4), 0, "有新结论就算进展");
     for r in 5..=9 {
-        p.note_round(r, false, false);
+        p.note_round(r, false, false, false);
     }
     assert_eq!(p.stalled(9), 5, "从第 4 轮之后开始数");
 }

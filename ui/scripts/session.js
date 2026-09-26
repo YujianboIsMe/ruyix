@@ -381,7 +381,10 @@
         await invoke("config_form_apply", {
           scope: "runtime",
           projectRoot: root(),
-          entries: [{ section: "harness", key: "llm.model", value: id }],
+          // D8：模型名**单一来源是 `ai.*`**（宿主 config_bridge 读 ai.model 再映射给引擎的
+          // llm.model）—— 这里原先是写 `llm.model`，那是**死写** ✗：宿主根本不读它，
+          // 于是「切到 flash」永远不生效，下拉框还会被 paintModel 按当前配置弹回去。
+          entries: [{ section: "ai", key: "ai.model", value: id }],
         });
         // 换模型要**重新问一次能力**：联网/录音的可用性跟着模型走
         wrap._webCaps = await invoke("ai_model_caps", { model: id, projectRoot: root() });
