@@ -24,6 +24,7 @@
  * # 2) 另开一个终端（wav 必须是 **16kHz 单声道 16bit**）
  * node scripts/voice-transcribe-probe.mjs <某个.wav>
  * node scripts/voice-transcribe-probe.mjs <某个.wav> --check-window   # 另验编码窗口开关（多花约 1 分钟：full 那臂更慢）
+ * node scripts/voice-transcribe-probe.mjs <某个.wav> --expect-cuda    # GPU 阶段：要求 device 必须是 cuda（判据不通过就非零退出）
  * ```
  *
  * 需要 Node 22+（内置 fetch / WebSocket，零 npm 依赖 —— 与本项目"零 npm"一致）。
@@ -204,7 +205,8 @@ async function main() {
     try {
       const out = await window.__TAURI__.core.invoke("voice_transcribe", { data: "${base64}", language: null });
       return { ms: Math.round(performance.now() - t), text: out.text, lang: out.language,
-               tokens: out.tokens, stages: out.stages, heard: stages };
+               tokens: out.tokens, stages: out.stages, heard: stages,
+               device: out.device, deviceNote: out.device_note };
     } catch (e) {
       return { ms: Math.round(performance.now() - t), error: String(e), heard: stages };
     } finally {
@@ -277,6 +279,16 @@ async function main() {
       Array.isArray(tx.heard) && tx.heard.length > 0,
       `转写期间收到的阶段：${JSON.stringify(tx.heard)}`
     );
+    // ⑥ 设备：跑在哪**必须报出来**（GPU 与 CPU 差一个量级，判「慢」之前先看这一行）。
+    // `--expect-cuda` 是 GPU 阶段的预注册判据：装好工具链后，这一条必须过。
+    report(
+      "voice-device-reported",
+      tx.device === "cpu" || tx.device === "cuda",
+      `${tx.device}${tx.deviceNote ? "（未用 GPU：" + tx.deviceNote + "）" : ""}`
+    );
+    if (process.argv.includes("--expect-cuda")) {
+      report("voice-device-is-cuda", tx.device === "cuda", `期望 cuda，实际 ${tx.device}`);
+    }
   }
   cdp.close();
 }
