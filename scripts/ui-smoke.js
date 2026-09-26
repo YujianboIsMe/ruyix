@@ -4700,6 +4700,18 @@ function runModelChipChecks() {
   const body = i >= 0 ? js.slice(i, i + 1600) : "";
   check("U68", "repaint-after-fetch", body.indexOf("ai_models") >= 0 && body.indexOf("ai_model_caps") >= 0 && body.indexOf("paintModel();") >= 0,
     "取完模型列表/能力之后必须重画下拉（否则永远停在初始化那一帧的模型未知）");
+  // 事件回环（用户实测「只能 pro，切不回 flash」）：换模型写的是 runtime `ai.model`，
+  // 而 `touchesKeyDependentState` 对任何 ai.*/llm.* 键都返回 true ⇒ 广播回来就重探 ⇒
+  // 用「后端当前配置」把刚选的模型画回去 ⇒ 用户永远换不动。两层都要挡。
+  const sess = read("ui/scripts/session.js");
+  const tks = sess.indexOf("function touchesKeyDependentState");
+  const tksBody = tks >= 0 ? sess.slice(tks, tks + 700) : "";
+  check("U68", "model-key-does-not-trigger-reprobe", tksBody.indexOf("/model/i") >= 0,
+    "touchesKeyDependentState 必须把模型键排除：否则换模型会触发重探，把刚选的画回去（事件回环）");
+  const mrs = read("src-tauri/src/main.rs");
+  check("U68", "engine-managed-keys-not-broadcast",
+    mrs.indexOf("fn is_engine_managed_key") >= 0 && mrs.indexOf("if meaningful.is_empty()") >= 0,
+    "宿主广播前必须滤掉引擎托管的键（模型名）：前端自己发起的那次写入不该广播回它自己");
   check("U68", "retry-once-when-list-missing", body.indexOf("setTimeout") >= 0 && body.indexOf("retried") >= 0,
     "第一次没取到要重试一次：应用刚起来后端可能未就绪，一次失败不等于永久未知");
 }

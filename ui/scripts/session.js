@@ -1386,6 +1386,10 @@
   function touchesKeyDependentState(keys) {
     return (keys || []).some((k) => {
       if (!k) return false;
+      // **模型名不重探**：它由宿主托管、用户无法编辑（前端只能从下拉里选）。
+      // 重探会用"后端当前配置"把刚选中的模型画回去 ⇒ **事件回环**（用户实测：换不了模型）。
+      // 换模型的显示由那次 `ai_model_caps` 回执决定，不需要这个事件。
+      if (/model/i.test(String(k.key))) return false;
       if (k.section === "ai" || k.section === "ai_fallback") return true;
       return k.section === "harness" && String(k.key).startsWith("llm.");
     });

@@ -1866,13 +1866,34 @@ fn config_form_load(
 ///
 /// **调用前必须已经放掉 config 锁**：监听者（会话面板）收到事件就会回头调
 /// `agent_env_probe` / `ai_models` —— 那些命令同样要锁 config，握着锁发事件就是自己撞自己。
+/// 这个键是不是**由引擎/宿主托管、前端用户无法编辑**？
+///
+/// 目前只有模型名这一类：它由宿主从 `ai.model` 解析后交给引擎，前端只能从下拉框里选。
+/// 判定这类键的意义是**掐掉事件回环**：前端换模型 → 写 runtime `ai.model` → 宿主广播
+/// → 前端重探 → 用"后端当前配置"把刚选的画回去 ⇒ 用户看到的是"换不了模型"。
+fn is_engine_managed_key(section: &str, key: &str) -> bool {
+    let k = key.trim();
+    (section == "ai" || section == "ai_fallback") && k.ends_with(".model")
+}
+
 fn emit_config_changed(
     app: &tauri::AppHandle,
     scope: &str,
     entries: &[config::ConfigEntryInput],
     applied: bool,
 ) {
-    let keys: Vec<serde_json::Value> = entries
+    // **引擎托管的键不广播**（模型名）：前端的"换模型"本身就是写 runtime `ai.model` ——
+    // 广播回去只会让会话面板用"后端当前配置"把刚选中的模型画回去，形成**事件回环**
+    // （用户实测：「只能 pro，切不回 flash」）。模型的显示由面板自己那次 `ai_model_caps` 回执决定。
+    // 用户能编辑、且前端需要据此重探的，只有 key / 端点 / 协议这几类。
+    let meaningful: Vec<&config::ConfigEntryInput> = entries
+        .iter()
+        .filter(|e| !is_engine_managed_key(&e.section, &e.key))
+        .collect();
+    if meaningful.is_empty() {
+        return;
+    }
+    let keys: Vec<serde_json::Value> = meaningful
         .iter()
         .map(|e| serde_json::json!({ "section": e.section, "key": e.key }))
         .collect();
