@@ -447,12 +447,6 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
         "plugins/README.md",
         include_str!("../templates/plugins-README.md"),
     ),
-    (
-        // GPU 加速是**可选插件**：目录空着 = 纯 CPU（合法默认）。
-        // 说明与打包脚本预置的是同一份文本，见 scripts/package-portable.js 的 PRESET。
-        "plugins/gpu-asr/README.md",
-        include_str!("../templates/gpu-asr-README.md"),
-    ),
 ];
 
 // ============================================

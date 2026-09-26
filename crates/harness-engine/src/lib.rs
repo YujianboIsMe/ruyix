@@ -38,5 +38,4 @@ pub mod step_agent;
 pub mod testllm;
 pub mod verify;
 /// 本地语音转写（candle whisper + 按需下载的量化权重）
-pub mod voice;
 pub mod workspace;

@@ -9,8 +9,6 @@
 // 用法：
 //   node scripts/package-portable.js              # 构建 + 组包 + 打 zip + 自校验
 //   node scripts/package-portable.js --no-build   # 跳过构建（用已有 target/release/ruyix.exe）
-//   node scripts/package-portable.js --gpu        # GPU 构建（带 cuda 特性；zip 名带 -gpu）
-//                                               # 需要 CUDA Toolkit；运行时要 plugins/gpu-asr/ 里的 DLL
 //   node scripts/package-portable.js --mode pure  # 纯净模式：无内置解析器、无预装插件
 //                                               #（产物 target-pure/release/ruyix.exe，zip 名带 -pure）
 //
@@ -32,11 +30,6 @@ const VERSION = (() => {
   return conf.version;
 })();
 const STAGE = path.join(DIST, NAME);
-// GPU 构建（A 路线，可选插件形态）：带 `cuda` 特性的 exe。**与 CPU 版是同一个 exe**
-// （candle 的 CUDA 走 cudarc 动态加载），差别只在"GPU 后端有没有编进去" —— 所以 zip 名带
-// `-gpu` 以免两个产物互相盖掉，而且 `--no-build` 与它**不能同时用**（否则会产出一个
-// "名字写着 gpu、内容其实是 CPU"的包：这种谎最难查，直接拒绝）。
-const GPU = process.argv.includes("--gpu");
 const NO_BUILD = process.argv.includes("--no-build");
 // 两种编译模式（见 doc/highlight-plugins.md）：
 //   preinstalled（默认）＝ 内置高亮解析器 + 预装高亮插件（首启物化到 plugins/highlight/）
@@ -52,7 +45,7 @@ const MODE = (() => {
 })();
 const ZIP = path.join(
   DIST,
-  `${NAME}-${VERSION}-win-x64${MODE === "pure" ? "-pure" : ""}${GPU ? "-gpu" : ""}.zip`
+  `${NAME}-${VERSION}-win-x64${MODE === "pure" ? "-pure" : ""}.zip`
 );
 // 纯净模式用独立 target 目录：两套特性的编译缓存互相顶掉的话，切模式每次都要全量重编
 const TARGET_DIR = MODE === "pure" ? "target-pure" : "target";
@@ -79,9 +72,6 @@ function copyFile(from, to) {
 }
 
 // ---------------------------------------------------------------- 1. 构建
-if (NO_BUILD && GPU) {
-  fail("--no-build 与 --gpu 不能同时用：GPU 后端是**编译期**特性，复用已有 exe 只会产出一个名字骗人的包");
-}
 if (NO_BUILD) {
   log("跳过构建（--no-build）");
 } else {
@@ -101,12 +91,7 @@ if (NO_BUILD) {
     ]);
   } else {
     log("cargo tauri build --no-bundle ...（便携形态不做安装器）");
-    run(
-      "cargo",
-      GPU
-        ? ["tauri", "build", "--no-bundle", "--features", "harness-engine/cuda"]
-        : ["tauri", "build", "--no-bundle"]
-    );
+    run("cargo", ["tauri", "build", "--no-bundle"]);
   }
 }
 
@@ -128,8 +113,6 @@ const PRESET = [
   ["global/README.md", "templates/global-README.md"],
   ["projects/README.md", "templates/projects-README.md"],
   ["plugins/README.md", "templates/plugins-README.md"],
-  // GPU 加速插件：目录空着就是纯 CPU，所以包里预置的是一份**说明书**，用户往里拷 DLL 即可。
-  ["plugins/gpu-asr/README.md", "templates/gpu-asr-README.md"],
 ];
 // 忘了登记就是漏发：`templates/` 里每个 .md 都必须被 PRESET 用到（对比"目录列举"而不是写死个数）。
 // 写死个数只会让加模板的人去改数字，抓不到"加了文件却没进包"。

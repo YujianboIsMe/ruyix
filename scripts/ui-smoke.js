@@ -3853,32 +3853,6 @@ function runModelDropdownChecks() {
 }
 
 /**
- * U60 voice-input：录音按钮（需求：多模态模型显示录音按钮；本版本改成「本机转写」）。
- *
- * **先说清为什么不是「把录音发给模型」**（2026-09-25 四种入口全打了一遍，实测）：
- *   · `/models` 的 `input_modalities` 合法取值只有 `text` / `image`，**没有任何模型声明 audio**；
- *   · `/audio/transcriptions` → 404（没有 ASR 入口）；
- *   · chat/completions 的 content 块只认 `text` / `image_url` / `file`，`input_audio` → 422；
- *   · `/files` 只收 webp/png/jpeg/gif —— WAV 与 TXT 都被同一句话打回（类型白名单，不是形状问题）。
- * 所以能做的是**本机转写**：candle 的 whisper（纯 Rust、不联网、权重按需下载），
- * 录音一个字节都不出本机 —— 这比「发给模型」反而是好处。判据钉的就是这条链路**不许假装**。
- */
-function runVoiceButtonChecks() {
-  const sessJs = read("ui/scripts/session.js");
-  check("U60", "voice-button", sessJs.includes('data-mic') && sessJs.includes('session-mic--rec'),
-    "工具栏没有录音按钮（data-mic / session-mic--rec 样式钩子）");
-  check("U60", "voice-button-modality-gated",
-    sessJs.includes("micBtn.hidden = !multim") && sessJs.includes("rec) return; // 录音中"),
-    "录音按钮没按多模态门控（不是多模态的模型上不该出现）");
-  check("U60", "voice-button-recorder",
-    sessJs.includes("MediaRecorder") && sessJs.includes("getUserMedia") && sessJs.includes("isTypeSupported"),
-    "录音实现缺件（MediaRecorder / getUserMedia / 编码协商）");
-  check("U60", "voice-button-records-not-mute",
-    sessJs.includes("这段录音是空的") && sessJs.includes("打不开麦克风"),
-    "录音的空数据/权限失败必须有话说（静默失败＝用户以为说完了其实没录上）");
-}
-
-/**
  * U65 config-form-no-value-smear：表单**不许把值串行写进配置**（真事故，2026-09-25）。
  *
  * 现场：`target/{debug,release}/global/harness.toml` 里 **23 个键 = "on"** ——
@@ -3998,108 +3972,6 @@ async function runConfigSmearChecks() {
 }
 
 /**
- * U66 gpu-device-plumbing：GPU 是**可选插件**，而且探测与回落每一步都要有话说。
- *
- * 用户原话：「为什么用CPU进行ASR？主动探测，用GPU不行吗？项目中已有探测GPU的代码。」
- * 三句都要落到代码里：
- *   · 主动探测 —— 复用**已有**那套 nvidia-smi（machine::nvidia_gpu_present），
- *     绝不许在别处再 spawn 一次（两套探测就会有两种答案）；
- *   · 用 GPU —— 设备是**编译期特性**（cuda），运行时只负责「真去试一次」（pick_device）；
- *   · 可选插件 —— CUDA 运行时 DLL 放 plugins/gpu-asr/ 并前置进 PATH，
- *     **不许**丢在 exe 根目录（那会毁掉「一个 exe + global + projects + plugins」的形态）。
- */
-function runGpuDeviceChecks() {
-  const cargo = read("crates/harness-engine/Cargo.toml");
-  const asr = read("crates/harness-engine/src/voice/asr.rs");
-  const cfg = read("crates/harness-engine/src/config.rs");
-  const main = read("src-tauri/src/main.rs");
-  const machine = read("src-tauri/src/agent/machine.rs");
-  const sess = read("ui/scripts/session.js");
-  const paths = read("src-tauri/src/paths.rs");
-  const pkg = read("scripts/package-portable.js");
-
-  check("U66", "cuda-feature-declared",
-    /^cuda\s*=\s*\[/m.test(cargo) && /candle-core\/cuda/.test(cargo),
-    "引擎要有 cuda 特性（可选构建）：没有它，Device::Cuda 在这个二进制里根本不存在");
-
-  check("U66", "device-pick-tries-then-falls-back",
-    /pub fn pick_device\(prefer_gpu: bool\)/.test(asr) &&
-      /pub fn decide_kind\(prefer_gpu: bool, cuda_built: bool, cuda_ok: bool\)/.test(asr) &&
-      /fn try_cuda\(\)/.test(asr),
-    "要主动真去建一次 CUDA 设备（失败回落 CPU），而不是「配了就当在用」");
-
-  check("U66", "no-second-gpu-probe",
-    /pub fn nvidia_gpu_present\(\)/.test(machine) &&
-      /machine::nvidia_gpu_present/.test(main) &&
-      !/"nvidia-smi"/.test(main),
-    // ↑ 只禁**字符串字面量**：注释里提它一句没关系，宿主真去 spawn 才是第二套探测
-    "复用已有那套探测（machine 里唯一一份）；宿主不许自己再 spawn 一次 nvidia-smi");
-
-  check("U66", "gpu-runtime-is-an-optional-plugin",
-    /plugins_root\.join\("gpu-asr"\)/.test(main) && /set_var\("PATH"/.test(main),
-    "CUDA 运行时 DLL 走 plugins/gpu-asr/ + 前置 PATH；不许往 exe 根目录塞");
-
-  check("U66", "device-is-reported-not-silent",
-    /"device": r\.device/.test(main) &&
-      /pub device: String/.test(asr) &&
-      /out\.device === "cuda"/.test(sess),
-    "实际跑在哪要一路回报到界面（以为在用 GPU 其实在跑 CPU 是最坏的一种沉默）");
-
-  check("U66", "gpu-unused-reason-surfaces",
-    /"device_note": r\.device_note/.test(main) &&
-      /pub device_note: Option<String>/.test(asr) &&
-      /out\.device_note \?/.test(sess),
-    "回落了要说为什么（DLL 缺 / 驱动旧 / 没编进构建），原因要显示给用户");
-
-  check("U66", "pref-change-reloads-model",
-    /a\.wants_gpu\(\) != want_gpu/.test(main) && /pub fn wants_gpu\(&self\)/.test(asr),
-    "改了 voice.gpu 要重载（权重的设备是加载时定死的，不重载等于配置改了没反应）");
-
-  check("U66", "gpu-config-key-is-an-enum",
-    /\("voice\.gpu", &\["auto", "off"\]\)/.test(cfg) && /cfg\.voice\.gpu != "off"/.test(main),
-    "voice.gpu = auto|off 进枚举表（表单自动出下拉）；读侧只有明确 off 才关");
-
-  check("U66", "gpu-plugin-dir-ships-a-readme",
-    /templates\/gpu-asr-README\.md/.test(paths) && /plugins\/gpu-asr\/README\.md/.test(paths) &&
-      /templates\/gpu-asr-README\.md/.test(pkg) && /plugins\/gpu-asr\/README\.md/.test(pkg),
-    "可选插件要随包预置一份说明书（打包脚本与首启写的是同一份模板，两处各写一份迟早漂移）");
-
-  // 「忘了登记」必须被抓到，而且**不能靠写死个数**（写死个数只会让加模板的人去改数字）。
-  // 预期来自目录列举：templates/ 里每个 .md 都要出现在两条清单里（paths.rs 与打包脚本）。
-  const tplDir = path.join(ROOT, "src-tauri", "templates");
-  const tplFiles = fs.readdirSync(tplDir).filter((f) => f.endsWith(".md"));
-  const unlisted = tplFiles.filter(
-    (f) => !paths.includes(`templates/${f}`) || !pkg.includes(`templates/${f}`)
-  );
-  check("U66", "every-template-is-registered",
-    tplFiles.length > 0 && unlisted.length === 0,
-    `${tplFiles.length} 份模板都要被 paths.rs 与打包脚本同时引用；漏的：${JSON.stringify(unlisted)}`);
-
-  // —— 打包脚本：GPU 构建开关 + **顶层 TDZ** 这类只在运行时才炸的错 ——
-  // 教训现场：`ZIP` 的初始化里用了 `MODE`，而 `MODE` 声明在它后面 ⇒ 顶层 const 的 TDZ ⇒
-  // `node scripts/package-portable.js` 一跑就 ReferenceError。`node --check` **不报**这种错，
-  // 而这条命令是出 zip 的唯一入口、平时没人跑，于是坏了很久没人发现。判据只能落在**声明顺序**上。
-  const declOrder = (a, b) => {
-    const ia = pkg.indexOf(`const ${a} `);
-    const ib = pkg.indexOf(`const ${b} `);
-    return ia >= 0 && ib >= 0 && ia < ib;
-  };
-  check("U66", "package-gpu-flag",
-    has(pkg, "--gpu") && has(pkg, "harness-engine/cuda") && has(pkg, "GPU ? \"-gpu\""),
-    "打包脚本必须能出 GPU 版（--gpu → cargo tauri build --features harness-engine/cuda，zip 名带 -gpu 以免与 CPU 版互相盖掉）");
-  check("U66", "package-gpu-needs-build",
-    has(pkg, "NO_BUILD && GPU"),
-    "--no-build 与 --gpu 必须互斥：GPU 是编译期特性，复用旧 exe 只会产出「名字写着 gpu、内容其实 CPU」的包");
-  check("U66", "package-decl-order-no-tdz",
-    declOrder("MODE", "ZIP") && declOrder("GPU", "ZIP") && declOrder("NO_BUILD", "ZIP") && declOrder("STAGE", "ZIP"),
-    "ZIP 的初始化用到 MODE/GPU/STAGE ⇒ 它们必须声明在 ZIP **之前**（声明在后 = 顶层 TDZ = 打包命令直接崩，而 node --check 不报）");
-
-  check("U66", "gpu-plugin-readme-template-exists",
-    fs.existsSync(path.join(ROOT, "src-tauri", "templates", "gpu-asr-README.md")),
-    "模板文件必须在，否则 include_str! 直接编译不过");
-}
-
-/**
  * U64 config-change-refresh：配置改完要**发事件**，会话面板**按事件重取**（用户报的）。
  *
  * 真实场景：用户在配置里填完 API Key → 回到会话面板，那排 chip 里还写着「✗ key 未配置」。
@@ -4148,55 +4020,6 @@ function runConfigEventChecks() {
     /function probeEnv/.test(sessJs) && /probeEnv\(\);/.test(sessJs) &&
       /keyDependent\.push/.test(sessJs) && /ai_models/.test(sessJs),
     "刷新要覆盖两处：环境探针 chip + 模型列表与能力（key 变了，能列出的模型也会变）");
-}
-
-/**
- * U63 voice-no-main-thread-block：语音这条路**不许占住主线程**（bug 现场：转写永久挂起）。
- *
- * 真实故障：`voice_status`（自检）旧版是**同步命令**，而自检里对 456MB 权重做
- * `std::fs::read` + 全量 sha256 ⇒ devtools 里那一条 `voice_status` 显示 **6.58 秒**。
- * 同步命令跑在**主线程**上，那 6.5 秒里界面在飞的 IPC 回复送不回去
- * ⇒ 用户看到的是"一直 transcribing locally，不会变化，一直挂起"。
- *
- * 四条契约（缺一条这病就会复发）：
- *   ① 自检的哈希必须**流式**（不许 `fs::read` 整个权重进内存）+ **每份文件只真算一次**；
- *   ② 自检命令必须 async（不占主线程），且真算的那一下要在阻塞线程里；
- *   ③ 转写的每个阶段都要发 `voice://stage`（用户得能区分"在算"和"卡死"）；
- *   ④ 前端要收这条事件，且状态行要给出"大概等多久"（时长 × 本机 RTF）。
- */
-function runVoiceThreadChecks() {
-  const mainRs = read("src-tauri/src/main.rs");
-  const storeRs = read("crates/harness-engine/src/modelstore.rs");
-  const sessJs = read("ui/scripts/session.js");
-
-  check("U63", "voice-status-async",
-    /async fn voice_status\(\)/.test(mainRs) && /spawn_blocking\(\|\|/.test(mainRs),
-    "voice_status 必须是 async + spawn_blocking —— 同步命令跑在主线程上，会把在飞的 IPC 拖死");
-  check("U63", "voice-hash-streaming",
-    // 判据要看**代码**而不是注释：旧写法在文档注释里被引用着（说明"以前是 fs::read"），
-    // 所以只否定"调用形态" `= std::fs::read(p)`，并要求哈希函数体内真用 File::open。
-    !/= std::fs::read\(p\)/.test(storeRs) &&
-      /fn sha256_file[\s\S]{0,400}File::open/.test(storeRs) &&
-      /read\(&mut buf\)/.test(storeRs),
-    "自检哈希必须流式读 —— 把 456MB 读进内存是 6.5 秒的元凶");
-  check("U63", "voice-hash-cached-once",
-    /static VERIFIED/.test(storeRs) && /fn sha256_matches_cached/.test(storeRs) &&
-      /verified_cache\(\)/.test(storeRs),
-    "同一份文件只许真校验一次（换文件靠 mtime 失效），否则每次自检都重算 6.5 秒");
-  check("U63", "voice-stage-events",
-    /voice:\/\/stage/.test(mainRs) && /stage\(\s*"status"/.test(mainRs) &&
-      /stage\(\s*"infer"/.test(mainRs),
-    "转写要分阶段发 voice://stage（status / load / infer）—— 否则「卡住」和「在算」分不出来");
-  check("U63", "voice-stage-listened",
-    /listen\("voice:\/\/stage"/.test(sessJs),
-    "前端要收 voice://stage，否则事件发了没人看");
-  check("U63", "voice-debug-build-warned",
-    /cfg!\(debug_assertions\)/.test(mainRs) && /语音建议用 release 跑/.test(mainRs),
-    "debug 构建下要把「推理慢十几倍」说出来 —— 不然用户看到的就是又一次「卡死」");
-
-  check("U63", "voice-eta-shown",
-    /本机推理约需/.test(sessJs),
-    "状态行要给「大概等多久」（音频时长 × 本机 RTF），让用户能判断该不该等");
 }
 
 /**
@@ -4256,78 +4079,6 @@ function runConfigModelChecks() {
       return !/model_retry_cfg|model_hint_on_error|resolve_model/.test(head);
     })(),
     "正常路径不许探测模型清单 —— 每次调用多打一发 /models 会拖慢、还会把本地桩测试打挂（真踩过）");
-}
-
-/**
- * U61 local-transcription：录音 → **本机转写** → 文本进输入框（这条链路的契约）。
- *
- * 三层都要钉住，因为每一层都出过真错：
- *   1. **前端**：解码/重采样交给 WebAudio（Rust 侧才不用引音频编解码依赖）；
- *      转写结果**填进输入框而不是自动发送**（转写会错字，得给用户改的机会）；
- *      缺模型**先问再下**（453MB 不能悄悄下）；转写失败**不能把用户说的话弄丢**。
- *   2. **宿主**：没装 / 装坏了 / 没配目录三种要照实说；PCM 长度与时长要有守卫；
- *      CPU 密集的活必须在 spawn_blocking 里（占住 async 运行时会让整个 IPC 变慢）。
- *   3. **引擎**：`pcm_to_mel` 的输出是 `[mel][frame]` 且**恒补到 30 秒**（3000 帧）——
- *      按真实长度编码必须**自己按该布局切片**。踩过的坑：把整块 mel 交给更小的 shape，
- *      `from_vec` 取前 N 个元素（不是截断时间轴，是把 mel 轴切掉），模型听见噪声并幻觉
- *      （中文音频转出 "Thank you."），**不报错、只能靠实测抓**。所以这条要机械化。
- */
-function runVoiceTranscribeChecks() {
-  const sessJs = read("ui/scripts/session.js");
-  const mainRs = read("src-tauri/src/main.rs");
-  const asrRs = read("crates/harness-engine/src/voice/asr.rs");
-  const fetchRs = read("crates/harness-engine/src/voice/fetch.rs");
-  const melRs = read("crates/harness-engine/src/voice/mel.rs");
-
-  // ── 前端 ──
-  check("U61", "voice-pcm-via-webaudio",
-    sessJs.includes("OfflineAudioContext") && sessJs.includes("decodeAudioData") &&
-      sessJs.includes("new OAC(1, 16000, 16000)"),
-    "录音解码/重采样没交给 WebAudio（16k 单声道口径）—— 那样 Rust 侧就得引音频编解码依赖");
-  check("U61", "voice-transcribe-call",
-    /invoke\("voice_transcribe"/.test(sessJs) && sessJs.includes("voice_status") && sessJs.includes("voice_model_fetch"),
-    "前端没接上 voice_transcribe / voice_status / voice_model_fetch");
-  const fill = sessJs.indexOf("input.value = input.value.trim() ?");
-  check("U61", "voice-fill-not-autosend",
-    fill > 0 && !/send\w*\(/.test(sessJs.slice(fill, fill + 400)),
-    "转写结果必须**填进输入框**（转写会错字，用户要能改）—— 不许直接自动发送");
-  check("U61", "voice-model-ask-before-download",
-    sessJs.includes("showConfirm(") && /need_bytes/.test(sessJs) && sessJs.includes("现在下吗"),
-    "缺模型时没有先问再下（453MB 的下载不能悄悄发生）");
-  check("U61", "voice-failure-keeps-audio",
-    sessJs.includes('invoke("voice_save"') && sessJs.includes("录音已存到"),
-    "转写失败时没有兜底保存录音 —— 用户说的话不能因为转写失败就丢了");
-  check("U61", "voice-progress-visible",
-    /listen\("voice:\/\/model"/.test(sessJs) && sessJs.includes("语音模型下载"),
-    "语音模型下载进度没接到状态栏（几百 MB 的下载看不见＝以为卡死了）");
-
-  // ── 宿主 ──
-  check("U61", "voice-commands-registered",
-    ["voice_status,", "voice_model_fetch,", "voice_transcribe,"].every((c) => mainRs.includes(c)),
-    "宿主没注册 voice_status / voice_model_fetch / voice_transcribe");
-  check("U61", "voice-transcribe-says-which",
-    /if !st\.is_ready\(\)/.test(mainRs) && mainRs.includes("st.voice_line()"),
-    "转写入口没把装没装/坏没坏/配没配照实说清楚（三种的下一步不一样）");
-  check("U61", "voice-transcribe-pcm-guards",
-    mainRs.includes("不是 4 的倍数") && mainRs.includes("录音太短"),
-    "PCM 入口缺守卫（长度要对齐 f32、时长要有个下限，否则一段噪音也送去推理）");
-  check("U61", "voice-transcribe-offloads-cpu",
-    /spawn_blocking\(move \|\| -> Result<serde_json::Value, String> \{/.test(mainRs) && mainRs.includes("VOICE_ASR"),
-    "转写（含首次加载 453MB）必须在 spawn_blocking 里且复用进程级实例 —— 否则每次重载权重、还会占住 async 运行时");
-  check("U61", "voice-model-not-autofetched",
-    mainRs.includes("不自动下载") && !/voice_model_fetch\(\)/.test(mainRs.split("fn voice_model_fetch")[0] || ""),
-    "语音模型不许像记忆模型那样开机自动取（453MB）；必须用户点一下才下");
-
-  // ── 引擎（mel 的那个坑必须机械化）──
-  check("U61", "voice-mel-sliced-per-channel",
-    asrRs.includes("fn slice_mel(") && /slice_mel\(&mel_v, n_mels, n_frames\)/.test(asrRs),
-    "按真实长度编码前没有按 [mel][frame] 布局切片 —— from_vec 会静默取前 N 个元素，模型听见噪声并幻觉");
-  check("U61", "voice-mel-filters-embedded",
-    melRs.includes('include_bytes!("mel-filters.bin")') && fs.existsSync(path.join(ROOT, "crates/harness-engine/src/voice/mel-filters.bin")),
-    "mel 滤波器表没编进二进制（自己算的公式实测差 0.5%，错了不报错、只会让识别率悄悄变差）");
-  check("U61", "voice-spec-self-contained",
-    fetchRs.includes("voice-spec.json") && fetchRs.includes("required_bytes"),
-    "语音模型规格没编进二进制（单 exe 要能自检并知道该取什么）");
 }
 
 async function runBucketPanelChecks() {
@@ -4895,6 +4646,36 @@ async function runMemoryPanelChecks() {
 
 
 /**
+ * U67 package-portable：出 zip 的唯一入口。
+ *
+ * 为什么单独立一条：这条命令**平时没人跑**，而它的错法是**顶层 TDZ**（`const ZIP` 的初始化里
+ * 用了声明在它后面的 `MODE`）—— `node --check` 语法能过、`cargo build` 更不关它的事，
+ * 于是「打包命令一跑就 ReferenceError」能坏很久没人发现（真发生过：用户问「没有 zip 啊？」）。
+ * 判据落在**声明顺序**与**模板必须登记**这两件可机械检查的事上。
+ */
+function runPackageChecks() {
+  const pkg = read("scripts/package-portable.js");
+  const tplDir = path.join(ROOT, "src-tauri", "templates");
+  const declOrder = (a, b) => {
+    const ia = pkg.indexOf(`const ${a} `);
+    const ib = pkg.indexOf(`const ${b} `);
+    return ia >= 0 && ib >= 0 && ia < ib;
+  };
+  check("U67", "zip-command-usage-doc",
+    pkg.includes("--no-build") && pkg.includes("--mode pure"),
+    "用法注释要写明 --no-build / --mode（下一个用的人才知道怎么出包）");
+  check("U67", "package-decl-order-no-tdz",
+    declOrder("MODE", "ZIP") && declOrder("STAGE", "ZIP") && declOrder("NAME", "ZIP") && declOrder("VERSION", "ZIP"),
+    "ZIP 的初始化用到 MODE/STAGE ⇒ 它们必须声明在 ZIP **之前**（声明在后 = 顶层 TDZ = 打包命令直接崩，而 node --check 不报）");
+  const onDisk = fs.readdirSync(tplDir).filter((n) => n.endsWith(".md"));
+  const pathsRs = read("src-tauri/src/paths.rs");
+  const missing = onDisk.filter((n) => !pathsRs.includes(n) && !pkg.includes(n));
+  check("U67", "every-template-is-registered",
+    missing.length === 0,
+    `模板清单与目录不一致（没登记：${missing.join(", ")}）—— 打包预置与程序首启写的是同一份文本`);
+}
+
+/**
  * U52 backend-msg-i18n（bug 1/2 的收尾门禁）：**后端来的消息在英文界面下不露中文**。
  *
  * 后端（Rust）有 200 多条中文错误文案，带插值、散在宿主与引擎两处。把它们改成"错误码 + 参数"
@@ -5045,14 +4826,11 @@ async function main() {
     ["U56", "startup-scope", runStartupScopeChecks],
     ["U58", "chat-toolbar", runChatToolbarChecks],
     ["U59", "model-dropdown", runModelDropdownChecks],
-    ["U60", "voice-button", runVoiceButtonChecks],
-    ["U61", "voice-transcribe", runVoiceTranscribeChecks],
     ["U62", "config-model-no-typing", runConfigModelChecks],
     ["U62", "config-model-fail-closed", runConfigModelFailClosedChecks],
-    ["U63", "voice-no-main-thread-block", runVoiceThreadChecks],
     ["U64", "config-change-refresh", runConfigEventChecks],
+    ["U67", "package-portable", runPackageChecks],
     ["U65", "config-form-no-value-smear", runConfigSmearChecks],
-    ["U66", "gpu-device-plumbing", runGpuDeviceChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {

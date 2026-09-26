@@ -2655,12 +2655,6 @@ html, body {
   filter: brightness(1.15);
 }
 
-/* 录音中：麦克风按钮变红（再点一次结束） */
-.session-mic--rec {
-  color: #f14c4c;
-  border-color: rgba(241, 76, 76, 0.6);
-}
-
 /* 发送/停止是同一个按钮：运行中换成"停止"的红脸（同一个红，与 .agent-btn--cancel 一致） */
 .agent-btn--run.session-run--busy {
   background: #f14c4c;

@@ -106,14 +106,6 @@ fn gpu_desc() -> Option<String> {
     nvidia_gpus().or_else(platform_gpus)
 }
 
-/// 有没有可用的 NVIDIA 卡（**复用同一套 nvidia-smi 探测**，绝不另写一份 —— 两套探测就会有两种答案）。
-///
-/// 注意它只回答"卡在不在"，不回答"能不能用"：能不能用要由引擎真去建一次 CUDA 设备才知道
-/// （DLL 缺 / 驱动旧 / 算力代号没编进内核 都会在那一步失败）。见 `voice/asr.rs::pick_device`。
-pub fn nvidia_gpu_present() -> bool {
-    nvidia_gpus().is_some()
-}
-
 fn nvidia_gpus() -> Option<String> {
     let raw = probe(
         "nvidia-smi",

@@ -862,74 +862,6 @@ impl Default for ProcConfig {
     }
 }
 
-/// 本地语音转写（v1.1）的配置面。
-///
-/// 目前只有一个开关，但它值得存在：**编码窗口**决定"要不要按真实长度编码"。
-///
-/// - `trim`（默认）：按音频真实长度编码（+1 秒余量），编码耗时降 6.5× —— 实测同一段
-///   中文两种窗口**识别内容一致**；
-/// - `full`：whisper 官方口径（恒补零到 30 秒）。留它是因为两者**不是逐位等价**
-///   （log-mel 归一化各取自己窗口内的 max，中英边界偶尔会翻一个空格/词形）。
-///   一旦哪天某句话因 trim 变了形，用户能一键回到官方口径 —— 而不用改代码或降级换实现。
-///
-/// 为什么做成配置项而不是常量："加速"与"与官方逐位一致"是两个都合理的目标，
-/// 选哪个取决于用户对那句转写结果有多在意。把它写死，就得替用户做这个决定。
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct VoiceConfig {
-    /// `trim` | `full`。未知值一律当 `trim`（读侧兜底，不让坏配置改行为）。
-    #[serde(default = "d_voice_window")]
-    pub window: String,
-    /// 转写前**剪静音**（默认开）。
-    ///
-    /// whisper 在静音上会幻觉（实测吐出 "Thank you."），而一段录音两头必然有静音、中间有气口。
-    /// 关掉它的唯一理由：说话声很小（被能量 VAD 判成静音）—— 那时把它设成 false，
-    /// 退回"整段喂模型"的老行为。
-    #[serde(default = "d_voice_vad")]
-    pub vad: bool,
-    /// 单次转写最多处理多少秒（默认 120；超出部分**如实标注** `truncated`，绝不悄悄截断）。
-    ///
-    /// 这个上限是**体验闸**不是技术限制：本地 CPU 的 RTF ~3×，再长用户会以为程序死了。
-    #[serde(default = "d_voice_max_secs")]
-    pub max_secs: u32,
-    /// `auto` | `off`：**要不要用 GPU**（默认 `auto`）。
-    ///
-    /// `auto` = 主动探测（宿主 `machine::gpu_desc`：nvidia-smi 说有卡才算数）+ 引擎真去
-    /// `Device::new_cuda(0)` 试一次；**任何一步不成立都回落 CPU，并把原因回报**，绝不静默。
-    /// `off` = 一律 CPU（用户说不许用就不许用）。
-    ///
-    /// ⚠ 这一项**只对带 `cuda` 特性的构建有意义**：默认构建里 `Device::Cuda` 根本不存在，
-    /// 探测到多好的卡也切不过去 —— 这是"为什么一直在用 CPU"的真正原因。
-    #[serde(default = "d_voice_gpu")]
-    pub gpu: String,
-}
-
-impl Default for VoiceConfig {
-    fn default() -> Self {
-        Self {
-            window: d_voice_window(),
-            vad: d_voice_vad(),
-            max_secs: d_voice_max_secs(),
-            gpu: d_voice_gpu(),
-        }
-    }
-}
-
-fn d_voice_vad() -> bool {
-    true
-}
-
-fn d_voice_max_secs() -> u32 {
-    120
-}
-
-fn d_voice_gpu() -> String {
-    "auto".into()
-}
-
-fn d_voice_window() -> String {
-    "trim".into()
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     #[serde(default)]
@@ -975,9 +907,6 @@ pub struct AppConfig {
     /// 向委托人提问（需求歧义只能问人，v0.8）
     #[serde(default)]
     pub ask: AskConfig,
-    /// 本地语音转写（编码窗口，v1.1）
-    #[serde(default)]
-    pub voice: VoiceConfig,
     /// **项目状态根**（暂存 / 备份 / 进程日志 / 验证产物）：宿主注入
     /// `<便携根>/projects/<项目 key>`。
     ///
@@ -1012,7 +941,6 @@ impl Default for AppConfig {
             env: EnvConfig::default(),
             proc: ProcConfig::default(),
             ask: AskConfig::default(),
-            voice: VoiceConfig::default(),
             project_state_root: String::new(),
             workspace_root: d_workspace(),
             max_context_chars: d_max_context(),
@@ -1178,10 +1106,6 @@ const ENUM_KEYS: &[(&str, &[&str])] = &[
     ("llm.web_search", &["off", "auto", "on"]),
     // `api_format` 决定 `chat()` 走哪套协议：OpenAI 兼容 还是 Anthropic Messages。
     ("llm.api_format", &["openai", "anthropic"]),
-    // 本地语音转写的编码窗口（见 `VoiceConfig`）。登记在这里 ⇒ 配置表单出一个下拉、
-    // 宿主桥接按白名单校验 —— 不必再写一行 UI。
-    ("voice.window", &["trim", "full"]),
-    ("voice.gpu", &["auto", "off"]),
 ];
 
 /// 不进配置表单的键（**前缀匹配**：写 `entropy` 就盖住整段）。

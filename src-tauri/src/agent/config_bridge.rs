@@ -317,24 +317,6 @@ mod tests {
         cfg
     }
 
-    /// `voice.window` 桥接：默认 trim（快的那个）、显式 full 照给、**坏值回落 trim**。
-    /// 与 `Window::from_cfg` 同一条不对称口径：把用户意外推进 full 的代价（每次慢 6 倍）
-    /// 远大于留在 trim 的代价（只是没用上加速，且那本来就是默认）。
-    #[test]
-    fn voice_window_bridges_and_bad_values_fall_back_to_trim() {
-        assert_eq!(bridge(&[]).voice.window, "trim", "默认必须是 trim");
-        assert_eq!(
-            bridge(&[("voice.window", "full")]).voice.window,
-            "full",
-            "用户显式要 full 就要给 full（那是他与官方口径对齐的手段）"
-        );
-        assert_eq!(
-            bridge(&[("voice.window", "on")]).voice.window,
-            "trim",
-            "枚举外的值必须当没配 —— 绝不许意外变慢"
-        );
-    }
-
     /// 说不通的值必须**当没配**（回落到默认）—— 真事故的回归判据。
     ///
     /// 现场：23 个键被写成字符串 `"on"`（错位的表单提交把 checkbox 的 DOM 默认值写了进去），
