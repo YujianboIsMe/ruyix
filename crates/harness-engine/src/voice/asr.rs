@@ -748,6 +748,16 @@ impl Asr {
         let mut suffix_next: std::collections::HashMap<(u32, u32, u32), Vec<u32>> =
             std::collections::HashMap::new();
         for step in 0..self.cfg.max_target_positions {
+            // **每步重发整段 token 前缀**（`flush = step == 0`）—— 看着浪费，但这是
+            // candle 0.9.2 的 whisper **唯一正确**的喂法。
+            //
+            // 试过"增量解码"（第一步整段、之后每步只喂新 token + 复用 kv_cache）：**输出直接崩**
+            // （实测 3.78 秒音频解出乱码替换符、6.86 秒解出"把"，都跑满 448 步）。原因在模型实现里 ——
+            // 位置编码按**输入长度**从 0 取起（`positional_embedding.narrow(0, 0, x.len())`），
+            // 喂单 token 等于把位置重置成 0。candle 自己的 whisper 示例同样每步 flush
+            // （`flush = x.dim(1)? != 1`）⇒ **这个版本无法增量解码**，解码 O(n^2) 是实现限制，
+            // 不是"我们没用对"（我先前那句话是错的，已更正）。
+            // 真要提速只有两条：fork candle 给位置编码加偏移（改依赖、风险高），或换实现 / 上 GPU。
             let input = Tensor::new(tokens.as_slice(), &self.device)
                 .and_then(|t| t.unsqueeze(0))
                 .map_err(|e| e.to_string())?;
