@@ -4676,6 +4676,33 @@ function runPackageChecks() {
 }
 
 /**
+ * U68 model-chip-repaint：会话里"模型下拉"的数据流契约。
+ *
+ * 钉住一个真事故（用户报「为什么配置了模型，会话 UI 一直显示（模型未知）」）：
+ * `reloadModelState()` 里写着 `await refreshCaps()`，而 `refreshCaps` **在整个 ui/ 里从未定义**
+ * ⇒ ReferenceError ⇒ 该 async 函数没人 await ⇒ **静默 reject** ⇒ 列表其实取到了，却没人重画，
+ * 下拉框永远停在初始化那一帧的「（模型未知）」（联网按钮同废）。
+ *
+ * 两条判据：① 不许再出现"调不存在的 refreshCaps"；② 取完数据**必须重画**（有 paintModel()）。
+ */
+function runModelChipChecks() {
+  const raw = read("ui/scripts/session.js");
+  // 剥掉注释再判：注释里提到 refreshCaps 不算"调用"（踩过一次假红）
+  const js = raw.split("\n").filter((l) => l.trim().indexOf("//") !== 0).join("\n");
+  // 都用纯字符串判断：这文件的行尾与转义都踩过坑，正则写错还会静默失配
+  const defined = js.indexOf("const refreshCaps") >= 0 || js.indexOf("function refreshCaps") >= 0 || js.indexOf("let refreshCaps") >= 0;
+  const called = js.indexOf("await refreshCaps(") >= 0 || js.indexOf(" refreshCaps(") >= 0;
+  check("U68", "no-undefined-refreshCaps", !called || defined,
+    "session.js 里调用了 refreshCaps，但整个 ui/ 没有它的定义 —— 这类调用会静默 reject，让数据到了也不重画");
+  const i = js.indexOf("const reloadModelState");
+  const body = i >= 0 ? js.slice(i, i + 1600) : "";
+  check("U68", "repaint-after-fetch", body.indexOf("ai_models") >= 0 && body.indexOf("ai_model_caps") >= 0 && body.indexOf("paintModel();") >= 0,
+    "取完模型列表/能力之后必须重画下拉（否则永远停在初始化那一帧的模型未知）");
+  check("U68", "retry-once-when-list-missing", body.indexOf("setTimeout") >= 0 && body.indexOf("retried") >= 0,
+    "第一次没取到要重试一次：应用刚起来后端可能未就绪，一次失败不等于永久未知");
+}
+
+/**
  * U52 backend-msg-i18n（bug 1/2 的收尾门禁）：**后端来的消息在英文界面下不露中文**。
  *
  * 后端（Rust）有 200 多条中文错误文案，带插值、散在宿主与引擎两处。把它们改成"错误码 + 参数"
@@ -4830,6 +4857,7 @@ async function main() {
     ["U62", "config-model-fail-closed", runConfigModelFailClosedChecks],
     ["U64", "config-change-refresh", runConfigEventChecks],
     ["U67", "package-portable", runPackageChecks],
+  ["U68", "model-chip-repaint", runModelChipChecks],
     ["U65", "config-form-no-value-smear", runConfigSmearChecks],
     ["U57", "startup-real", runStartupProbe],
   ];

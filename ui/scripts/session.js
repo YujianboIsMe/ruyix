@@ -339,15 +339,36 @@
 
     // 取模型列表 + 能力（联网/录音按钮的可用性都跟着它）。**起个名字**而不是匿名 IIFE：
     // 配置一改（比如刚填完 API Key），这两样都得重取 —— 见 keyDependent 的注释。
+    // 取模型列表 + 当前模型能力，**并在数据到达后重画**。
+    //
+    // 修的是一个静默断链：这里原先是 `await refreshCaps()` —— 而 `refreshCaps` 在整个 ui/ 里
+    // **从未定义** ⇒ ReferenceError ⇒ 这个 async 函数没人 await ⇒ 静默 reject ⇒ 列表其实取到了，
+    // 却没人重画，下拉框永远停在初始化那一帧的「（模型未知）」（联网按钮的可用性同废）。
+    // 现在：能力自己取、拿完就重画、失败可见且只重试一次。
+    let retried = false;
     const reloadModelState = async () => {
       const invoke = getInvoke();
       if (!invoke) return;
       try {
         wrap._models = await invoke("ai_models", { projectRoot: root() });
-      } catch {
+      } catch (e) {
         wrap._models = null;
+        status(L(`取模型列表失败：${e}`, `failed to list models: ${e}`), "error");
       }
-      await refreshCaps();
+      try {
+        // 不传 model ⇒ 后端用**当前配置里的**模型（与配置面板同一个解析口径）
+        wrap._webCaps = await invoke("ai_model_caps", { model: "", projectRoot: root() });
+      } catch {
+        wrap._webCaps = null;
+      }
+      paintModel();
+      paintWeb();
+      // 首次就没取到 ⇒ 1.5 秒后重试**一次**：应用刚起来时后端可能尚未就绪，
+      // 一次失败不该等于永久「模型未知」。
+      if (!wrap._models && !retried) {
+        retried = true;
+        setTimeout(() => { reloadModelState(); }, 1500);
+      }
     };
     reloadModelState();
     keyDependent.push({ el: wrap, fn: reloadModelState });
