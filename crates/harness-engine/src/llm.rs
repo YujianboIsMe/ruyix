@@ -1008,6 +1008,23 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
     })
 }
 
+/// 正文**至少**要留多少：思考预算是从这里往外扣的（含工具调用 JSON 与最终答复）。
+///
+/// 原先的下界是 `max_tokens - 1024`，实测把交付打断了：`max_tokens=2048` + medium
+/// ⇒ 思考 1024 / 输出 ~1024 ⇒ 一次 `record_findings` 的 JSON 被截成
+/// `finish_reason=length` + `missing field \`claim\``（用户 40 轮 0 结论那次就是这样收尾的）。
+const OUT_FLOOR: u32 = 4096;
+
+pub fn reasoning_budget(effort: &str, max_tokens: u32) -> u32 {
+    let share = match effort.trim().to_ascii_lowercase().as_str() {
+        "low" => 0.25f32,
+        "high" => 0.75f32,
+        _ => 0.5f32,
+    };
+    let want = (max_tokens as f32 * share) as u32;
+    want.clamp(1024, max_tokens.saturating_sub(OUT_FLOOR).max(1024))
+}
+
 /// 按 `api_format` 选择整套协议：anthropic → `/v1/messages`；否则按 `web_search_on`
 /// 在 `/responses` 与 `/chat/completions` 间分叉。anthropic 必须最先判 ——
 /// **但联网不是被它跳过的**：anthropic 有自己的服务端检索工具，由 [`anthropic_parts`] 声明。
@@ -1025,20 +1042,22 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
 ///   （越界厂商直接 400），所以按比例取并给正文留余量；
 /// · OpenAI 兼容：`reasoning_effort`（low | medium | high）；
 /// · 值不认（写错/空）一律回落 **medium** —— 这是"不许 0 推理强度"的落点。
-pub fn reasoning_budget(effort: &str, max_tokens: u32) -> u32 {
-    let share = match effort.trim().to_ascii_lowercase().as_str() {
-        "low" => 0.25f32,
-        "high" => 0.75f32,
-        _ => 0.5f32,
-    };
-    ((max_tokens as f32 * share) as u32).clamp(1024, max_tokens.saturating_sub(1024).max(1024))
-}
-
 pub fn apply_reasoning(body: &mut serde_json::Value, cfg: &LlmConfig, anthropic: bool) {
     if anthropic {
+        let budget = reasoning_budget(&cfg.reasoning, cfg.max_tokens);
+        // 思考 + 输出共用 max_tokens：**先保正文底线**，不够就把本次请求的上限抬上去。
+        // 抬的是本次请求（不写回配置），所以配置里那个数仍是用户的意图。
+        let need = budget.saturating_add(OUT_FLOOR);
+        if need > cfg.max_tokens {
+            for k in ["max_tokens", "max_output_tokens"] {
+                if body.get(k).is_some() {
+                    body[k] = serde_json::json!(need);
+                }
+            }
+        }
         body["thinking"] = serde_json::json!({
             "type": "enabled",
-            "budget_tokens": reasoning_budget(&cfg.reasoning, cfg.max_tokens),
+            "budget_tokens": budget,
         });
     } else {
         body["reasoning_effort"] = serde_json::json!(cfg.reasoning);
