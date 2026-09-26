@@ -681,13 +681,19 @@ mod tests {
         assert_eq!(worse.agent.batch_max, d.agent.batch_max);
     }
 
-    /// v0.11 历史折叠：默认开（保留最近 6 轮），两个键都能一行回退；
+    /// v0.11 历史折叠：默认开（保留最近 12 轮），两个键都能一行回退；
     /// `history_keep_rounds = 0` 按非法值处理 —— 0 轮等于把当前这轮的结果也折掉
     #[test]
     fn agent_history_fold_bridge_defaults_on_and_can_be_turned_off() {
         let d = bridge(&[]);
         assert!(d.agent.history_trim, "默认开：老轮次的正文不该每轮重发");
-        assert_eq!(d.agent.history_keep_rounds, 6);
+        // 断言的是**下限**不是具体数字：窗口小到 6 会让模型"刚读过的东西六轮后被折掉、
+        // 只能重读同一批文件"（实测两次跑死在这条线上）。以后往上调不触发假红，
+        // 但调回 6 这种量级必须红。
+        assert!(
+            d.agent.history_keep_rounds >= 10,
+            "保留窗口太小 ⇒ 模型刚读过就失忆（实测定在 12）"
+        );
 
         let off = bridge(&[
             ("agent.history_trim", "false"),
