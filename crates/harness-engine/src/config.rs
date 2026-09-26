@@ -19,6 +19,15 @@ fn d_model() -> String {
 fn d_temperature() -> f32 {
     0.2
 }
+/// 推理强度（**默认 medium，不允许 0**）。
+///
+/// 实测：加上它之前，请求体里只有 `temperature` + `max_tokens`，一个推理参数都没有 ——
+/// 于是模型跑在厂商默认上，表现为"连续 24 次搜索、一次都不肯推理"（用户实测截图）。
+/// 映射见 `llm::apply_reasoning`：anthropic 走 `thinking.budget_tokens`，OpenAI 兼容走 `reasoning_effort`。
+fn d_reasoning() -> String {
+    "medium".into()
+}
+
 fn d_max_tokens() -> u32 {
     8192
 }
@@ -61,6 +70,9 @@ pub struct LlmConfig {
     pub temperature: f32,
     #[serde(default = "d_max_tokens")]
     pub max_tokens: u32,
+    /// 推理强度：low | medium | high（默认 medium）
+    #[serde(default = "d_reasoning")]
+    pub reasoning: String,
     #[serde(default = "d_llm_timeout")]
     pub timeout_secs: u64,
     /// 服务端联网搜索：`off` / `auto` / `on`（见 `llm::web_search_on`）。
@@ -115,6 +127,7 @@ impl Default for LlmConfig {
             model: d_model(),
             temperature: d_temperature(),
             max_tokens: d_max_tokens(),
+            reasoning: d_reasoning(),
             timeout_secs: d_llm_timeout(),
             web_search: d_web_search(),
             api_format: d_api_format(),
@@ -1134,6 +1147,9 @@ const ENUM_KEYS: &[(&str, &[&str])] = &[
     ("llm.web_search", &["off", "auto", "on"]),
     // `api_format` 决定 `chat()` 走哪套协议：OpenAI 兼容 还是 Anthropic Messages。
     ("llm.api_format", &["openai", "anthropic"]),
+    // 推理强度：厂商侧思考预算（low/medium/high）。**没有 off** ——
+    // 实测"关着思考"就是本仓库最贵的那类故障（连续搜索不推理）。
+    ("llm.reasoning", &["low", "medium", "high"]),
 ];
 
 /// 不进配置表单的键（**前缀匹配**：写 `entropy` 就盖住整段）。

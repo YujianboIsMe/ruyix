@@ -668,6 +668,7 @@ fn chat_parts(
         "max_tokens": cfg.max_tokens,
         "stream": false,
     });
+    apply_reasoning(&mut body, cfg, false);
     if json_mode {
         body["response_format"] = serde_json::json!({ "type": "json_object" });
     }
@@ -899,6 +900,7 @@ fn anthropic_parts(
         "temperature": cfg.temperature,
         "stream": false,
     });
+    apply_reasoning(&mut body, cfg, true);
     if !system_text.is_empty() {
         body["system"] = serde_json::json!(system_text);
     }
@@ -1017,6 +1019,32 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
 /// 目前不声明也不解析工具 —— 那条路配严格模式会有和 anthropic 以前一样的病（每轮"没有工具调用"）。
 /// 它没被一起改的原因是：`/responses` 只服务"要服务端联网检索"的用法，而联网检索与工具循环
 /// 同时开着本身还没验证过；等有真实需求再按同一套（声明 + 解析 + 回灌）补齐。
+/// 把 `llm.reasoning` 落到请求体上。
+///
+/// · anthropic：`thinking: {"type":"enabled","budget_tokens":N}` —— N 必须**小于** `max_tokens`
+///   （越界厂商直接 400），所以按比例取并给正文留余量；
+/// · OpenAI 兼容：`reasoning_effort`（low | medium | high）；
+/// · 值不认（写错/空）一律回落 **medium** —— 这是"不许 0 推理强度"的落点。
+pub fn reasoning_budget(effort: &str, max_tokens: u32) -> u32 {
+    let share = match effort.trim().to_ascii_lowercase().as_str() {
+        "low" => 0.25f32,
+        "high" => 0.75f32,
+        _ => 0.5f32,
+    };
+    ((max_tokens as f32 * share) as u32).clamp(1024, max_tokens.saturating_sub(1024).max(1024))
+}
+
+pub fn apply_reasoning(body: &mut serde_json::Value, cfg: &LlmConfig, anthropic: bool) {
+    if anthropic {
+        body["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": reasoning_budget(&cfg.reasoning, cfg.max_tokens),
+        });
+    } else {
+        body["reasoning_effort"] = serde_json::json!(cfg.reasoning);
+    }
+}
+
 fn request_plan(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
