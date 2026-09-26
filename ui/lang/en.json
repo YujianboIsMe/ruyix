@@ -560,5 +560,9 @@
   "mem.fetchFailed": "Model fetch failed: {line}",
   "config.section.harness.voice": "Local speech",
   "config.field.harness.voice.window": "Encoding window",
-  "config.desc.harness.voice.window": "trim = encode by real audio length (6.5x faster, default; measured content matches the official window); full = whisper's official 30-second window (slower). They are NOT bit-identical (an EN/CJK boundary may differ by a space or word form) — switch to full if a sentence ever comes out wrong under trim."
+  "config.desc.harness.voice.window": "trim = encode by real audio length (6.5x faster, default; measured content matches the official window); full = whisper's official 30-second window (slower). They are NOT bit-identical (an EN/CJK boundary may differ by a space or word form) — switch to full if a sentence ever comes out wrong under trim.",
+  "config.field.harness.voice.vad": "Trim silence",
+  "config.desc.harness.voice.vad": "Drop silence/pauses before feeding the model (default on). Whisper hallucinates on silence (measured: it printed \"Thank you.\"), and every recording has silence at both ends. Only disable it if quiet speech gets misclassified as silence.",
+  "config.field.harness.voice.max_secs": "Max seconds",
+  "config.desc.harness.voice.max_secs": "How many seconds to transcribe per call (default 120); anything beyond is honestly reported as truncated, never silently cut. This is a UX guard, not a technical limit: local CPU runs ~3x real time, longer would look like a hang."
 }

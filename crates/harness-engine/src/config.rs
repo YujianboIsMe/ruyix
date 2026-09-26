@@ -879,14 +879,36 @@ pub struct VoiceConfig {
     /// `trim` | `full`。未知值一律当 `trim`（读侧兜底，不让坏配置改行为）。
     #[serde(default = "d_voice_window")]
     pub window: String,
+    /// 转写前**剪静音**（默认开）。
+    ///
+    /// whisper 在静音上会幻觉（实测吐出 "Thank you."），而一段录音两头必然有静音、中间有气口。
+    /// 关掉它的唯一理由：说话声很小（被能量 VAD 判成静音）—— 那时把它设成 false，
+    /// 退回"整段喂模型"的老行为。
+    #[serde(default = "d_voice_vad")]
+    pub vad: bool,
+    /// 单次转写最多处理多少秒（默认 120；超出部分**如实标注** `truncated`，绝不悄悄截断）。
+    ///
+    /// 这个上限是**体验闸**不是技术限制：本地 CPU 的 RTF ~3×，再长用户会以为程序死了。
+    #[serde(default = "d_voice_max_secs")]
+    pub max_secs: u32,
 }
 
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
             window: d_voice_window(),
+            vad: d_voice_vad(),
+            max_secs: d_voice_max_secs(),
         }
     }
+}
+
+fn d_voice_vad() -> bool {
+    true
+}
+
+fn d_voice_max_secs() -> u32 {
+    120
 }
 
 fn d_voice_window() -> String {

@@ -126,6 +126,7 @@ fn main() -> Result<(), String> {
     );
 
     let mut pass = 0usize;
+    let mut silent = 0usize; // 判为「没有人声」的段数（空文本的正确来源之一）
     for w in &wavs {
         let pcm = read_wav_16k_mono(w)?;
         let t = Instant::now();
@@ -133,6 +134,23 @@ fn main() -> Result<(), String> {
         println!("── {w}");
         println!("   语言      : {}", r.language);
         println!("   文本      : {}", r.text);
+        // 剪静音/分段的实际效果要看这几个数（"说得慢"与"没听全"必须能区分开）
+        println!(
+            "   静音处理后: 人声 {:.2}s / 共 {:.2}s · {} 个窗口 · 截断={} · 判为无人声={}",
+            r.speech_secs, r.audio_secs, r.windows, r.truncated, r.no_speech
+        );
+        println!(
+            "   置信度    : avg_logprob {:.3}（越接近 0 越有把握）",
+            r.avg_logprob
+        );
+        println!(
+            "   温度回退  : {} 个窗口重跑过（0 = 全是一次贪心就过）",
+            r.retries
+        );
+        println!(
+            "   重复环    : {} 个窗口的尾巴被剪过（0 = 没有打转）",
+            r.deduped
+        );
         println!("   token 数  : {}", r.tokens);
         println!(
             "   分阶段    : 编码 {} ms（固定 30s 窗）· 解码 {} ms（{} 步）",
@@ -146,15 +164,27 @@ fn main() -> Result<(), String> {
         );
         println!("   墙钟(含准备): {} ms", t.elapsed().as_millis());
         if r.truncated {
-            println!("   ⚠ 音频超过 30 秒，只转了前 30 秒");
+            println!("   ⚠ 音频超过 max_secs，只转了前面那段（结果里标 truncated）");
         }
+        // **空文本有两种，必须分开判**（这是"静音幻觉"修好之后才出现的区别）：
+        //   ① 判为无人声 ⇒ 空是**正确**的（旧行为是在这里吐一句 "Thank you."）；
+        //   ② 明明有人声却转出空 ⇒ 那才是链路坏了（权重 / mel 表 / 提示词）。
+        // 混在一起判，要么把正确的静音拒识当失败，要么把真故障当正常。
         if r.text.trim().is_empty() {
-            return Err(format!("{w} 转出来是空的 —— 权重/mel 表/提示词有一步不对"));
+            if r.no_speech || r.speech_secs < 0.2 {
+                println!("   ✓ 判为「没有人声」→ 空文本是正确结果（不是故障）");
+                silent += 1;
+                continue;
+            }
+            return Err(format!(
+                "{w} 明明有人声（{:.2}s）却转出空 —— 权重/mel 表/提示词有一步不对",
+                r.speech_secs
+            ));
         }
         pass += 1;
     }
     println!(
-        "\nvoice_probe: {pass}/{} 段转出了非空文本（准确率请人眼核对上面的原文）",
+        "\nvoice_probe: {pass}/{} 段转出了非空文本，{silent} 段判为无人声（准确率请人眼核对上面的原文）",
         wavs.len()
     );
     Ok(())

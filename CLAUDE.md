@@ -48,6 +48,13 @@ and `voice/` is local speech-to-text (see *本地语音转写* below). **Agent t
 - **Communication**: Tauri native IPC. Synchronous calls use `invoke()`. Async push for PTY output uses Tauri's event system `emit()`/`listen()`.
 - **Syntax highlighting**: `tree-sitter` + `arborium` crate. Highlighting runs in a `spawn_blocking` thread to avoid blocking the async runtime.
 - **Terminal**: `xterm.js` (vendored from `ui/packages/xterm.js`) + Rust PTY via `portable-pty` crate.
+- **本地语音转写（v1.1）**：引擎 `voice/` 里是 **纯 Rust candle**（量化 GGUF，按需下载，音频不出本机）。
+  链路是 **剪静音（能量 VAD）→ 分段（相邻语音段装箱进 ≤30 秒窗，只在气口收口）→ 逐窗编码解码 → 拼接**。
+  三条必须记住的口径：① `pcm_to_mel` 恒补 30 秒且布局是 `[mel][frame]`，截断**必须逐通道切**
+  （切错不报错，只会吐幻觉）；② mel 表用**官方那份**（自己按 librosa 算第一个系数就差 0.5%）；
+  ③ **静音必须剪**（whisper 在静音上会幻觉），且"空文本"要分两种：**判为无人声**（正确）与
+  **有人声却转空**（故障）。速度上 RTF ~3×，且 debug 构建慢十几倍 —— 验语音一律用 release。
+  详见 `doc/需求-本地语音转写-v1.1.md` 与 skill `local-speech-to-text`。
 
 ## Project Structure
 
@@ -469,6 +476,7 @@ Known config keys:
 - `ruyix.code.harness.discover.enabled` / `discover.ttl_secs` / `discover.extra`（v0.5 命令发现；`extra` 逗号分隔，追加工具表没覆盖的命令）
 - `ruyix.code.harness.env.install_enabled`（v0.5 环境准备：缺失工具按需安装；默认开，关掉后宿主不再把 env 目标摆进 connect 清单）
 - `ruyix.code.harness.proc.enabled` / `proc.max` / `proc.ready_timeout_secs`（v0.6 常驻服务托管；默认开，`max` 上限 16，`ready_timeout_secs` 范围 1~600）
+- `ruyix.code.harness.voice.vad`（默认开）/ `voice.max_secs`（默认 120）—— 转写前**剪静音**（whisper 在静音上会幻觉，实测吐过 "Thank you."）与单次时长上限（超出**如实标注** truncated）
 - `ruyix.code.harness.voice.window` = `trim`（默认）| `full`（v1.1 本地语音的**编码窗口**：trim 按真实长度编码、快 6.5×；full 是 whisper 官方 30 秒口径。两者**识别内容一致但不是逐位等价**——中英边界可能差一个空格，所以留了这个一键回官方口径的开关。读侧兜底：只有明确写 `full` 才用 full，其余一律 trim）
 
 ## Tauri Commands (main.rs)

@@ -1917,15 +1917,25 @@ async fn voice_transcribe(
     // 编码窗口（`voice.window` = trim | full）在**进阻塞线程之前**读出来：
     // MutexGuard 不是 Send，带不进 `spawn_blocking`；而且这个值在这一轮里不会再变。
     // 读侧兜底交给 `Window::from_cfg`（未知值一律 trim —— 坏配置不许改变行为）。
-    let window = {
+    let (window, vad, max_secs) = {
         let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
         let cfg = agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?;
-        harness_engine::voice::asr::Window::from_cfg(&cfg.voice.window)
+        (
+            harness_engine::voice::asr::Window::from_cfg(&cfg.voice.window),
+            cfg.voice.vad,
+            // 0 / 荒谬的小值一律当默认：这个闸只用来**兜住体验**，不该被一个坏数字变成"什么都不转"
+            if cfg.voice.max_secs == 0 {
+                120.0
+            } else {
+                cfg.voice.max_secs as f32
+            },
+        )
     };
     let window_line = match window {
         harness_engine::voice::asr::Window::Full => "full 窗口（官方 30 秒口径）",
         harness_engine::voice::asr::Window::Trim => "trim 窗口（按真实长度编码）",
     };
+    let vad_line = if vad { "剪静音" } else { "不剪静音" };
 
     let stage_app = app.clone();
     let stage = move |phase: &str, line: String| {
@@ -1968,12 +1978,20 @@ async fn voice_transcribe(
         stage(
             "infer",
             format!(
-                "识别中（{} 秒音频，本机推理，{window_line}）…{slow}",
+                "识别中（{} 秒音频，本机推理，{window_line}，{vad_line}）…{slow}",
                 pcm.len() as f32 / harness_engine::voice::asr::SAMPLE_RATE as f32
             ),
         );
         let asr = guard.as_mut().expect("上面刚填过");
-        let r = asr.transcribe_in(&pcm, language.as_deref(), window)?;
+        let r = asr.transcribe_with(
+            &pcm,
+            harness_engine::voice::asr::TranscribeOpts {
+                language: language.as_deref(),
+                window,
+                vad,
+                max_secs,
+            },
+        )?;
         Ok(serde_json::json!({
             "text": r.text,
             "language": r.language,
@@ -1981,6 +1999,12 @@ async fn voice_transcribe(
             "elapsed_ms": r.elapsed_ms,
             "tokens": r.tokens,
             "truncated": r.truncated,
+            "speech_secs": r.speech_secs,
+            "windows": r.windows,
+            "no_speech": r.no_speech,
+            "avg_logprob": r.avg_logprob,
+            "retries": r.retries,
+            "deduped": r.deduped,
             "window": match window {
                 harness_engine::voice::asr::Window::Full => "full",
                 harness_engine::voice::asr::Window::Trim => "trim",

@@ -513,16 +513,45 @@
         return;
       }
       const text = String((out && out.text) || "").trim();
+      // **空文本有两种，界面上要说清是哪一种**（以前只有一句"没听出内容"，用户只能归咎于"不准"）：
+      //   ① 判为没有人声 ⇒ 后端**正确拒识**，该告诉用户"这段没听到人声"（不是故障，也别让他怀疑模型）
+      //   ② 有人声却空 ⇒ 才是真出了问题
       if (!text) {
-        return status(L("没听出内容（可能太短或太吵）—— 再录一次试试", "nothing recognised — try again"), "error");
+        const heard = Number((out && out.speech_secs) || 0);
+        if (out && out.no_speech) {
+          return status(
+            L(`没听到人声（这段 ${((out.audio_secs || 0)).toFixed(1)}s 里没有语音）—— 对着麦克风再说一次`,
+              `no speech detected in ${((out.audio_secs || 0)).toFixed(1)}s of audio — try again`),
+            "warn"
+          );
+        }
+        return status(
+          L(`转写结果为空（检测到 ${heard.toFixed(1)}s 人声却一个字都没出来）—— 这像故障，不是"太吵"`,
+            `empty transcript (detected ${heard.toFixed(1)}s of speech) — looks like a pipeline fault`),
+          "error"
+        );
       }
       // 填进输入框而**不自动发送**：转写可能有个别字错，用户该有机会改一下再发
       input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
       input.focus();
       const secs = ((out.elapsed_ms || 0) / 1000).toFixed(1);
+      // 三条**如实告知**（都是本地模型真实存在的边界，藏起来只会变成"它一点都不准"）：
+      //   · 分段：超过 30 秒的话被切成几窗跑，说明转写是完整的（不是"只听了前半句"）
+      //   · 截断：超过 voice.max_secs 的部分**没转**（绝不能不说）
+      //   · 低置信度：avg_logprob < -1 时提示核对（whisper 自己判幻觉的第一条阈值）
+      const notes = [];
+      const wins = Number((out && out.windows) || 1);
+      if (wins > 1) notes.push(L(`分 ${wins} 段`, `${wins} segments`));
+      if (out && out.truncated) notes.push(L("⚠ 超出时长上限，只转了前面一段", "⚠ truncated: only the first part was transcribed"));
+      if (Number((out && out.deduped) || 0) > 0)
+        notes.push(L("已去掉重复的尾巴", "removed a repeated tail"));
+      const lp = Number((out && out.avg_logprob) ?? 0);
+      if (lp < -1.0) notes.push(L("⚠ 置信度偏低，请核对", "⚠ low confidence — please review"));
+      const tail = notes.length ? ` · ${notes.join(" · ")}` : "";
       status(
-        L(`本地转写完成（${secs}s · 音频没出本机）—— 确认后发送`, `transcribed locally (${secs}s · audio never left) — review then send`),
-        "info"
+        L(`本地转写完成（${secs}s · 音频没出本机）${tail} —— 确认后发送`,
+          `transcribed locally (${secs}s · audio never left)${tail} — review then send`),
+        out && out.truncated ? "warn" : "info"
       );
     }
 
