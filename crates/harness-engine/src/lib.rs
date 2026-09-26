@@ -25,7 +25,7 @@ pub mod kb;
 pub mod lint;
 pub mod llm;
 pub mod mem;
-/// 模型缓存（自检 + 按需下载 + 逐文件校验）：记忆与语音共用一份机制
+/// 模型缓存（自检 + 按需下载 + 逐文件校验）：记忆的嵌入模型用它
 pub mod modelstore;
 pub mod observe;
 pub mod pipeline;
@@ -37,5 +37,4 @@ pub mod sandbox;
 pub mod step_agent;
 pub mod testllm;
 pub mod verify;
-/// 本地语音转写（candle whisper + 按需下载的量化权重）
 pub mod workspace;
