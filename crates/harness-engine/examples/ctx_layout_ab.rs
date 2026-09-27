@@ -204,7 +204,7 @@ fn scripted_arm(
     dedup: bool,
     script: Vec<String>,
     sink: &MetricSink,
-) -> Arm {
+) -> Result<Arm, String> {
     let llm = fake_llm(script);
     let mut cfg = base_cfg(layout, dedup);
     cfg.llm.base_url = llm.base_url.clone();
@@ -221,11 +221,24 @@ fn scripted_arm(
         &harness_engine::exec::new_cancel_flag(),
         sink,
     ))
-    .expect("工具循环不该失败");
+    .map_err(|e| e.to_string())?;
 
-    Arm {
+    Ok(Arm {
         reqs: requests(&llm),
         outcome,
+    })
+}
+
+/// 跑一臂，失败就**说清楚再退出**（退出码 2）——
+/// 轨迹文件格式不对 / 手改坏了 / 模型不走工具调用，都属于"这次跑不动"，
+/// 不该甩一段 panic 栈让人以为是引擎坏了。
+fn arm_or_die(r: Result<Arm, String>, what: &str) -> Arm {
+    match r {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("✗ {what} 跑不动：{e}");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -325,13 +338,10 @@ def describe(code):
     .unwrap();
 }
 
-fn real_arm(dir: &Path, layout: bool, dedup: bool, sink: &MetricSink, task: &str) -> Arm {
-    real_arm_try(dir, layout, dedup, sink, task).expect("工具循环不该失败")
-}
-
-/// 同 [`real_arm`]，但把失败**交回去**而不是 panic ——
-/// 抄轨迹时要能如实说出"这一趟模型没走工具调用"（那是模型的偶发行为，引擎的守卫会报出来）。
-fn real_arm_try(
+/// 真跑一臂（打到厂商端点）。失败**交回去**而不是 panic ——
+/// 抄轨迹时要能如实说出"这一趟模型没走工具调用"（那是模型的偶发行为，引擎的守卫会报出来），
+/// 调用方用 [`arm_or_die`] 统一处置。
+fn real_arm(
     dir: &Path,
     layout: bool,
     dedup: bool,
@@ -621,7 +631,7 @@ fn capture(out: &Path, task: &str) {
     harness_engine::debug::set_enabled(true);
 
     let sink = MetricSink::new();
-    let arm = match real_arm_try(&dir, false, false, &sink, task) {
+    let arm = match real_arm(&dir, false, false, &sink, task) {
         Ok(a) => a,
         Err(e) => {
             harness_engine::debug::set_enabled(false);
@@ -682,7 +692,10 @@ fn pair(path: &Path, mode: Mode) {
         let _ = std::fs::remove_file(&log);
         harness_engine::debug::set_path(log.clone());
         harness_engine::debug::set_enabled(true);
-        let arm = scripted_arm(&dir, layout, dedup, trace.actions.clone(), &sink);
+        let arm = arm_or_die(
+            scripted_arm(&dir, layout, dedup, trace.actions.clone(), &sink),
+            &format!("配对臂 {name}"),
+        );
         harness_engine::debug::set_enabled(false);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -804,9 +817,12 @@ fn main() {
             write_fixture(&dir);
         }
         let arm = if real {
-            real_arm(&dir, layout, dedup, &sink, task)
+            arm_or_die(real_arm(&dir, layout, dedup, &sink, task), "真跑臂")
         } else {
-            scripted_arm(&dir, layout, dedup, entry_script(mode), &sink)
+            arm_or_die(
+                scripted_arm(&dir, layout, dedup, entry_script(mode), &sink),
+                "脚本化臂",
+            )
         };
         let _ = std::fs::remove_dir_all(&dir);
 
