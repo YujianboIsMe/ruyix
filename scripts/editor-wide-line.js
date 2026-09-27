@@ -7,8 +7,9 @@
  * 修法是宽行只读视图：超长行切成显示段、textarea 退出布局、顶部加一条不编号的虚拟横幅。
  * 这几件事**全都只存在于布局引擎里**（Node 的 DOM 桩量不到），所以门禁必须是真浏览器。
  *
- * 做法：把**真实的** ui/index.html（剥 <script>/<link>）+ ui/styles.css + ui/scripts/main.js
- * 拼成一个自包含页面（main.js 的引导块剥掉，只借函数），在无头 Edge 里跑四个臂：
+ * 做法：把**真实的** ui/index.html（剥 <script>/<link>）+ ui/styles.css + ui/scripts/*.js
+ * （按 index.html 的顺序，见 scripts/ui-sources.js）拼成一个自包含页面（引导块剥掉，
+ * 只借函数），在无头 Edge 里跑四个臂：
  *
  *   臂 1  2000 列   → **不该**触发（阈值是「> 2000」）
  *   臂 2  2001 列   → 触发
@@ -42,6 +43,7 @@ const cp = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
+const { uiScriptSource } = require("./ui-sources.js");
 
 function findBrowser() {
   if (process.env.MSEDGE_PATH) return process.env.MSEDGE_PATH;
@@ -69,14 +71,14 @@ const css = read("ui/styles.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
 
 // main.js 的引导块剥掉：只借函数声明，不要它去初始化整个应用（没有 Tauri 后端）
-const mainSrc = read("ui/scripts/main.js").replace(
+const mainSrc = uiScriptSource().replace(
   /if \(document\.readyState === "loading"\) \{[\s\S]*?initApp\(\);[\s\S]*?\n\}/,
   "/* 引导块被探针剥掉 */"
 );
 // 臂 4 用：把阈值调到天上 = 等价于"没有这条闸门"，用来给闸门自己做对照
 const THRESHOLD_DECL = "const EDITOR_WIDE_MAX_COLS = 2000;";
 if (!mainSrc.includes(THRESHOLD_DECL)) {
-  console.log("FAIL: 在 main.js 里定位不到阈值声明（探针锚点失效）：" + THRESHOLD_DECL);
+  console.log("FAIL: 在 ui/scripts/ 里定位不到阈值声明（探针锚点失效）：" + THRESHOLD_DECL);
   process.exit(1);
 }
 const noGateSrc = mainSrc.replace(THRESHOLD_DECL, "const EDITOR_WIDE_MAX_COLS = 1000000000;");
@@ -118,7 +120,7 @@ const driver = `
         out.notes.push("强制显示祖先 " + (el.id || el.className));
       }
     }
-    // 同一份 main.js 装两遍：真实阈值一遍、阈值调到天上（= 无闸门）一遍
+    // 同一份前端源码装两遍：真实阈值一遍、阈值调到天上（= 无闸门）一遍
     const api = (src) =>
       new Function(
         src + "\\nreturn { showEditor: showEditor, setupEditorVirtualScroll: setupEditorVirtualScroll," +

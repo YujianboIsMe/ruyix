@@ -39,7 +39,9 @@ ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Mo
 ## Architecture
 
 - **Frontend**: Vanilla HTML/CSS/JS (no bundler, no npm). Served from `ui/` via Tauri's custom protocol. All Tauri APIs accessed via `window.__TAURI__` global.
-- **Frontend globals**: `main.js` owns the app state; panel modules (`session.js` / `mcp.js` / `a2a.js` / `capability.js` / `config.js` / `service.js`) read it as `window.state`. A top-level `const` does NOT land on `window`, so `main.js` must keep the explicit `window.state = state;` export — drop it and every panel loses `currentProject` (config project scope then falsely reports "no project open"). Guarded by ui-smoke U10.
+- **Frontend globals**: `main.js` owns the app state; the modules split out of it (`titlebar` / `menus` /
+  `contextmenu` / `commandbar` / `navigator` / `editor` / `terminal`) and the panel modules (`session.js` /
+  `mcp.js` / `a2a.js` / `capability.js` / `config.js` / `service.js`) read it as `window.state`. A top-level `const` does NOT land on `window`, so `main.js` must keep the explicit `window.state = state;` export — drop it and every panel loses `currentProject` (config project scope then falsely reports "no project open"). Guarded by ui-smoke U10.
 - **Backend**: Tauri 2 Rust backend, modules: `main.rs` (Tauri commands + app entry), `config.rs` (3-scope config, projects, run targets), `pty.rs` (PTY terminal management), `ai.rs` (LLM integration), `git.rs` (git status/commands), `runner.rs` (run-command inference from manifest contents), `instance.rs` (single-instance detection), `agent/` (Agent bridge: `agent_*` commands + `agent://*` events + config_bridge + `sessions.rs` chat-session store, see `doc/v0.x/融合计划-Agent集成-v0.2.md`), `mcp.rs` (MCP client over stdio JSON-RPC: server registry in `mcp.toml`, tools discovery & invocation), `a2a.rs` (A2A client: agent card discovery + task delegation, registry in `a2a.toml`), `capability.rs` (capability system: CLI tool whitelist `tools.toml` + SKILL docs `skills.toml`, see `doc/capability.md`), `paths.rs` (portable root + project buckets).
 - **Agent engine**: `crates/harness-engine` — zero-tauri lib crate imported from darkhorse-harness (agent tool loop + plan/generate/lint/verify/repair pipeline; unit tests via `cargo test -p harness-engine`). The ruyix `agent/` module wraps it; engine code lives in the workspace, don't re-vendor.
 `modelstore` is the **shared** on-demand model cache (self-check + `.part` atomic write + per-file sha256 +
@@ -76,10 +78,17 @@ sources; used by the memory embedding model),
 │                         # 第三方在 packages/** —— 根目录只留"页面与数据"，一眼看得出谁能改谁不能改。
 │   ├── index.html        # Full layout: titlebar, workspace, command bar, statusbar
 │   ├── styles.css        # Dark IDE theme + syntax highlighting colors
-│   ├── scripts/          # 我们自己的 JS（13 个，全部由 index.html 按序 include）
+│   ├── scripts/          # 我们自己的 JS（20 个，全部由 index.html 按序 include；**main.js 最后加载**）
 │   │   ├── i18n.js       # Multi-language: I18N.init / setLang / getLang / t()
 │   │   ├── command.js    # Command parser, dispatcher, all command implementations
-│   │   ├── main.js       # UI state, file tree, tabs, xterm, context menu, modal
+│   │   ├── main.js       # UI state（state + `window.state` 导出）、标签页、git 面板、弹窗、引导块
+│   │   ├── titlebar.js   # 标题栏：窗口控制 / 项目切换下拉 / 自适应标题（window.TitleBarUI）
+│   │   ├── menus.js      # 菜单栏五个下拉：语言 / 配置 / 能力 / 帮助 / 服务（window.MenusUI）
+│   │   ├── contextmenu.js# 文件树 + 标签栏右键菜单、关闭策略 closePlan（window.ContextMenuUI）
+│   │   ├── commandbar.js # 全局键盘快捷键（Ctrl+S / Ctrl+W / Ctrl+P…）（window.CommandBarUI）
+│   │   ├── navigator.js  # 导航区：项目列表 / 文件树 / 状态桶 / 欢迎页（window.NavigatorUI）
+│   │   ├── editor.js     # 编辑器：虚拟化渲染 / 大纲 / 帮助页 / 图片预览（window.EditorUI）
+│   │   ├── terminal.js   # 终端：PTY 标签页 / 终端目标列表 / 尺寸自适应（window.TerminalUI）
 │   │   ├── session.js    # Session chat (nav list + chat tabs, run artifacts apply-back panel)
 │   │   ├── mcp.js        # MCP panel (servers, tools, tool calls)
 │   │   ├── a2a.js        # A2A panel (remote agents, task delegation)

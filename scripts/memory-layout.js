@@ -8,7 +8,7 @@
  * 与 bug 3（面板并排各占一半）同类：`showPane` 保证了"只有一块可见"，
  * 但"可见的那块真的铺满"、"内容有没有越界"必须在真浏览器里量。
  *
- * 做法：拼一个自包含页面（真 index.html 骨架 + 真 styles.css + 真 main.js + 真 memory.js，
+ * 做法：拼一个自包含页面（真 index.html 骨架 + 真 styles.css + 真 ui/scripts/*.js，
  * 后端形参照旧走 `window.__TAURI__` 桩，桩里给**带长值**的记忆数据），在无头 Edge 里：
  * `MemoryUI.open()` → 量 → 点「凭什么」展开修订链 → 量 → 切到服务面板（互斥的反面）→ 量 →
  * 缩窄外层 → 再量。全程用**真的**面板与**真的** CSS。
@@ -38,6 +38,7 @@ const cp = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
+const { uiScriptSource } = require("./ui-sources.js");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function findBrowser() {
@@ -244,8 +245,8 @@ html = html.replace(
     `<style>${css}</style>` +
     `<script>${i18nStub}</script>` +
     `<script>${stubs}</script>` +
-    `<script>eval(${enc(read("ui/scripts/main.js"))})</script>` +
-    `<script>eval(${enc(read("ui/scripts/memory.js"))})</script>` +
+    // 全量清单里已经带了 memory.js（index.html 的真实顺序），不再单独装一遍
+    `<script>eval(${enc(uiScriptSource())})</script>` +
     `<script>${driver}</script></body>`
 );
 

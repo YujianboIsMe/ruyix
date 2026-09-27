@@ -10,7 +10,8 @@
  * "被内容撑开"的能力，只剩 `flex:1` = 视口宽度，textarea 的正文装不下自己那一格。
  *
  * 做法：把**真实的** ui/index.html（剥掉 <script>/<link>）+ ui/styles.css +
- * ui/scripts/main.js 拼成一个自包含页面，在无头 Edge 里打开、喂一份 5000 行的合成源码
+ * ui/scripts/*.js（按 index.html 的顺序，见 scripts/ui-sources.js）拼成一个自包含页面，
+ * 在无头 Edge 里打开、喂一份 5000 行的合成源码
  * （第 11 行故意很长、且**不在可视窗口内**），然后逐元素量 offset/client/scroll。
  *
  * 判据（任何一条不成立即退出码 1）：
@@ -31,6 +32,7 @@ const cp = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
+const { uiScriptSource } = require("./ui-sources.js");
 
 function findBrowser() {
   if (process.env.MSEDGE_PATH) return process.env.MSEDGE_PATH;
@@ -57,7 +59,7 @@ let html = read("ui/index.html")
 const css = read("ui/styles.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
 // main.js 的引导块剥掉：只借函数声明，不要它去初始化整个应用（没有 Tauri 后端）
-const mainSrc = read("ui/scripts/main.js").replace(
+const mainSrc = uiScriptSource().replace(
   /if \(document\.readyState === "loading"\) \{[\s\S]*?initApp\(\);[\s\S]*?\n\}/,
   "/* 引导块被探针剥掉 */"
 );

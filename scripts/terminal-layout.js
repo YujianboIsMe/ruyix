@@ -13,7 +13,7 @@
  *      一根横向滚动条。
  *
  * 做法：拼一个自包含页面（真 index.html 骨架 + 真 styles.css/xterm.css + 真 xterm.js +
- * 真 main.js，形参照旧走 `window.__TAURI__` 桩），在无头 Edge 里：`showTerminalView()` →
+ * 真 ui/scripts/*.js，形参照旧走 `window.__TAURI__` 桩），在无头 Edge 里：`showTerminalView()` →
  * `spawnTerminal()` → 量 → **缩小外层** → 再量。全程用**真的 xterm**，量到的就是真机上那块屏。
  *
  * 为什么走 CDP（而不是像 editor-layout.js 那样 `--dump-dom`）：**`--dump-dom` 模式下
@@ -40,6 +40,7 @@ const cp = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
+const { uiScriptSource } = require("./ui-sources.js");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function findBrowser() {
@@ -183,7 +184,7 @@ html = html.replace(
     `<style>${css}</style>` +
     `<script>${stubs}</script>` +
     `<script>eval(${enc(read("ui/packages/xterm.js"))})</script>` +
-    `<script>eval(${enc(read("ui/scripts/main.js"))})</script>` +
+    `<script>eval(${enc(uiScriptSource())})</script>` +
     `<script>${driver}</script></body>`
 );
 

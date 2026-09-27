@@ -55,7 +55,7 @@ open project <path> 升级为"打开即切换"（命令层）
 标题栏项目名 → 快速切换下拉（零鼠标移动路径）
 
 点标题栏的项目名，弹出 get_projects 列表的下拉，点击即切换。
-数据（已有逻辑 main.js:1640），当前项目那一行高亮 + ✔ 标记
+数据（已有逻辑 `ui/scripts/titlebar.js` 的 `renderProjectSwitchDropdown`），当前项目那一行高亮 + ✔ 标记
 适合把鼠标已经放在顶部的场景。
  
 ## 多实例

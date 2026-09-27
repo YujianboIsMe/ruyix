@@ -219,6 +219,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { uiScriptSource } = require("./ui-sources.js");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
@@ -256,6 +257,31 @@ function readEngineAgent() {
 const readLf = (p) => read(p).replace(/\r\n/g, "\n");
 
 /**
+ * 前端一方脚本的**全量源码**：按 ui/index.html 里真实的 <script src="scripts/*.js">
+ * 顺序拼接（行尾归一 LF）。清单在 scripts/ui-sources.js —— 与布局探针共用同一份。
+ *
+ * 为什么不再钉死 ui/scripts/main.js：契约的对象是**前端模块**，不是某个文件名 ——
+ * 引擎侧早就这么读（见 readEngineAgent：主循环从 agent.rs 搬去 tool_loop.rs 时，
+ * 钉死文件名的 8 条契约集体报"文件挪了"，那不是在报"契约破了"）。main.js 拆成 7 个
+ * 模块（titlebar / menus / contextmenu / commandbar / navigator / editor / terminal）
+ * 之后同理：凡"代码里写了 X"、"不许出现 X"、"切一段源码出来跑"的断言都读这里；
+ * 只有**指明 main.js 独有职责**的断言（window.state 的显式导出、main.js 不许再
+ * 声明顶层 L）才继续读 main.js。
+ */
+const readUiScripts = () => uiScriptSource();
+
+/**
+ * 单个前端模块的源码（LF 归一）—— 只在断言的语义**真的**只关乎某一个模块时才用它。
+ *
+ * 有两类判据不能读全量（readUiScripts）：「不许出现 X」与「只许有一处调用」。
+ * 命令层里 `invoke("config_set")` / `invoke("project_bucket_delete")` 是**应该**有的
+ * （那是命令系统的本体），`highlightAndRender` 的另一处调用在 command.js 的显式换语言
+ * 路径上（用户点「重新着色」就该重着色）—— 读全量会把合法的调用算成违规。
+ * 那不是「更严」，那是判错了对象。
+ */
+const readUiModule = (file) => readLf("ui/scripts/" + file);
+
+/**
  * realL —— 回放 main.js 的探针必须照**真页面的装配**来：index.html 里 command.js 先加载并
  * 定义 window.L，而 main.js 里用的是裸 `L()`。只把 main.js 丢进裸环境的话，`L` 会落到本进程的
  * globalThis 上 = undefined ⇒ 命中那条路径时当场 ReferenceError，判据假红。
@@ -270,6 +296,18 @@ function realL(win, doc, i18n) {
     i18n
   );
   return win.L;
+}
+
+/**
+ * realBackendMsg —— 与 realL 同理：真页面里 errors.js 先加载并把 `BackendMsg` 挂到 window 上，
+ * 而 main.js 的 setStatus 用的是**裸 `BackendMsg`**（浏览器里 window 的属性就是全局变量）。
+ * 回放把整份前端源码塞进 `new Function` 时，自由变量解析到的是**本进程**的 globalThis，
+ * 所以这一份也得显式当形参传进去 —— 否则 U53 的降级场景走到 setStatus 就 ReferenceError，
+ * 表现成「状态栏没说人话」（红出来的方向还是错的）。
+ */
+function realBackendMsg(win, doc) {
+  new Function("window", "document", readLf("ui/scripts/errors.js"))(win, doc);
+  return win.BackendMsg;
 }
 
 /**
@@ -298,6 +336,8 @@ function has(text, needle) {
 function runStaticChecks() {
   const html = read("ui/index.html");
   const commandJs = read("ui/scripts/command.js");
+  // 前端一方脚本全量（7 个模块 + main.js 按页面顺序拼，见 readUiScripts）
+  const uiSrc = readUiScripts();
   const mainRs = read("src-tauri/src/main.rs");
   const sinkRs = read("src-tauri/src/agent/sink.rs");
 
@@ -429,40 +469,42 @@ function runStaticChecks() {
       !it.cls.includes("file-only") && !it.cls.includes("folder-only"),
       `[${action}] 挂了 file-only/folder-only —— 文件和文件夹上都要能看到它（class="${it.cls}"）`);
   }
-  const ctxMainJs = readLf("ui/scripts/main.js");
   check("U33", "ctx-copy-path",
-    /case\s+"copy-path":/.test(ctxMainJs) && /case\s+"copy-full-path":/.test(ctxMainJs),
-    "main.js 的右键 switch 没有 copy-path / copy-full-path 两个分支");
+    /case\s+"copy-path":/.test(uiSrc) && /case\s+"copy-full-path":/.test(uiSrc),
+    "前端脚本的右键 switch 没有 copy-path / copy-full-path 两个分支");
 
   // U34 autosave-no-ui：自动保存**只写盘**。着色（全量 tree-sitter + 一趟 IPC）与大纲
-  // （O(全文) 解析 + 重建 DOM）不许挂在每次打字停顿上，两者只能从 refreshEditorChrome 出去
-  const autoStart = ctxMainJs.indexOf("async function doAutoSave(tab) {");
-  const autoEnd = autoStart >= 0 ? ctxMainJs.indexOf("\n}\n", autoStart) : -1;
+  // （O(全文) 解析 + 重建 DOM）不许挂在每次打字停顿上，两者只能从 refreshEditorChrome 出去。
+  // 判据限定在**编辑器模块**：command.js 里还有一处 highlightAndRender（用户显式换语言那条
+  // 路，是应该有的），读全量会把它算成违规（见 readUiModule 的注释）。
+  const edSrc = readUiModule("editor.js");
+  const autoStart = edSrc.indexOf("async function doAutoSave(tab) {");
+  const autoEnd = autoStart >= 0 ? edSrc.indexOf("\n}\n", autoStart) : -1;
   check("U34", "autosave-no-ui", autoStart >= 0 && autoEnd > autoStart,
-    "main.js 里定位不到 doAutoSave（切片锚点失效）");
+    "编辑器模块里定位不到 doAutoSave（切片锚点失效）");
   const autoBody = autoStart >= 0 && autoEnd > autoStart
-    ? ctxMainJs.slice(autoStart, autoEnd) : "";
+    ? edSrc.slice(autoStart, autoEnd) : "";
   check("U34", "autosave-no-ui",
     autoBody.includes("write_file") && !autoBody.includes("highlightAndRender") &&
       !autoBody.includes("updateOutline"),
     "doAutoSave 只该有 write_file —— 带 UI 刷新就等于每次打字停顿跑一趟全量 tree-sitter");
-  const debStart = ctxMainJs.indexOf("debounceTimer = setTimeout(() => {");
-  const debEnd = debStart >= 0 ? ctxMainJs.indexOf("}, 1000);", debStart) : -1;
-  const debBody = debStart >= 0 && debEnd > debStart ? ctxMainJs.slice(debStart, debEnd) : "";
+  const debStart = edSrc.indexOf("debounceTimer = setTimeout(() => {");
+  const debEnd = debStart >= 0 ? edSrc.indexOf("}, 1000);", debStart) : -1;
+  const debBody = debStart >= 0 && debEnd > debStart ? edSrc.slice(debStart, debEnd) : "";
   check("U34", "autosave-no-ui",
     debBody.includes("doAutoSave") && !debBody.includes("updateOutline") &&
       !debBody.includes("highlightAndRender"),
     "自动保存的防抖回调里只该有 doAutoSave，不该带 UI 刷新");
   for (const fn of ["highlightAndRender", "updateOutline"]) {
-    const calls = [...ctxMainJs.matchAll(new RegExp(`(?<!function )\\b${fn}\\(`, "g"))].length;
+    const calls = [...edSrc.matchAll(new RegExp(`(?<!function )\\b${fn}\\(`, "g"))].length;
     check("U34", "autosave-no-ui", calls === 1,
       `${fn} 的调用点应只有 refreshEditorChrome 里那一处，实际 ${calls} 处`);
   }
   check("U34", "autosave-no-ui",
-    [...ctxMainJs.matchAll(/refreshEditorChrome\(/g)].length >= 3,
+    [...edSrc.matchAll(/refreshEditorChrome\(/g)].length >= 3,
     "refreshEditorChrome 要挂在切回标签页 / 失焦 / 显式保存三个时机上");
   check("U34", "autosave-no-ui",
-    /if \(tab\._language && !tab\._highlighted\)/.test(ctxMainJs),
+    /if \(tab\._language && !tab\._highlighted\)/.test(edSrc),
     "refreshEditorChrome 得先判断高亮是否过期 —— 没过期就别再跑一趟 IPC");
 
   // U35 web-search-toggle：🌏 联网是**逐模型**的能力（引擎 llm::model_caps，
@@ -612,17 +654,16 @@ function runStaticChecks() {
     `帮助源文件不是有效的 markdown（缺标题或表格）: ${badMd.map((f) => f.p).join(", ")}`);
   check("U22", "help-markdown", !has(commandJs, "getHelpText"),
     "command.js 仍在拼接纯文本帮助（getHelpText）——正文应只维护 md 源文件");
-  const mainJs = read("ui/scripts/main.js");
   check("U22", "help-markdown",
-    has(mainJs, "async function loadHelpDoc()") && has(mainJs, "markdownToHtml") &&
-      has(mainJs, "window.markdownit") && has(mainJs, "help-zh.md") && has(mainJs, "help-en.md"),
-    "main.js 缺少帮助文档链路（按语言加载 md → markdown-it 渲染）");
+    has(uiSrc, "async function loadHelpDoc()") && has(uiSrc, "markdownToHtml") &&
+      has(uiSrc, "window.markdownit") && has(uiSrc, "help-zh.md") && has(uiSrc, "help-en.md"),
+    "前端脚本缺少帮助文档链路（按语言加载 md → markdown-it 渲染）");
   check("U22", "help-markdown",
     has(html, 'id="help-body"') && !has(html, "help-table"),
     "index.html 应只留 #help-body 容器（正文由渲染结果填充），不再内嵌手写表格");
   check("U22", "help-markdown",
-    has(mainJs, "if (tab._isHelp)") && has(mainJs, "showHelpPage()") &&
-      !has(mainJs, "content: getHelpText()"),
+    has(uiSrc, "if (tab._isHelp)") && has(uiSrc, "showHelpPage()") &&
+      !has(uiSrc, "content: getHelpText()"),
     "帮助标签页必须走 markdown 文档视图（_isHelp → showHelpPage），不再塞进只读编辑器");
 
   // U23 service-panel：agent 用 background 起的常驻服务必须**在 UI 里看得见、停得掉**。
@@ -655,9 +696,9 @@ function runStaticChecks() {
       /\$\{h\}h\$\{m\}m\$\{s\}s/.test(serviceJs) && has(serviceJs, "isDead"),
     "启动时间要显示到秒并带 h/m/s 时长；已退出的进程不该再占一行（没有可管的）");
   check("U23", "service-panel",
-    has(mainJs, "tab._isService") && has(mainJs, "showServiceView") &&
-      has(mainJs, "ServiceUI?.close") && has(commandJs, 'case "service":') &&
-      /_isService\)\s*return/.test(mainJs),
+    has(uiSrc, "tab._isService") && has(uiSrc, "showServiceView") &&
+      has(uiSrc, "ServiceUI?.close") && has(commandJs, 'case "service":') &&
+      /_isService\)\s*return/.test(uiSrc),
     "main.js 缺服务标签页分支（含标签图标）/ 切走时没停秒级刷新，或命令栏缺 service 动词");
 
   // U24 external-link：agent 回的链接不能把 IDE 顶掉（P0）。
@@ -683,7 +724,7 @@ function runStaticChecks() {
       has(mainRs, "ShellExecuteW") && has(mainRs, "open_external,"),
     "外链出口必须是 open_external（白名单 + 系统默认处理程序），且已注册到 invoke_handler");
   check("U24", "external-link",
-    has(html, 'src="scripts/external.js"') && has(mainJs, "ExternalLinks?.install") &&
+    has(html, 'src="scripts/external.js"') && has(uiSrc, "ExternalLinks?.install") &&
       has(commandJs, 'case "url":') && has(commandJs, '"open_external"'),
     "前端外链链路不完整（external.js 未加载/未安装、命令栏缺 open url、或没接上 open_external）");
   check("U24", "external-link",
@@ -724,13 +765,12 @@ function runStaticChecks() {
   // 链路五环缺一不可：引擎发 plan 事件 → sink emit → session.js 监听并渲染 → main.js 会话分支调用
   // → run 收尾时 settle_steps 把每个步骤都落到终态（否则没轮到派发的步骤会永远停在
   //   ⌛「等待执行」，实测 run agent-20260920-091436 就是 2/3 + 永久沙漏）。
-  const uiMainJs = read("ui/scripts/main.js");
   const stylesCss = read("ui/styles.css");
   check("U15", "outline-plan",
     has(sinkRs, 'emit("agent://plan"') &&
       has(sessionJs, "STEP_EMOJI") &&
       ["✅", "⌛", "⛏️", "❌", "⏹️", "⚠️"].every((e) => has(sessionJs, e)) &&
-      /SessionUI\?\.renderOutline\(/.test(uiMainJs) &&
+      /SessionUI\?\.renderOutline\(/.test(uiSrc) &&
       has(stylesCss, "outline-plan-step") && has(stylesCss, "outline-plan-step--error") &&
       has(stylesCss, "outline-plan-step--skipped") &&
       has(stylesCss, "outline-plan-step--partial"),
@@ -1331,9 +1371,9 @@ function runStaticChecks() {
       has(procLogJs, "offset: tab._offset") && !has(procLogJs, "terminal-container"),
     "输出面板：convertEol 没开（LF 会让输出斜成阶梯）/ 增量读没带 offset / 复用了 PTY 的终端容器");
   check("U30", "proc-log",
-    has(mainJs, "tab._isProcLog") && has(mainJs, "showProcLogView") &&
-      has(mainJs, "ProcLogUI?.blur") && has(mainJs, "ProcLogUI?.close(tab)") &&
-      /_isProcLog\)\s*return/.test(mainJs),
+    has(uiSrc, "tab._isProcLog") && has(uiSrc, "showProcLogView") &&
+      has(uiSrc, "ProcLogUI?.blur") && has(uiSrc, "ProcLogUI?.close(tab)") &&
+      /_isProcLog\)\s*return/.test(uiSrc),
     "main.js 缺输出标签页分支：切走不停轮询 / 关标签页不 dispose（后台会一直问后端）");
   check("U30", "proc-log",
     has(read("ui/scripts/service.js"), "data-output") && has(read("ui/scripts/service.js"), "openLog") &&
@@ -1389,17 +1429,17 @@ function runStaticChecks() {
     has(html, 'wrap="off"'),
     'textarea 缺 wrap="off"：它默认软换行，长行会在内部折成两行而 backdrop 按一行画，光标与高亮从折行处起错开');
   check("U31", "editor-virtual-render",
-    has(mainJs, "EDITOR_LINE_H = 20") && has(mainJs, "EDITOR_VPAD = 16") &&
+    has(uiSrc, "EDITOR_LINE_H = 20") && has(uiSrc, "EDITOR_VPAD = 16") &&
       /\.code-line\s*\{[^}]*height:\s*20px/.test(stylesCss) &&
       /\.editor-textarea\s*\{[^}]*padding:\s*8px 16px/.test(stylesCss),
     "虚拟化的行高/内边距常量与 CSS 脱节：占位高度会整体偏移（滚动条长度与行号位置全错）");
   // 三个渲染入口必须**都**走 setEditorContent：漏一个就会出现「textarea 有显式高度
   // 但 overlay 没虚拟化」或反过来的半吊子状态（编辑器塌成 2 行 / 回车滚不动）。
   const editorBodyOf = (name) => {
-    const i = mainJs.indexOf("function " + name + "(");
+    const i = uiSrc.indexOf("function " + name + "(");
     if (i < 0) return "";
-    const j = mainJs.indexOf("\nfunction ", i + 1);
-    return mainJs.slice(i, j < 0 ? mainJs.length : j);
+    const j = uiSrc.indexOf("\nfunction ", i + 1);
+    return uiSrc.slice(i, j < 0 ? uiSrc.length : j);
   };
   const entryPoints = ["renderHighlightedCode", "renderPlainCode", "renderTerminalOutput"];
   check("U31", "editor-virtual-render",
@@ -2002,16 +2042,16 @@ async function runConfigChecks() {
  * 配最小 DOM stub + 真 markdown-it + 假 fetch（喂 ui/help-*.md 的真实内容）。
  */
 async function runHelpChecks() {
-  const mainJs = read("ui/scripts/main.js");
-  const start = mainJs.indexOf("/** markdown-it 渲染器懒构造");
-  const endMark = mainJs.indexOf("// 编辑器 textarea 同步");
-  const end = endMark > 0 ? mainJs.lastIndexOf("// ====", endMark) : -1;
+  const uiSrc = readUiScripts();
+  const start = uiSrc.indexOf("/** markdown-it 渲染器懒构造");
+  const endMark = uiSrc.indexOf("// 编辑器 textarea 同步");
+  const end = endMark > 0 ? uiSrc.lastIndexOf("// ====", endMark) : -1;
   if (start < 0 || end <= start) {
     check("U22", "help-replay", false,
-      "main.js 中定位不到帮助页代码段（区间标记变了，请同步本回放）");
+      "前端脚本中定位不到帮助页代码段（区间标记变了，请同步本回放）");
     return;
   }
-  const helpSrc = mainJs.slice(start, end);
+  const helpSrc = uiSrc.slice(start, end);
 
   // 真渲染器：vendor 的 markdown-it.min.js（UMD，需浏览器式全局 window）
   const mdCtx = {};
@@ -2038,6 +2078,9 @@ async function runHelpChecks() {
     window: {
       location: { origin: "https://ruyix.localhost" },
       markdownit,
+      // 模块里读的是 window.state（main.js 顶层 const 不挂 window，靠显式导出）：
+      // 切片改成取自模块之后，回放沙箱也要照真页面的装配给上这一份
+      state: appState,
     },
     document: { getElementById: el },
     state: appState,
@@ -2320,7 +2363,7 @@ async function runEditorChecks() {
   try {
     // 往源码尾部追加导出：main.js 的函数在 new Function 作用域里，外面拿不到
     const src =
-      read("ui/scripts/main.js") +
+      readUiScripts() +
       "\nwindow.__ed = { renderPlainCode: renderPlainCode, renderHighlightedCode: renderHighlightedCode," +
       " setupEditorVirtualScroll: setupEditorVirtualScroll, model: () => editorModel };\n";
     // eslint-disable-next-line no-new-func
@@ -2541,11 +2584,11 @@ function runSessionTraceLayoutProbe() {
  *      "计划为空 ⇒ 隐藏"是这条单子最初的错法：右键最左标签看不到【关闭左侧】，被当成缺功能报上来。
  */
 async function runTabContextMenuChecks() {
-  const mainSrc = readLf("ui/scripts/main.js");
+  const mainSrc = readUiScripts();
   const start = mainSrc.indexOf("function closePlan(ids, targetId, mode) {");
   const end = mainSrc.indexOf("\nfunction setupContextMenu(", start);
   check("U45", "tab-context-menu", start >= 0 && end > start,
-    "main.js 里定位不到 closePlan…setupTabContextMenu 这段源码（切片锚点失效）");
+    "前端脚本里定位不到 closePlan…setupTabContextMenu 这段源码（切片锚点失效）");
   if (start < 0 || end <= start) return;
   const funcs = mainSrc.slice(start, end);
 
@@ -2605,6 +2648,7 @@ async function runTabContextMenuChecks() {
   let hid = 0;
   const mod = new Function(
     "document",
+    "window",
     "state",
     "closeTab",
     "hideContextMenu",
@@ -2612,6 +2656,7 @@ async function runTabContextMenuChecks() {
     `${funcs}\nreturn { closePlan, setupTabContextMenu };`
   )(
     docStub,
+    { state },
     state,
     (id) => closed.push(id),
     () => {
@@ -3226,12 +3271,12 @@ async function runExternalLinkChecks() {
  * toRelativePath / copyToClipboard / handleContextCopyPath 源码（切片 + new Function），不另抄一份。
  */
 async function runContextMenuChecks() {
-  const mainSrc = readLf("ui/scripts/main.js");
+  const mainSrc = readUiScripts();
   const start = mainSrc.indexOf("function toRelativePath(fullPath) {");
   const anchor = mainSrc.indexOf("async function handleContextCopyPath(");
   const end = anchor >= 0 ? mainSrc.indexOf("\n}\n", anchor) : -1;
   check("U33", "ctx-copy-path", start >= 0 && end > start,
-    "main.js 里定位不到 toRelativePath…handleContextCopyPath 这段源码（切片锚点失效）");
+    "前端脚本里定位不到 toRelativePath…handleContextCopyPath 这段源码（切片锚点失效）");
   if (start < 0 || end <= start) return;
 
   const zh = JSON.parse(read("ui/lang/zh-CN.json"));
@@ -3269,9 +3314,9 @@ async function runContextMenuChecks() {
   };
   const setStatus = (msg, kind) => statuses.push({ msg, kind });
   const body = mainSrc.slice(start, end + 3);
-  const factory = new Function("state", "I18N", "setStatus", "navigator", "document",
-    `${body}\nreturn { toRelativePath, handleContextCopyPath };`);
-  const mod = factory(state, I18N, setStatus, navigatorStub, documentStub);
+  const factory = new Function("window", "state", "I18N", "setStatus", "navigator",
+    "document", `${body}\nreturn { toRelativePath, handleContextCopyPath };`);
+  const mod = factory({ state }, state, I18N, setStatus, navigatorStub, documentStub);
 
   const rel = mod.toRelativePath("D:\\proj\\src\\main.rs");
   check("U33", "ctx-copy-path", rel === "src\\main.rs",
@@ -4085,7 +4130,8 @@ function runConfigModelChecks() {
 
 async function runBucketPanelChecks() {
   const commandJs = readLf("ui/scripts/command.js");
-  const mainSrc = readLf("ui/scripts/main.js");
+  // 桶面板住在导航区模块（读全量会让命令层合法的 invoke("project_bucket_delete") 算成违规）
+  const panelSrc = readUiModule("navigator.js");
   const pathsRs = readLf("src-tauri/src/paths.rs");
   const mainRs = readLf("src-tauri/src/main.rs");
 
@@ -4106,12 +4152,12 @@ async function runBucketPanelChecks() {
     "删桶前必须先出确认框（桶里有暂存与写前备份，自动删等于替用户做决定）");
 
   check("U48", "bucket-panel-via-command",
-    mainSrc.includes("handleCommand(`bucket delete ${el.dataset.key}`)") &&
-      !mainSrc.includes('invoke("project_bucket_delete"'),
+    panelSrc.includes("handleCommand(`bucket delete ${el.dataset.key}`)") &&
+      !panelSrc.includes('invoke("project_bucket_delete"'),
     "面板必须经命令系统删（`bucket delete <key>`），不许在按钮处理器里直接 invoke");
   check("U48", "bucket-orphan-marked",
-    has(mainSrc, "renderProjectBuckets") && has(mainSrc, "bucket.orphan") &&
-      has(mainSrc, "known.has("),
+    has(panelSrc, "renderProjectBuckets") && has(panelSrc, "bucket.orphan") &&
+      has(panelSrc, "known.has("),
     "面板没有把「不对应任何已知项目的桶」标出来（没有它，孤儿只能靠用户对着目录名猜）");
 
   const zh = JSON.parse(read("ui/lang/zh-CN.json"));
@@ -4190,7 +4236,7 @@ async function runHighlightPluginChecks() {
     "index.html 里出现了 .tok-* 规则");
 
   // ---- ② 静态：语言的唯一来源在后端
-  const mjs = readLf("ui/scripts/main.js");
+  const mjs = readUiScripts();
   check("U53", "language-resolved-server-side",
     mjs.includes('invoke("highlight_plugins")') && mjs.includes("path: tab?.path || null"),
     "前端没有向插件注册表要语言表，或没把 path 交给后端解析语言");
@@ -4268,15 +4314,17 @@ async function runHighlightPluginChecks() {
       // （main.js 里的 L() 又引用**裸全局** I18N —— new Function 的自由变量走本进程的
       //   globalThis，所以两者都得显式当形参传进去，见 realL 注释。）
       const L = realL(sandboxWin, sandboxDoc, sandboxWin.I18N);
+      const BackendMsg = realBackendMsg(sandboxWin, sandboxDoc);
       new Function(
         "window",
         "document",
         "console",
         "I18N",
         "L",
-        readLf("ui/scripts/main.js") +
+        "BackendMsg",
+        readUiScripts() +
           "\n;window.__probe = { loadHighlightPlugins, fileIcon, get state() { return state; } };"
-      )(sandboxWin, sandboxDoc, console, sandboxWin.I18N, L);
+      )(sandboxWin, sandboxDoc, console, sandboxWin.I18N, L, BackendMsg);
       await sandboxWin.__probe.loadHighlightPlugins();
       // 桩的 getElementById 对任何 id 都会造一个元素 ⇒ main.js 会认为 <style> 已存在、
       // 只往那个元素上写 textContent（不再 appendChild）。所以两个地方都要看。
@@ -4379,7 +4427,7 @@ async function runPaneExclusiveChecks() {
   try {
     // main.js 的函数在 new Function 作用域里，外面拿不到 —— 尾部追加导出
     const src =
-      read("ui/scripts/main.js") +
+      readUiScripts() +
       "\nwindow.__pane = { showPane: showPane, hidePane: hidePane, EDITOR_PANES: EDITOR_PANES," +
       " showConfigView: showConfigView, showServiceView: showServiceView," +
       " showSessionView: showSessionView, hideConfigView: hideConfigView };\n";
@@ -4451,7 +4499,8 @@ async function runPaneExclusiveChecks() {
  */
 async function runTerminalTargetChecks() {
   const html = readLf("ui/index.html");
-  const mainSrc = readLf("ui/scripts/main.js");
+  // 面板部分只在终端模块里找（读全量会让命令层合法的 invoke("config_set") 算成违规）
+  const termSrc = readUiModule("terminal.js");
   const cmdSrc = readLf("ui/scripts/command.js");
   const rustMain = readLf("src-tauri/src/main.rs");
   const rustCfg = readLf("src-tauri/src/config.rs");
@@ -4461,18 +4510,18 @@ async function runTerminalTargetChecks() {
   check(
     "U51",
     "terminal-add-entry",
-    has(html, 'id="terminal-add"') && has(mainSrc, '"get_term_targets"') && has(mainSrc, "renderTerminalTargets"),
+    has(html, 'id="terminal-add"') && has(termSrc, '"get_term_targets"') && has(termSrc, "renderTerminalTargets"),
     "面板缺添加入口，或用户终端没走 get_term_targets 渲染（又回到写死的几条了？）"
   );
   check(
     "U51",
     "terminal-writes-via-command",
-    has(mainSrc, "handleCommand(`term add ") &&
-      has(mainSrc, "handleCommand(`term del ") &&
+    has(termSrc, "handleCommand(`term add ") &&
+      has(termSrc, "handleCommand(`term del ") &&
       has(cmdSrc, "async function handleTermCommand(") &&
       has(cmdSrc, 'case "term":') &&
       // 面板层不许自己写配置（那是命令层的活）
-      !/terminal[\s\S]{0,600}?invoke\("config_set"/.test(mainSrc),
+      !/terminal[\s\S]{0,600}?invoke\("config_set"/.test(termSrc),
     "增删改没有全部走命令系统（面板直接写配置会绕开命令层）"
   );
   check(
@@ -4585,7 +4634,7 @@ async function runMemoryPanelChecks() {
   //   命令动词注册 · 文案两种语言齐（U49 的老病）· 缺模型要说人话 · 后端注册 ·
   //   **记忆不许被插件化**（用户拍板：核心模块）。
   const memJs = read("ui/scripts/memory.js");
-  const panelMainJs = read("ui/scripts/main.js");
+  const panelMainJs = readUiScripts();
   const panelCmdJs = read("ui/scripts/command.js");
   const panelMainRs = read("src-tauri/src/main.rs");
   check(

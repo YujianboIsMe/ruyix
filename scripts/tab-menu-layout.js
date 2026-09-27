@@ -38,6 +38,7 @@ const cp = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
+const { uiScriptSource } = require("./ui-sources.js");
 
 function findBrowser() {
   if (process.env.MSEDGE_PATH) return process.env.MSEDGE_PATH;
@@ -57,11 +58,11 @@ if (!browser) {
   process.exit(0);
 }
 
-const mainSrc = read("ui/scripts/main.js");
+const mainSrc = uiScriptSource();
 const start = mainSrc.indexOf("function closePlan(ids, targetId, mode) {");
 const end = mainSrc.indexOf("\nfunction setupContextMenu(", start);
 if (start < 0 || end <= start) {
-  console.log("FAIL: main.js 里定位不到 closePlan…setupTabContextMenu 这段源码（切片锚点失效）");
+  console.log("FAIL: 前端源码里定位不到 closePlan…setupTabContextMenu 这段源码（切片锚点失效）");
   process.exit(1);
 }
 const funcSlice = mainSrc.slice(start, end);
@@ -101,6 +102,7 @@ const driver = `
     const closed = [];
     const mod = new Function(
       "document",
+      "window",
       "state",
       "closeTab",
       "hideContextMenu",
@@ -108,6 +110,7 @@ const driver = `
       slice + "\\nreturn { setupTabContextMenu };"
     )(
       document,
+      { state },
       state,
       (id) => closed.push(id),
       (m) => {

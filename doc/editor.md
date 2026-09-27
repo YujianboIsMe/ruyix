@@ -61,7 +61,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
   零点几像素，也不会再冒出一对滚动条。
 
 > 这一条**只有真浏览器能量到**（Node 的 DOM 桩没有布局引擎），所以门禁是
-> `node scripts/editor-layout.js` —— 用真实 `index.html` + `styles.css` + `main.js`
+> `node scripts/editor-layout.js` —— 用真实 `index.html` + `styles.css` + `ui/scripts/*.js`
 > 在无头 Edge 里开一页、喂 5000 行合成源码（长行故意放在可视窗口外），逐元素量
 > `offset - client`（**只有真画出来的滚动条才占这几像素**）。`ui-smoke` 的 U32 内置
 > 三条静态契约 + 转调这个脚本，找不到 Edge 时它自己 SKIP 并在报告里显式说明。
@@ -72,7 +72,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
 
 滚动重绘按 rAF 节流，且**窗口没变就直接 return**（滚动事件会连发几十次，重画是白做）。
 
-实测（无头 Edge + 真实 `styles.css`/`main.js`，视口 870×573）：
+实测（无头 Edge + 真实 `styles.css`/`ui/scripts/*.js`，视口 870×573）：
 
 | 行数 | 渲染的 code-line | 节点数（纯文本） | 滚动重绘 | 打字重画 |
 |---|---|---|---|---|
@@ -80,7 +80,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
 | 10,000 | 78 | 161 | 3.8ms | 6.3ms |
 | 25,000 | 78 | 161 | 9.1ms | 13.0ms |
 
-> 改动位置：`ui/scripts/main.js` 的 `setEditorContent` / `paintEditorWindow` / `syncCodeWidth` /
+> 改动位置：`ui/scripts/editor.js` 的 `setEditorContent` / `paintEditorWindow` / `syncCodeWidth` /
 > `setupEditorVirtualScroll`（三个渲染入口 `renderHighlightedCode`、`renderPlainCode`、
 > `renderTerminalOutput` **都必须**走 `setEditorContent`）。
 > 门禁 `node scripts/ui-smoke.js` 的 U31 覆盖行为与样式两侧，U32 覆盖"真实布局"（滚动条 /
@@ -141,7 +141,7 @@ max-content），只剩 `flex:1` = 视口宽度。于是正文一旦比格子宽
 6. java文件（`.java`）
 
 > 新增语言的落地位置：`src-tauri/Cargo.toml` 的 arborium `lang-*` feature、
-> `ui/scripts/main.js` 的 `extToLanguage()`（扩展名 → arborium 语言名）与 `fileIcon()`（标签页/文件树图标）。
+> `ui/scripts/editor.js` 的 `extToLanguage()`（扩展名 → arborium 语言名）与 `fileIcon()`（标签页/文件树图标）。
 > 三者缺一，表现为"打开文件没有高亮"。
 
 ### 载荷形状：`{ tags, lines }`（不回传正文）
