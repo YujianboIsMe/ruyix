@@ -4946,6 +4946,64 @@ function runContextLayoutChecks() {
     "`agent/ledger.rs` 要真接上主循环：ContextLedger + 唯一决策点 precheck + 命中走 reused_slot，" +
       "且 `agent.ctx.dedup` 键必须存在"
   );
+  // ⑥ P3（capsule 侧存）：召回必须在 trace 里**看得见**，且标明 sha256 校验
+  // —— 判据"为召回而重跑 = 0"的可见证据就是这条线（召回走磁盘读，不重跑工具）。
+  check(
+    "U70",
+    "capsule-recall-line",
+    src.includes("capsule 召回，sha256 ✓"),
+    "命中的 trace 要标出 capsule 召回 + sha256 校验（P3 的可见证据）"
+  );
+
+  // ⑦ P4（重基线调度）：trace 形状是契约的一部分 —— 判据按这行数理由
+  // （`rebase 决策=执行/跳过 理由=DP|ski-rental|下限|预算 预计省 X 字节`）
+  check(
+    "U70",
+    "rebase-trace-line",
+    src.includes("rebase 决策={} 理由={} 预计省 {} 字节"),
+    "rebase 决策行必须是可数、可读的形状（架构 §7 规定）"
+  );
+  check(
+    "U70",
+    "rebase-reasons-covered",
+    ["DP", "ski-rental", "下限", "预算"].every((r) => src.includes('"' + r + '"')),
+    "四种理由（DP / ski-rental / 下限 / 预算）都要在实现里存在：缺一种就等于少一条判据"
+  );
+
+  // ⑧ P3/P4 的开关也必须默认关（新机制一律先关着验，v1.2 纪律）
+  check(
+    "U70",
+    "p3-p4-switches-default-off",
+    (() => {
+      const cfgSrc = readLf("crates/harness-engine/src/config.rs");
+      return (
+        cfgSrc.includes("pub capsule: bool") &&
+        cfgSrc.includes("capsule: d_false()") &&
+        cfgSrc.includes("pub schedule: bool") &&
+        cfgSrc.includes("schedule: d_false()")
+      );
+    })(),
+    "`agent.ctx.capsule` 与 `agent.ctx.schedule` 必须默认 false（与 layout/dedup/metrics 同规矩）"
+  );
+
+  // ⑨ P4 的调度器与主循环真的接上了：`scheduler::decide` 被调用 + 下限用的是 keep_rounds
+  check(
+    "U70",
+    "scheduler-is-wired-to-the-loop",
+    src.includes("scheduler::decide(") &&
+      src.includes("floor_rounds: cfg.agent.history_keep_rounds"),
+    "调度器要真接进主循环，且 `keep_rounds` 只作**安全下限**（拍板 3）"
+  );
+
+  // ⑩ P3 的只读例外只有一处，且必须落在 state_root 之内
+  check(
+    "U70",
+    "state-root-read-exception-is-jailed",
+    src.includes("fn state_file(") &&
+      src.includes("real.starts_with(&root) && real.is_file()"),
+    "侧存只读例外必须**规范化后落在 state_root 之内**（`..` 逃不出去）"
+  );
+
 }
 
 async function main() {
