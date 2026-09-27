@@ -3293,3 +3293,479 @@ fn record_findings_rides_along_in_a_batch() {
     // 空 items 一律拒（空调用是无意义的一轮，要变成一句明确的纠正）
     assert!(parse_action(r#"{"tool":"record_findings","args":{"items":[]}}"#).is_err());
 }
+
+// ============================================================================
+// v1.2 P1：上下文布局契约 [S][E][A]（`agent.ctx.layout` / `agent.ctx.metrics`）
+//
+// 见 `doc/v1.2/需求-Agent-上下文布局与去重账本-v1.2.md` §1 与
+// `doc/v1.2/架构-上下文账本与重基线调度-v1.2.md` §1。
+// 判据全部落在**模型实际看到的东西**上（请求体），不落在我们自己的账本上。
+// ============================================================================
+
+/// 假 LLM 收到的第 i 次请求的 messages —— 判据的唯一事实来源。
+fn req_msgs(llm: &crate::testllm::FakeLlm, i: usize) -> Vec<ChatMessage> {
+    let body = llm.request(i);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("请求体该是 JSON");
+    v["messages"]
+        .as_array()
+        .expect("请求体里该有 messages 数组")
+        .iter()
+        .map(|m| ChatMessage {
+            role: m["role"].as_str().unwrap_or_default().to_string(),
+            content: m["content"].as_str().unwrap_or_default().to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        })
+        .collect()
+}
+
+/// 从请求体序列算出全程**加权**复用率（与引擎里那个仪器同一份实现）
+fn prefix_tally(llm: &crate::testllm::FakeLlm, rounds: usize) -> context::PrefixTally {
+    let reqs: Vec<Vec<ChatMessage>> = (0..rounds).map(|i| req_msgs(llm, i)).collect();
+    let mut t = context::PrefixTally::default();
+    for (i, cur) in reqs.iter().enumerate() {
+        t.add(context::prefix_stat(
+            if i == 0 { None } else { Some(&reqs[i - 1]) },
+            cur,
+        ));
+    }
+    t
+}
+
+/// 跑一轮「读五个文件 → 交付」（六次模型调用；`fold_fixture` 的同一份靶子）。
+async fn run_five_reads(cfg: &AppConfig, root: &std::path::Path) -> AgentOutcome {
+    run(
+        cfg,
+        root,
+        "把五个文件都读一遍",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    )
+    .await
+    .expect("run 不该失败")
+}
+
+/// **运行时 I1**（P1 的第一条判据）：`layout` 打开时，相邻两轮的 S 段**逐字节相同**，
+/// 且它就是 `agent_system_prompt()` 那条常量本身（不是"常量 + 点别的"）。
+///
+/// 关掉时这条必然不成立（每轮重建 system）—— 见下一条测试，那正是本版要治的病。
+#[test]
+fn layout_on_keeps_the_root_byte_identical_across_rounds() {
+    let (d, llm) = fold_fixture("ctx-layout-i1");
+    let mut cfg = ask_cfg(&llm);
+    cfg.agent.ctx.layout = true;
+
+    block_on(run_five_reads(&cfg, &d.0));
+    assert_eq!(llm.count(), 6, "5 轮读 + 1 轮交付");
+
+    let want = agent_system_prompt();
+    for i in 0..6 {
+        let msgs = req_msgs(&llm, i);
+        assert_eq!(
+            msgs[0].content,
+            want,
+            "第 {} 轮：S 段必须等于系统提示词常量本身",
+            i + 1
+        );
+        // 任务头（第一条 user 消息）也在稳定区：它从头到尾不该动
+        assert!(
+            msgs[1].content.contains("项目根目录"),
+            "第 {} 轮：第一条 user 消息该是任务头",
+            i + 1
+        );
+    }
+    let roots: Vec<String> = (0..6)
+        .map(|i| req_msgs(&llm, i)[0].content.clone())
+        .collect();
+    let distinct = roots.iter().collect::<std::collections::HashSet<_>>().len();
+    assert_eq!(distinct, 1, "六次请求的 S 段只该有**一个**指纹");
+}
+
+/// **I1 的反面**（同一份靶子、开关关掉）：块拼在 system 尾部 ⇒ 每轮重建 system，
+/// 相邻两轮的 S 段必然不同。这条钉住"关掉时与 v1.1 一字不变"，
+/// 同时它也是 P1 要消灭的那个事实的**在场证明**（不是我们嘴上说它不好）。
+#[test]
+fn layout_off_still_rebuilds_the_system_message_every_round() {
+    let (d, llm) = fold_fixture("ctx-layout-off");
+    let cfg = ask_cfg(&llm); // 默认关
+
+    block_on(run_five_reads(&cfg, &d.0));
+    let first = req_msgs(&llm, 0)[0].content.clone();
+    let second = req_msgs(&llm, 1)[0].content.clone();
+    assert!(
+        first.starts_with(&agent_system_prompt()),
+        "老行为：system = 提示词常量 + 块"
+    );
+    assert!(
+        first.contains("已确认的事实"),
+        "老行为：findings/账本块在 system 里"
+    );
+    assert_ne!(
+        first, second,
+        "关掉布局时 system 每轮都该变（账本多了一行）—— 这就是每轮砸缓存的现状"
+    );
+    // 尾布局里那条"末尾多一条 user 块"在关闭时**不该**出现
+    let last_off = req_msgs(&llm, 5).pop().unwrap();
+    assert_eq!(last_off.role, "user");
+    assert!(
+        !last_off.content.contains("## 已确认的事实"),
+        "关闭时最后一条消息该是工具结果，不该是账块"
+    );
+}
+
+/// 尾布局的形状：块是请求体的**最后一条消息**（易变尾 A），
+/// 而且**每一轮都在**（不是只有第一轮）。
+#[test]
+fn layout_on_puts_the_volatile_block_last() {
+    let (d, llm) = fold_fixture("ctx-layout-tail");
+    let mut cfg = ask_cfg(&llm);
+    cfg.agent.ctx.layout = true;
+
+    block_on(run_five_reads(&cfg, &d.0));
+    for i in 0..6 {
+        let msgs = req_msgs(&llm, i);
+        let last = msgs.last().expect("请求体不该是空的");
+        assert_eq!(last.role, "user", "第 {} 轮：尾该是 user 消息", i + 1);
+        assert!(
+            last.content.contains("## 已确认的事实"),
+            "第 {} 轮：尾必须是账块（findings + 引擎账本）",
+            i + 1
+        );
+        // 块只该出现在末尾一处：S 段里**不许**再有它
+        assert!(
+            !msgs[0].content.contains("已确认的事实"),
+            "第 {} 轮：块不许同时留在 system 里（那就是两份会打架的账）",
+            i + 1
+        );
+    }
+}
+
+/// **P1 的主判据**（可证伪）：同一份靶子、同一段脚本，尾布局的加权公共前缀占比
+/// 必须**高于**"块塞进 system"那一臂。
+///
+/// 这条就是需求 §5 的否定判据在单测里的形状：方向反了（占比下降）⇒ 红。
+/// 真 run 上还会再量一次（同一判据、真实模型），这里先用确定性脚本钉住方向。
+#[test]
+fn layout_raises_the_common_prefix_ratio() {
+    // 臂一：块塞进 system（v1.1 行为）
+    let (d_off, llm_off) = fold_fixture("ctx-prefix-off");
+    block_on(run_five_reads(&ask_cfg(&llm_off), &d_off.0));
+    // 臂二：块是易变尾
+    let (d_on, llm_on) = fold_fixture("ctx-prefix-on");
+    let mut cfg_on = ask_cfg(&llm_on);
+    cfg_on.agent.ctx.layout = true;
+    block_on(run_five_reads(&cfg_on, &d_on.0));
+
+    let (a, b) = (prefix_tally(&llm_off, 6), prefix_tally(&llm_on, 6));
+    assert!(
+        b.ratio() > a.ratio(),
+        "尾布局的加权复用率必须更高：尾 {} vs 塞根 {}",
+        b.render(),
+        a.render()
+    );
+    // 首轮按 0 前缀计（它本来就没有可复用的东西）—— 这条也要钉住，别靠"不算首轮"抬分
+    assert_eq!(prefix_tally(&llm_on, 1).prefix, 0);
+}
+
+/// **折叠的下标纪律**：尾只在请求期间存在，调完就摘 —— `fold_history` 按下标改老轮次
+/// 正文，任何跨轮的插/删都会让下标偏一格（折错消息，或直接越界 panic）。
+///
+/// 这条判据的针对性：把"摘尾"挪到下一轮开头（不修下标）就会红。
+#[test]
+fn layout_on_does_not_shift_the_fold_bookkeeping() {
+    let (d, llm) = fold_fixture("ctx-layout-fold");
+    let mut cfg = ask_cfg(&llm);
+    cfg.agent.ctx.layout = true;
+    cfg.agent.history_keep_rounds = 2;
+
+    let out = block_on(run_five_reads(&cfg, &d.0));
+    assert!(out.answer.contains("读完了"), "{}", out.answer);
+    let last = llm.request(5);
+    assert!(
+        last.contains("正文已折叠"),
+        "窗口外的老轮次该被折叠：{last}"
+    );
+    assert!(
+        !last.contains("MARK1") && !last.contains("MARK2"),
+        "窗口外的正文该被折掉，而窗口内的要留着：{last}"
+    );
+    assert!(
+        last.contains("MARK4") && last.contains("MARK5"),
+        "窗口内的正文一字不该动：{last}"
+    );
+    assert!(
+        last.contains("## 已确认的事实"),
+        "折叠与尾布局同时开着时，尾该照旧在：{last}"
+    );
+}
+
+// ============================================================================
+// v1.2 P2：去重账本（`agent.ctx.dedup` + 仪器 `agent.ctx.metrics`）
+//
+// 判据的取向：**宁可多执行一次，也不许"看起来一样就跳过"**。所以每条断言都问两件事 ——
+// ① 该省的时候省了吗 ② 不该省的时候（不纯 / 版本变了）有没有老实执行。
+// ============================================================================
+
+/// 留档型 Sink：把引擎的日志行收下来。P2 的两条读数（`dedup` 行、账本小结）
+/// 只有从这里看得见 —— 它们是**给模型与运维看的**，不是我们自己的内部计数。
+#[derive(Default)]
+struct LogSink {
+    lines: std::sync::Mutex<Vec<String>>,
+}
+
+impl LogSink {
+    fn joined(&self) -> String {
+        self.lines.lock().unwrap().join("\n")
+    }
+}
+
+impl Sink for LogSink {
+    fn log(&self, _level: &str, msg: String) {
+        self.lines.lock().unwrap().push(msg);
+    }
+}
+
+/// 跑一轮并把日志收下来（P2 用）
+async fn run_logging(
+    cfg: &AppConfig,
+    root: &std::path::Path,
+    script: Vec<String>,
+) -> (crate::testllm::FakeLlm, AgentOutcome, String) {
+    let llm = crate::testllm::fake_llm(script);
+    let mut cfg = cfg.clone();
+    cfg.llm.base_url = llm.base_url.clone();
+    cfg.llm.api_key = "smoke".into();
+    cfg.llm.model = "fake".into();
+    let sink = LogSink::default();
+    let out = run(
+        &cfg,
+        root,
+        "把同一个文件读两遍",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &crate::exec::new_cancel_flag(),
+        &sink,
+    )
+    .await
+    .expect("run 不该失败");
+    (llm, out, sink.joined())
+}
+
+/// 与 `ask_cfg` 同款，但**不需要先有一个假 LLM**（P2 那几条自己起假 LLM）
+fn quiet_cfg() -> AppConfig {
+    let mut cfg = AppConfig::default();
+    cfg.gate.narrow = false;
+    cfg.gate.full = false;
+    cfg.reflect.enabled = false;
+    cfg.step.execute_plan = false;
+    cfg.discover.enabled = false;
+    cfg
+}
+
+/// 一条读动作的账本键（测试里手搓用）
+fn ledger_read(path: &str) -> ledger::LedgerCall {
+    ledger::classify(&Action::Read(ReadSpec {
+        path: path.to_string(),
+        offset: None,
+        limit: None,
+    }))
+    .expect("read 永远纯")
+}
+
+/// **P2 的主判据**（同一份脚本、两臂）：重复调用在对照臂里**真的执行了**，
+/// 在实验臂里**被拦下**。这也是"重复工具调用次数下降 ≥50%"那条验收在引擎里的形状 ——
+/// 两臂用的是**同一份仪器**（`metrics` 都开），处理变量只有 `dedup`。
+#[test]
+fn dedup_blocks_the_repeat_that_the_control_arm_really_executes() {
+    let script = || {
+        vec![
+            r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+            r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+            r#"{"final":"读了两遍"}"#.to_string(),
+        ]
+    };
+    // 臂一（对照）：先只开仪器 —— 重复的那次**照旧执行**，账上记为"仍重复执行"
+    let d1 = TempDir::new("dedup-off");
+    d1.write("a.txt", "内容-MARK-1");
+    let mut cfg_off = quiet_cfg();
+    cfg_off.agent.ctx.metrics = true;
+    let (llm_off, _, log_off) = block_on(run_logging(&cfg_off, &d1.0, script()));
+
+    // 臂二（实验）：再开去重 —— 同样的重复被拦下
+    let d2 = TempDir::new("dedup-on");
+    d2.write("a.txt", "内容-MARK-1");
+    let mut cfg_on = cfg_off.clone();
+    cfg_on.agent.ctx.dedup = true;
+    let (llm_on, _, log_on) = block_on(run_logging(&cfg_on, &d2.0, script()));
+
+    assert_eq!(llm_off.count(), 3, "两次读 → 交付，共三次请求");
+    assert_eq!(
+        llm_on.count(),
+        3,
+        "去重不省轮次：省的是**执行**，不是模型往返"
+    );
+
+    // 对照臂：没有 dedup 行，也没有复用标注；账上"仍重复执行 1"
+    assert!(
+        !log_off.contains("dedup read"),
+        "对照臂不该有 dedup 行：{log_off}"
+    );
+    assert!(
+        !llm_off.request(2).contains("未重跑"),
+        "对照臂不该有复用标注"
+    );
+    assert!(
+        log_off.contains("拦截重复 0") && log_off.contains("仍重复执行 1"),
+        "对照臂的账该如实数出那次浪费：{log_off}"
+    );
+
+    // 实验臂：拦下了、标注了、结果逐字节还是上次那份
+    assert!(
+        log_on.contains("dedup read a.txt"),
+        "实验臂的 trace 必须有 `dedup <tool> <norm>` 这一行：{log_on}"
+    );
+    let last = llm_on.request(2);
+    assert!(
+        last.contains("内容-MARK-1") && last.contains("本次直接复用，未重跑"),
+        "命中要把**上次的原文**还回去并附标注：{last}"
+    );
+    assert!(
+        log_on.contains("拦截重复 1") && log_on.contains("仍重复执行 0"),
+        "实验臂的账该显示那次重复被拦下了：{log_on}"
+    );
+}
+
+/// **不该省的一条：版本变了必须重执行**（自己写过它 = 版本失效）。
+/// 这条是"静默给出错答案"的唯一防线 —— 反向错了最难查。
+#[test]
+fn dedup_reruns_after_our_own_write_invalidates_the_read() {
+    let d = TempDir::new("dedup-stale");
+    d.write("a.txt", "旧内容-OLD");
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        format!(
+            r#"{{"tool":"write","args":{{"path":"a.txt","content":{}}}}}"#,
+            serde_json::to_string("新内容-NEW").unwrap()
+        ),
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        r#"{"final":"改完再看一遍"}"#.to_string(),
+    ];
+    let mut cfg = quiet_cfg();
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.dedup = true;
+    let (llm, _, log) = block_on(run_logging(&cfg, &d.0, script));
+
+    // request(3) = 第 3 条动作（重读）的结果回灌出去的那一次请求
+    let last_read = llm.request(3);
+    assert!(
+        last_read.contains("新内容-NEW"),
+        "写完之后再读，必须是**新内容**（复用旧内容就是静默给错答案）：{last_read}"
+    );
+    assert!(
+        !last_read.contains("未重跑"),
+        "版本变了不许标注为复用：{last_read}"
+    );
+    assert!(
+        log.contains("版本失效重执行 1"),
+        "账上该如实记一次「版本失效重执行」：{log}"
+    );
+}
+
+/// **不该省的第二条：不纯的动作永远不进去重**（白名单外一律执行）。
+#[test]
+fn dedup_never_blocks_effectful_calls() {
+    let d = TempDir::new("dedup-effectful");
+    let script = vec![
+        r#"{"tool":"execute","args":{"cmd":"echo one"}}"#.to_string(),
+        r#"{"tool":"execute","args":{"cmd":"echo one"}}"#.to_string(),
+        r#"{"final":"跑了两遍"}"#.to_string(),
+    ];
+    let mut cfg = quiet_cfg();
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.dedup = true;
+    let (llm, _, log) = block_on(run_logging(&cfg, &d.0, script));
+
+    assert_eq!(llm.count(), 3);
+    assert!(
+        log.contains("拦截重复 0") && log.contains("不纯执行 2"),
+        "白名单外的命令必须每次都真跑：{log}"
+    );
+    // 白名单内的同类命令（纯）则会被拦 —— 一正一反，判据才立得住
+    let d2 = TempDir::new("dedup-pure-cmd");
+    d2.write("b.txt", "hello");
+    let script2 = vec![
+        r#"{"tool":"execute","args":{"cmd":"type b.txt"}}"#.to_string(),
+        r#"{"tool":"execute","args":{"cmd":"type b.txt"}}"#.to_string(),
+        r#"{"final":"看完了"}"#.to_string(),
+    ];
+    let (_, _, log2) = block_on(run_logging(&cfg, &d2.0, script2));
+    assert!(
+        log2.contains("拦截重复 1") && log2.contains("dedup execute type b.txt"),
+        "`type` 是白名单里的只读命令，第二次该被拦下：{log2}"
+    );
+}
+
+/// **停滞判据的替换**：账本记下一次**真执行**才算进展；只有命中的那一轮什么都不算。
+///
+/// 它替掉的是 `fresh_cmd` 那条按**命令字面**去重的近似（`git grep x` 与
+/// `git grep x 2>nul` 在那个判据下是两条新命令 ⇒ 换个拼法重跑同一件事也能骗过守卫）。
+#[test]
+fn a_library_hit_is_not_progress_and_a_real_execution_is() {
+    let mut p = Progress::new();
+    let call = ledger_read("a.rs");
+    let v = ledger::VersionVec {
+        repo: None,
+        paths: vec![("a.rs".to_string(), ledger::Ver::File(1, 1))],
+        unknown: false,
+    };
+    // 第 1 轮：真执行了一次 ⇒ 算进展
+    p.dedup_record(call, "内容".into(), v.clone(), 1);
+    p.note_round(1, false, false, false);
+    assert_eq!(p.stalled(1), 0, "真执行算进展");
+    // 第 2 轮：只有命中（复用），没有新结论、没有写文件 ⇒ 算停滞
+    p.note_round(2, false, false, false);
+    assert_eq!(p.stalled(2), 1, "复用不算进展 —— 那一轮什么都没新看到");
+    // 第 3 轮：又真执行了一次（新命令/版本失效的重执行）⇒ 进展恢复
+    p.dedup_record(ledger_read("b.rs"), "别的".into(), v, 3);
+    p.note_round(3, false, false, false);
+    assert_eq!(p.stalled(3), 0);
+}
+
+/// 结果侧存的上限：**被挤掉的条目等于没记过**（下次真执行，fail-safe）。
+#[test]
+fn dedup_cap_evicts_the_oldest_and_then_re_executes() {
+    let d = TempDir::new("dedup-cap");
+    for i in 0..3 {
+        d.write(
+            &format!("f{i}.txt"),
+            &format!("体量-{i}-{}", "x".repeat(400)),
+        );
+    }
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"f0.txt"}}"#.to_string(),
+        r#"{"tool":"read","args":{"path":"f1.txt"}}"#.to_string(),
+        r#"{"tool":"read","args":{"path":"f0.txt"}}"#.to_string(),
+        r#"{"final":"看完了"}"#.to_string(),
+    ];
+    let mut cfg = quiet_cfg();
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.dedup = true;
+    // 上限只够放一条（第二条进来就把 f0 挤掉）
+    cfg.agent.ctx.dedup_max_bytes = 500;
+    let (llm, _, log) = block_on(run_logging(&cfg, &d.0, script));
+
+    assert!(
+        !llm.request(3).contains("未重跑"),
+        "被挤掉的条目不许假装还记得：{}",
+        llm.request(3)
+    );
+    assert!(
+        log.contains("拦截重复 0"),
+        "上限挤掉之后那次读必须真执行：{log}"
+    );
+    assert!(log.contains("侧存 1 条"), "侧存该被压到上限之内：{log}");
+}

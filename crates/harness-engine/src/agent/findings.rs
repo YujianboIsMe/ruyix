@@ -22,6 +22,7 @@
 //! - **取代不改历史**：被 `supersede` 的条目留在账本里、只从提示词中退出；
 //! - **字节要可观测**：`active_bytes` 报给 trace，否则上限有没有踩到没人知道。
 
+use super::ledger;
 use std::path::{Path, PathBuf};
 
 /// 一条结论（模型写的）。
@@ -110,6 +111,14 @@ pub struct Progress {
     /// 提示词里 findings 块的字节上限（0 = 不限）。放在状态里而不是每次传参：
     /// `byte_account` 与 `prompt_block` 必须用同一个数，否则账与行为会各说各话。
     cap_bytes: usize,
+    /// **去重账本**（v1.2 P2）。`agent.ctx.dedup` 关着时没人查它也没人记它 ⇒ 空转。
+    dedup: ledger::ContextLedger,
+    /// 本轮账本记下了**一次真执行**（不是命中）⇒ 算进展。
+    ///
+    /// 它替掉的是 [`Progress::note_round`] 里 `fresh_cmd` 那条近似：那个判据按
+    /// **命令字面**去重，`git grep -n x` 与 `git grep -n x 2>nul` 算两条新命令 ⇒
+    /// 换个拼法重跑同一件事也能骗过停滞守卫。账本的判据是"这次执行有没有带来新证据"。
+    fresh_exec: bool,
 }
 
 /// findings 块的默认字节上限 —— **与引擎配置的默认值保持一致**（`d_agent_findings_max_bytes` = 8192）。
@@ -118,6 +127,10 @@ pub struct Progress {
 /// 0 = 不限，是合法值。**显示上不许把它印成 `0.0KB`** —— 用户实测就是这么读错的
 /// （"一个字都不许记？"），而实际上一个字都没少记。
 pub const DEFAULT_FINDINGS_CAP_BYTES: usize = 8192;
+
+/// 去重账本**结果侧存**的默认上限（8MB）—— 与引擎配置的默认值保持一致
+/// （`d_ctx_dedup_max_bytes`）。P3 换成 capsule 侧存之后这条上限退场。
+pub const DEFAULT_DEDUP_CAP_BYTES: usize = 8 * 1024 * 1024;
 
 impl Default for Progress {
     fn default() -> Self {
@@ -132,6 +145,8 @@ impl Default for Progress {
             cap_bytes: DEFAULT_FINDINGS_CAP_BYTES,
             cmds: Vec::new(),
             fresh_cmd: false,
+            dedup: ledger::ContextLedger::new(DEFAULT_DEDUP_CAP_BYTES),
+            fresh_exec: false,
         }
     }
 }
@@ -289,6 +304,66 @@ impl Progress {
         hit
     }
 
+    // ---------------------------------------------------------------- 去重账本
+
+    /// 查一条可复用的记录：命中返回 `(上次的**原文**, 上一次执行它的轮次)`。
+    /// 原文逐字节一致（判据 8），标注行由调用方追加。
+    pub fn dedup_lookup(
+        &self,
+        call: &ledger::LedgerCall,
+        now: &ledger::VersionVec,
+    ) -> Option<(String, u32)> {
+        let e = self.dedup.lookup(call, now)?;
+        Some((e.result.clone(), e.step))
+    }
+
+    /// 记一次**命中**（没执行，但要能数出省了几次）。
+    pub fn dedup_note_hit(&mut self, call: &ledger::LedgerCall, now: &ledger::VersionVec) {
+        self.dedup.note_hit_for(call, now);
+    }
+
+    /// 记一次**真的执行**（结果 + 执行前的版本快照）。同时算作"这一轮有进展"。
+    pub fn dedup_record(
+        &mut self,
+        call: ledger::LedgerCall,
+        result: String,
+        versions: ledger::VersionVec,
+        step: u32,
+    ) {
+        self.dedup.record(call, result, versions, step);
+        self.fresh_exec = true;
+    }
+
+    /// **仪器**：把这一次执行喂给审计（`call = None` ⇒ 不纯动作）。
+    /// 与 `dedup` 开关无关 —— 对照臂也要能数出"重复执行了几次"。
+    ///
+    /// 走 [`ledger::ContextLedger::audit_exec`]：它比 digest 口径多一类
+    /// **被既有记录覆盖**的重复（整份读之后再读一个窗口），而那正是账本能省、对照臂会白跑的那类。
+    pub fn dedup_audit(
+        &mut self,
+        call: Option<&ledger::LedgerCall>,
+        versions: &ledger::VersionVec,
+    ) -> ledger::ExecKind {
+        match call {
+            Some(c) => self.dedup.audit_exec(c, versions, true),
+            None => self.dedup.audit_effectful(),
+        }
+    }
+
+    /// 结果侧存上限（字节）。0 = 不限。（配置 `agent.ctx.dedup_max_bytes` 直接灌进来）
+    pub fn set_dedup_cap(&mut self, cap: usize) {
+        self.dedup.set_cap(cap);
+    }
+
+    pub fn dedup_stats(&self) -> ledger::Stats {
+        self.dedup.stats()
+    }
+
+    /// 一行小结（进 trace）：**P2 的验收读数**就在这里
+    pub fn dedup_summary(&self) -> String {
+        self.dedup.render_stats()
+    }
+
     // ---------------------------------------------------------------- 停滞
 
     /// 记一轮的产出（新结论 / 文件变更）
@@ -299,8 +374,11 @@ impl Progress {
     /// 收集信息就是进展；只有"没读新东西、没新结论、也没改文件"才是真在原地打转。
     pub fn note_round(&mut self, round: usize, new_finding: bool, wrote: bool, new_read: bool) {
         // 新命令 = 拿到了新信息（调研型任务的主力就是 execute 式检索）。
-        let new_read = new_read || self.fresh_cmd;
+        // 账本记下一次**真执行**同理（`fresh_exec`）—— 命中（复用）**不算**进展：
+        // 那一轮什么新东西都没看到，正是停滞守卫要抓的形态。
+        let new_read = new_read || self.fresh_cmd || self.fresh_exec;
         self.fresh_cmd = false;
+        self.fresh_exec = false;
         if new_finding || wrote || new_read {
             self.last_progress = round;
         }

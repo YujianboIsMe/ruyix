@@ -74,7 +74,19 @@ pub async fn run_with_ask(
     // 连续模型调用失败计数：成功一轮即清零
     let mut llm_failures: u32 = 0;
 
-    let mut msgs = vec![ChatMessage::system(agent_system_prompt())];
+    // 布局契约的 S 段（不可变根）：**只在循环外建一次**（`Regions::new` 的注释：唯一一次写 root）。
+    // 它有两个用处：① 根段字节的**唯一来源**；② 运行时 I1 判据的参照指纹。
+    let ctx_root = context::Regions::new(agent_system_prompt());
+    // 计量状态（`agent.ctx.metrics` 才用）：上一轮请求体 / 上一轮 S 段指纹 / 全程加权账，
+    // 以及厂商回报的缓存命中合计（**真值**那一半）
+    let mut prev_req: Option<Vec<ChatMessage>> = None;
+    let mut prev_root_digest: Option<u64> = None;
+    let mut tally = context::PrefixTally::default();
+    let mut cache_hit_sum: u64 = 0;
+    let mut cache_in_sum: u64 = 0;
+    let mut cache_rounds: usize = 0;
+
+    let mut msgs = vec![ChatMessage::system(ctx_root.root())];
     for m in tail_history(history, 12) {
         msgs.push(if m.role == "assistant" {
             ChatMessage::assistant(m.text)
@@ -269,10 +281,21 @@ pub async fn run_with_ask(
             continue;
         }
 
-        // ---- 进展记忆：每轮重建 system **尾部** ----
+        // ---- 进展记忆：块放**哪儿**由布局契约决定（`agent.ctx.layout`）----
         //
-        // 位置固定（前缀不变、只有块本身会变）⇒ 对提示词缓存友好；放 system 而不是对话流里，
-        // 是因为那两类消息会被 `fold_history` 折叠 —— 而"证据被折掉"正是本机制要治的病（ISSUE-8）。
+        // 关（默认 = v1.1 行为）：块拼进 `msgs[0]` 尾部。位置固定，看着"对缓存友好"，
+        // 但 **system 属不可变根 S** —— 每轮重建它，就等于每轮作废它**之后**的一切
+        // （任务头 + 整段历史都在后面）。字节流在块里就分叉了，后面的消息只是"内容相同"，
+        // 位置已经不同 ⇒ 一个字节都算不上复用。证据与判据见
+        // `doc/v1.2/架构-上下文账本与重基线调度-v1.2.md` §1（不变式 I1）。
+        // 开：块是**易变尾 A** —— 追加在全部稳定字节（S + E）之后，每轮整块重建，
+        // 且**只活这一次请求**；`msgs[0]` 从头到尾一个字节不动。
+        //
+        // 为什么调完就摘掉，而不是留到下一轮开头再删：`fold_history` 是**按下标**改老轮次
+        // 正文的（见 `RoundSlot`），任何跨轮的插/删都会让已记录的下标整体偏一格 ——
+        // 折错消息、甚至越界 panic。摘掉之后 `msgs` 的下标纪律与今天**一字不差**，
+        // 而线上请求体仍是 `[S][E][A]`（尾永远是最后一条消息，两臂在这一点的字节形状相同）。
+        let mut tail_idx: Option<usize> = None;
         if cfg.agent.findings_enabled {
             let spill = ctx.state_root().join("findings");
             if ctx.progress_mut().prompt_block(Some(&spill)).is_some() {
@@ -284,22 +307,94 @@ pub async fn run_with_ask(
                     ),
                 );
             }
-            msgs[0] = ChatMessage::system(format!(
-                "{}{}",
-                agent_system_prompt(),
-                ctx.progress().render()
-            ));
+            let block = ctx.progress().render();
+            if cfg.agent.ctx.layout {
+                tail_idx = Some(msgs.len());
+                msgs.push(ChatMessage::user(block));
+            } else {
+                // 根段从 `ctx_root` 来（而不是再喊一次 `agent_system_prompt()`）：S 段有**一个**
+                // 来源，运行时 I1 的参照指纹也是它 —— 两处各喊一次就成了两份会漂移的字节。
+                msgs[0] = ChatMessage::system(format!("{}{}", ctx_root.root(), block));
+            }
         }
 
-        let reply = match llm::chat(
+        // 计量（`agent.ctx.metrics`，默认关）：请求体在**发之前**留一份 ——
+        // 真要量的就是"厂商看到了什么"，而那就是带上易变尾的这一条（事后摘了尾就量不着了）。
+        let sent = cfg.agent.ctx.metrics.then(|| msgs.clone());
+
+        let llm_res = llm::chat(
             &cfg.llm,
             cfg.llm_fallback.as_ref(),
             &msgs,
             true,
             cfg.llm.tool_protocol,
         )
-        .await
-        {
+        .await;
+        // 摘尾：**所有**出口都在这一行之后（含下面"退避后重试"那条 continue）⇒
+        // 下一轮不会攒下第二条尾，任何一条路径都不会把尾漏进 `msgs` 的记账里
+        if let Some(i) = tail_idx {
+            msgs.remove(i);
+        }
+
+        // 量尺（只在 `agent.ctx.metrics` 打开时算）：① 公共前缀占比（**代理**）
+        // ② 厂商回报的命中 token（**真值**，实测可用）③ S 段指纹（运行时 I1）。
+        // 关掉时零额外计算、零额外日志 —— 两臂的门禁数字因此逐项不变。
+        if let Some(sent) = sent {
+            let stat = context::prefix_stat(prev_req.as_deref(), &sent);
+            tally.add(stat);
+            // 运行时 I1：S 段指纹必须逐轮相同。开着布局还变 ⇒ 契约被谁绕过去了。
+            let d = context::digest(&sent[0].content);
+            let root_note = match prev_root_digest {
+                None => format!("S 段 {d:016x}（首轮）"),
+                Some(p) if p == d => format!("S 段 {d:016x} 未变 ✓"),
+                Some(p) => {
+                    if cfg.agent.ctx.layout {
+                        sink.log(
+                            "error",
+                            format!(
+                                "[agent] 第 {step} 轮 布局契约 I1 被违反：S 段指纹 {d:016x} ≠ 上轮 {p:016x}\
+                                 （layout=on 时它必须逐轮逐字节相同）"
+                            ),
+                        );
+                    }
+                    format!("S 段 {d:016x} ≠ 上轮 {p:016x}（每轮重建）")
+                }
+            };
+            // 厂商回报的命中 token（**真值**）：拿不到就如实说"没回报"，
+            // 不许把"这家不报这个数"说成"命中 0"。
+            // 写法上刻意用 `if let Ok(..)`：U52 那道门禁按 `Err(` 上下文抓后端文案，
+            // 而这几句是**日志**不是回给前端的错误（引擎日志一律中文，与既有 info 行同款）。
+            let vendor = if let Ok(r) = llm_res.as_ref() {
+                match r.usage.cache_read() {
+                    Some(hit) => {
+                        cache_hit_sum += hit;
+                        cache_in_sum += r.usage.prompt_tokens;
+                        cache_rounds += 1;
+                        format!(
+                            " · 厂商命中 {hit} tokens（{:.1}%）",
+                            hit as f64 * 100.0 / r.usage.prompt_tokens.max(1) as f64
+                        )
+                    }
+                    None => " · 厂商未回报命中 token（**拿不到 ≠ 命中 0**）".to_string(),
+                }
+            } else {
+                " · 本轮请求失败：没有回报".to_string()
+            };
+            sink.log(
+                "info",
+                clip(
+                    &format!(
+                        "[agent] 第 {step} 轮 上下文计量：公共前缀 {} · {root_note}{vendor}",
+                        stat.render()
+                    ),
+                    300,
+                ),
+            );
+            prev_root_digest = Some(d);
+            prev_req = Some(sent);
+        }
+
+        let reply = match llm_res {
             Ok(r) => {
                 llm_failures = 0;
                 r
@@ -590,55 +685,82 @@ pub async fn run_with_ask(
         // 一波内互不冲突（见 conflicts）：一串读、一串命令就是一波 —— 那就是"一起并发"。
         let n = actions.len();
         let waves = batch_waves(&actions);
+        // ---- 去重账本（`agent.ctx.dedup`）的**执行前预检** ----
+        //
+        // 位置选在这里（波次调度之前）是刻意的：命中的那些**根本不进波** ⇒ 不占并发、
+        // 不占超时、不改任何调度形状；而"要不要跳过执行"这唯一一次决策也只发生在这一处。
+        // 版本快照必须在**执行之前**取（执行本身可能改文件）。
+        //
+        // 仪器那一半（审计）跟着 `metrics` 走、与 `dedup` 无关：**对照臂也要能量**
+        // "重复执行了几次"，否则"下降 ≥50%"这条判据没有基线。
+        let repo_ver = if cfg.agent.ctx.dedup || cfg.agent.ctx.metrics {
+            ledger::repo_version(proj)
+        } else {
+            None
+        };
+        let plans: Vec<Option<ledger::Plan>> = if cfg.agent.ctx.dedup || cfg.agent.ctx.metrics {
+            ledger::precheck(&mut ctx, &actions, &repo_ver, cfg.agent.ctx.dedup)
+        } else {
+            Vec::new()
+        };
+        if let Some(cap) = cfg.agent.ctx.dedup.then_some(cfg.agent.ctx.dedup_max_bytes) {
+            ctx.progress_mut().set_dedup_cap(cap);
+        }
         let mut slots: Vec<Option<CallResult>> = (0..n).map(|_| None).collect();
         for wave in &waves {
             if wave.len() == 1 {
                 let i = wave[0];
-                let one = match &actions[i] {
-                    // plan 是控制动作（parse 拒了批里的 plan，所以只可能是单动作）：
-                    // 就地更新引擎手里的计划与游标，回灌文本与老版本逐字一致
-                    Action::Plan(steps) => {
-                        let is_reset = !plan_steps.is_empty();
-                        if cfg.step.execute_plan && is_reset && plan_resets >= MAX_PLAN_RESETS {
-                            // 重排次数用尽：忽略这一次，按现有计划继续 —— 否则
-                            // "失败 → 重排 → 又失败 → 再重排"能把整个轮次预算烧光却什么都不产出
-                            (
-                                "plan".into(),
-                                "重排被忽略（已达上限）".into(),
-                                Ok(format!(
-                                    "计划重排次数已达上限（{MAX_PLAN_RESETS} 次），继续按现有计划执行。"
-                                )),
-                            )
-                        } else {
-                            plan_steps = steps.clone();
-                            // 新计划 = 从头执行（游标归零）。已完成的步骤事实留在 plan_done 里，
-                            // 子步骤输入包会带上它，模型仍能看到"前面做过什么"。
-                            plan_cursor = 0;
-                            step_states = vec![None; plan_steps.len()];
-                            if is_reset {
-                                plan_resets += 1;
-                            }
-                            let p = plan_to_outline(task, plan_steps.clone());
-                            sink.plan(&p);
-                            (
-                                "plan".into(),
-                                format!("{} 个步骤", plan_steps.len()),
-                                Ok(if cfg.step.execute_plan {
-                                    "计划已收到，引擎将按序执行各步骤；全部做完后输出 final。\
+                // 去重命中：**不执行**（结果在预检里已经算好，连波都不进）
+                let one = if let Some(hit) = reused_slot(&plans, i) {
+                    hit
+                } else {
+                    match &actions[i] {
+                        // plan 是控制动作（parse 拒了批里的 plan，所以只可能是单动作）：
+                        // 就地更新引擎手里的计划与游标，回灌文本与老版本逐字一致
+                        Action::Plan(steps) => {
+                            let is_reset = !plan_steps.is_empty();
+                            if cfg.step.execute_plan && is_reset && plan_resets >= MAX_PLAN_RESETS {
+                                // 重排次数用尽：忽略这一次，按现有计划继续 —— 否则
+                                // "失败 → 重排 → 又失败 → 再重排"能把整个轮次预算烧光却什么都不产出
+                                (
+                                    "plan".into(),
+                                    "重排被忽略（已达上限）".into(),
+                                    Ok(format!(
+                                        "计划重排次数已达上限（{MAX_PLAN_RESETS} 次），继续按现有计划执行。"
+                                    )),
+                                )
+                            } else {
+                                plan_steps = steps.clone();
+                                // 新计划 = 从头执行（游标归零）。已完成的步骤事实留在 plan_done 里，
+                                // 子步骤输入包会带上它，模型仍能看到"前面做过什么"。
+                                plan_cursor = 0;
+                                step_states = vec![None; plan_steps.len()];
+                                if is_reset {
+                                    plan_resets += 1;
+                                }
+                                let p = plan_to_outline(task, plan_steps.clone());
+                                sink.plan(&p);
+                                (
+                                    "plan".into(),
+                                    format!("{} 个步骤", plan_steps.len()),
+                                    Ok(if cfg.step.execute_plan {
+                                        "计划已收到，引擎将按序执行各步骤；全部做完后输出 final。\
                                      若要调整计划，重新输出 plan（注意：会从第 1 步重新执行）。"
-                                        .into()
-                                } else {
-                                    "任务清单已展示给用户（大纲区），按清单继续。".into()
-                                }),
-                            )
+                                            .into()
+                                    } else {
+                                        "任务清单已展示给用户（大纲区），按清单继续。".into()
+                                    }),
+                                )
+                            }
                         }
+                        // 没命中（或这条本来就不参与去重）：照常执行 —— 与 v1.1 逐字一致
+                        _ => exec_one(cfg, proj, policy, conn, &mut ctx, actions[i].clone()).await,
                     }
-                    _ => exec_one(cfg, proj, policy, conn, &mut ctx, actions[i].clone()).await,
                 };
                 slots[i] = Some(one);
             } else {
                 run_wave(
-                    cfg, proj, policy, conn, &mut ctx, &actions, wave, &mut slots,
+                    cfg, proj, policy, conn, &mut ctx, &actions, &plans, wave, &mut slots,
                 )
                 .await;
             }
@@ -661,6 +783,49 @@ pub async fn run_with_ask(
         let mut any_write_ok = false;
         for (i, (tool, brief, res)) in results.iter().enumerate() {
             let ok = res.is_ok();
+            // ---- 去重账本：**真执行**的那些记账 + 仪器喂数（命中不记，只计数）----
+            //
+            // 记账用**执行前**的版本快照（`p.versions`）：执行本身可能改文件，
+            // 事后取会把"这次读到的东西"绑定到"改完之后的状态"上 —— 那正是
+            // "静默给出错答案"的入口。
+            let hit = plans
+                .get(i)
+                .and_then(|p| p.as_ref())
+                .is_some_and(|p| p.reuse.is_some());
+            if let Some(p) = plans.get(i).and_then(|p| p.as_ref()) {
+                if !hit {
+                    // **顺序要紧**：先审计、后记账。反过来的话，审计问的"账本会不会拦下它"
+                    // 会撞上**刚为这次执行记下的那一条** ⇒ 每次执行都被数成"重复"
+                    // （实测踩过：唯一执行 0 · 仍重复执行 2）。
+                    if cfg.agent.ctx.metrics {
+                        ctx.progress_mut().dedup_audit(Some(&p.call), &p.versions);
+                    }
+                    if cfg.agent.ctx.dedup
+                        && let Ok(text) = res
+                    {
+                        ctx.progress_mut().dedup_record(
+                            p.call.clone(),
+                            text.clone(),
+                            p.versions.clone(),
+                            step as u32,
+                        );
+                    }
+                }
+            } else if cfg.agent.ctx.metrics
+                && matches!(
+                    &actions[i],
+                    Action::Write(_)
+                        | Action::Execute(_, _)
+                        | Action::ExecBg(_)
+                        | Action::Proc(_, _)
+                        | Action::Connect(_)
+                )
+            {
+                // 不纯的那些（写 / 白名单外的 execute / 后台 / 句柄 / connect）也要进审计：
+                // 上游的"唯一执行"里含它们，少了这一支，两边的计数就对不上。
+                ctx.progress_mut()
+                    .dedup_audit(None, &ledger::VersionVec::default());
+            }
             if *tool == "write" && ok {
                 any_write_ok = true;
             }
@@ -699,10 +864,20 @@ pub async fn run_with_ask(
             };
             let level = if ok { "info" } else { "warn" };
             let icon = if ok { "✓" } else { "✗" };
-            sink.log(
-                level,
-                clip(&format!("[agent] {head} {tool} {icon} {brief}"), 400),
-            );
+            // 命中的那几条给一条**看得见**的 trace：`dedup <tool> <norm>` 这个形状是契约的
+            // 一部分（ui-smoke U70 与真 run 的读数都按它数），措辞别随手改。
+            let line = match plans
+                .get(i)
+                .and_then(|p| p.as_ref())
+                .and_then(|p| p.reuse.as_ref())
+            {
+                Some(r) => format!(
+                    "[agent] {head} dedup {tool} {brief} ← 复用第 {} 轮的结果（资源版本未变，未重跑）",
+                    r.step
+                ),
+                None => format!("[agent] {head} {tool} {icon} {brief}"),
+            };
+            sink.log(level, clip(&line, 400));
         }
         if n > 1 {
             // 用户读日志时最想知道的就是"这一轮省了几次往返、几条真并发"
@@ -739,8 +914,12 @@ pub async fn run_with_ask(
                 // 而且账本会随轮数线性涨。要内容就去 findings（模型写的结论）或重新精确读。
                 ctx.progress_mut()
                     .ledger_line(ledger_line_for(step, tool, brief, res));
-                // 重复读守卫：同一 (path, 区间) 本 run 第二次读 ⇒ 在该条结果后追加一行
-                if let Action::Read(spec) = &actions[i] {
+                // 重复读守卫（**账本开着时这条退场**）：`agent.ctx.dedup` 的"包含关系 + 版本"
+                // 判据替掉了"区间相交"这条近似（见 v1.2 架构文档 §3）—— 一个被账本覆盖的读，
+                // 要么命中（那已经有复用标注了），要么真读了新东西（账本记下 ⇒ 算进展）。
+                let ledger_covered =
+                    cfg.agent.ctx.dedup && plans.get(i).and_then(|p| p.as_ref()).is_some();
+                if !ledger_covered && let Action::Read(spec) = &actions[i] {
                     let start = spec.offset.unwrap_or(1).max(1).min(u32::MAX as usize) as u32;
                     let end = start
                         .saturating_add(spec.limit.unwrap_or(400).min(u32::MAX as usize) as u32)
@@ -952,6 +1131,41 @@ pub async fn run_with_ask(
         .as_ref()
         .map(|d| d.to_string_lossy().to_string());
     out.changes = ctx.changes.clone();
+    // 上下文计量小结（`agent.ctx.metrics`）：整段 run 的**加权**复用率 ——
+    // 单轮的占比会被"这一轮恰好是新内容"带偏，账单要看的是全程。
+    // 两个数一起给：字节代理（发前就能算）+ 厂商回报的命中 token（**真值**，首轮必然是 0 命中）。
+    if cfg.agent.ctx.metrics && tally.rounds > 0 {
+        let vendor = if cache_rounds == 0 {
+            " · 厂商回报命中：无（这家/这一路没给这个数）".to_string()
+        } else {
+            format!(
+                " · 厂商回报命中 {} / {} tokens = {:.1}%（{} 轮；输入含命中部分）",
+                cache_hit_sum,
+                cache_in_sum,
+                cache_hit_sum as f64 * 100.0 / cache_in_sum.max(1) as f64,
+                cache_rounds
+            )
+        };
+        sink.log(
+            "info",
+            clip(
+                &format!(
+                    "[agent] 上下文计量小结：加权公共前缀 {} · 共 {} 轮（首轮按 0 前缀计 —— 它本来就没有可复用的东西）{vendor}",
+                    tally.render(),
+                    tally.rounds
+                ),
+                300,
+            ),
+        );
+    }
+    // 去重账本小结（`dedup` 或 `metrics` 开着）：**P2 的验收读数**
+    // —— "重复工具调用次数下降 ≥50%" 里的那个数就是 `拦截重复` 与 `仍重复执行`。
+    if cfg.agent.ctx.dedup || cfg.agent.ctx.metrics {
+        sink.log(
+            "info",
+            clip(&format!("[agent] {}", ctx.progress().dedup_summary()), 300),
+        );
+    }
     sink.stage(
         "agent",
         "done",

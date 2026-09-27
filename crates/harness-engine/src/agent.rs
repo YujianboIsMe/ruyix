@@ -1720,6 +1720,24 @@ pub(crate) fn batch_json_result(items: &[CallResult]) -> String {
     .to_string()
 }
 
+/// 去重命中时直接给出的那条结果（**不执行**）。`None` = 没命中 ⇒ 调用方照常执行。
+///
+/// 措辞与形状都只有这一处：单动作路径与批路径共用它，免得两处各写一遍
+/// "原文 + 标注行" 而在某一次改动里分叉（模型看到的标注就那两种，分叉 = 一处漏标）。
+pub(crate) fn reused_slot(plans: &[Option<ledger::Plan>], i: usize) -> Option<CallResult> {
+    let p = plans.get(i)?.as_ref()?;
+    let r = p.reuse.as_ref()?;
+    Some((
+        p.tool.to_string(),
+        p.brief.clone(),
+        Ok(format!(
+            "{}{}",
+            r.text,
+            ledger::LedgerCall::reuse_note(r.step)
+        )),
+    ))
+}
+
 /// 一个动作 → `(tool, brief, result)`。批与单动作走**同一份**实现：
 /// 两条派发路径必然分叉（老代码里解析与执行就分在两处 `match`），这里只留一条。
 async fn exec_one(
@@ -1818,12 +1836,17 @@ async fn run_wave(
     conn: &dyn Connector,
     ctx: &mut Ctx<'_>,
     actions: &[Action],
+    plans: &[Option<ledger::Plan>],
     wave: &[usize],
     slots: &mut [Option<CallResult>],
 ) {
     // 一行回退：波内也不并发（仍是一批一次往返，只是按声明顺序串行）
     if !cfg.agent.batch_parallel {
         for &i in wave {
+            if let Some(hit) = reused_slot(plans, i) {
+                slots[i] = Some(hit); // 去重命中：不执行
+                continue;
+            }
             slots[i] = Some(exec_one(cfg, proj, policy, conn, &mut *ctx, actions[i].clone()).await);
         }
         return;
@@ -1840,6 +1863,11 @@ async fn run_wave(
     let mut finds: Vec<(usize, Vec<FindingSpec>)> = Vec::new();
 
     for &i in wave {
+        // 去重命中：**不进波、不执行** —— 结果在预检里就算好了（`plans` 由 tool_loop 传入）
+        if let Some(hit) = reused_slot(plans, i) {
+            slots[i] = Some(hit);
+            continue;
+        }
         match &actions[i] {
             Action::Read(spec) => reads.push((i, spec.clone())),
             Action::Write(spec) => match safe_rel_path(&spec.path) {
@@ -3895,6 +3923,8 @@ pub use tool_loop::run_with_ask;
 /// 子模块用 `use super::*` 看到这里的一切。
 pub mod context;
 pub mod findings;
+/// 去重账本（v1.2 P2）：纯工具 + 资源版本未变 ⇒ 同一次调用不许执行第二次。
+pub mod ledger;
 
 #[cfg(test)]
 mod tests;

@@ -95,6 +95,27 @@ pub struct Usage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// **命中前缀缓存**的输入 token —— 厂商回报的**真值**（v1.2 拍板 6 的答案：实测
+    /// `https://api.deepseek.com/anthropic` 确实回报它，见下）。
+    ///
+    /// `None` = 这一轮/这家**没回报这个数**，**不等于"命中 0"** —— 两个意思在账上必须分开
+    /// （拿不到就不许当 0 使，否则"用了缓存"和"这家不报"会被算成同一件事）。
+    ///
+    /// 三家的名字不一样，统一在 [`Usage::cache_read`] 里读：
+    /// · DeepSeek（openai 形状）平铺 `prompt_cache_hit_tokens`
+    /// · OpenAI `prompt_tokens_details.cached_tokens`
+    /// · anthropic `cache_read_input_tokens`（那种形状下 `input_tokens` **不含**命中部分）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_hit_tokens: Option<u64>,
+    /// OpenAI 形状的输入明细（`prompt_tokens_details.cached_tokens`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PromptTokensDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -102,6 +123,18 @@ impl Usage {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
         self.total_tokens += other.total_tokens;
+        // 有一轮没回报 ⇒ 合计标 None：宁可"不知道"，也不给一个偏小的数充数
+        self.prompt_cache_hit_tokens =
+            match (self.prompt_cache_hit_tokens, other.prompt_cache_hit_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                _ => None,
+            };
+    }
+
+    /// 命中前缀缓存的输入 token（三家形状归一，见字段注释）。`None` = 这家没回报。
+    pub fn cache_read(&self) -> Option<u64> {
+        self.prompt_cache_hit_tokens
+            .or_else(|| self.prompt_tokens_details.as_ref()?.cached_tokens)
     }
 }
 
@@ -790,6 +823,13 @@ struct AnthropicUsage {
     input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+    /// 命中前缀缓存的输入 token（**实测 DeepSeek 的 anthropic 端点回报它**：同一前缀第二次
+    /// 请求 `input_tokens` 只剩增量、命中部分走这里。见 `doc/v1.2/` 的计量小节）
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    /// 写入缓存的输入 token（首次请求为 0）
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
 }
 
 fn anthropic_url(base_url: &str) -> String {
@@ -992,10 +1032,21 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
     };
     let usage = parsed
         .usage
-        .map(|u| Usage {
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            total_tokens: u.input_tokens + u.output_tokens,
+        .map(|u| {
+            let hit = u.cache_read_input_tokens;
+            let created = u.cache_creation_input_tokens;
+            Usage {
+                // anthropic 的 `input_tokens` **不含**命中/写入缓存的部分 ⇒ 三者相加才是
+                // 真正的输入量（不然命中越多、账面上"输入越少"，缓存看起来像是"省了输入"）
+                prompt_tokens: u.input_tokens + hit.unwrap_or(0) + created.unwrap_or(0),
+                completion_tokens: u.output_tokens,
+                total_tokens: u.input_tokens
+                    + hit.unwrap_or(0)
+                    + created.unwrap_or(0)
+                    + u.output_tokens,
+                prompt_cache_hit_tokens: hit,
+                prompt_tokens_details: None,
+            }
         })
         .unwrap_or_default();
     Ok(RawReply {
@@ -1162,6 +1213,9 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
             total_tokens: u.input_tokens + u.output_tokens,
+            // `/responses` 这条路的缓存回报形状**没实测过** ⇒ 如实留 None（不猜字段名，
+            // 猜错的表现是"命中恒为 0"，那比"不知道"坏得多）
+            ..Default::default()
         })
         .unwrap_or_default();
     Ok(RawReply {
@@ -2309,14 +2363,44 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            prompt_cache_hit_tokens: Some(4),
+            ..Default::default()
         };
         a.add(&Usage {
             prompt_tokens: 1,
             completion_tokens: 2,
             total_tokens: 3,
+            prompt_cache_hit_tokens: Some(3),
+            ..Default::default()
         });
         assert_eq!(a.total_tokens, 18);
         assert_eq!(a.completion_tokens, 7);
+        assert_eq!(a.cache_read(), Some(7), "两轮都回报 ⇒ 合计如实相加");
+        // 有一轮没回报 ⇒ 合计标 None（"不知道"不许伪装成"偏小的数"）
+        a.add(&Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
+            ..Default::default()
+        });
+        assert_eq!(a.cache_read(), None);
+    }
+
+    /// 三家形状归一到一个读数：`prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens`
+    #[test]
+    fn cache_read_normalizes_both_openai_shapes() {
+        let flat: Usage =
+            serde_json::from_str(r#"{"prompt_tokens":100,"prompt_cache_hit_tokens":64}"#)
+                .expect("DeepSeek 平铺形状该能解");
+        assert_eq!(flat.cache_read(), Some(64));
+        // 没这个键 = 这家不回报（None），**不是** 0 命中
+        let none: Usage = serde_json::from_str(r#"{"prompt_tokens":100}"#).unwrap();
+        assert_eq!(none.cache_read(), None);
+        let nested: Usage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":80}}"#,
+        )
+        .unwrap();
+        assert_eq!(nested.cache_read(), Some(80));
     }
 
     /// 模型把 Markdown 的多行说明直接塞进 JSON 字符串（写真换行，而不是转义写法）时，
@@ -2446,6 +2530,34 @@ mod tests {
         let r = extract_anthropic(raw).unwrap();
         assert_eq!(r.finish_reason.as_deref(), Some("length"));
         assert_eq!(r.content, "半截");
+    }
+
+    /// **真机样本**（2026-09-27 实测 `https://api.deepseek.com/anthropic`，同一段前缀连发两次）：
+    /// 第二次 `input_tokens` 只剩增量、命中部分走 `cache_read_input_tokens`。
+    ///
+    /// 这条钉住两件事：① 命中数被读出来（v1.2 的 G1 从此有**真值**，不必只靠字节代理）；
+    /// ② 输入量按三者相加（否则命中越多、账面输入越少，缓存看起来像"省了输入"）。
+    #[test]
+    fn anthropic_cache_hit_tokens_are_read_and_counted_into_the_input() {
+        let second = r#"{"type":"message","stop_reason":"end_turn",
+            "content":[{"type":"text","text":"好"}],
+            "usage":{"input_tokens":176,"cache_creation_input_tokens":0,
+                     "cache_read_input_tokens":6272,"output_tokens":8}}"#;
+        let r = extract_anthropic(second).unwrap();
+        assert_eq!(r.usage.cache_read(), Some(6272));
+        assert_eq!(r.usage.prompt_tokens, 176 + 6272);
+        assert_eq!(r.usage.total_tokens, 176 + 6272 + 8);
+        // 首次请求：命中 0，但**回报了**这个数 ⇒ Some(0)，不是 None（"命中 0"≠"没回报"）
+        let first = r#"{"type":"message","content":[{"type":"text","text":"好"}],
+            "usage":{"input_tokens":6440,"cache_creation_input_tokens":0,
+                     "cache_read_input_tokens":0,"output_tokens":8}}"#;
+        let f = extract_anthropic(first).unwrap();
+        assert_eq!(f.usage.cache_read(), Some(0));
+        assert_eq!(f.usage.prompt_tokens, 6440);
+        // 老样本没有这些键 ⇒ 命中数如实是 None（不许默认成 0 命中）
+        let old = r#"{"type":"message","content":[{"type":"text","text":"x"}],
+            "usage":{"input_tokens":9,"output_tokens":1}}"#;
+        assert_eq!(extract_anthropic(old).unwrap().usage.cache_read(), None);
     }
 
     /// 联网能力**按协议那一维**判（2026-09-25 实测修正掉"anthropic 一律关"）：

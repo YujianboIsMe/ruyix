@@ -1,0 +1,2628 @@
+{
+ "counts": {
+  "blocked_dup": 35,
+  "redundant_exec": 0,
+  "stale_exec": 1,
+  "unique_exec": 81
+ },
+ "events": [
+  {
+   "decision": "execute",
+   "digest": "03cd1aabc933a3f2",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "config/ledger5.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "config/ledger5.py"
+    },
+    "tool": "write"
+   },
+   "step": 0,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "a160027a7e499716",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 1,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "a160027a7e499716",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": "C1:0",
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 1,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "52354be9bb28888b",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/cache1.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs/cache1.py"
+    },
+    "tool": "read"
+   },
+   "step": 2,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "2d3f4914f5254ca9",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/scheduler6.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- config/scheduler6.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 3,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "12189c3a0938ca1e",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/core/runtime2.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/core/runtime2.py"
+    },
+    "tool": "write"
+   },
+   "step": 4,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "0b22a3f2646bf6e4",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/core/index0.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/core/index0.toml"
+    },
+    "tool": "write"
+   },
+   "step": 5,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "1cec3266b79115f4",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/io/store4.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/io/store4.rs"
+    },
+    "tool": "write"
+   },
+   "step": 6,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "0598b798bbe949be",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "docs/cache1.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs/cache1.py"
+    },
+    "tool": "write"
+   },
+   "step": 7,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "274d71d0a775f117",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/index0.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/index0.py"
+    },
+    "tool": "execute"
+   },
+   "step": 7,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "9e67fb840a7b5d1b",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "anchor": 1,
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"anchor\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 8,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "274d71d0a775f117",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/index0.py": 1
+   },
+   "reused_ref": "C7:1",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/index0.py"
+    },
+    "tool": "execute"
+   },
+   "step": 9,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "c6ea53c165daa60b",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 10,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "execute",
+   "digest": "e25dd30a52eef3b7",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/core": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/core"
+    },
+    "tool": "read"
+   },
+   "step": 11,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "d09d4d3a7d85e31c",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/ledger3.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/io/ledger3.rs"
+    },
+    "tool": "read"
+   },
+   "step": 12,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "2858c0de40668b90",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "docs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 13,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "execute",
+   "digest": "e477d67c192511bb",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "config"
+    },
+    "tool": "read"
+   },
+   "step": 14,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "49d74766d3dc0f47",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src"
+    },
+    "tool": "read"
+   },
+   "step": 15,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "a160027a7e499716",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": "C1:0",
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 15,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "b85ddc11930bda59",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/cache1.py": 2
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"rung\" -- docs/cache1.py"
+    },
+    "tool": "execute"
+   },
+   "step": 16,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "e89e1c712ab83e15",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/budget3.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/budget3.md"
+    },
+    "tool": "read"
+   },
+   "step": 17,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "4c94a40915d3604c",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "scripts"
+    },
+    "tool": "read"
+   },
+   "step": 18,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "1c42e6d415bf1bcc",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/scheduler5.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/scheduler5.toml"
+    },
+    "tool": "read"
+   },
+   "step": 18,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "14a0ececee5dc263",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/scheduler5.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- src/scheduler5.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 19,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "49d74766d3dc0f47",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src": 1
+   },
+   "reused_ref": "C15:0",
+   "ruyix": {
+    "args": {
+     "path": "src"
+    },
+    "tool": "read"
+   },
+   "step": 20,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "fb8dca96b1baf106",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/cache2.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"delta\" -- scripts/cache2.md"
+    },
+    "tool": "execute"
+   },
+   "step": 20,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "1acc764ec99b5524",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "prefix": 1,
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"prefix\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 21,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e25dd30a52eef3b7",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/core": 1
+   },
+   "reused_ref": "C11:0",
+   "ruyix": {
+    "args": {
+     "path": "src/core"
+    },
+    "tool": "read"
+   },
+   "step": 22,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "318adcc27cf9b436",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/ledger4.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"digest\" -- tests/ledger4.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 23,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e477d67c192511bb",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config": 1
+   },
+   "reused_ref": "C14:0",
+   "ruyix": {
+    "args": {
+     "path": "./config"
+    },
+    "tool": "read"
+   },
+   "step": 24,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "4c94a40915d3604c",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts": 1
+   },
+   "reused_ref": "C18:0",
+   "ruyix": {
+    "args": {
+     "path": "scripts"
+    },
+    "tool": "read"
+   },
+   "step": 25,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "b463eba70919fc2b",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "anchor": 1,
+    "scripts": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"anchor\" -- scripts"
+    },
+    "tool": "execute"
+   },
+   "step": 26,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e89e1c712ab83e15",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/budget3.md": 1
+   },
+   "reused_ref": "C17:0",
+   "ruyix": {
+    "args": {
+     "path": "src/budget3.md"
+    },
+    "tool": "read"
+   },
+   "step": 27,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "b770c810ff285108",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/planner1.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "tests/planner1.toml"
+    },
+    "tool": "read"
+   },
+   "step": 28,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "2858c0de40668b90",
+   "kind": "fact_probe",
+   "purity": "effectful",
+   "resources": {
+    "docs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 29,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "execute",
+   "digest": "589e86c9f119c12a",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/wal5.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 29,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "1ef2e2745eaa2151",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "delta": 1,
+    "docs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"delta\" -- docs"
+    },
+    "tool": "execute"
+   },
+   "step": 29,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "ff02f6f877779bc0",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "tests"
+    },
+    "tool": "read"
+   },
+   "step": 30,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "2d3f4914f5254ca9",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "config/scheduler6.rs": 1
+   },
+   "reused_ref": "C3:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- config/scheduler6.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 31,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "ebde063fd9676403",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "delta": 1,
+    "src": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"delta\" -- src"
+    },
+    "tool": "execute"
+   },
+   "step": 31,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "43e2e1094990ba92",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/core/index0.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"capsule\" -- src/core/index0.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 31,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "a160027a7e499716",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": "C1:0",
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 32,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "5ad92101976d1432",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config": 1,
+    "prefix": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"prefix\" -- config"
+    },
+    "tool": "execute"
+   },
+   "step": 32,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "b4e5dfd82d58443f",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/planner1.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"prefix\" -- tests/planner1.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 32,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e25dd30a52eef3b7",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src/core": 1
+   },
+   "reused_ref": "C11:0",
+   "ruyix": {
+    "args": {
+     "path": "src/core"
+    },
+    "tool": "read"
+   },
+   "step": 33,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "54b363914d0cbd62",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/parser5.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- docs/parser5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 33,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "5c3245ded14ecb01",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "epoch": 1,
+    "tests": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"epoch\" -- tests"
+    },
+    "tool": "execute"
+   },
+   "step": 34,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "4c94a40915d3604c",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts": 1
+   },
+   "reused_ref": "C18:0",
+   "ruyix": {
+    "args": {
+     "path": "scripts"
+    },
+    "tool": "read"
+   },
+   "step": 35,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "54b363914d0cbd62",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/parser5.md": 1
+   },
+   "reused_ref": "C33:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- docs/parser5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 35,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "2bf429fe3f1dfe1b",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal3.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/wal3.md"
+    },
+    "tool": "execute"
+   },
+   "step": 36,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "fd392d982e6c8903",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/parser0.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"token\" -- scripts/parser0.md"
+    },
+    "tool": "execute"
+   },
+   "step": 37,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "274d71d0a775f117",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts/index0.py": 1
+   },
+   "reused_ref": "C7:1",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/index0.py"
+    },
+    "tool": "execute"
+   },
+   "step": 38,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "862bed103d6a402d",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "limit": 20,
+     "offset": 0,
+     "path": "scripts/wal5.toml"
+    },
+    "tool": "read"
+   },
+   "step": 38,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "52354be9bb28888b",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "docs/cache1.py": 2
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs/cache1.py"
+    },
+    "tool": "read"
+   },
+   "step": 39,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ff02f6f877779bc0",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests": 1
+   },
+   "reused_ref": "C30:0",
+   "ruyix": {
+    "args": {
+     "path": "tests"
+    },
+    "tool": "read"
+   },
+   "step": 39,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "589e86c9f119c12a",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": "C29:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- ./scripts/wal5.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 39,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "54b363914d0cbd62",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/parser5.md": 1
+   },
+   "reused_ref": "C33:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- docs/parser5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 40,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "5ad92101976d1432",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "config": 1,
+    "prefix": 1
+   },
+   "reused_ref": "C32:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"prefix\" -- config"
+    },
+    "tool": "execute"
+   },
+   "step": 41,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "4a1f6e2deed47550",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "scripts/wal5.toml"
+    },
+    "tool": "write"
+   },
+   "step": 41,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1c42e6d415bf1bcc",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src/scheduler5.toml": 1
+   },
+   "reused_ref": "C18:1",
+   "ruyix": {
+    "args": {
+     "path": "src/scheduler5.toml"
+    },
+    "tool": "read"
+   },
+   "step": 42,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "4c94a40915d3604c",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts": 1
+   },
+   "reused_ref": "C18:0",
+   "ruyix": {
+    "args": {
+     "path": "scripts"
+    },
+    "tool": "read"
+   },
+   "step": 42,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "c6ea53c165daa60b",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 43,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "execute",
+   "digest": "83f3b598591ee112",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/encoder4.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"anchor\" -- docs/encoder4.py"
+    },
+    "tool": "execute"
+   },
+   "step": 44,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "d28fb5526cf91cc9",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/core/runtime2.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- src/core/runtime2.py"
+    },
+    "tool": "execute"
+   },
+   "step": 44,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "ed6bffa484505e6a",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1,
+    "token": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"token\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 45,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "ab17780e4128464f",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/cache0.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs/cache0.md"
+    },
+    "tool": "read"
+   },
+   "step": 46,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ab17780e4128464f",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/cache0.md": 1
+   },
+   "reused_ref": "C46:0",
+   "ruyix": {
+    "args": {
+     "path": "docs/cache0.md"
+    },
+    "tool": "read"
+   },
+   "step": 47,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "a160027a7e499716",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": "C1:0",
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 48,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "0598b798bbe949be",
+   "kind": "fact_probe",
+   "purity": "effectful",
+   "resources": {
+    "docs/cache1.py": 2
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs/cache1.py"
+    },
+    "tool": "write"
+   },
+   "step": 49,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "3002b39d255ca228",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/ledger5.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "config/ledger5.py"
+    },
+    "tool": "read"
+   },
+   "step": 49,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "c6ea53c165daa60b",
+   "kind": "fact_probe",
+   "purity": "effectful",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 50,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "dedup",
+   "digest": "49d74766d3dc0f47",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src": 1
+   },
+   "reused_ref": "C15:0",
+   "ruyix": {
+    "args": {
+     "path": "./src"
+    },
+    "tool": "read"
+   },
+   "step": 50,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e25dd30a52eef3b7",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/core": 1
+   },
+   "reused_ref": "C11:0",
+   "ruyix": {
+    "args": {
+     "path": "src/core"
+    },
+    "tool": "read"
+   },
+   "step": 50,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1c42e6d415bf1bcc",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/scheduler5.toml": 1
+   },
+   "reused_ref": "C18:1",
+   "ruyix": {
+    "args": {
+     "path": "src/scheduler5.toml"
+    },
+    "tool": "read"
+   },
+   "step": 51,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "0a8c1f1c9e70e054",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/index5.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- src/index5.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 51,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "2c47fd30540e4bba",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/cache2.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/cache2.md"
+    },
+    "tool": "execute"
+   },
+   "step": 52,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e25dd30a52eef3b7",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/core": 1
+   },
+   "reused_ref": "C11:0",
+   "ruyix": {
+    "args": {
+     "path": "./src/core"
+    },
+    "tool": "read"
+   },
+   "step": 53,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "e0dda70da1854e67",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/core/planner0.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/core/planner0.py"
+    },
+    "tool": "write"
+   },
+   "step": 54,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "6629e428141acd8b",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/parser5.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"capsule\" -- docs/parser5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 55,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ff02f6f877779bc0",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "tests": 1
+   },
+   "reused_ref": "C30:0",
+   "ruyix": {
+    "args": {
+     "path": "tests"
+    },
+    "tool": "read"
+   },
+   "step": 56,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e89e1c712ab83e15",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/budget3.md": 1
+   },
+   "reused_ref": "C17:0",
+   "ruyix": {
+    "args": {
+     "path": "src/budget3.md"
+    },
+    "tool": "read"
+   },
+   "step": 56,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1acc764ec99b5524",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "prefix": 1,
+    "src/io": 1
+   },
+   "reused_ref": "C21:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"prefix\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 57,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "45ff4134633748a1",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "digest": 1,
+    "docs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"digest\" -- docs"
+    },
+    "tool": "execute"
+   },
+   "step": 57,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1ef2e2745eaa2151",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "delta": 1,
+    "docs": 1
+   },
+   "reused_ref": "C29:1",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"delta\" -- docs"
+    },
+    "tool": "execute"
+   },
+   "step": 58,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "6629e428141acd8b",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "docs/parser5.md": 1
+   },
+   "reused_ref": "C55:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"capsule\" -- docs/parser5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 59,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "fe9cb0ad2c6885ec",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config": 1,
+    "segment": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"segment\" -- config"
+    },
+    "tool": "execute"
+   },
+   "step": 59,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "b4e5dfd82d58443f",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "tests/planner1.toml": 1
+   },
+   "reused_ref": "C32:1",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"prefix\" -- tests/planner1.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 60,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "a160027a7e499716",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": "C1:0",
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 60,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "execute",
+   "digest": "7135195ac1a0cdf7",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/parser5.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/parser5.py"
+    },
+    "tool": "read"
+   },
+   "step": 61,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "8f130564207de72d",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/parser3.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- tests/parser3.md"
+    },
+    "tool": "execute"
+   },
+   "step": 62,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "589e86c9f119c12a",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": "C29:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/wal5.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 63,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "1e3e771019f29fdb",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/segment2.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- src/io/segment2.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 63,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "4f85c5e9048c9b53",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/scheduler6.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "config/scheduler6.rs"
+    },
+    "tool": "read"
+   },
+   "step": 63,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e89e1c712ab83e15",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src/budget3.md": 1
+   },
+   "reused_ref": "C17:0",
+   "ruyix": {
+    "args": {
+     "path": "src/budget3.md"
+    },
+    "tool": "read"
+   },
+   "step": 64,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "9e1128ff399f2ce6",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs"
+    },
+    "tool": "read"
+   },
+   "step": 64,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1c42e6d415bf1bcc",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/scheduler5.toml": 1
+   },
+   "reused_ref": "C18:1",
+   "ruyix": {
+    "args": {
+     "path": "src/scheduler5.toml"
+    },
+    "tool": "read"
+   },
+   "step": 65,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "ee767af98f15e803",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/ledger4.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"segment\" -- tests/ledger4.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 66,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "2d3f4914f5254ca9",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/scheduler6.rs": 1
+   },
+   "reused_ref": "C3:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- config/scheduler6.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 67,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "a160027a7e499716",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": "C1:0",
+   "ruyix": {
+    "args": {
+     "path": "src/io"
+    },
+    "tool": "read"
+   },
+   "step": 68,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "b85ddc11930bda59",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "docs/cache1.py": 2
+   },
+   "reused_ref": "C16:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"rung\" -- docs/cache1.py"
+    },
+    "tool": "execute"
+   },
+   "step": 68,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "f05bb44d912caab2",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/store4.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"segment\" -- src/io/store4.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 68,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "80b754dae139ec94",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "tests/ledger6.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "tests/ledger6.toml"
+    },
+    "tool": "write"
+   },
+   "step": 68,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "fb8dca96b1baf106",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts/cache2.md": 1
+   },
+   "reused_ref": "C20:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"delta\" -- scripts/cache2.md"
+    },
+    "tool": "execute"
+   },
+   "step": 69,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ff02f6f877779bc0",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests": 1
+   },
+   "reused_ref": "C30:0",
+   "ruyix": {
+    "args": {
+     "path": "tests"
+    },
+    "tool": "read"
+   },
+   "step": 69,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ee767af98f15e803",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "tests/ledger4.toml": 1
+   },
+   "reused_ref": "C66:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"segment\" -- tests/ledger4.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 70,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "53e0fa04a1045042",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/segment4.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- config/segment4.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 70,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "589e86c9f119c12a",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": "C29:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/wal5.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 71,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ee767af98f15e803",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "tests/ledger4.toml": 1
+   },
+   "reused_ref": "C66:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"segment\" -- tests/ledger4.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 71,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "e89e1c712ab83e15",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/budget3.md": 1
+   },
+   "reused_ref": "C17:0",
+   "ruyix": {
+    "args": {
+     "path": "src/budget3.md"
+    },
+    "tool": "read"
+   },
+   "step": 71,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "a28d042d719d7a3b",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "tests": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 72,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "dedup",
+   "digest": "2c47fd30540e4bba",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/cache2.md": 1
+   },
+   "reused_ref": "C52:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/cache2.md"
+    },
+    "tool": "execute"
+   },
+   "step": 72,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "4f85c5e9048c9b53",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/scheduler6.rs": 1
+   },
+   "reused_ref": "C63:1",
+   "ruyix": {
+    "args": {
+     "path": "config/scheduler6.rs"
+    },
+    "tool": "read"
+   },
+   "step": 73,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "37b009cf3b7e5f07",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "epoch": 1,
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"epoch\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 74,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "5c3245ded14ecb01",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "epoch": 1,
+    "tests": 1
+   },
+   "reused_ref": "C34:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"epoch\" -- tests"
+    },
+    "tool": "execute"
+   },
+   "step": 75,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "3002b39d255ca228",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "config/ledger5.py": 1
+   },
+   "reused_ref": "C49:0",
+   "ruyix": {
+    "args": {
+     "path": "config/ledger5.py"
+    },
+    "tool": "read"
+   },
+   "step": 76,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "4c94a40915d3604c",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts": 1
+   },
+   "reused_ref": "C18:0",
+   "ruyix": {
+    "args": {
+     "path": "./scripts"
+    },
+    "tool": "read"
+   },
+   "step": 76,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "b85ddc11930bda59",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "docs/cache1.py": 2
+   },
+   "reused_ref": "C16:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"rung\" -- docs/cache1.py"
+    },
+    "tool": "execute"
+   },
+   "step": 77,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "4fdd1e160f2f3f03",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/io/store4.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/io/store4.toml"
+    },
+    "tool": "write"
+   },
+   "step": 77,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "804387a9bd82a885",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/index5.rs": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/index5.rs"
+    },
+    "tool": "read"
+   },
+   "step": 78,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "2c47fd30540e4bba",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts/cache2.md": 1
+   },
+   "reused_ref": "C52:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/cache2.md"
+    },
+    "tool": "execute"
+   },
+   "step": 79,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "9d0daa3a8e996a6e",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/ledger4.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "limit": 40,
+     "offset": 80,
+     "path": "tests/ledger4.toml"
+    },
+    "tool": "read"
+   },
+   "step": 79,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "e7547d8f14fe7f64",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "config/ledger5.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"epoch\" -- config/ledger5.py"
+    },
+    "tool": "execute"
+   },
+   "step": 80,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "fc55868140b8c219",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "capsule": 1,
+    "tests": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"capsule\" -- tests"
+    },
+    "tool": "execute"
+   },
+   "step": 81,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "94def6c93ab813d5",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 82,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "execute",
+   "digest": "0b22a3f2646bf6e4",
+   "kind": "fact_probe",
+   "purity": "effectful",
+   "resources": {
+    "src/core/index0.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/core/index0.toml"
+    },
+    "tool": "write"
+   },
+   "step": 83,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "45d2074b37d534c7",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "scripts/wal5.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "limit": 20,
+     "offset": 80,
+     "path": "scripts/wal5.toml"
+    },
+    "tool": "read"
+   },
+   "step": 83,
+   "tool": "read_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "2c47fd30540e4bba",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "scripts/cache2.md": 1
+   },
+   "reused_ref": "C52:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- scripts/cache2.md"
+    },
+    "tool": "execute"
+   },
+   "step": 84,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "c98fc67895615502",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/encoder5.md": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"token\" -- src/io/encoder5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 84,
+   "tool": "grep"
+  },
+  {
+   "decision": "dedup",
+   "digest": "ed6bffa484505e6a",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "src/io": 1,
+    "token": 1
+   },
+   "reused_ref": "C45:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"token\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 85,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1e3e771019f29fdb",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/segment2.rs": 1
+   },
+   "reused_ref": "C63:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- src/io/segment2.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 85,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "54b363914d0cbd62",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/parser5.md": 1
+   },
+   "reused_ref": "C33:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- docs/parser5.md"
+    },
+    "tool": "execute"
+   },
+   "step": 86,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1e3e771019f29fdb",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/segment2.rs": 1
+   },
+   "reused_ref": "C63:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- ./src/io/segment2.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 87,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "c6ea53c165daa60b",
+   "kind": "fact_probe",
+   "purity": "effectful",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 88,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "execute",
+   "digest": "c6ea53c165daa60b",
+   "kind": "step_call",
+   "purity": "effectful",
+   "resources": {
+    "src/io": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "cargo test"
+    },
+    "tool": "execute"
+   },
+   "step": 88,
+   "tool": "run_tests"
+  },
+  {
+   "decision": "dedup",
+   "digest": "37b009cf3b7e5f07",
+   "kind": "fact_probe",
+   "purity": "pure",
+   "resources": {
+    "epoch": 1,
+    "src/io": 1
+   },
+   "reused_ref": "C74:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"epoch\" -- src/io"
+    },
+    "tool": "execute"
+   },
+   "step": 89,
+   "tool": "search"
+  },
+  {
+   "decision": "execute",
+   "digest": "dc40d0d546bd6ce1",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/ledger6.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "limit": 60,
+     "offset": 0,
+     "path": "tests/ledger6.toml"
+    },
+    "tool": "read"
+   },
+   "step": 89,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "2ba8a1b7bb4b0420",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs/index1.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "docs/index1.toml"
+    },
+    "tool": "read"
+   },
+   "step": 90,
+   "tool": "read_file"
+  },
+  {
+   "decision": "execute",
+   "digest": "510224c458cfba30",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "delta": 1,
+    "scripts": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"delta\" -- scripts"
+    },
+    "tool": "execute"
+   },
+   "step": 91,
+   "tool": "search"
+  },
+  {
+   "decision": "dedup",
+   "digest": "1e3e771019f29fdb",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "src/io/segment2.rs": 1
+   },
+   "reused_ref": "C63:0",
+   "ruyix": {
+    "args": {
+     "cmd": "git diff -- src/io/segment2.rs"
+    },
+    "tool": "execute"
+   },
+   "step": 92,
+   "tool": "git_diff"
+  },
+  {
+   "decision": "execute",
+   "digest": "af43dc6cb27b0d02",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "tests/planner1.toml": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "cmd": "git grep -n \"anchor\" -- tests/planner1.toml"
+    },
+    "tool": "execute"
+   },
+   "step": 93,
+   "tool": "grep"
+  },
+  {
+   "decision": "execute",
+   "digest": "e0dda70da1854e67",
+   "kind": "fact_probe",
+   "purity": "effectful",
+   "resources": {
+    "src/core/planner0.py": 1
+   },
+   "reused_ref": null,
+   "ruyix": {
+    "args": {
+     "path": "src/core/planner0.py"
+    },
+    "tool": "write"
+   },
+   "step": 94,
+   "tool": "edit_file"
+  },
+  {
+   "decision": "dedup",
+   "digest": "9e1128ff399f2ce6",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs": 1
+   },
+   "reused_ref": "C64:0",
+   "ruyix": {
+    "args": {
+     "path": "docs"
+    },
+    "tool": "read"
+   },
+   "step": 94,
+   "tool": "list_dir"
+  },
+  {
+   "decision": "dedup",
+   "digest": "9e1128ff399f2ce6",
+   "kind": "step_call",
+   "purity": "pure",
+   "resources": {
+    "docs": 1
+   },
+   "reused_ref": "C64:0",
+   "ruyix": {
+    "args": {
+     "path": "docs"
+    },
+    "tool": "read"
+   },
+   "step": 95,
+   "tool": "list_dir"
+  }
+ ],
+ "meta": {
+  "commit": "<unavailable: Command '['git', '-C', 'D:\\\\Projects\\\\Python\\\\context-algorithm', 'rev-parse', 'HEAD']' returned non-zero exit status 128.>",
+  "files_sha256": {
+   "src/lsc/compressor.py": "5ba4c308ba8f8269ee50145cdc9f3035de016cdcb7f191b1edc8c090101f0d35",
+   "src/lsc/ledger.py": "c3fee4b6d62359a6044125875842efc25eb8db3b621bfbb070bf0a715c73be19",
+   "src/lsc/policy.py": "54e3326478afe8a6301748816bdd4cfd82286c8b6677e5a0597d0c8ee30cb58f",
+   "src/lsc/scheduler.py": "45aa83be899adea7935f8f82fb041fb850272723e4a9019bce8e144b97e573e7",
+   "src/lsc/workload.py": "3a1402dcdc791e300868903f4a67c033e2992f040cc7576bba980d5782ac2b55"
+  },
+  "mapping": "experiments/export_decision_trace.py::to_ruyix（工具名 → ruyix 四原语）",
+  "note": "决策只有两种：dedup（账本命中 ⇒ 不执行）/ execute。Rust 端口在同一条输入序列上必须给出同一条决策，且四类计数逐项相等。",
+  "source": "context-algorithm (LSC)",
+  "workload": {
+   "seed": 1,
+   "steps": 96
+  }
+ }
+}

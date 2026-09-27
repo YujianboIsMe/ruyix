@@ -409,6 +409,72 @@ pub struct AgentConfig {
     /// 默认 8。**0 = 关掉守卫**（只关守卫，不关账本与 findings）。
     #[serde(default = "d_agent_stall_rounds")]
     pub stall_rounds: usize,
+    /// 上下文层（v1.2 · LSC 迁移）。**默认全关**：关掉时行为与 v1.1 一字不变。
+    #[serde(default)]
+    pub ctx: CtxConfig,
+}
+
+/// 上下文布局契约（v1.2 P1）与它的计量仪器。
+///
+/// 见 `doc/v1.2/需求-Agent-上下文布局与去重账本-v1.2.md` §1 与
+/// `doc/v1.2/架构-上下文账本与重基线调度-v1.2.md` §1：请求体是
+/// `[S 不可变根][E 只追加梯子][A 每步重建的易变尾]`，而**改 S 会让它之后的所有缓存块失效**。
+/// 现状（findings/账本块每轮拼进 `msgs[0]`）正好踩这条：system 一变，
+/// 后面全部重算 —— 这是本期第一个要挪的东西，且**不需要任何算法**。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CtxConfig {
+    /// **布局契约**：把 findings / 引擎账本块从 `msgs[0]` 尾部搬到易变尾 `A`
+    /// （追加在所有稳定字节之后，每轮整块重建并只活这一次请求）。
+    ///
+    /// 关（默认）= 块仍拼进 system 尾部：**与 v1.1 逐字节相同**，但每轮重建 system
+    /// ⇒ 它之后的缓存块全部作废（`[S]` 被当成可变区用）。
+    /// 开 = `msgs[0]` 从头到尾一个字节不动（不变式 I1）。
+    ///
+    /// 为什么默认关：它是**热路径上的上下文布局**，改的是模型每一轮看到的东西的位置。
+    /// 按 v1.2 的纪律"开关关掉 ⇒ 行为与今天一字不变"，逐个真 run 验证后再改默认值。
+    #[serde(default = "d_false")]
+    pub layout: bool,
+    /// **计量**（`公共前缀占比` + `S 段指纹`）的开关，默认关。
+    ///
+    /// 为什么和 `layout` 分开：**仪器必须两臂都能用**。判据是"占比**上升**"，
+    /// 而对照臂（`layout=false`）也要能量出基线 —— 仪器只长在实验臂上，
+    /// 那个"上升"就无从比较（等于拿一个没量过的数当基线）。
+    /// 关掉时零额外计算、零额外日志行。
+    #[serde(default = "d_false")]
+    pub metrics: bool,
+    /// **去重账本**（v1.2 P2）：纯工具 + 资源版本未变 ⇒ 同一次调用不执行第二次。
+    ///
+    /// 命中时不执行，但把上次的**原文**还回去并附一行标注（模型必须知道这是复用）。
+    /// 判据只有一个方向：**宁可多执行一次，也不许"看起来一样就跳过"** ——
+    /// 白名单外一律执行，版本拿不到一律执行。
+    ///
+    /// 关（默认）= 与 v1.1 一字不变（`repeat-read` 区间守卫与 `fresh_cmd` 判据照旧）。
+    #[serde(default = "d_false")]
+    pub dedup: bool,
+    /// 去重账本**结果侧存**的字节上限（0 = 不限）。默认 8MB。
+    ///
+    /// P2 的结果侧存在内存里，所以它有界：被挤掉的条目等于**没记过**（下次真执行，
+    /// fail-safe）。P3 换成 capsule 侧存（`projects/<键>/ctx/<run-id>/` + sha256 校验）
+    /// 之后这条上限退场 —— "历史不删"是记忆层的公理。
+    #[serde(default = "d_ctx_dedup_max_bytes")]
+    pub dedup_max_bytes: usize,
+}
+
+impl Default for CtxConfig {
+    fn default() -> Self {
+        Self {
+            layout: d_false(),
+            metrics: d_false(),
+            dedup: d_false(),
+            dedup_max_bytes: d_ctx_dedup_max_bytes(),
+        }
+    }
+}
+
+/// 8MB：一次 run 的**纯工具结果**（读过的文件正文 / grep 输出）留这么多足够覆盖
+/// "刚刚读过什么"的回看窗口；超了就把最老的挤掉（挤掉 = 没记过 ⇒ 下次真执行）。
+fn d_ctx_dedup_max_bytes() -> usize {
+    crate::agent::findings::DEFAULT_DEDUP_CAP_BYTES
 }
 
 impl Default for AgentConfig {
@@ -423,6 +489,7 @@ impl Default for AgentConfig {
             findings_enabled: d_true(),
             findings_max_bytes: d_agent_findings_max_bytes(),
             stall_rounds: d_agent_stall_rounds(),
+            ctx: CtxConfig::default(),
         }
     }
 }
@@ -498,6 +565,12 @@ impl Default for VerifyConfig {
 
 fn d_true() -> bool {
     true
+}
+
+/// v1.2 起的**关**默认值：新机制一律默认关，逐个真 run 验过再改默认
+/// （判据：关掉时既有门禁数字逐项不变）。
+fn d_false() -> bool {
+    false
 }
 fn d_zero_i32() -> i32 {
     0
