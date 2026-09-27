@@ -2,7 +2,7 @@
 name = "ruyix"
 version = "1.0.0"
 description = "ruyix —— 绿色便携的 AI IDE：一个可执行文件 + global/ + projects/ + plugins/，卸载 = 删文件夹"
-authors = ["醒过来摸鱼"]
+authors = ["醒过来摸鱼","YujianboIsMe"]
 edition = "2024"
 
 [build-dependencies]
