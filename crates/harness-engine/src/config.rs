@@ -1678,6 +1678,43 @@ mod tests {
         );
     }
 
+    /// **用户能不能真把 v1.2 的开关打开** —— 这条是补的（2026-09-27）。
+    ///
+    /// 现场（用户质疑"到底用没用账本？"）：账本/调度都交付了、也有实测读数，但界面里
+    /// **每轮都在折叠**、看不到一条 `dedup` / `rebase` 痕迹 —— 因为**这些开关默认关**（拍板纪律：
+    /// 新机制默认关、逐个真 run 验过再改默认）。而"默认关"必须配上"能被打开"才叫交付：
+    /// 判据就是 `apply_flat` 认得这些键（用户写进 `harness.toml` 或者配置表单提交都要走它）。
+    #[test]
+    fn v12_switches_are_reachable_from_config() {
+        let mut cfg = AppConfig::default();
+        let pairs: Vec<(String, String)> = [
+            "agent.ctx.layout",
+            "agent.ctx.metrics",
+            "agent.ctx.dedup",
+            "agent.ctx.schedule",
+            "agent.ctx.capsule",
+        ]
+        .iter()
+        .map(|k| (k.to_string(), "true".to_string()))
+        .collect();
+        assert_eq!(apply_flat(&mut cfg, &pairs), pairs.len(), "这些键全都得认");
+        assert!(cfg.agent.ctx.layout, "layout 打不开 = P1 白做");
+        assert!(cfg.agent.ctx.metrics, "metrics 打不开 = 量尺白做");
+        assert!(cfg.agent.ctx.dedup, "dedup 打不开 = 账本白做");
+        assert!(cfg.agent.ctx.schedule, "schedule 打不开 = 调度白做");
+        assert!(cfg.agent.ctx.capsule, "capsule 打不开 = 侧存白做");
+        // 数值键：预算 / 视野 / 侧存上限
+        let nums = vec![
+            ("agent.ctx.horizon".to_string(), "48".to_string()),
+            ("agent.ctx.budget_tokens".to_string(), "20000".to_string()),
+            ("agent.ctx.dedup_max_bytes".to_string(), "1024".to_string()),
+        ];
+        assert_eq!(apply_flat(&mut cfg, &nums), nums.len(), "数值键也得认");
+        assert_eq!(cfg.agent.ctx.horizon, 48);
+        assert_eq!(cfg.agent.ctx.budget_tokens, 20_000);
+        assert_eq!(cfg.agent.ctx.dedup_max_bytes, 1024);
+    }
+
     /// 值按**目标位置的类型**转换：数字串进数字键、真假词进布尔键、分隔符串进列表键。
     #[test]
     fn apply_flat_coerces_by_target_type() {
