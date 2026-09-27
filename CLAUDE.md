@@ -62,6 +62,7 @@ sources; used by the memory embedding model),
 ```
 ├── src-tauri/            # Rust backend (Tauri 2)
 │   ├── src/main.rs       # App entry, Tauri commands, file operations
+│   ├── src/tests.rs      # 宿主的单元测试（`#[cfg(test)] mod tests;` —— 2026-09-27 从 main.rs 拆出）
 │   ├── src/config.rs     # ConfigManager: 3-scope config, projects, run targets, config form scan/save/apply
 │   ├── src/pty.rs        # PtyManager: spawn/write/resize/close PTY sessions
 │   ├── src/ai.rs         # AI translation: natural language → standard commands

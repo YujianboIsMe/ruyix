@@ -38,6 +38,7 @@
     "改名": "rename",
     "写盘": "write to disk",
     "落盘": "flush to disk",
+    "备份": "back up",
     "体积": "size",
     "不符": "mismatch",
     "客户端": "client",
@@ -160,6 +161,9 @@
     "项目桶": "the project bucket",
     "文字": "text",
     "MCP服务器": "MCP server",
+    // 补：规则 ③ `<东西>不存在: <值>` 靠它成立（`工具不存在: {name}`、`工具不存在: foo`）。
+    // 它是 U52 把扫描范围修对之后露出来的 5 条之一（见文件末那段注释 / ui-smoke U52）。
+    "工具": "tool",
     "A2Aagent": "A2A agent",
     "项目目录": "project directory",
     "项目桶": "project bucket",
@@ -319,6 +323,15 @@
       "[{}] is managed by a dedicated feature and cannot be written from the config form",
     "这次运行没有产物目录": "this run has no artifact directory",
     "MCP 服务器未连接": "MCP server is not connected",
+    // 宿主（main.rs）的几条 —— U52 的扫描原先"砍到第一个 #[cfg(test)] 为止"，而 main.rs 中段
+    // 有个测试专用的 `#[cfg(test)] fn utf16_offset`，于是它只扫到前 1478 行；测试搬进 tests.rs
+    // 之后这 5 条才露出来（2026-09-27）。后三条按**前缀**用（后端常接 `: {name}` / `：{e}` /
+    // `（{opener}: {e}）`，见 translate 的 EXACT 前缀分支）。
+    "未配置备用 LLM（ai_fallback.*）—— 先把它的 api_url / api_key 填上":
+      "no fallback LLM configured (ai_fallback.*) — fill in its api_url / api_key first",
+    "MCP 服务器已停用": "MCP server is disabled",
+    "不是合法的链接": "not a valid link",
+    "系统没有能打开它的程序": "no program on this system can open it",
     "无法启动 git": "cannot start git",
     "不是合法 JSON": "not valid JSON",
     "没有找到这次运行": "no such run",
@@ -358,6 +371,74 @@
     "，无法回滚": ", cannot roll back",
     "handle={handle} 的进程已被停止，本次等待中止":
       "the process with handle={handle} was stopped — this wait was aborted",
+
+    // ------------------------------------------------------------------------
+    // 2026-09-27：U52 把扫描范围修对之后露出来的那批后端文案。
+    //
+    // 病灶不在这张表，而在扫描规则：原先是"砍掉第一个 `#[cfg(test)]` 之后的全部"，而 9 个
+    // 文件里都有**中段**的 `#[cfg(test)]` 门禁项（多半是测试专用 helper）⇒ 那些文件后半段的
+    // 生产代码**从没被扫过**。把 main.rs 的测试搬进 tests.rs 时先露了 5 条，随后按同一思路
+    // 修规则（只砍**内联测试模块**），引擎侧那 40 条也一起露出来。记在 doc/v1.2/bugs.md ISSUE-1。
+    //
+    // 标"前缀"的条目按**前缀**用：后端在它们后面接 `: {值}` / `：{原因}` / `（补充）`
+    // （见 translate 的 EXACT 前缀分支）。
+    //
+    // ---- 宿主（src-tauri）----
+    "未打开项目 —— Agent 工具循环需要一个项目作为工作区":
+      "no project open — the agent tool loop needs a project as its workspace",
+    "未打开项目，无法确认写回目标": "no project open — cannot determine the write-back target",
+    "未打开项目，无法写回": "no project open — cannot write back",
+    "环境采集失败": "environment probe failed", // 前缀
+    "计划 JSON 解析失败": "failed to parse the plan JSON", // 前缀
+    "安装任务失败": "installation failed", // 前缀
+    "探针线程异常": "the probe thread panicked", // 前缀
+    "侧存读不出": "cannot read the capsule store", // 前缀
+    // ---- 引擎：agent 循环（这些会进 trace / 验证区，也会当反馈回灌给模型）----
+    "actions 为空": "actions is empty",
+    "final 为空": "final is empty",
+    "plan.steps 为空": "plan.steps is empty",
+    "args 缺少字符串字段": "args is missing a string field", // 前缀
+    "join 状态丢失": "the join state was lost",
+    "已中止写入": "the write was aborted",
+    "content 为空 —— 不允许静默清空文件":
+      "content is empty — silently emptying a file is not allowed",
+    "write.content 为空 —— 不允许静默清空文件":
+      "write.content is empty — silently emptying a file is not allowed",
+    "write.edits 为空 —— 没有改动就别说要改":
+      "write.edits is empty — if nothing changes, do not claim an edit",
+    "并发读取未返回（读取线程异常）":
+      "the concurrent read never returned (the reader thread panicked)",
+    "final 的 answer 为空 —— 交付要写清结论、改了哪些文件、验证结果":
+      "final's answer is empty — a delivery must state the conclusion, which files changed, and the verification result",
+    "❌ 空命令。": "❌ empty command.",
+    "plan 不能和别的调用放进同一轮：清单要单独发一轮":
+      "plan cannot share a round with other calls — send the outline in a round of its own",
+    "ask_user 不能和别的调用放进同一轮：提问要单独一轮":
+      "ask_user cannot share a round with other calls — ask in a round of its own",
+    "final 不能和别的调用放进同一轮：完成时单独发一轮":
+      "final cannot share a round with other calls — send it alone when you finish",
+    "本轮不允许批量调用：请每轮只发一个调用（actions 已关闭）":
+      "batching is off for this run — send one call per round (actions is disabled)",
+    "final 不能放进批里：完成时单独发一轮 final":
+      "final cannot go in a batch — send a lone final when you finish",
+    "plan 不能放进批里：清单要单独发一轮":
+      "plan cannot go in a batch — send the outline in a round of its own",
+    "plan / final / ask_user 不能与调用同批执行":
+      "plan / final / ask_user cannot run in the same batch as calls",
+    "plan / final / ask_user 不能与调用同波执行":
+      "plan / final / ask_user cannot run in the same round as calls",
+    "record_findings 的 items 为空（要给 claim + evidence）":
+      "record_findings has no items (each needs a claim + evidence)",
+    "就绪判据没通过闸门": "the readiness criterion did not pass the gate", // 前缀
+    "就绪判据被拒绝": "the readiness criterion was refused", // 前缀
+    "验证线程没能跑起来": "the verify thread could not start", // 前缀
+    // ---- 引擎：记忆库（路径夹在中间 —— 按前缀接，规则够不着）----
+    "建记忆目录失败": "failed to create the memory directory", // 前缀
+    "建记忆表失败": "failed to create the memory table", // 前缀
+    "打开记忆库失败": "failed to open the memory store", // 前缀
+    "统计失败": "stats failed", // 前缀
+    "记忆库已经安装过了（install 只该在启动时调一次）":
+      "the memory store is already installed (install should run once, at startup)",
   };
 
   // ============================================
@@ -490,6 +571,27 @@
     ],
     // ⑱ `<A>（<补充>）`
     [/^(.+?)（(.+?)）$/, (m) => join(phraseOrNull(m[1]), " (", phraseOrNull(m[2]), ")")],
+    // ---- 2026-09-27（U52 扫描范围修对之后露出来的那批；见文件上方 EXACT 段落的注释）----
+    // ⑲ `第 <N> 个工具调用：<原因>`
+    [/^第\s*(.+?)\s*个工具调用[:：]\s*(.+)$/, (m) => join("tool call #", m[1], ": ", m[2])],
+    // ⑳ `actions/items 第 <N> 条解析失败：<原因>`
+    [
+      /^(actions|items)\s*第\s*(.+?)\s*(?:条|个)解析失败[:：]\s*(.+)$/,
+      (m) => join(m[1], ": failed to parse #", m[2], ": ", m[3]),
+    ],
+    // ㉑ `items 第 <N> 条的 claim 为空`
+    [/^items\s*第\s*(.+?)\s*条的\s*claim\s*为空$/, (m) => join("items: the claim of #", m[1], " is empty")],
+    // ㉒ `第 <N> 条 edit：<原因>`（注意与 ⑪ 的"条编辑"不是同一种写法）
+    [/^第\s*(.+?)\s*条\s*edit[:：]\s*(.+)$/, (m) => join("edit #", m[1], ": ", m[2])],
+    // ㉓ `被拒 <N> 条：<原因列表>`
+    [/^被拒\s*(.+?)\s*条[:：]\s*(.*)$/, (m) => join("rejected ", m[1], " item(s): ", m[2])],
+    // ㉔ `{key} 只能是正整数，收到 <值>`
+    [
+      /^(.+?)\s*只能是正整数[,，]?\s*收到\s*(.*)$/,
+      (m) => join(m[1], " must be a positive integer, got ", m[2]),
+    ],
+    // ㉕ `{key} 不能是 0（{key} 是行数/行号，从 1 起）`
+    [/^(.+?)\s*不能是\s*0（.+?）$/, (m) => join(m[1], " must not be 0 (line numbers and counts start at 1)")],
   ];
 
   function dictValue(k) {
@@ -576,8 +678,11 @@
       const rest = s.slice(k.length);
       if (/^[:：]/.test(rest)) return v + ": " + rest.slice(1).trim();
       // 后缀是值或括号补充（`判据正则写错了 {pattern}: {e}`、`熵管理未启用（…）`）：
-      // 原样接上 —— 里面是值不是文案，不需要翻
-      if (/^\s|^（/.test(rest)) return v + (rest.startsWith(" ") ? "" : " ") + rest.trim();
+      // 原样接上 —— 里面是值不是文案，不需要翻。
+      // **接的时候一律留一个空格**（2026-09-27 修）：原来只在"（"开头时补空格，于是
+      // `侧存读不出 {}（…）` 这类（值紧跟在前缀后）会拼成 `…store{}（…）` —— 英文少一个空格，
+      // 而这条路径的产物是要给人看的。
+      if (/^\s|^（/.test(rest)) return v + " " + rest.trim();
     }
     const hit = byRules(s);
     if (hit) return hit;

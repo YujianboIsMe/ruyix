@@ -4834,7 +4834,23 @@ async function runBackendMsgChecks() {
   const missing = [];
   for (const f of files) {
     let src = readLf(f);
-    const cut = src.indexOf("#[cfg(test)]");
+    // 只扫**生产代码**：测试里的中文（用例数据、断言文案）不该要求翻译。
+    //
+    // ⚠ 踩过的坑（2026-09-27）：原先是"砍掉第一个 `#[cfg(test)]` 之后的全部"，而 main.rs
+    //   中段有个测试专用的 `#[cfg(test)] fn utf16_offset()` ⇒ 这条扫描其实只扫到 main.rs 的
+    //   1478 行，后面两千多行生产代码**从没被检查过**；把测试搬进 tests.rs 之后，那 5 条
+    //   没被 errors.js 覆盖的后端文案才露出来（顺手补齐了）。
+    //   现在的规则：只把 `#[cfg(test)]` 门禁的**内联模块**（`mod …tests {…}`，即测试代码就在
+    //   本文件里）当测试代码砍掉；挂在函数 / 常量上、或者只写一句 `mod x_tests;`（模块体在
+    //   另一个文件里）的 `#[cfg(test)]` 都不让扫描提前收摊 —— 宁可多扫（顶多多报一条测试
+    //   专用 helper 里的文案），也不要静默漏掉生产代码。测试**成文件**（`*tests.rs`）时上面
+    //   已按文件名排除。
+    //   （实测：67 个 Rust 文件里每个内联测试模块都在**文件末尾** ⇒ "砍到文件末尾"就是
+    //    精确跳过测试模块；改成要求 `{` 之后，`#[cfg(test)] mod x_tests;` 那种"模块体在别的
+    //    文件里"的声明也不再让扫描提前收摊。）
+    const cut = src.search(
+      /^#\[cfg\(test\)\]\s*(?:\n\s*(?:#\[[^\]]*\]|\/\/[^\n]*))*\n?(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{/m
+    );
     if (cut > 0) src = src.slice(0, cut);
     src.split("\n").forEach((line, i) => {
       const s = line.trim();
