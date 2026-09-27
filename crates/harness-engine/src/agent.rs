@@ -3893,6 +3893,7 @@ pub use tool_loop::run_with_ask;
 ///
 /// 见 `doc/v1.1/需求-Agent-进展记忆与循环守卫-v1.1.md`。与 `tool_loop` 一样是**文件切分**，
 /// 子模块用 `use super::*` 看到这里的一切。
+pub mod context;
 pub mod findings;
 
 #[cfg(test)]
