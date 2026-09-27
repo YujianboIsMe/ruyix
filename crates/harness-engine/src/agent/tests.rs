@@ -646,10 +646,26 @@ fn preflight_keeps_a_quoted_path_in_one_piece() {
 #[test]
 fn preflight_allows_a_project_local_script_that_exists() {
     let d = TempDir::new("gate-script");
-    d.write("mvnw.cmd", "@echo off\n");
-    assert!(preflight_execute(&d.0, r".\mvnw.cmd -v").is_ok());
-    assert!(preflight_execute(&d.0, "mvnw -v").is_ok());
-    assert!(preflight_execute(&d.0, r".\nope.cmd").is_err());
+    // 包装脚本的**本地落地形态**两端不同：Windows 是 `mvnw.cmd`（cmd 只认带扩展名的落地文件），
+    // Unix 是无扩展名的 `mvnw`。测试得跟着写对名字 —— 否则量到的是"这个平台没有这种文件"，
+    // 而不是闸门本身（macOS/Linux 上 `.\mvnw.cmd` 是**字面文件名**，永远不存在）。
+    #[cfg(target_os = "windows")]
+    let (name, run, missing) = ("mvnw.cmd", r".\mvnw.cmd -v", r".\nope.cmd");
+    #[cfg(not(target_os = "windows"))]
+    let (name, run, missing) = ("mvnw", "./mvnw -v", "./nope");
+    d.write(name, "@echo off\n");
+    assert!(
+        preflight_execute(&d.0, run).is_ok(),
+        "存在的项目内脚本不该被拒：{run}"
+    );
+    assert!(
+        preflight_execute(&d.0, "mvnw -v").is_ok(),
+        "裸名也要认（项目内脚本按名字就该放行）"
+    );
+    assert!(
+        preflight_execute(&d.0, missing).is_err(),
+        "不存在的路径要拒：{missing}"
+    );
 }
 
 /// 端到端：被闸门挡住时不该留下"执行痕迹"（模型会以为跑过了）。

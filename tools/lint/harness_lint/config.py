@@ -2,15 +2,27 @@
 
 用标准库 `tomllib`（3.11+）读，零依赖。所有阈值都可配 —— 硬编码阈值是"规则写太死、
 把正常代码判违规"的头号来源。
+
+`tomllib` 是 3.11 才进的 stdlib，而 macOS 自带的 `python3` 至今是 3.9/3.10：
+没有解析器时**不假装配置生效**（那会让用户以为阈值被读了），明说一句再退回默认值，
+这样 lint 本身照跑、只是不吃项目里的 `.harnesslint.toml`。装了 `tomli` 就用它。
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
-import tomllib
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List
+
+try:  # Python 3.11+：标准库
+    import tomllib
+except ModuleNotFoundError:  # 3.9 / 3.10（macOS 自带）
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]  # 第三方，装了就有
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]  # 都没有 → 只走默认值
 
 CONFIG_FILENAME = ".harnesslint.toml"
 
@@ -117,6 +129,14 @@ def load(root: str, explicit: str = "") -> Config:
     cfg = Config()
     path = explicit or os.path.join(root, CONFIG_FILENAME)
     if not os.path.isfile(path):
+        return cfg
+    if tomllib is None:
+        # 没有 TOML 解析器：**明说**再走默认值。悄悄忽略等于让用户以为阈值生效了。
+        print(
+            f"[harness_lint] 跳过 {path}：当前 Python 没有 TOML 解析器"
+            "（需要 3.11+ 的 tomllib，或 `pip install tomli`）—— 本次一律用默认阈值。",
+            file=sys.stderr,
+        )
         return cfg
     with open(path, "rb") as f:
         data = tomllib.load(f)

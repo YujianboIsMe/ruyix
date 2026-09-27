@@ -21,6 +21,7 @@ mod repo_clean_tests;
 pub mod sessions;
 pub mod sink;
 pub mod stage;
+pub mod vendor;
 
 use crate::config::ConfigManager;
 use engine::pipeline::Sink as _;

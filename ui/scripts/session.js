@@ -246,9 +246,11 @@
     // 实测只有 v4-pro 在 /responses 上真检索，flash 一次都不检索。所以模型不支持时
     // 直接禁用并说清原因：**不给一个按下去没反应的按钮**。
     const webBtn = wrap.querySelector("[data-web]");
-    wrap._webCaps = null;
+    // 模型厂商对象（宿主 `ai_vendor` 的回执）：厂商身份 + 模型清单 + 当前模型能力。
+    // **只由 reloadVendor 写** —— 它是这份对象的唯一来源（见下面 reloadVendor 的注释）。
+    wrap._vendor = null;
     const paintWeb = () => {
-      const caps = wrap._webCaps;
+      const caps = wrap._vendor && wrap._vendor.caps;
       if (!caps) {
         webBtn.disabled = true;
         webBtn.title = L("联网能力未知（未取到模型能力）", "Web capability unknown");
@@ -289,27 +291,31 @@
           status(String(e), "error");
         }
       }
+      // 开关状态是本地的（`s._webSearch`）—— 只重画这颗按钮，**不重取厂商对象**：
+      // 联网开关与"这是哪家厂商"无关，重取只会把用户刚选的模型按配置里的默认画回去。
       paintWeb();
     });
     // ---- 模型下拉框（需求：探测厂商模型列表，在会话界面就能换模型）----
     //
-    // 数据源是**厂商的** `GET /models`（宿主 `ai_models`，与配置表单同一个引擎函数）——
+    // 数据源是**厂商的** `GET /models`（宿主 `ai_vendor` 里那份厂商对象，与配置表单同源）——
     // 前端不维护模型名单，厂商加一个模型这里就多一项（实测 DeepSeek 今天只有
     // `deepseek-flash` / `deepseek-v4-pro` 两个，而能力表里还留着两个已退役的旧名）。
     // 每一项的 title 写清能力（联网 / 读图 / 录音 / 上下文），用户不必去配置面板猜。
     const modelSel = wrap.querySelector("[data-model]");
-    wrap._models = null;
     const paintModel = () => {
-      const cur = (wrap._webCaps && wrap._webCaps.model) || "";
-      const list = wrap._models;
+      const cur = (wrap._vendor && wrap._vendor.model) || "";
+      const list = wrap._vendor && wrap._vendor.models;
       if (!list || !list.length) {
         // 拿不到厂商列表**不许编**：只留当前模型一项并说清为什么换不了
         modelSel.innerHTML = `<option>${esc(cur || L("（模型未知）", "(model unknown)"))}</option>`;
         modelSel.disabled = true;
-        modelSel.title = L(
+        // 宿主把"为什么拿不到"放在 models_error 里 —— 原样显示，别让用户猜
+        const why = wrap._vendor && wrap._vendor.models_error;
+        const base = L(
           "拿不到厂商模型列表（没配 Key / 网络不通 / 该端点没有 /models）—— 默认模型在配置面板里改",
           "Vendor model list unavailable (no key / offline / no /models endpoint) — set the default in the config panel"
         );
+        modelSel.title = why ? L(`${base}：${why}`, `${base}: ${why}`) : base;
         return;
       }
       const capText = (m) =>
@@ -337,41 +343,38 @@
       );
     };
 
-    // 取模型列表 + 能力（联网/录音按钮的可用性都跟着它）。**起个名字**而不是匿名 IIFE：
-    // 配置一改（比如刚填完 API Key），这两样都得重取 —— 见 keyDependent 的注释。
-    // 取模型列表 + 当前模型能力，**并在数据到达后重画**。
+    // 厂商对象的**一次完整重取**：身份 + 模型清单 + 当前模型 + 能力，一发回来（宿主 `ai_vendor`）。
     //
-    // 修的是一个静默断链：这里原先是 `await refreshCaps()` —— 而 `refreshCaps` 在整个 ui/ 里
-    // **从未定义** ⇒ ReferenceError ⇒ 这个 async 函数没人 await ⇒ 静默 reject ⇒ 列表其实取到了，
-    // 却没人重画，下拉框永远停在初始化那一帧的「（模型未知）」（联网按钮的可用性同废）。
-    // 现在：能力自己取、拿完就重画、失败可见且只重试一次。
+    // 触发源只有三个：面板首次打开、用户换模型、宿主广播"厂商变了"（`model://vendor-changed`，
+    // 端点 / 密钥 / 协议之一变化）。**不再跟着任意配置变化重取** —— 那正是这轮 bug 的根：
+    // 拧一下 🌏（写 harness.llm.web_search）也会触发重取，拿配置里的默认模型把用户刚选的画回去
+    // （用户实测：toggle 联网就跳回 pro）。
+    //
+    // 起个名字而不是匿名 IIFE 是上一轮的教训：这里曾写着 `await refreshCaps()`，而 `refreshCaps`
+    // 在 ui/ 里**从未定义** ⇒ ReferenceError ⇒ 静默 reject ⇒ 列表取到了却没人重画（下拉永远
+    // 停在"（模型未知）"）。现在：拿完就重画、失败可见、首次拿不到只重试一次。
     let retried = false;
-    const reloadModelState = async () => {
+    const reloadVendor = async () => {
       const invoke = getInvoke();
       if (!invoke) return;
       try {
-        wrap._models = await invoke("ai_models", { projectRoot: root() });
+        wrap._vendor = await invoke("ai_vendor", { projectRoot: root() });
       } catch (e) {
-        wrap._models = null;
-        status(L(`取模型列表失败：${e}`, `failed to list models: ${e}`), "error");
-      }
-      try {
-        // 不传 model ⇒ 后端用**当前配置里的**模型（与配置面板同一个解析口径）
-        wrap._webCaps = await invoke("ai_model_caps", { model: "", projectRoot: root() });
-      } catch {
-        wrap._webCaps = null;
+        wrap._vendor = null;
+        status(L(`取模型厂商失败：${e}`, `failed to load the model vendor: ${e}`), "error");
       }
       paintModel();
       paintWeb();
-      // 首次就没取到 ⇒ 1.5 秒后重试**一次**：应用刚起来时后端可能尚未就绪，
+      // 首次就没取到清单 ⇒ 1.5 秒后重试**一次**：应用刚起来时后端可能尚未就绪，
       // 一次失败不该等于永久「模型未知」。
-      if (!wrap._models && !retried) {
+      if ((!wrap._vendor || !(wrap._vendor.models || []).length) && !retried) {
         retried = true;
-        setTimeout(() => { reloadModelState(); }, 1500);
+        setTimeout(() => { reloadVendor(); }, 1500);
       }
     };
-    reloadModelState();
-    keyDependent.push({ el: wrap, fn: reloadModelState });
+    reloadVendor();
+    // 登记给 `model://vendor-changed` 用（见 attach 里的监听）：厂商真的换了才重取。
+    vendorDependent.push({ el: wrap, fn: reloadVendor });
     modelSel.addEventListener("change", async () => {
       const id = modelSel.value;
       const invoke = getInvoke();
@@ -381,18 +384,19 @@
         await invoke("config_form_apply", {
           scope: "runtime",
           projectRoot: root(),
-          // D8：模型名**单一来源是 `ai.*`**（宿主 config_bridge 读 ai.model 再映射给引擎的
-          // llm.model）—— 这里原先是写 `llm.model`，那是**死写** ✗：宿主根本不读它，
-          // 于是「切到 flash」永远不生效，下拉框还会被 paintModel 按当前配置弹回去。
-          entries: [{ section: "ai", key: "ai.model", value: id }],
+          // 模型名**单一来源是 `ai.*`**（宿主 config_bridge 读 ai.model 再映射给引擎的
+          // llm.model）。键名只能是 `model`：宿主的完整键 = `ruyix.code.<section>.<key>`，
+          // 把键名写成 `ai.model`（section 已经是 ai 了）会拼出 `ruyix.code.ai.ai.model`
+          // 这个**没人读**的死键 ——
+          // 于是"切到 flash"既不进引擎（引擎仍用 pro），也会被下一次重取按配置里的默认弹回去。
+          entries: [{ section: "ai", key: "model", value: id }],
         });
-        // 换模型要**重新问一次能力**：联网/录音的可用性跟着模型走
-        wrap._webCaps = await invoke("ai_model_caps", { model: id, projectRoot: root() });
       } catch (e) {
         status(String(e), "error");
       }
-      paintWeb();
-      paintModel();
+      // 换模型要**重新问一次能力**（联网/录音的可用性跟着模型走）—— 重取整个厂商对象最省心，
+      // 且 `ai_vendor` 里的"当前模型"就是从配置解析出来的那个，刚写进去的这次选择会生效。
+      await reloadVendor();
     });
     paintModel();
     paintWeb();
@@ -1335,19 +1339,26 @@
         listen("agent://reflect", (ev) => appendGate(ev.payload ?? {}, "reflect"));
         // 提问（v0.8）：模型问需求歧义 → 会话里弹问题卡，等你答完它继续做
         listen("agent://ask", (ev) => showAskCard(ev.payload ?? {}));
-  // 配置改了（`config://changed`）：重取一切"取决于当前 key / 模型 / 端点"的状态。
-  // 触发场景就是用户报的那一条：在配置里填完 API Key → 会话面板那排 chip 还写着
-  // 「✗ key 未配置」—— 面板只在打开时探过一次，之后没人告诉它 key 变了。
-  listen("config://changed", (ev) => {
-    const keys = (ev.payload ?? {}).keys || [];
-    if (!touchesKeyDependentState(keys)) return; // 改别的键不值得重探
-    probeEnv();
-    for (const it of aliveKeyDependent()) {
-      Promise.resolve()
-        .then(() => it.fn())
-        .catch(() => {});
-    }
-  });
+        // 配置改了（`config://changed`）：只重探**环境状态**（那排 chip 写着 key 配没配）。
+        //
+        // 触发场景就是用户报的那一条：在配置里填完 API Key → 会话面板那排 chip 还写着
+        // 「✗ key 未配置」—— 面板只在打开时探过一次，之后没人告诉它 key 变了。
+        // **模型/厂商不在这里刷新**：那是下面 `model://vendor-changed` 的事。
+        listen("config://changed", (ev) => {
+          const keys = (ev.payload ?? {}).keys || [];
+          if (!touchesEnvState(keys)) return; // 改别的键不值得重探
+          probeEnv();
+        });
+        // 厂商变了（`model://vendor-changed`）：端点 / 密钥 / 协议之一变化，宿主在 runtime 里
+        // 刷新了厂商对象之后才广播。**只有这一件事能让会话面板重取模型清单与能力** ——
+        // 于是"拧一下 🌏（写 harness.llm.web_search）就把选中的模型弹回 pro"这条回环从根上没了。
+        listen("model://vendor-changed", () => {
+          for (const it of aliveVendorDependent()) {
+            Promise.resolve()
+              .then(() => it.fn())
+              .catch(() => {});
+          }
+        });
       }
     } catch {
       // 浏览器模式无 Tauri 事件
@@ -1358,14 +1369,12 @@
   }
 
   /**
-   * 配置改了之后要**重取**的东西（会话面板里凡是取决于"当前 key / 模型 / 端点"的状态）。
+   * 厂商变了之后要**重取**的东西（会话面板里"取决于当前厂商"的状态：模型清单 / 能力）。
    *
-   * 为什么需要这张表：配置表单与面板互不相识 —— 表单只知道"我改了这些键"，不知道谁在用。
-   * 以前面板只在打开时探一次，于是用户在配置里填完 API Key、回到会话面板，那排 chip 里
-   * 还写着「✗ key 未配置」（用户报障原话就是让我"用事件刷新红框标注的部分"）。
-   * 现在由宿主发 `config://changed`，谁用谁登记刷新。
+   * 为什么需要这张表：宿主只知道"厂商变了"，不知道谁在用。每个会话标签登记自己的
+   * `reloadVendor`，标签关掉后由 `aliveVendorDependent` 顺手剔除。
    */
-  const keyDependent = [];
+  const vendorDependent = [];
 
   /** 环境探针（那排 chip）：key 配没配就写在里面 */
   function probeEnv() {
@@ -1377,32 +1386,24 @@
   }
 
   /**
-   * `config://changed` 的载荷里，哪些键会改变会话面板的派生状态？
+   * `config://changed` 的载荷里，哪些键会改变**环境状态**（那排 chip）？
    *
-   * **两个键空间都要认**：`ai.*` 是**配置表单**写的（api_key / api_url / model / …），
-   * `harness.llm.*` 是**会话里的模型下拉框**写的运行时 LLM 配置（换模型走它）。
-   * 只认相关的：改个 `ui.lang` 不值得把模型列表与 key 状态全重探一遍。
+   * 只认 `ai.*` / `ai_fallback.*`（端点与密钥）—— 它们才决定"key 配没配"。
+   * `harness.llm.*` 不再算：模型清单与能力走 `model://vendor-changed`，与这里无关。
+   * 只认相关的：改个 `ui.lang`、拧一下 🌏 都不值得把那排 chip 全重探一遍。
    */
-  function touchesKeyDependentState(keys) {
-    return (keys || []).some((k) => {
-      if (!k) return false;
-      // **模型名不重探**：它由宿主托管、用户无法编辑（前端只能从下拉里选）。
-      // 重探会用"后端当前配置"把刚选中的模型画回去 ⇒ **事件回环**（用户实测：换不了模型）。
-      // 换模型的显示由那次 `ai_model_caps` 回执决定，不需要这个事件。
-      if (/model/i.test(String(k.key))) return false;
-      if (k.section === "ai" || k.section === "ai_fallback") return true;
-      return k.section === "harness" && String(k.key).startsWith("llm.");
-    });
+  function touchesEnvState(keys) {
+    return (keys || []).some((k) => k && (k.section === "ai" || k.section === "ai_fallback"));
   }
 
   /** 还活着的刷新登记项（标签页关掉后 DOM 就不在文档里了，顺手剔除，免得越攒越多） */
-  function aliveKeyDependent() {
+  function aliveVendorDependent() {
     const alive = (el) =>
       typeof document?.contains !== "function" || !el || document.contains(el);
-    for (let i = keyDependent.length - 1; i >= 0; i -= 1) {
-      if (!alive(keyDependent[i].el)) keyDependent.splice(i, 1);
+    for (let i = vendorDependent.length - 1; i >= 0; i -= 1) {
+      if (!alive(vendorDependent[i].el)) vendorDependent.splice(i, 1);
     }
-    return keyDependent;
+    return vendorDependent;
   }
 
   function renderEnvChips(env) {

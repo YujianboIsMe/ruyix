@@ -1667,41 +1667,104 @@ async fn ai_list_models(
     harness_engine::llm::probe(&llm).await
 }
 
-/// 厂商模型列表**带能力**（会话工具栏的模型下拉框用它）。
-///
-/// 与 `ai_list_models`（只要 id，配置表单用）**同源**：都走 `llm::models`，所以
-/// 两处的"有哪些模型"永远一致 —— 各拉一份的口径差就会变成"配置里选得到、会话里没有"。
+/// 厂商清单的一条 → 给前端的带能力条目。
 ///
 /// 为什么把 `input_modalities` 一起给前端：那是**厂商自己声明的**"收什么输入"（实测
 /// DeepSeek 是 text/image）。录音按钮该不该出现、能不能点，必须由这份声明决定，
 /// 而不是由我们猜 —— 猜错的代价是一个按下去什么都没发生的按钮。
+fn ai_model_info(m: harness_engine::llm::ModelInfo, api_format: &str) -> AiModelInfo {
+    let caps = harness_engine::llm::model_caps(&m.id);
+    AiModelInfo {
+        web_search: harness_engine::llm::web_search_capable(&m.id, api_format),
+        // 读图：能力表说能、或厂商声明里就有 image（两处任一为真都算有能力）
+        multimodal: caps.multimodal || m.accepts("image"),
+        // 收音频：**只看厂商声明**（能力表里没有这一维，也不该靠猜）
+        audio: m.accepts("audio"),
+        name: m.display_name().to_string(),
+        id: m.id,
+        input_modalities: m.input_modalities,
+        context_window: m.context_window,
+    }
+}
+
+/// 某个模型具备哪些服务端能力（联网 / 多模态）—— dto 组装。
+///
+/// 能力表在引擎里（`llm::model_caps`），宿主不抄一份 —— 否则加一个模型要改两处，
+/// 而两处不一致的表现就是"配置里选得到、跑起来没反应"。
+///
+/// **联网是"（协议 × 模型）"的**：同一个模型在 anthropic 路上能搜、在 `/responses` 上搜不了
+/// （实测 flash 就是这样）。所以 dto 里给三样东西：
+/// · `web_search` —— **按当前 `api_format` 算出来的有效值**（开关可见性只看它，前端不必懂协议）；
+/// · 两条协议各自的原始值 —— 界面要说清"哪个协议下能搜"时用；
+/// · `api_format` —— 说明上面那个有效值是按哪条协议算的（文案里要写出来，否则用户看不懂为什么突然不能搜）。
+fn model_caps_dto(name: &str, api_format: &str) -> ModelCapsDto {
+    let c = harness_engine::llm::model_caps(name);
+    ModelCapsDto {
+        model: name.to_string(),
+        web_search: harness_engine::llm::web_search_capable(name, api_format),
+        web_search_openai: c.web_search,
+        web_search_anthropic: c.web_search_anthropic,
+        api_format: api_format.to_string(),
+        multimodal: c.multimodal,
+    }
+}
+
+/// 模型厂商对象（会话工具栏的**单一读取源**）。
+///
+/// 一发把会话里要的四样取齐：厂商身份（宿主 runtime 里那份对象）+ 厂商模型清单 +
+/// 当前模型 + 该模型能力。过去前端要分三发（`ai_models` / `ai_model_caps` / 隐式解析），
+/// 三发之间厂商可能已经换了；现在一发就是**同一版对象**，`identity.generation` 说清是哪一版。
+///
+/// 清单与 `ai_list_models`（配置表单用）**同源**：都走 `llm::models`，所以两处的
+/// "有哪些模型"永远一致 —— 各拉一份的口径差就会变成"配置里选得到、会话里没有"。
+///
+/// 拿不到模型清单**不失败**：把原因放进 `models_error`，会话面板据此把下拉变成
+/// "取不到清单"并说清为什么（拿不到就编一份清单，等于让用户选一个跑不通的模型）。
 #[tauri::command]
-async fn ai_models(
+async fn ai_vendor(
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    vendor: tauri::State<'_, Mutex<agent::vendor::ModelVendor>>,
     project_root: Option<String>,
-) -> Result<Vec<AiModelInfo>, String> {
-    let cfg = {
+) -> Result<VendorDto, String> {
+    // 同步段：引擎配置 + 厂商对象快照（配置锁与 vendor 锁都**不跨 await**）
+    let (cfg, identity) = {
         let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-        agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
+        let cfg = agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?;
+        let identity = vendor.lock().map_err(|e| e.to_string())?.snapshot();
+        (cfg, identity)
     };
-    let list = harness_engine::llm::models(&cfg.llm).await?;
-    Ok(list
-        .into_iter()
-        .map(|m| {
-            let caps = harness_engine::llm::model_caps(&m.id);
-            AiModelInfo {
-                web_search: harness_engine::llm::web_search_capable(&m.id, &cfg.llm.api_format),
-                // 读图：能力表说能、或厂商声明里就有 image（两处任一为真都算有能力）
-                multimodal: caps.multimodal || m.accepts("image"),
-                // 收音频：**只看厂商声明**（能力表里没有这一维，也不该靠猜）
-                audio: m.accepts("audio"),
-                name: m.display_name().to_string(),
-                id: m.id,
-                input_modalities: m.input_modalities,
-                context_window: m.context_window,
-            }
-        })
-        .collect())
+    let (models, models_error) = match harness_engine::llm::models(&cfg.llm).await {
+        Ok(list) => (
+            list.into_iter()
+                .map(|m| ai_model_info(m, &cfg.llm.api_format))
+                .collect(),
+            None,
+        ),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    // 当前模型按**配置解析**（runtime 覆盖已生效）—— 与配置面板同一个口径
+    let model = cfg.llm.model.clone();
+    Ok(VendorDto {
+        caps: model_caps_dto(&model, &cfg.llm.api_format),
+        identity,
+        model,
+        models,
+        models_error,
+    })
+}
+
+/// 会话工具栏要的**一份**厂商对象（含身份 / 清单 / 当前模型 / 能力）。
+#[derive(serde::Serialize)]
+struct VendorDto {
+    /// 厂商身份快照（宿主 runtime 里维护的那份对象）
+    identity: agent::vendor::VendorSnapshot,
+    /// 当前模型（按当前配置解析，含 runtime 覆盖）
+    model: String,
+    /// 当前模型能力（联网/读图）—— 按钮可用性只看它
+    caps: ModelCapsDto,
+    /// 厂商模型清单（拿不到 = 空 + `models_error`）
+    models: Vec<AiModelInfo>,
+    models_error: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1718,53 +1781,6 @@ struct AiModelInfo {
     multimodal: bool,
     /// 收音频（录音按钮据此出现/启用）
     audio: bool,
-}
-
-/// 某个模型具备哪些服务端能力（联网 / 多模态）。
-///
-/// 能力表在引擎里（`llm::model_caps`），宿主不抄一份 —— 否则加一个模型要改两处，
-/// 而两处不一致的表现就是"配置里选得到、跑起来没反应"。
-/// `model` 省略时查当前配置的模型。
-///
-/// **联网是"（协议 × 模型）"的**：同一个模型在 anthropic 路上能搜、在 `/responses` 上搜不了
-/// （实测 flash 就是这样）。所以这里给三样东西：
-/// · `web_search` —— **按当前 `api_format` 算出来的有效值**（开关可见性只看它，前端不必懂协议）；
-/// · 两条协议各自的原始值 —— 界面要说清"哪个协议下能搜"时用；
-/// · `api_format` —— 说明上面那个有效值是按哪条协议算的（文案里要写出来，否则用户看不懂为什么突然不能搜）。
-#[tauri::command]
-fn ai_model_caps(
-    model: Option<String>,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-    project_root: Option<String>,
-) -> Result<ModelCapsDto, String> {
-    let name = match model {
-        Some(m) if !m.trim().is_empty() => m,
-        _ => {
-            let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-            agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
-                .llm
-                .model
-        }
-    };
-    let c = harness_engine::llm::model_caps(&name);
-    // 有效值按**当前配置的协议**算：`api_format` 是从同一份配置里读的，
-    // 所以"面板里选的格式"与"能力判定"不会各说各话。
-    let api_format = {
-        let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-        agent::config_bridge::build_app_config(&mgr, project_root.as_deref())?
-            .llm
-            .api_format
-    };
-    // 先算有效值再进结构体字面量：`model: name` 会把 name 移走，之后就不能再借它了
-    let effective = harness_engine::llm::web_search_capable(&name, &api_format);
-    Ok(ModelCapsDto {
-        model: name,
-        web_search: effective,
-        web_search_openai: c.web_search,
-        web_search_anthropic: c.web_search_anthropic,
-        api_format,
-        multimodal: c.multimodal,
-    })
 }
 
 #[derive(serde::Serialize)]
@@ -1865,15 +1881,17 @@ fn config_form_load(
 /// 改个 `ui.lang` 不必把模型列表和 API key 状态全重探一遍。
 ///
 /// **调用前必须已经放掉 config 锁**：监听者（会话面板）收到事件就会回头调
-/// `agent_env_probe` / `ai_models` —— 那些命令同样要锁 config，握着锁发事件就是自己撞自己。
-/// 这个键是不是**由引擎/宿主托管、前端用户无法编辑**？
+/// `agent_env_probe` / `ai_vendor` —— 那些命令同样要锁 config，握着锁发事件就是自己撞自己。
 ///
-/// 目前只有模型名这一类：它由宿主从 `ai.model` 解析后交给引擎，前端只能从下拉框里选。
-/// 判定这类键的意义是**掐掉事件回环**：前端换模型 → 写 runtime `ai.model` → 宿主广播
-/// → 前端重探 → 用"后端当前配置"把刚选的画回去 ⇒ 用户看到的是"换不了模型"。
+/// 这个键是不是**由宿主托管、前端用户无法编辑**、且广播出去只会引起无用重探的？
+///
+/// 目前只有模型名这一类（宿主键 `ai.model` / `ai_fallback.model`）：它既**不改变厂商身份**
+/// （见 `refresh_vendor` —— 身份只由端点 / 密钥 / 协议决定），也不影响那排环境 chip，
+/// 所以不进 `config://changed`，免得面板为一个与自己无关的键跑一次环境探针。
+/// （口径含 `ends_with(".model")` 是为了兼容历史上错写成 `ai.model` 的那种键。）
 fn is_engine_managed_key(section: &str, key: &str) -> bool {
     let k = key.trim();
-    (section == "ai" || section == "ai_fallback") && k.ends_with(".model")
+    (section == "ai" || section == "ai_fallback") && (k == "model" || k.ends_with(".model"))
 }
 
 fn emit_config_changed(
@@ -1882,10 +1900,8 @@ fn emit_config_changed(
     entries: &[config::ConfigEntryInput],
     applied: bool,
 ) {
-    // **引擎托管的键不广播**（模型名）：前端的"换模型"本身就是写 runtime `ai.model` ——
-    // 广播回去只会让会话面板用"后端当前配置"把刚选中的模型画回去，形成**事件回环**
-    // （用户实测：「只能 pro，切不回 flash」）。模型的显示由面板自己那次 `ai_model_caps` 回执决定。
-    // 用户能编辑、且前端需要据此重探的，只有 key / 端点 / 协议这几类。
+    // 模型名这类**宿主托管键不广播**：前端只能从下拉框里选它，收到广播也做不了什么，
+    // 只会白跑一次环境探针（"换厂商"由 refresh_vendor 的 `model://vendor-changed` 负责）。
     let meaningful: Vec<&config::ConfigEntryInput> = entries
         .iter()
         .filter(|e| !is_engine_managed_key(&e.section, &e.key))
@@ -1903,6 +1919,40 @@ fn emit_config_changed(
     );
 }
 
+/// 配置改完 → **厂商身份真的变了**才刷新宿主 runtime 里的厂商对象并广播 `model://vendor-changed`。
+///
+/// **为什么不是"配置一变就发"**：会话面板拿这个事件当"重取模型清单/能力"的信号，而清单只取决于
+/// 端点 / 密钥 / 协议（换一家厂商、换一把钥匙、换一条协议，能列出、能联网的模型才可能变）。
+/// 拧一下 🌏（写 `harness.llm.web_search`）与厂商无关；发事件只会让面板拿配置里的默认模型
+/// 把用户刚选的那一个画回去 —— 那正是"toggle 联网就跳回 pro"的成因。
+///
+/// **身份从 `AppConfig` 解析、不逐个读键**：必须与**引擎实际要用的端点**同源
+/// （见 `agent::vendor::ModelVendor::from_app` 的注释）。
+///
+/// **调用前 config 锁必须已释放**（同 `emit_config_changed`）。
+fn refresh_vendor(
+    app: &tauri::AppHandle,
+    vendor: &Mutex<agent::vendor::ModelVendor>,
+    config_mgr: &Mutex<config::ConfigManager>,
+    project_root: Option<&str>,
+) {
+    let next = {
+        let Ok(mgr) = config_mgr.lock() else { return };
+        match agent::vendor::ModelVendor::read(&mgr, project_root) {
+            Some(v) => v,
+            None => return,
+        }
+    };
+    let Ok(mut cur) = vendor.lock() else { return };
+    if cur.same_vendor(&next) {
+        return; // 同一家厂商：清单不会变，别打扰面板
+    }
+    cur.adopt(next); // 版本 +1
+    let snapshot = cur.snapshot();
+    drop(cur);
+    let _ = app.emit("model://vendor-changed", snapshot);
+}
+
 /// 配置菜单：保存表单（增量写；空值 = 删除该键）
 #[tauri::command]
 fn config_form_save(
@@ -1911,6 +1961,7 @@ fn config_form_save(
     entries: Vec<config::ConfigEntryInput>,
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    vendor: tauri::State<'_, Mutex<agent::vendor::ModelVendor>>,
 ) -> Result<config::ScopeSaveReport, String> {
     let s = config::Scope::from_str(&scope).ok_or_else(|| {
         format!(
@@ -1925,6 +1976,7 @@ fn config_form_save(
     // 上面那个作用域结束 = 配置锁已释放（见 emit_config_changed 的注释：
     // 握着锁发事件会撞自己 —— 监听者收到事件就会回头调要锁的配置命令）
     emit_config_changed(&app, &scope, &entries, false);
+    refresh_vendor(&app, vendor.inner(), config_mgr.inner(), project_root.as_deref());
     Ok(report)
 }
 
@@ -1936,6 +1988,7 @@ fn config_form_apply(
     entries: Vec<config::ConfigEntryInput>,
     project_root: Option<String>,
     config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
+    vendor: tauri::State<'_, Mutex<agent::vendor::ModelVendor>>,
 ) -> Result<config::ScopeSaveReport, String> {
     let s = config::Scope::from_str(&scope).ok_or_else(|| {
         format!(
@@ -1949,6 +2002,7 @@ fn config_form_apply(
     };
     // 「应用」比「保存」更该广播：运行时内存真的变了，界面里所有派生状态当场就旧了
     emit_config_changed(&app, &scope, &entries, true);
+    refresh_vendor(&app, vendor.inner(), config_mgr.inner(), project_root.as_deref());
     Ok(report)
 }
 
@@ -2471,9 +2525,21 @@ fn main() {
             .unwrap_or(None),
     ));
 
+    // 模型厂商对象（宿主 runtime）：启动时按当前配置播种；之后每次配置变化由
+    // `refresh_vendor` 比对身份，变了才 +1 版本并广播 `model://vendor-changed` ——
+    // 会话面板只认这一个事件，于是"拧一下 🌏 就把选中的模型弹回 pro"的回环从根上没了。
+    let vendor_state = Mutex::new(
+        config_mgr
+            .lock()
+            .ok()
+            .and_then(|m| agent::vendor::ModelVendor::read(&m, None))
+            .unwrap_or_default(),
+    );
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(config_mgr)
+        .manage(vendor_state)
         .manage(mcp::McpManager::new())
         .manage(pty_mgr)
         .manage(agent::AgentState::new())
@@ -2626,8 +2692,7 @@ fn main() {
             config_schema,
             ai_translate,
             ai_list_models,
-            ai_models,
-            ai_model_caps,
+            ai_vendor,
             // Agent 命令桥（融合计划 Z3，append-only 注册块）
             agent::agent_run,
             agent::agent_reply,

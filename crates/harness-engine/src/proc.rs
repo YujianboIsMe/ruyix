@@ -1229,11 +1229,15 @@ mod tests {
     }
 
     /// 起来后写一个标记文件，再挂着 —— 这样"就绪判据"不必依赖端口，测试也能机器无关。
+    ///
+    /// **两边口径必须一致**：判据要的是文件**内容**里有 `started`（见 [`predicate_marker`]），
+    /// 所以写入侧也得写内容 —— 原来 Unix 侧写成 `touch`（**空文件**），于是 macOS/Linux 上
+    /// 这两条测试永远等不到 Ready（实测：`exit=1`，排在 Windows 上从没暴露过）。
     fn touch_marker_and_wait() -> String {
         #[cfg(target_os = "windows")]
         return format!("echo started > {MARKER} & {}", sleeper());
         #[cfg(not(target_os = "windows"))]
-        return format!("touch {MARKER}; {}", sleeper());
+        return format!("echo started > {MARKER}; {}", sleeper());
     }
 
     /// 打印点东西然后以退出码 7 结束
@@ -1251,11 +1255,14 @@ mod tests {
     /// "文件在、内容还空"的窗口。早先这里用 `type 文件`（空文件也返回 0），
     /// 谓词恰好轮询到这个窗口就会拿到一次**假命中**（证据只有 `exit=0`，没有那行内容），
     /// 表现为这条测试偶发失败。`findstr` / `grep` 在内容没匹配上时返回非 0，天然没有这个洞。
+    ///
+    /// **不带 `grep -q`**：判据**打印命中的那行**是契约的一部分（证据里要看得见命中了什么），
+    /// 与 Windows 的 `findstr /C:...` 对齐；`-q` 只回退出码，证据就只剩 `exit=0`。
     fn predicate_marker() -> String {
         #[cfg(target_os = "windows")]
         return format!("findstr /C:\"started\" {MARKER}");
         #[cfg(not(target_os = "windows"))]
-        return format!("grep -q started {MARKER}");
+        return format!("grep started {MARKER}");
     }
 
     fn predicate_never() -> String {
@@ -1625,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn log_tail_keeps_the_end_and_decodes_the_active_codepage() {
+    fn log_tail_keeps_the_end() {
         let _g = table_lock();
         let proj = tmp_proj("tail");
         let p = proj.join("x.log");
@@ -1637,21 +1644,33 @@ mod tests {
         let tail = read_log_tail(&p, 5);
         assert!(tail.contains("line-100"), "要保留**末尾**: {tail}");
         assert!(!tail.contains("line-1\n"), "不该把整份日志倒出来");
+    }
 
-        // GBK 字节（"不是内部或外部命令"）必须解成可读中文。
-        // 只在中文机器上断言 —— 英文机器活动代码页是 1252，这是预期内的差异。
-        if cfg!(target_os = "windows") && exec::ansi_codepage() == 936 {
-            let gbk: Vec<u8> = vec![
-                0xB2, 0xBB, 0xCA, 0xC7, 0xC4, 0xDA, 0xB2, 0xBF, 0xBB, 0xF2, 0xCD, 0xE2, 0xB2, 0xBF,
-                0xC3, 0xFC, 0xC1, 0xEE, 0x0A,
-            ];
-            let gp = proj.join("gbk.log");
-            std::fs::write(&gp, &gbk).unwrap();
-            assert!(
-                read_log_tail(&gp, 10).contains("不是内部或外部命令"),
-                "GBK 日志要解得开"
-            );
+    /// GBK 字节（"不是内部或外部命令"）必须解成可读中文。
+    ///
+    /// **Windows-only**：活动代码页只有 Windows 有（`exec::ansi_codepage` 本身就是
+    /// Windows-only）。不能写成 `if cfg!(windows) && exec::ansi_codepage() == 936` ——
+    /// `cfg!` 是**运行期**布尔，两个分支都得先编过，于是 macOS/Linux 上整包测试编不出来。
+    /// 而且英文 Windows 的活动代码页是 1252，这里按 936 才断言（预期内的差异）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn log_tail_decodes_the_active_codepage() {
+        let _g = table_lock();
+        if exec::ansi_codepage() != 936 {
+            return; // 英文机器：没有 GBK 语义，不断言
         }
+        let proj = tmp_proj("tail-gbk");
+        let gp = proj.join("gbk.log");
+        let gbk: Vec<u8> = vec![
+            0xB2, 0xBB, 0xCA, 0xC7, 0xC4, 0xDA, 0xB2, 0xBF, 0xBB, 0xF2, 0xCD, 0xE2, 0xB2, 0xBF,
+            0xC3, 0xFC, 0xC1, 0xEE, 0x0A,
+        ];
+        std::fs::write(&gp, &gbk).unwrap();
+        assert!(
+            read_log_tail(&gp, 10).contains("不是内部或外部命令"),
+            "GBK 日志要解得开"
+        );
+        let _ = std::fs::remove_dir_all(&proj);
     }
 
     #[test]
