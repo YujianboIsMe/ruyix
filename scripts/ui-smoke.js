@@ -4833,6 +4833,121 @@ async function runBackendMsgChecks() {
   check("U52", "backend-msg-samples", wrong.length === 0, "翻译结果不对：\n      " + wrong.join("\n      "));
 }
 
+/**
+ * U70 上下文布局契约（v1.2 P1 · LSC 迁移）。
+ *
+ * 钉住的是一件结构性的事：**不可变根 S 不许被每轮重建**。现状（v1.1）每轮把
+ * findings/账本块拼进 `msgs[0]` —— system 一动，请求体里其后的一切（任务头 + 整段历史）
+ * 就不再是公共前缀，缓存全废。判据与证据见 `doc/v1.2/架构-上下文账本与重基线调度-v1.2.md` §1。
+ *
+ * 契约的对象是**模块**（`readEngineAgent()`）：agent/ 里怎么挪文件都行，但这三件事必须在：
+ *   ① `msgs[0]` 的重建**只**发生在 layout 关的那条分支里（无条件重建 = 病回来了）；
+ *   ② layout 开着时，账块是**易变尾**（push 成最后一条），且**只活这一次请求**（调完就摘）；
+ *   ③ 运行时有一条"根段指纹变了就喊"的出口 —— 契约破了不许静默通过。
+ *
+ * 数值判据不在这一层：真 run 的"占比要涨"由引擎侧量（`agent/context.rs` 单测 +
+ * `examples/ctx_layout_ab.rs` 两臂量尺）。这里只钉**源码形状** —— 形状错了，那边跑出来的数
+ * 就不是同一件事的数。P2 的去重 / P4 的 re-base 接进来时，本条再加那两行 trace 的存在性
+ * （现在加等于钉一行不存在的代码）。
+ */
+function runContextLayoutChecks() {
+  const src = readEngineAgent();
+  const cfg = readLf("crates/harness-engine/src/config.rs");
+
+  // ① 根段只在 layout 关的分支里重建
+  const first = src.indexOf("msgs[0] = ChatMessage::system(");
+  const second = first < 0 ? -1 : src.indexOf("msgs[0] = ChatMessage::system(", first + 1);
+  const guard = first < 0 ? -1 : src.lastIndexOf("if cfg.agent.ctx.layout", first);
+  check(
+    "U70",
+    "root-rebuilt-only-when-layout-off",
+    first >= 0 && second < 0 && guard >= 0 && src.slice(guard, first).includes("} else {"),
+    "tool_loop.rs 里 `msgs[0] = ChatMessage::system(` 必须**只有一处**、且落在 " +
+      "`if cfg.agent.ctx.layout { … } else { … }` 的 else 分支里：无条件重建 system " +
+      "就是每轮作废其后所有缓存块（v1.2 P1 要治的那条）"
+  );
+
+  // ② 尾：push 成最后一条，且**调完就摘**（摘在后面，尾才真的进过请求体）
+  const push = src.indexOf("tail_idx = Some(msgs.len());");
+  const chat = src.indexOf("let llm_res = llm::chat(");
+  const unmount = src.indexOf("if let Some(i) = tail_idx {", chat);
+  check(
+    "U70",
+    "volatile-tail-is-last-and-unmounted-after-the-call",
+    push >= 0 &&
+      chat > push &&
+      unmount > chat &&
+      src.slice(unmount, unmount + 120).includes("msgs.remove(i)"),
+    "账块要 push 在消息序列**末尾**（易变尾 A），并且在 `llm::chat` **之后**摘掉：" +
+      "摘早了尾就不在请求体里，摘晚了（留到下一轮）会让后面记录的轮次下标整体偏移，" +
+      "而 fold_history 是按下标改老轮次正文的"
+  );
+
+  // ③ 契约破了要有人喊（不许静默通过）
+  check(
+    "U70",
+    "runtime-root-digest-tripwire",
+    src.includes("布局契约 I1 被违反"),
+    "layout 开着时相邻两轮的 S 段指纹必须逐轮相同 —— 变了要有一条 error 出口，" +
+      "否则契约破了只是悄悄少用缓存，谁都不知道"
+  );
+
+  // ④ 两个开关默认关（关掉时行为与 v1.1 一字不变），且**键真在**
+  const offByDefault = (key) => {
+    const at = cfg.indexOf("pub " + key + ": bool");
+    return at >= 0 && cfg.slice(Math.max(0, at - 200), at).includes('#[serde(default = "d_false")]');
+  };
+  check(
+    "U70",
+    "switches-default-off",
+    offByDefault("layout") &&
+      offByDefault("metrics") &&
+      /fn d_false\(\) -> bool \{\s*false\s*\}/.test(cfg),
+    "`agent.ctx.layout` / `agent.ctx.metrics` 必须默认 **false**（v1.2 纪律：新机制默认关，" +
+      "逐个真 run 验过再改默认值；关掉时既有门禁数字逐项不变）"
+  );
+  // ⑤ P2（去重账本）：命中的 trace 行必须是 `dedup <tool> <norm>` 这个形状
+  // —— 真 run 的读数（"重复工具调用次数"）与这条线是同一份证据，措辞改了就对不上账。
+  check(
+    "U70",
+    "dedup-trace-line",
+    src.includes("dedup {tool} {brief}"),
+    "去重命中要在日志里留下一行 `dedup <tool> <norm>`：它是 P2 验收读数（重复执行次数）在 trace 里的唯一来源"
+  );
+  // ⑥ P2：复用必须**标注**给模型看，且标注行只该有**一处实现**
+  // （不标注模型会怀疑"没执行成功"再试一次；两处实现迟早分叉成一处漏标）
+  // 数法：**按文件读、各自在 `#[cfg(test)]` 处截断** —— 测试里断言这句话不算"实现"。
+  const NOTE = "本次直接复用，未重跑";
+  const codeOf = (p) => readLf(p).split("#[cfg(test)]")[0];
+  const impls = [
+    "crates/harness-engine/src/agent.rs",
+    "crates/harness-engine/src/agent/ledger.rs",
+    "crates/harness-engine/src/agent/tool_loop.rs",
+    "crates/harness-engine/src/agent/context.rs",
+    "crates/harness-engine/src/agent/findings.rs",
+  ]
+    .map(codeOf)
+    .join("\n")
+    .split(NOTE).length - 1;
+  check(
+    "U70",
+    "reuse-note-single-source",
+    impls === 1,
+    "`" + NOTE + "` 只该有一处实现（`LedgerCall::reuse_note`，架构文档 §4 的原话），现在有 " + impls + " 处"
+  );
+  // ⑦ P2：账本真的接上了主循环（模块在、决策点唯一、开关默认关）
+  check(
+    "U70",
+    "ledger-is-wired-to-the-loop",
+    src.includes("pub struct ContextLedger") &&
+      src.includes("pub(super) fn precheck(") &&
+      src.includes("reused_slot(") &&
+      cfg.indexOf("pub dedup: bool") >= 0,
+    "`agent/ledger.rs` 要真接上主循环：ContextLedger + 唯一决策点 precheck + 命中走 reused_slot，" +
+      "且 `agent.ctx.dedup` 键必须存在"
+  );
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -4872,6 +4987,7 @@ async function main() {
     ["U64", "config-change-refresh", runConfigEventChecks],
     ["U67", "package-portable", runPackageChecks],
   ["U68", "model-chip-repaint", runModelChipChecks],
+  ["U70", "context-layout", runContextLayoutChecks],
     ["U65", "config-form-no-value-smear", runConfigSmearChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
