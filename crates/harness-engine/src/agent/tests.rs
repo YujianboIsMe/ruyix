@@ -1045,6 +1045,12 @@ fn ask_cfg(llm: &crate::testllm::FakeLlm) -> AppConfig {
     cfg.reflect.enabled = false;
     cfg.step.execute_plan = false;
     cfg.discover.enabled = false;
+    // 同 `quiet_cfg`：**基线不许依赖出厂默认值** —— 要哪一条，用例自己打开。
+    cfg.agent.ctx.layout = false;
+    cfg.agent.ctx.metrics = false;
+    cfg.agent.ctx.dedup = false;
+    cfg.agent.ctx.capsule = false;
+    cfg.agent.ctx.schedule = false;
     cfg
 }
 
@@ -3563,7 +3569,49 @@ fn quiet_cfg() -> AppConfig {
     cfg.reflect.enabled = false;
     cfg.step.execute_plan = false;
     cfg.discover.enabled = false;
+    // **基线不许依赖出厂默认值**（2026-09-27 的教训）：那一刻起出厂默认从"五个全关"
+    // 翻成"五个全开"（用户拍板：不要配置，run 内直接用 LSC 算法），当天有 7 条老用例
+    // 因为"默认值变了"整片变红 —— 它们要的其实是 **v1.1 基线**，不是"默认值"。
+    // 现在把五个开关**逐条钉在这里**：要哪一条，用例自己打开。
+    cfg.agent.ctx.layout = false;
+    cfg.agent.ctx.metrics = false;
+    cfg.agent.ctx.dedup = false;
+    cfg.agent.ctx.capsule = false;
+    cfg.agent.ctx.schedule = false;
     cfg
+}
+
+/// 出厂默认就是这套算法，**不写任何配置**也该看见它在工作（2026-09-27 拍板后的判据）。
+///
+/// 这条判据的存在理由：用户质疑过"到底用没用账本？我怎么看着每轮都在折叠" ——
+/// 当时五个开关默认全关，界面上自然一条账本行都没有。现在默认全开，
+/// 所以"默认配置 + 一次重复读 ⇒ trace 里必须出现 `dedup` / `上下文计量` / `rebase 决策=`"。
+#[test]
+fn the_shipped_default_config_shows_the_algorithm_at_work() {
+    let d = TempDir::new("shipped-default");
+    d.write("f1.txt", "一小段正文\n");
+    let mut cfg = AppConfig::default(); // ← **一个 ctx 开关都不碰**
+    cfg.gate.narrow = false;
+    cfg.gate.full = false;
+    cfg.reflect.enabled = false;
+    cfg.step.execute_plan = false;
+    cfg.discover.enabled = false;
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"f1.txt"}}"#.to_string(),
+        r#"{"tool":"read","args":{"path":"f1.txt"}}"#.to_string(),
+        r#"{"final":"读完了"}"#.to_string(),
+    ];
+    let (_, _, log) = block_on(run_logging(&cfg, &d.0, script));
+    assert!(log.contains("上下文计量"), "量尺没生效（默认该开）：{log}");
+    assert!(
+        log.contains("dedup read f1.txt"),
+        "去重账本没生效（默认该开）：{log}"
+    );
+    assert!(
+        log.contains("rebase 决策="),
+        "重基线调度没生效（默认该开）：{log}"
+    );
+    assert!(log.contains("拦截重复 1"), "第二次读没有被拦下：{log}");
 }
 
 /// 一条读动作的账本键（测试里手搓用）
@@ -3912,9 +3960,11 @@ fn capsule_off_writes_nothing_anywhere() {
         r#"{"final":"x"}"#.to_string(),
     ];
     let (_, _, log) = block_on(run_logging(&cfg, &d.0, script));
+    // 判据盯**行为**，不盯那个词：run 末的"机制 capsule=off"那行本来就该出现
+    // （用户要求"关也报一声"），所以这里只禁止侧存/召回**真的发生**。
     assert!(
-        !log.contains("capsule"),
-        "关着时连一行 capsule 都不该出现：{log}"
+        !log.contains("capsule 侧存") && !log.contains("capsule 召回"),
+        "关着时不该有侧存或召回：{log}"
     );
     assert!(!state.0.join("ctx").exists(), "关着时不建侧存目录");
     assert!(log.contains("拦截重复 1"), "P2 的去重照旧：{log}");

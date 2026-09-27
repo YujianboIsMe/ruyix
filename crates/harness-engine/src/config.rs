@@ -409,7 +409,8 @@ pub struct AgentConfig {
     /// 默认 8。**0 = 关掉守卫**（只关守卫，不关账本与 findings）。
     #[serde(default = "d_agent_stall_rounds")]
     pub stall_rounds: usize,
-    /// 上下文层（v1.2 · LSC 迁移）。**默认全关**：关掉时行为与 v1.1 一字不变。
+    /// 上下文层（v1.2 · LSC 迁移）。**出厂全开**（2026-09-27 拍板：用户原话
+    /// 「不要配置了，run 内上下文管理直接换成 LSC 算法」）。逐个关掉时行为与 v1.1 一字不变。
     #[serde(default)]
     pub ctx: CtxConfig,
 }
@@ -430,17 +431,17 @@ pub struct CtxConfig {
     /// ⇒ 它之后的缓存块全部作废（`[S]` 被当成可变区用）。
     /// 开 = `msgs[0]` 从头到尾一个字节不动（不变式 I1）。
     ///
-    /// 为什么默认关：它是**热路径上的上下文布局**，改的是模型每一轮看到的东西的位置。
-    /// 按 v1.2 的纪律"开关关掉 ⇒ 行为与今天一字不变"，逐个真 run 验证后再改默认值。
-    #[serde(default = "d_false")]
+    /// **默认开**（2026-09-27 拍板）：run 内的上下文管理就是这套算法，不给用户配置负担。
+    /// 关掉 ⇒ 块仍拼进 system 尾部、与 v1.1 逐字节相同（判据钉着这条）。
+    #[serde(default = "d_true")]
     pub layout: bool,
-    /// **计量**（`公共前缀占比` + `S 段指纹`）的开关，默认关。
+    /// **计量**（`公共前缀占比` + `S 段指纹`）的开关，**默认开**（2026-09-27 拍板）。
     ///
     /// 为什么和 `layout` 分开：**仪器必须两臂都能用**。判据是"占比**上升**"，
     /// 而对照臂（`layout=false`）也要能量出基线 —— 仪器只长在实验臂上，
     /// 那个"上升"就无从比较（等于拿一个没量过的数当基线）。
     /// 关掉时零额外计算、零额外日志行。
-    #[serde(default = "d_false")]
+    #[serde(default = "d_true")]
     pub metrics: bool,
     /// **去重账本**（v1.2 P2）：纯工具 + 资源版本未变 ⇒ 同一次调用不执行第二次。
     ///
@@ -448,15 +449,18 @@ pub struct CtxConfig {
     /// 判据只有一个方向：**宁可多执行一次，也不许"看起来一样就跳过"** ——
     /// 白名单外一律执行，版本拿不到一律执行。
     ///
-    /// 关（默认）= 与 v1.1 一字不变（`repeat-read` 区间守卫与 `fresh_cmd` 判据照旧）。
-    #[serde(default = "d_false")]
+    /// **默认开**（2026-09-27 拍板）。关掉 = 与 v1.1 一字不变
+    /// （`repeat-read` 区间守卫与 `fresh_cmd` 判据照旧）。
+    #[serde(default = "d_true")]
     pub dedup: bool,
-    /// **capsule 侧存**（P3，默认关）：结果正文落 `<便携根>/projects/<键>/ctx/<run-id>/`
+    /// **capsule 侧存**（P3，**默认开**）：结果正文落 `<便携根>/projects/<键>/ctx/<run-id>/`
     /// （`<step>-<tool>-<hash8>.txt` + `index.jsonl`），账本只留引用。
     /// 开了之后下面那条内存上限自然退场（正文不驻留内存）；召回 = **磁盘读 + sha256 校验**，不重跑工具。
+    #[serde(default = "d_true")]
     pub capsule: bool,
-    /// **重基线调度**（P4，默认关）：什么时候压缩交给 `agent::scheduler` 决定，
-    /// `history_keep_rounds` 降级为**安全下限**。关掉 ⇒ 行为与今天一字不变（老触发条件）。
+    /// **重基线调度**（P4，**默认开**）：什么时候压缩交给 `agent::scheduler` 决定，
+    /// `history_keep_rounds` 降级为**安全下限**。关掉 ⇒ 行为与 v1.1 一字不变（老触发条件）。
+    #[serde(default = "d_true")]
     pub schedule: bool,
     /// 规划视野 H（默认 96 = `MAX_STEPS`，与上游同设定）
     #[serde(default = "d_ctx_horizon")]
@@ -496,11 +500,14 @@ impl CtxConfig {
 impl Default for CtxConfig {
     fn default() -> Self {
         Self {
-            layout: d_false(),
-            metrics: d_false(),
-            dedup: d_false(),
-            capsule: d_false(),
-            schedule: d_false(),
+            // **出厂即用**（2026-09-27 拍板，用户原话：「不要配置了，run 内上下文管理直接换成 LSC 算法」）：
+            // 五个开关默认**全开** —— run 内的上下文管理就是账本 + 侧存 + 重基线调度 + [S][E][A] 布局。
+            // 想回到 v1.1 的老行为，逐个写 false 即可（关掉时与老行为逐项一致，有判据钉着）。
+            layout: d_true(),
+            metrics: d_true(),
+            dedup: d_true(),
+            capsule: d_true(),
+            schedule: d_true(),
             horizon: d_ctx_horizon(),
             window_tokens: d_ctx_window_tokens(),
             budget_tokens: d_ctx_budget_tokens(),
@@ -634,10 +641,6 @@ fn d_true() -> bool {
 }
 
 /// v1.2 起的**关**默认值：新机制一律默认关，逐个真 run 验过再改默认
-/// （判据：关掉时既有门禁数字逐项不变）。
-fn d_false() -> bool {
-    false
-}
 fn d_zero_i32() -> i32 {
     0
 }

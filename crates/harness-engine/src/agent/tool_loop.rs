@@ -1254,6 +1254,16 @@ pub async fn run_with_ask(
         // G2（有界上下文）：prompt 峰值 vs 预算 B —— 判据是"不退化"，所以要**每次都报**，
         // 哪怕没越界（不报就没人知道它到底有没有挨到边）。
         let budget = cfg.agent.ctx.budget_tokens_effective();
+        // **机制状态**（用户质疑过"我怎么看不出到底用没用它"）：关着也照样报 ——
+        // 一行说清这次 run 用了哪几件。不报的话，"没生效"与"没启用"在界面上长得一模一样。
+        let onoff = |v: bool| if v { "on" } else { "off" };
+        let mech = format!(
+            " · 机制 layout={} dedup={} schedule={} capsule={}",
+            onoff(cfg.agent.ctx.layout),
+            onoff(cfg.agent.ctx.dedup),
+            onoff(cfg.agent.ctx.schedule),
+            onoff(cfg.agent.ctx.capsule)
+        );
         let g2 = format!(
             " · prompt 峰值 {g2_max_prompt} token（预算 B = {budget}{}） · 被 max_tokens 截断 {g2_truncated} 次",
             if g2_max_prompt > budget {
@@ -1266,7 +1276,7 @@ pub async fn run_with_ask(
             "info",
             clip(
                 &format!(
-                    "[agent] 上下文计量小结：加权公共前缀 {} · 共 {} 轮（首轮按 0 前缀计 —— 它本来就没有可复用的东西）{vendor}{g2}",
+                    "[agent] 上下文计量小结：加权公共前缀 {} · 共 {} 轮（首轮按 0 前缀计 —— 它本来就没有可复用的东西）{vendor}{g2}{mech}",
                     tally.render(),
                     tally.rounds
                 ),

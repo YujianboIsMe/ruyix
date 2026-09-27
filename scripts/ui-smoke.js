@@ -4892,19 +4892,23 @@ function runContextLayoutChecks() {
       "否则契约破了只是悄悄少用缓存，谁都不知道"
   );
 
-  // ④ 两个开关默认关（关掉时行为与 v1.1 一字不变），且**键真在**
-  const offByDefault = (key) => {
+  // ④ 出厂默认**全开**（2026-09-27 拍板：不要配置，run 内上下文管理直接用 LSC 算法）。
+  // 用户不该为了用上算法去写配置 —— 所以这里钉的是：五个开关的 serde 默认都是 true。
+  const onByDefault = (key) => {
     const at = cfg.indexOf("pub " + key + ": bool");
-    return at >= 0 && cfg.slice(Math.max(0, at - 200), at).includes('#[serde(default = "d_false")]');
+    return at >= 0 && cfg.slice(Math.max(0, at - 220), at).includes('[serde(default = "d_true")]');
   };
   check(
     "U70",
-    "switches-default-off",
-    offByDefault("layout") &&
-      offByDefault("metrics") &&
-      /fn d_false\(\) -> bool \{\s*false\s*\}/.test(cfg),
-    "`agent.ctx.layout` / `agent.ctx.metrics` 必须默认 **false**（v1.2 纪律：新机制默认关，" +
-      "逐个真 run 验过再改默认值；关掉时既有门禁数字逐项不变）"
+    "switches-default-on",
+    onByDefault("layout") &&
+      onByDefault("metrics") &&
+      onByDefault("dedup") &&
+      onByDefault("capsule") &&
+      onByDefault("schedule") &&
+      /fn d_true\(\) -> bool \{\s*true\s*\}/.test(cfg),
+    "`agent.ctx.*` 五个开关必须默认 **true**（出厂即用：账本 + 侧存 + 重基线调度 + [S][E][A] 布局）；" +
+      "想回到 v1.1 写 false，那条路的老用例仍然逐条盯着"
   );
   // ⑤ P2（去重账本）：命中的 trace 行必须是 `dedup <tool> <norm>` 这个形状
   // —— 真 run 的读数（"重复工具调用次数"）与这条线是同一份证据，措辞改了就对不上账。
@@ -4970,20 +4974,21 @@ function runContextLayoutChecks() {
     "四种理由（DP / ski-rental / 下限 / 预算）都要在实现里存在：缺一种就等于少一条判据"
   );
 
-  // ⑧ P3/P4 的开关也必须默认关（新机制一律先关着验，v1.2 纪律）
+  // ⑧ 同上，再按五个都真打开了数一遍（防有人只改一半）
   check(
     "U70",
-    "p3-p4-switches-default-off",
+    "lsc-switches-default-on-2",
     (() => {
       const cfgSrc = readLf("crates/harness-engine/src/config.rs");
       return (
-        cfgSrc.includes("pub capsule: bool") &&
-        cfgSrc.includes("capsule: d_false()") &&
-        cfgSrc.includes("pub schedule: bool") &&
-        cfgSrc.includes("schedule: d_false()")
+        cfgSrc.includes("layout: d_true()") &&
+        cfgSrc.includes("metrics: d_true()") &&
+        cfgSrc.includes("dedup: d_true()") &&
+        cfgSrc.includes("capsule: d_true()") &&
+        cfgSrc.includes("schedule: d_true()")
       );
     })(),
-    "`agent.ctx.capsule` 与 `agent.ctx.schedule` 必须默认 false（与 layout/dedup/metrics 同规矩）"
+    "五个开关的出厂默认必须是**开**（2026-09-27 拍板：不要配置，run 内直接用 LSC 算法）"
   );
 
   // ⑨ P4 的调度器与主循环真的接上了：`scheduler::decide` 被调用 + 下限用的是 keep_rounds
