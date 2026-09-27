@@ -456,6 +456,16 @@ pub async fn run(
         ChatMessage::user(build_user_prompt(inp)),
     ];
     let max_steps = cfg.reflect.max_steps.max(1);
+    // 预算先说清：**读满轮次却什么都不给，是最坏的结果**（2026-09-27 真 run 的现场：
+    // 复核把 8 轮全花在 read 上，最后只降级出一句「没有给出结论」—— 用户既不知道缺什么、
+    // 也不知道要不要管）。附在输入包末尾，不额外占一轮。
+    if let Some(last) = msgs.last_mut() {
+        last.content.push_str(&format!(
+            "（预算 {max_steps} 轮：**先给结论再补证据**；证据不够就直接给 \
+             verdict=unknown 并写明缺哪一条 —— 读满轮次却什么都不给，是最坏的结果。）"
+        ));
+    }
+    let mut reads = 0usize;
 
     for step in 1..=max_steps {
         if is_cancelled(cancel) {
@@ -507,10 +517,14 @@ pub async fn run(
             crate::agent::tool_calls_echo(&reply.tool_calls)
         }));
         let nudge = match read_via_tool_calls(&reply.tool_calls, inp.project_root, sink) {
-            Some(obs) => obs,
+            Some(obs) => {
+                reads += 1;
+                obs
+            }
             None => match parse_read(&reply.content) {
                 Ok(Some(path)) => match read_project_file(inp.project_root, &path) {
                     Ok(text) => {
+                        reads += 1;
                         sink.log("info", format!("[reflect] read {path}"));
                         format!("{{\"ok\":true,\"result\":{}}}", json_str(&text))
                     }
@@ -529,10 +543,54 @@ pub async fn run(
         msgs.push(ChatMessage::user(nudge));
     }
 
+    // ---- 预算用尽：**再要一次结论**（工具面收成空 ⇒ 它只能表态）----
+    //
+    // 为什么必须有这一步：复核的价值全在那句结论上。只降级出一句「没有给出结论」，
+    // 等于花 8 轮模型钱换一句话，用户没法行动。"证据不足 + 缺哪一条"**本身就是一个
+    // 有效结论**：它告诉人这次交付有没有被复核过、下一步该看什么。
+    msgs.push(ChatMessage::user(format!(
+        "{{\"ok\":false,\"error\":{}}}",
+        json_str(&format!(
+            "预算用完了（{max_steps} 轮）。**现在必须给出结论**，不要再调用任何工具；\
+             只输出那一个 JSON：证据够 ⇒ verdict=ok|suspect；不够 ⇒ verdict=unknown，\
+             并在 summary 里写清 ① 你已经看过什么 ② 还缺哪一条证据 ③ 这对本次交付意味着什么。"
+        ))
+    )));
+    if let Ok(reply) =
+        llm::chat_with_tools(&llm_cfg, cfg.llm_fallback.as_ref(), &msgs, true, &[]).await
+    {
+        usage.add(&reply.usage);
+        if let Ok(r) = parse_reflection(&reply.content) {
+            sink.log(
+                "warn",
+                format!(
+                    "[reflect] 预算用尽后的强制表态：{}（{} 条 findings）",
+                    r.verdict,
+                    r.findings.len()
+                ),
+            );
+            return ReflectOutcome {
+                reflection: r,
+                usage,
+            };
+        }
+    }
+    // 连强制表态都拿不到 ⇒ 降级，但话要说全（读了几次、交付算什么状态）
     ReflectOutcome {
-        reflection: degraded(format!("复核在 {max_steps} 轮内没有给出结论")),
+        reflection: degraded(exhausted_note(reads, max_steps)),
         usage,
     }
+}
+
+/// 预算用尽又拿不到结论时，那句 note 说什么（单独成函数是为了能单测这条文案）。
+///
+/// 老文案只有一句「复核在 N 轮内没有给出结论」—— **不可行动**：不知道它干了什么、
+/// 也不知道这次交付算不算复核过。新的三件事：读了几次 / 结论算「未复核」/ 建议怎么做。
+fn exhausted_note(reads: usize, max_steps: usize) -> String {
+    format!(
+        "复核在 {max_steps} 轮预算内没能给出可用结论（读了 {reads} 次文件）—— \
+         本次交付**未经复核**，结论按 unknown 计，建议人工过一眼它给的关键文件"
+    )
 }
 
 /// 复核结论 → AgentOutcome 里的汇总（给 UI 的一句话）
@@ -557,6 +615,20 @@ pub fn summarize(out: &AgentOutcome) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// 预算用尽又没拿到结论时，那句 note 必须**可行动**。
+    ///
+    /// 老文案只有一句「复核在 N 轮内没有给出结论」：用户读完既不知道它干了什么，
+    /// 也不知道这次交付算不算复核过 —— 真 run 现场（2026-09-27）就是这么报的。
+    #[test]
+    fn the_exhausted_note_says_what_happened_and_what_it_means() {
+        let n = exhausted_note(8, 8);
+        assert!(n.contains("8 轮预算"), "{n}");
+        assert!(n.contains("读了 8 次文件"), "{n}");
+        assert!(n.contains("未经复核"), "必须点明这次交付的状态：{n}");
+        assert!(n.contains("建议人工"), "必须给下一步：{n}");
+        assert!(!n.contains("没有给出结论"), "老的不可行动文案必须消失：{n}");
+    }
+
     use super::*;
 
     #[test]

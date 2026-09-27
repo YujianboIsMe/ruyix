@@ -59,6 +59,9 @@ pub struct Capsule {
     dir: PathBuf,
     index: PathBuf,
     puts: usize,
+    /// 落盘正文的**总字节**（run 小结用）。侧存形态下内存里有界计数恒为 0，
+    /// 只报内存会让用户看到「侧存 28 条/0.0KB」⇒ 以为存了个空 —— 真报障（2026-09-27）。
+    bytes: usize,
     recalls: usize,
     /// 召回时 sha256 对不上的次数（**必须为 0**；非 0 说明侧存被改过 —— 要如实报出来）
     corrupted: usize,
@@ -76,6 +79,7 @@ impl Capsule {
             index: dir.join(INDEX_FILE),
             dir,
             puts: 0,
+            bytes: 0,
             recalls: 0,
             corrupted: 0,
         })
@@ -88,6 +92,7 @@ impl Capsule {
             index: dir.join(INDEX_FILE),
             dir,
             puts: 0,
+            bytes: 0,
             recalls: 0,
             corrupted: 0,
         }
@@ -98,6 +103,11 @@ impl Capsule {
     }
 
     /// `(落盘条数, 召回次数, 校验失败次数)`
+    /// 落盘正文的总字节（run 小结用；这是**磁盘**占用，不是内存里的）
+    pub fn disk_bytes(&self) -> usize {
+        self.bytes
+    }
+
     pub fn stats(&self) -> (usize, usize, usize) {
         (self.puts, self.recalls, self.corrupted)
     }
@@ -145,6 +155,7 @@ impl Capsule {
             .open(&self.index)?;
         writeln!(f, "{line}")?;
         self.puts += 1;
+        self.bytes += body.len();
         Ok(Ref {
             file,
             sha256: sum,

@@ -903,10 +903,16 @@ impl ContextLedger {
     }
 
     /// 侧存统计（落盘条数 / 召回次数 / 校验失败次数）+ 写失败次数
-    pub fn capsule_stats(&self) -> Option<(usize, usize, usize, u64)> {
+    pub fn capsule_stats(&self) -> Option<(usize, usize, usize, u64, usize)> {
         self.capsule.as_ref().map(|c| {
             let (puts, recalls, corrupted) = c.stats();
-            (puts, recalls, corrupted, self.capsule_errors)
+            (
+                puts,
+                recalls,
+                corrupted,
+                self.capsule_errors,
+                c.disk_bytes(),
+            )
         })
     }
 
@@ -958,17 +964,18 @@ impl ContextLedger {
     pub fn render_stats(&self) -> String {
         let kb = |n: usize| format!("{:.1}KB", n as f64 / 1024.0);
         let s = self.stats();
+        // 侧存形态下 `s.bytes` 是**内存**里的字节（恒为 0）—— 直接报它，用户会看到
+        // 「侧存 28 条/0.0KB」以为存了个空（真报障，2026-09-27）。所以：挂了 capsule 就报
+        // **磁盘**占用，而且两个形态都**标明**是哪一个 —— 数字一样、含义不同，不标是另一种误导。
+        let stored = match self.capsule_stats() {
+            Some((_, _, _, _, disk)) => format!("{} 条/{}（磁盘）", s.entries, kb(disk)),
+            None => format!("{} 条/{}（内存）", s.entries, kb(s.bytes)),
+        };
         let line = format!(
-            "去重账本：拦截重复 {} · 唯一执行 {} · 仍重复执行 {} · 版本失效重执行 {} · 不纯执行 {} · 侧存 {} 条/{}",
-            s.blocked,
-            s.unique,
-            s.redundant,
-            s.stale,
-            s.effectful,
-            s.entries,
-            kb(s.bytes)
+            "去重账本：拦截重复 {} · 唯一执行 {} · 仍重复执行 {} · 版本失效重执行 {} · 不纯执行 {} · 侧存 {}",
+            s.blocked, s.unique, s.redundant, s.stale, s.effectful, stored
         );
-        if let Some((puts, recalls, corrupted, werrs)) = self.capsule_stats() {
+        if let Some((puts, recalls, corrupted, werrs, _)) = self.capsule_stats() {
             return format!(
                 "{line}（capsule 落盘 {puts} 条 · 召回 {recalls} 次 · 校验失败 {corrupted}                  · 写失败 {werrs}；召回即磁盘读，**不重跑工具**）"
             );
@@ -1063,6 +1070,15 @@ pub(super) fn precheck(
 
 #[cfg(test)]
 mod tests {
+    /// 侧存形态下小计要报**磁盘**占用并标明形态（老形态报内存 ⇒ 恒 0.0KB，看着像没存）。
+    #[test]
+    fn the_stats_line_labels_whether_the_bytes_are_memory_or_disk() {
+        let l = ContextLedger::new(1 << 20);
+        let line = l.render_stats();
+        assert!(line.contains("（内存）"), "没挂侧存时按内存计：{line}");
+        assert!(line.contains("条/"), "{line}");
+    }
+
     use super::*;
 
     fn read_call(path: &str, offset: Option<usize>, limit: Option<usize>) -> LedgerCall {
