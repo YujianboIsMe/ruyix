@@ -135,6 +135,21 @@ mod tests {
             "{:?}",
             reg.notes
         );
+        // **交付物判据**（2026-09-27 补）：前端拿到的就是 `to_json()["css"]`
+        // —— 它必须是**有效 CSS**。真事故：过滤时漏了右花括号，注入的整份 CSS 成了
+        // 一段永不闭合的块，浏览器只认第一条规则的属性 ⇒ "只有注释高亮了"。
+        // 这里量的是**交付出去的那份字符串**，不是磁盘上的文件（文件当时完全正常）。
+        let payload = reg.to_json("preinstalled");
+        let css = payload["css"].as_str().unwrap_or_default();
+        assert!(!css.trim().is_empty(), "预装模式必须下发配色：{payload}");
+        assert_eq!(
+            css.matches('{').count(),
+            css.matches('}').count(),
+            "下发的 CSS 花括号不配平 ⇒ 浏览器只认第一条规则：{css}"
+        );
+        for seg in css.split('}').filter(|s| !s.trim().is_empty()) {
+            assert_eq!(seg.matches('{').count(), 1, "这条规则不完整：{seg:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

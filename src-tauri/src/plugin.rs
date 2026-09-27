@@ -426,7 +426,10 @@ pub fn filter_theme_css(text: &str) -> (String, Vec<String>) {
         }
         let parts: Vec<&str> = sel.split(',').map(|s| s.trim()).collect();
         if parts.iter().all(|s| is_tok_selector(s)) {
-            kept.push_str(&format!("{sel} {{{}\n", body.trim_end()));
+            // **右花括号必须补回来**：上面 `split('}')` 把它吃掉了，只写 `{` 的话整份 CSS
+            // 就是一段永不闭合的块 —— 浏览器只认第一条规则的属性，其余选择器全被当成
+            // 块里的无效声明丢掉。症状：**只有注释高亮了**（注释恰好是主题的第一条）。
+            kept.push_str(&format!("{sel} {{{} }}\n", body.trim_end()));
         } else {
             dropped.push(format!(
                 "选择器 `{}` 不是纯 `.tok-*`（插件不许碰 IDE 自己的样式）",
@@ -596,6 +599,37 @@ grammar = "builtin"
         assert!(!kept.contains("tab-bar"), "{kept}");
         assert!(!kept.contains(".a,"), "{kept}");
         assert_eq!(dropped.len(), 2, "{dropped:?}");
+    }
+
+    /// **每一条被留下的规则必须自带右花括号**（补的判据）。
+    ///
+    /// 现场：`filter_theme_css` 用 `split('}')` 切规则 ⇒ 右花括号被吃掉了，
+    /// 组回去时只写了 `{` ⇒ **整份注入的 CSS 里一个 `}` 都没有**。
+    /// 浏览器读到的是一段永不闭合的块：只有第一条规则的属性生效（注释色 + 斜体），
+    /// 后面的选择器全被当成块里的无效声明丢掉 —— 症状就是"**只有注释高亮了**"。
+    ///
+    /// 老判据（`theme_keeps_only_tok_rules`）只查 `kept.contains(".tok-keyword")`，
+    /// 字符串在就算过 ⇒ 十几天没抓住：**判据量的是"有没有"，不是"还能不能用"**。
+    #[test]
+    fn every_kept_rule_keeps_its_closing_brace() {
+        let (kept, _) =
+            filter_theme_css(".tok-keyword { color: #0af; }\n.tok-string { color: #ce9178; }\n");
+        assert_eq!(
+            kept.matches('{').count(),
+            kept.matches('}').count(),
+            "花括号必须配平（否则注入的整份 CSS 是废的）：{kept:?}"
+        );
+        assert_eq!(kept.matches('{').count(), 2, "两条规则都要留下：{kept:?}");
+        // 逐条重解析：按 `}` 切开，每段必须恰好有一个 `{`
+        let rules: Vec<&str> = kept.split('}').filter(|s| !s.trim().is_empty()).collect();
+        assert_eq!(rules.len(), 2, "规则条数要等于 `}}` 的个数：{kept:?}");
+        for seg in rules {
+            assert_eq!(
+                seg.matches('{').count(),
+                1,
+                "这条规则不完整（缺右花括号）：{seg:?}"
+            );
+        }
     }
 
     #[test]

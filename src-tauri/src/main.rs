@@ -3329,6 +3329,44 @@ mod tests {
         );
     }
 
+    /// **交付出去的那份 CSS 必须还是有效 CSS**（补的判据，2026-09-27）。
+    ///
+    /// 上面那条只查"主题**文件**里有没有 `.tok-x`"；可真正注入进 WebView 的不是文件，
+    /// 而是 `plugin::filter_theme_css` 过完一遍的**产物**。现场（真事故）：过滤时用
+    /// `split('}')` 切规则、组回去漏了右花括号 ⇒ 整份注入 CSS 是一段永不闭合的块 ⇒
+    /// 浏览器只认第一条规则的属性（那份主题的第一条正好是注释）⇒ 症状"**只有注释高亮了**"；
+    /// 而**文件本身完全正常**，上面那条判据一直是绿的。
+    ///
+    /// 教训与 §10.3 是同一句话：**判据要量交付物，不要量源料**。
+    #[test]
+    fn the_css_we_inject_is_valid_css() {
+        let theme = include_str!("../../plugins/highlight/ruyix-builtin/theme.css");
+        let (kept, dropped) = plugin::filter_theme_css(theme);
+        assert!(
+            dropped.is_empty(),
+            "内置主题不该有被丢弃的规则：{dropped:?}"
+        );
+        // ① 结构：花括号配平，且每条规则自成一段（缺 `}` 的规则会把后面全部吞掉）
+        assert_eq!(
+            kept.matches('{').count(),
+            kept.matches('}').count(),
+            "注入的 CSS 花括号不配平 ⇒ 浏览器只认第一条规则：{kept}"
+        );
+        for seg in kept.split('}').filter(|s| !s.trim().is_empty()) {
+            assert_eq!(seg.matches('{').count(), 1, "这条规则不完整：{seg:?}");
+        }
+        // ② 覆盖：名字表里的每个 token 都要在**注入产物**里有配色
+        let missing: Vec<&str> = builtin_token_names()
+            .iter()
+            .copied()
+            .filter(|n| !kept.contains(&format!(".tok-{n} {{")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "注入的 CSS 里缺这些 token 的配色：{missing:?}（渲染成默认色 = 看着像高亮丢了）"
+        );
+    }
+
     /// 预装插件的清单必须覆盖内置的 8 门语言（否则"预装了但少一半语言"没人发现）。
     #[test]
     fn preinstalled_plugin_covers_builtin_languages() {
