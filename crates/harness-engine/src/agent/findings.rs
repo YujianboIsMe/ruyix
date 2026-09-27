@@ -91,7 +91,8 @@ const LEDGER_KEEP: usize = 60;
 
 /// 本 run 的进展状态：结论 + 账本 + 读取索引。**step 子步骤与主循环共用同一份**
 /// （子步骤借的是同一个 `&mut Ctx`，所以这里天然共享，不需要再造一套）。
-#[derive(Clone, Debug)]
+// 不派生 Clone：内部持有 capsule 侧存句柄（有计数与 IO 语义，复制没有意义）
+#[derive(Debug)]
 pub struct Progress {
     findings: Vec<Finding>,
     /// 引擎账本（已做过什么）。只增不改。
@@ -314,7 +315,12 @@ impl Progress {
         now: &ledger::VersionVec,
     ) -> Option<(String, u32)> {
         let e = self.dedup.lookup(call, now)?;
-        Some((e.result.clone(), e.step))
+        match &e.body {
+            ledger::Body::Inline(s) => Some((s.clone(), e.step)),
+            // 侧存形态要读盘 + 校验（可能失败）⇒ 必须走 `dedup_recall`；
+            // 这条老入口只服务内存形态，拿不到就当作没命中（fail-safe）
+            ledger::Body::Stored(_) => None,
+        }
     }
 
     /// 记一次**命中**（没执行，但要能数出省了几次）。
@@ -323,6 +329,8 @@ impl Progress {
     }
 
     /// 记一次**真的执行**（结果 + 执行前的版本快照）。同时算作"这一轮有进展"。
+    /// 挂了 capsule（`agent.ctx.capsule`）时把正文**落盘**、账本只留引用；
+    /// 落盘失败就**退化为内存**并如实计数（`capsule_errors`）—— 不因为存不下就不记。
     pub fn dedup_record(
         &mut self,
         call: ledger::LedgerCall,
@@ -330,8 +338,46 @@ impl Progress {
         versions: ledger::VersionVec,
         step: u32,
     ) {
-        self.dedup.record(call, result, versions, step);
+        let body = match self.dedup.capsule_mut() {
+            Some(c) => {
+                let version = ledger::versions_json(&versions);
+                match c.put(
+                    step,
+                    crate::agent::capsule::Entry {
+                        tool: call.tool.name(),
+                        key: &call.norm,
+                        digest: call.digest,
+                        target: &call.norm,
+                        version: &version,
+                    },
+                    &result,
+                ) {
+                    Ok(r) => ledger::Body::Stored(r),
+                    Err(_) => {
+                        self.dedup.note_capsule_error();
+                        ledger::Body::Inline(result)
+                    }
+                }
+            }
+            None => ledger::Body::Inline(result),
+        };
+        self.dedup.record(call, body, versions, step);
         self.fresh_exec = true;
+    }
+
+    /// **召回**（P3 的唯一入口）：命中就取回正文 —— 内存形态给内存里的，
+    /// 侧存形态走 capsule 读盘 + **sha256 校验**。返回 `None` = 没命中（或侧存读不回来）⇒ 照常执行。
+    pub fn dedup_recall(
+        &mut self,
+        call: &ledger::LedgerCall,
+        now: &ledger::VersionVec,
+    ) -> Option<ledger::Recall> {
+        self.dedup.recall(call, now)
+    }
+
+    /// 挂上侧存（由主循环在 run 开头决定挂不挂）
+    pub fn attach_capsule(&mut self, c: crate::agent::capsule::Capsule) {
+        self.dedup.attach_capsule(c);
     }
 
     /// **仪器**：把这一次执行喂给审计（`call = None` ⇒ 不纯动作）。

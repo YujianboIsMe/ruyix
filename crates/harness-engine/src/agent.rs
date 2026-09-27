@@ -2485,6 +2485,27 @@ impl<'a> Ctx<'a> {
     }
 
     /// 项目状态根：注入优先，否则兜底临时目录（**绝不回落进项目**）。
+    /// 侧存文件（**只读例外**，v1.2 P3）：把一条**绝对路径**认成"项目桶里的文件"。
+    ///
+    /// 规矩两条，缺一不可：① **只读**（这里只解析路径，写盘另有闸 —— `apply_write`
+    /// 仍走 `safe_rel_path`）；② 规范化之后**必须落在 `state_root` 之内**（`..` 与
+    /// 符号链接都逃不出去）。项目内的绝对路径**照旧拒绝**，那条规定没被放宽。
+    fn state_file(&self, raw: &str) -> Option<PathBuf> {
+        let t = raw.trim();
+        let looks_absolute =
+            (t.len() >= 2 && t.as_bytes()[1] == b':') || t.starts_with('/') || t.starts_with('\\');
+        if !looks_absolute {
+            return None;
+        }
+        let root = self.state_root().canonicalize().ok()?;
+        let real = Path::new(t).canonicalize().ok()?;
+        if real.starts_with(&root) && real.is_file() {
+            Some(real)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn state_root(&self) -> PathBuf {
         self.state_root
             .clone()
@@ -2561,6 +2582,17 @@ impl<'a> Ctx<'a> {
             let mut n = 0usize;
             repair::list_dir(self.proj, "", 0, &mut n, &mut listing);
             return Ok(listing);
+        }
+        // ---- 唯一的"跳出项目根"只读例外（v1.2 P3）----
+        // capsule 侧存与 findings 落盘都在**项目桶**（`<便携根>/projects/<键>/`）里，
+        // 不在用户仓库内 —— 模型要能回头读自己那次被折掉的全量结果（需求 §2 G4）。
+        if let Some(p) = self.state_file(raw) {
+            let body = std::fs::read_to_string(&p).unwrap_or_else(|e| format!("<读取失败：{e}>"));
+            return Ok(format!(
+                "--- {}（侧存，只读）---
+{body}",
+                p.display()
+            ));
         }
         let rel = safe_rel_path(raw)?;
         if let Some(c) = self.overlay.get(&rel) {
@@ -3917,14 +3949,16 @@ pub use findings::Progress;
 mod tool_loop;
 pub use tool_loop::run_with_ask;
 
+/// 去重账本（v1.2 P2）：纯工具 + 资源版本未变 ⇒ 同一次调用不许执行第二次。
+pub mod capsule;
 /// 进展记忆与循环守卫（`record_findings` + 引擎账本 + 两条守卫）
 ///
 /// 见 `doc/v1.1/需求-Agent-进展记忆与循环守卫-v1.1.md`。与 `tool_loop` 一样是**文件切分**，
 /// 子模块用 `use super::*` 看到这里的一切。
 pub mod context;
 pub mod findings;
-/// 去重账本（v1.2 P2）：纯工具 + 资源版本未变 ⇒ 同一次调用不许执行第二次。
 pub mod ledger;
+pub mod scheduler;
 
 #[cfg(test)]
 mod tests;

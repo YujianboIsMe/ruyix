@@ -57,6 +57,82 @@ impl MetricSink {
         Some(pct / 100.0)
     }
 
+    /// 逐轮占比的**中位数**（P4 的读数用它）。
+    ///
+    /// 为什么另开一个而不是只看加权：**一次重建必定打断一轮的前缀**（折叠点之后的正文
+    /// 整块要重算）—— 那一轮的占比会掉一大截，而它是一次性的转换成本。
+    /// 加权平均会被它拖下来，于是"调度把前缀改碎了"这种错判就会发生；
+    /// 中位数看的是**稳态**：一轮的转换不该盖过其余轮的表现。
+    fn median_round_ratio(&self) -> Option<f64> {
+        let lines = self.lines.lock().unwrap();
+        let mut v: Vec<f64> = lines
+            .iter()
+            .filter(|l| l.contains("上下文计量：公共前缀"))
+            .filter_map(|l| {
+                let rest = l.split("公共前缀 ").nth(1)?;
+                let pct = rest.split('%').next()?.trim().parse::<f64>().ok()?;
+                Some(pct / 100.0)
+            })
+            .collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Some(v[v.len() / 2])
+    }
+
+    /// 任何一条留档行里取一个数（`prompt 峰值 N` / `被 max_tokens 截断 N 次` …）
+    fn metric_num(&self, key: &str) -> Option<u64> {
+        let lines = self.lines.lock().unwrap();
+        for line in lines.iter().rev() {
+            if let Some(rest) = line.split(key).nth(1) {
+                let digits: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(n) = digits.parse() {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
+    /// G2 越界了吗（prompt 峰值 > 预算 B）
+    fn g2_over_budget(&self) -> bool {
+        match (self.metric_num("prompt 峰值"), self.metric_num("预算 B =")) {
+            (Some(peak), Some(budget)) => peak > budget,
+            _ => false,
+        }
+    }
+
+    /// 留档行里出现某个片段的次数（`rebase 决策=执行` / `理由=预算` / `历史折叠` / `capsule 召回`）
+    fn count_lines(&self, needle: &str) -> usize {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+
+    /// G2 / 折叠 / 召回这三个读数（哪一臂写了什么，一眼看得见）
+    fn g2_and_rebase_line(&self) -> String {
+        format!(
+            "G1 加权 {:?} / 中位 {:?} · G2 prompt 峰值 {:?}（预算 {:?}） · 截断 {:?} 次 · rebase 执行 {} 次（预算强制 {}） · 折叠 {} 轮 · capsule 召回 {} 次",
+            self.engine_ratio(),
+            self.median_round_ratio(),
+            self.metric_num("prompt 峰值"),
+            self.metric_num("预算 B ="),
+            self.metric_num("被 max_tokens 截断"),
+            self.count_lines("rebase 决策=执行"),
+            self.count_lines("理由=预算"),
+            self.count_lines("历史折叠"),
+            self.count_lines("capsule 召回"),
+        )
+    }
+
     /// 账本小结里取一个数（`拦截重复 N` / `仍重复执行 N` / `唯一执行 N`）
     fn ledger_num(&self, key: &str) -> Option<u64> {
         let line = self
@@ -86,7 +162,12 @@ impl MetricSink {
 impl Sink for MetricSink {
     fn log(&self, _level: &str, msg: String) {
         // 两套仪器都收：P1 的逐轮计量 + P2 的账本小结（它们本来就是给同一次 run 量的）
-        if msg.contains("上下文计量") || msg.contains("去重账本") {
+        if msg.contains("上下文计量")
+            || msg.contains("去重账本")
+            || msg.contains("rebase ")
+            || msg.contains("历史折叠")
+            || msg.contains("capsule ")
+        {
             println!("      {msg}");
             self.lines.lock().unwrap().push(msg);
         }
@@ -142,7 +223,15 @@ fn temp_project(tag: &str) -> PathBuf {
 
 /// 量尺统一的配置：**只留工具循环本体**（门禁 / 复核 / 计划派发 / 命令发现 / 提问全关）——
 /// 它们各自会再发请求，会把"这一轮的请求"换成另一种东西，两臂就没法对着比了。
-fn base_cfg(layout: bool, dedup: bool) -> AppConfig {
+#[derive(Clone, Copy)]
+struct Switches {
+    layout: bool,
+    dedup: bool,
+    schedule: bool,
+    capsule: bool,
+}
+
+fn base_cfg(sw: Switches) -> AppConfig {
     let mut cfg = AppConfig::default();
     cfg.sandbox.mode = "off".into();
     cfg.lint.enabled = false;
@@ -154,8 +243,15 @@ fn base_cfg(layout: bool, dedup: bool) -> AppConfig {
     cfg.ask.enabled = false;
     // **仪器两臂都开**，处理变量只有一个（P1 是 layout，P2 是 dedup）
     cfg.agent.ctx.metrics = true;
-    cfg.agent.ctx.layout = layout;
-    cfg.agent.ctx.dedup = dedup;
+    cfg.agent.ctx.layout = sw.layout;
+    cfg.agent.ctx.dedup = sw.dedup;
+    cfg.agent.ctx.schedule = sw.schedule;
+    cfg.agent.ctx.capsule = sw.capsule;
+    // **两臂都要有"老机制"**：P4 的处理变量是"谁决定何时压"，所以对照臂必须是**老触发条件**
+    // （`history_trim` + `keep_rounds`）而不是"干脆不折" —— 否则比出来的差只是"折与不折"，
+    // 与调度器无关（实测踩过：对照臂没开 trim，读数直接读反）。
+    cfg.agent.history_trim = true;
+    cfg.agent.history_keep_rounds = 12;
     cfg
 }
 
@@ -200,13 +296,12 @@ fn write_fixture(dir: &Path) {
 /// 脚本化臂：**给定脚本**跑一臂（确定性；配对回放也走这里 —— 两臂的实现只有这一份）
 fn scripted_arm(
     dir: &Path,
-    layout: bool,
-    dedup: bool,
+    sw: Switches,
     script: Vec<String>,
     sink: &MetricSink,
 ) -> Result<Arm, String> {
     let llm = fake_llm(script);
-    let mut cfg = base_cfg(layout, dedup);
+    let mut cfg = base_cfg(sw);
     cfg.llm.base_url = llm.base_url.clone();
     cfg.llm.api_key = "smoke".into();
     cfg.llm.model = "fake".into();
@@ -341,14 +436,8 @@ def describe(code):
 /// 真跑一臂（打到厂商端点）。失败**交回去**而不是 panic ——
 /// 抄轨迹时要能如实说出"这一趟模型没走工具调用"（那是模型的偶发行为，引擎的守卫会报出来），
 /// 调用方用 [`arm_or_die`] 统一处置。
-fn real_arm(
-    dir: &Path,
-    layout: bool,
-    dedup: bool,
-    sink: &MetricSink,
-    task: &str,
-) -> Result<Arm, String> {
-    let mut cfg = base_cfg(layout, dedup);
+fn real_arm(dir: &Path, sw: Switches, sink: &MetricSink, task: &str) -> Result<Arm, String> {
+    let mut cfg = base_cfg(sw);
     config::apply_env_overrides(&mut cfg);
     // 协议：显式给了就听显式的，否则按 base_url 认（DeepSeek 的 `/anthropic` 端点就是 anthropic 协议）
     let fmt = std::env::var("DEEPSEEK_API_FORMAT")
@@ -390,17 +479,58 @@ fn real_arm(
 // 否则"配对"只是个说法（两臂的定义一旦分叉，量出来的差就不是开关的了）。
 
 /// 两种模式各自的**臂定义**：(名字, layout, dedup)
-fn arms_for(mode: Mode) -> [(&'static str, bool, bool); 2] {
+fn arms_for(mode: Mode, capsule: bool) -> [(&'static str, Switches); 2] {
+    let off = Switches {
+        layout: false,
+        dedup: false,
+        schedule: false,
+        capsule: false,
+    };
     match mode {
         Mode::Layout => [
-            ("关（块塞进 system，v1.1 行为）", false, false),
-            ("开（块是易变尾 A）", true, false),
+            ("关（块塞进 system，v1.1 行为）", off),
+            (
+                "开（块是易变尾 A）",
+                Switches {
+                    layout: true,
+                    ..off
+                },
+            ),
         ],
         Mode::Dedup => [
-            ("关（每次调用都真跑，v1.1 行为）", false, false),
-            ("开（纯工具 + 资源版本未变 ⇒ 复用）", false, true),
+            ("关（每次调用都真跑，v1.1 行为）", off),
+            (
+                "开（纯工具 + 资源版本未变 ⇒ 复用）",
+                Switches {
+                    dedup: true,
+                    capsule,
+                    ..off
+                },
+            ),
+        ],
+        Mode::Sched => [
+            ("关（老触发条件：过 keep 轮就折）", off),
+            (
+                "开（调度器决定何时压）",
+                Switches {
+                    schedule: true,
+                    ..off
+                },
+            ),
         ],
     }
+}
+
+/// P4 的脚本：**20 轮**（每轮读不同区间 ⇒ 正文各不相同、阶梯真的在长）
+fn sched_script() -> Vec<String> {
+    let mut v: Vec<String> = (0..20)
+        .map(|i| {
+            let off = 1 + i * 30;
+            format!(r#"{{"tool":"read","args":{{"path":"mod1.rs","offset":{off},"limit":30}}}}"#)
+        })
+        .collect();
+    v.push(r#"{"final":"读完了"}"#.to_string());
+    v
 }
 
 /// 脚本化臂用哪份确定性脚本
@@ -408,12 +538,52 @@ fn entry_script(mode: Mode) -> Vec<String> {
     match mode {
         Mode::Layout => script(),
         Mode::Dedup => dedup_script(),
+        Mode::Sched => sched_script(),
     }
 }
 
-/// 判读（预注册规则）：P1 看加权占比"开 > 关"；P2 看重复执行次数"开 < 关"。
+/// 判读（预注册规则）：P1 看加权占比"开 > 关"；P2 看重复执行次数"开 < 关"；
+/// P4 看"G1 不下降 + G2 不退化"（每臂的三读数在跑的时候已经打出来了）。
 fn verdict(mode: Mode, ratios: &[(&str, Option<f64>)], dups: &[(&str, Option<u64>, Option<u64>)]) {
     match mode {
+        Mode::Sched => {
+            println!(
+                "
+=== 判读（预注册规则：G2 不退化 + 折叠次数不多于老规则）==="
+            );
+            // **为什么不拿 G1 当 P4 的判据**（实测）：小阶梯夹具上折叠会把 prompt 缩小，
+            // 而那条 8KB 的系统前缀是常数 ⇒ **折得越多、比率越高** —— 于是"折得少"在 G1 上
+            // 反而像退步。G1 量的是前缀稳定性（那是 P1 的判据），不是"该不该折"（那是 token 账）。
+            if let (Some(a), Some(b)) = (ratios[0].1, ratios[1].1) {
+                println!(
+                    "  参考（不判对错）：G1 逐轮中位数 关 {:.1}%   开 {:.1}%",
+                    a * 100.0,
+                    b * 100.0
+                );
+            }
+            match (dups.first(), dups.get(1)) {
+                (Some((n0, f0, g0)), Some((n1, f1, g1))) => {
+                    println!(
+                        "  折叠次数：{n0} {} 次   {n1} {} 次",
+                        f0.unwrap_or(0),
+                        f1.unwrap_or(0)
+                    );
+                    if g0.unwrap_or(0) == 1 || g1.unwrap_or(0) == 1 {
+                        println!("  ⇒ **G2 越界**（prompt 峰值超预算）⇒ 回滚 + 查预算与调度参数");
+                        std::process::exit(1);
+                    }
+                    println!("  ⇒ G2 未越界 ✓");
+                    if f1.unwrap_or(0) > f0.unwrap_or(0) {
+                        println!(
+                            "  ⇒ **折叠次数变多了**（调度比老规则拆得还勤）⇒ 回滚 + 查 MARGIN"
+                        );
+                        std::process::exit(1);
+                    }
+                    println!("  ⇒ 折得不多于老规则 ✓（该省的省、该保的保）");
+                }
+                _ => println!("  ⇒ 没量到两臂的读数（检查 metrics 开关）"),
+            }
+        }
         Mode::Layout => {
             println!("\n=== 判读（预注册规则：加权占比「开 > 关」才算方向正确）===");
             match (ratios[0].1, ratios[1].1) {
@@ -631,7 +801,17 @@ fn capture(out: &Path, task: &str) {
     harness_engine::debug::set_enabled(true);
 
     let sink = MetricSink::new();
-    let arm = match real_arm(&dir, false, false, &sink, task) {
+    let arm = match real_arm(
+        &dir,
+        Switches {
+            layout: false,
+            dedup: false,
+            schedule: false,
+            capsule: false,
+        },
+        &sink,
+        task,
+    ) {
         Ok(a) => a,
         Err(e) => {
             harness_engine::debug::set_enabled(false);
@@ -670,7 +850,7 @@ fn capture(out: &Path, task: &str) {
 }
 
 /// 用同一份轨迹跑两臂（`mode` 决定处理变量是 layout 还是 dedup）。
-fn pair(path: &Path, mode: Mode) {
+fn pair(path: &Path, mode: Mode, capsule: bool) {
     let Some(trace) = load_trace(path) else {
         eprintln!("轨迹文件读不出内容：{}", path.display());
         std::process::exit(2);
@@ -683,7 +863,7 @@ fn pair(path: &Path, mode: Mode) {
 
     let mut ratios: Vec<(&str, Option<f64>)> = Vec::new();
     let mut dups: Vec<(&str, Option<u64>, Option<u64>)> = Vec::new();
-    for (name, layout, dedup) in arms_for(mode) {
+    for (name, sw) in arms_for(mode, capsule) {
         println!("\n>>> 臂 {name}");
         let sink = MetricSink::new();
         let dir = temp_project("pair");
@@ -693,7 +873,7 @@ fn pair(path: &Path, mode: Mode) {
         harness_engine::debug::set_path(log.clone());
         harness_engine::debug::set_enabled(true);
         let arm = arm_or_die(
-            scripted_arm(&dir, layout, dedup, trace.actions.clone(), &sink),
+            scripted_arm(&dir, sw, trace.actions.clone(), &sink),
             &format!("配对臂 {name}"),
         );
         harness_engine::debug::set_enabled(false);
@@ -710,12 +890,31 @@ fn pair(path: &Path, mode: Mode) {
             rounds,
             first_line(&arm.outcome.answer)
         );
-        ratios.push((name, sink.engine_ratio()));
-        dups.push((
+        println!("     {}", sink.g2_and_rebase_line());
+        // P4 的读数取**逐轮占比的中位数**（一次重建会打断一轮的前缀，那是一次性的转换成本，
+        // 不该盖过稳态）；其余模式沿用加权占比。
+        ratios.push((
             name,
-            sink.ledger_num("拦截重复"),
-            sink.ledger_num("仍重复执行"),
+            if matches!(mode, Mode::Sched) {
+                sink.median_round_ratio()
+            } else {
+                sink.engine_ratio()
+            },
         ));
+        dups.push(if matches!(mode, Mode::Sched) {
+            // P4 的两个格子装：折叠次数 / G2 是否越界（判据看的就是这两个）
+            (
+                name,
+                Some(sink.count_lines("历史折叠") as u64),
+                Some(u64::from(sink.g2_over_budget())),
+            )
+        } else {
+            (
+                name,
+                sink.ledger_num("拦截重复"),
+                sink.ledger_num("仍重复执行"),
+            )
+        });
     }
     verdict(mode, &ratios, &dups);
 }
@@ -728,15 +927,20 @@ fn pair(path: &Path, mode: Mode) {
 enum Mode {
     /// P1：布局 A/B（处理变量 = `agent.ctx.layout`）
     Layout,
-    /// P2：去重 A/B（处理变量 = `agent.ctx.dedup`）
+    /// P2/P3：去重 A/B（处理变量 = `agent.ctx.dedup`，加 `--capsule` 时正文落侧存）
     Dedup,
+    /// P4：重基线调度 A/B（处理变量 = `agent.ctx.schedule`）
+    Sched,
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let real = args.iter().any(|a| a == "--real");
+    let capsule = args.iter().any(|a| a == "--capsule");
     let mode = if args.iter().any(|a| a == "--dedup") {
         Mode::Dedup
+    } else if args.iter().any(|a| a == "--sched") {
+        Mode::Sched
     } else {
         Mode::Layout
     };
@@ -746,6 +950,10 @@ fn main() {
              谁盖谁；(2) verify() 返回 1 和返回 2 分别代表什么。每条结论给出 path:line 证据，\
              然后用 final 交付一句话结论。不要改任何文件。",
             "v1.2 P1 上下文布局 A/B",
+        ),
+        Mode::Sched => (
+            "把一个文件分块读一遍（每块 30 行），读完用 final 交付一句话结论。不要改任何文件。",
+            "v1.2 P4 重基线调度 A/B",
         ),
         Mode::Dedup => (
             // **故意请它复读**：第三步是"回同一处原文核对" —— 真 run 里最常见的浪费就是这个。
@@ -774,10 +982,10 @@ fn main() {
             eprintln!("--pair 需要一个轨迹文件：--pair <trace.json>");
             std::process::exit(2);
         };
-        pair(Path::new(path), mode);
+        pair(Path::new(path), mode, capsule);
         return;
     }
-    let arms = arms_for(mode);
+    let arms = arms_for(mode, capsule);
 
     if real
         && std::env::var("DEEPSEEK_API_KEY")
@@ -802,12 +1010,13 @@ fn main() {
         match mode {
             Mode::Layout => "agent.ctx.layout",
             Mode::Dedup => "agent.ctx.dedup",
+            Mode::Sched => "agent.ctx.schedule",
         }
     );
 
     let mut ratios: Vec<(&str, Option<f64>)> = Vec::new();
     let mut dups: Vec<(&str, Option<u64>, Option<u64>)> = Vec::new();
-    for (name, layout, dedup) in arms {
+    for (name, sw) in arms {
         println!("\n>>> 臂 {name}");
         let sink = MetricSink::new();
         let dir = temp_project(if real { "real" } else { "script" });
@@ -817,10 +1026,10 @@ fn main() {
             write_fixture(&dir);
         }
         let arm = if real {
-            arm_or_die(real_arm(&dir, layout, dedup, &sink, task), "真跑臂")
+            arm_or_die(real_arm(&dir, sw, &sink, task), "真跑臂")
         } else {
             arm_or_die(
-                scripted_arm(&dir, layout, dedup, entry_script(mode), &sink),
+                scripted_arm(&dir, sw, entry_script(mode), &sink),
                 "脚本化臂",
             )
         };
@@ -842,12 +1051,31 @@ fn main() {
             rounds,
             first_line(&arm.outcome.answer)
         );
-        ratios.push((name, sink.engine_ratio()));
-        dups.push((
+        println!("     {}", sink.g2_and_rebase_line());
+        // P4 的读数取**逐轮占比的中位数**（一次重建会打断一轮的前缀，那是一次性的转换成本，
+        // 不该盖过稳态）；其余模式沿用加权占比。
+        ratios.push((
             name,
-            sink.ledger_num("拦截重复"),
-            sink.ledger_num("仍重复执行"),
+            if matches!(mode, Mode::Sched) {
+                sink.median_round_ratio()
+            } else {
+                sink.engine_ratio()
+            },
         ));
+        dups.push(if matches!(mode, Mode::Sched) {
+            // P4 的两个格子装：折叠次数 / G2 是否越界（判据看的就是这两个）
+            (
+                name,
+                Some(sink.count_lines("历史折叠") as u64),
+                Some(u64::from(sink.g2_over_budget())),
+            )
+        } else {
+            (
+                name,
+                sink.ledger_num("拦截重复"),
+                sink.ledger_num("仍重复执行"),
+            )
+        });
     }
 
     verdict(mode, &ratios, &dups);

@@ -451,6 +451,28 @@ pub struct CtxConfig {
     /// 关（默认）= 与 v1.1 一字不变（`repeat-read` 区间守卫与 `fresh_cmd` 判据照旧）。
     #[serde(default = "d_false")]
     pub dedup: bool,
+    /// **capsule 侧存**（P3，默认关）：结果正文落 `<便携根>/projects/<键>/ctx/<run-id>/`
+    /// （`<step>-<tool>-<hash8>.txt` + `index.jsonl`），账本只留引用。
+    /// 开了之后下面那条内存上限自然退场（正文不驻留内存）；召回 = **磁盘读 + sha256 校验**，不重跑工具。
+    pub capsule: bool,
+    /// **重基线调度**（P4，默认关）：什么时候压缩交给 `agent::scheduler` 决定，
+    /// `history_keep_rounds` 降级为**安全下限**。关掉 ⇒ 行为与今天一字不变（老触发条件）。
+    pub schedule: bool,
+    /// 规划视野 H（默认 96 = `MAX_STEPS`，与上游同设定）
+    #[serde(default = "d_ctx_horizon")]
+    pub horizon: usize,
+    /// 模型上下文窗口（默认 131072）—— 预算 B 从它推
+    #[serde(default = "d_ctx_window_tokens")]
+    pub window_tokens: usize,
+    /// prompt 的预算 B（token）。**0 = 按窗口的 60% 推**（架构 §6）
+    #[serde(default = "d_ctx_budget_tokens")]
+    pub budget_tokens: usize,
+    /// 每轮携带 1 token 的代价（缓存读价；未缓存输入 = 1.0）
+    #[serde(default = "d_ctx_carry_rate")]
+    pub carry_rate: f64,
+    /// 重建一次被丢掉的前缀的额外代价
+    #[serde(default = "d_ctx_rebuild_rate")]
+    pub rebuild_rate: f64,
     /// 去重账本**结果侧存**的字节上限（0 = 不限）。默认 8MB。
     ///
     /// P2 的结果侧存在内存里，所以它有界：被挤掉的条目等于**没记过**（下次真执行，
@@ -460,15 +482,59 @@ pub struct CtxConfig {
     pub dedup_max_bytes: usize,
 }
 
+impl CtxConfig {
+    /// 真正用的预算 B：`budget_tokens = 0` ⇒ 按窗口的 60% 推（架构 §6 的原话）。
+    pub fn budget_tokens_effective(&self) -> usize {
+        if self.budget_tokens > 0 {
+            self.budget_tokens
+        } else {
+            self.window_tokens / 100 * 60
+        }
+    }
+}
+
 impl Default for CtxConfig {
     fn default() -> Self {
         Self {
             layout: d_false(),
             metrics: d_false(),
             dedup: d_false(),
+            capsule: d_false(),
+            schedule: d_false(),
+            horizon: d_ctx_horizon(),
+            window_tokens: d_ctx_window_tokens(),
+            budget_tokens: d_ctx_budget_tokens(),
+            carry_rate: d_ctx_carry_rate(),
+            rebuild_rate: d_ctx_rebuild_rate(),
             dedup_max_bytes: d_ctx_dedup_max_bytes(),
         }
     }
+}
+
+/// 规划视野：96 = `MAX_STEPS`（上游同设定）。H 已知 ⇒ 主路径是反向 DP。
+fn d_ctx_horizon() -> usize {
+    96
+}
+
+/// 上下文窗口的默认假设（131072）。预算 B 从它推 —— 换模型时改这一个数。
+fn d_ctx_window_tokens() -> usize {
+    131_072
+}
+
+/// 预算 B 的默认值：0 = 不写死，按窗口的 60% 推（架构 §6）。
+fn d_ctx_budget_tokens() -> usize {
+    0
+}
+
+/// 缓存读价（未缓存输入 = 1.0）：携带一个 token 一轮付这么多。
+/// 默认取 Anthropic prompt caching 的 cache read（0.1）。
+fn d_ctx_carry_rate() -> f64 {
+    0.1
+}
+
+/// 重建代价的额外部分：把丢掉的前缀再读一遍 ≈ 未缓存输入（1.0）减去已付的缓存读（0.1）。
+fn d_ctx_rebuild_rate() -> f64 {
+    0.9
 }
 
 /// 8MB：一次 run 的**纯工具结果**（读过的文件正文 / grep 输出）留这么多足够覆盖

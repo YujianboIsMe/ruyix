@@ -3769,3 +3769,282 @@ fn dedup_cap_evicts_the_oldest_and_then_re_executes() {
     );
     assert!(log.contains("侧存 1 条"), "侧存该被压到上限之内：{log}");
 }
+
+// ============================================================================
+// v1.2 P3：capsule 侧存（`agent.ctx.capsule`）
+// ============================================================================
+
+/// P3 的判据：挂着 capsule 时，重复的读**从侧存召回**（磁盘读 + sha256 校验），
+/// **不重跑工具**，而且侧存里那份与原文**逐字节相同**。
+#[test]
+fn capsule_serves_the_recall_without_rerunning_the_tool() {
+    let d = TempDir::new("capsule-on");
+    d.write("a.txt", "正文-MARK-CAPSULE\n第二行\n");
+    let state = TempDir::new("capsule-state");
+
+    let mut cfg = quiet_cfg();
+    cfg.agent.ctx.dedup = true;
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.capsule = true;
+    cfg.project_state_root = state.0.to_string_lossy().to_string();
+
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        r#"{"final":"读了两遍"}"#.to_string(),
+    ];
+    let (llm, _, log) = block_on(run_logging(&cfg, &d.0, script));
+
+    assert_eq!(llm.count(), 3, "去重不省轮次（省的是执行）");
+    // ① trace 上要看得出"召回"，且带 sha256 校验标记
+    assert!(
+        log.contains("capsule 召回，sha256 ✓"),
+        "命中的那条 trace 要标出侧存召回：{log}"
+    );
+    assert!(
+        log.contains("拦截重复 1") && log.contains("仍重复执行 0"),
+        "账上该是拦下 1 次、零重复执行：{log}"
+    );
+    // ② 工具只执行了一次：第二次读没有新的 read 结果（正文只在轮 1 出现）
+    let reads = log.matches("第 2 轮 read ✓").count();
+    assert_eq!(reads, 0, "第二次读不该执行：{log}");
+    // ③ 侧存真的落了盘，且**只落在 state_root 下**（绝不写用户仓库）
+    let ctx_dir = state.0.join("ctx");
+    let runs: Vec<_> = std::fs::read_dir(&ctx_dir)
+        .expect("capsule 目录该建出来")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(runs.len(), 1, "一次 run 一个目录");
+    let idx = std::fs::read_to_string(runs[0].path().join("index.jsonl")).unwrap();
+    assert_eq!(idx.lines().count(), 1, "一条结果一行索引");
+    let v: serde_json::Value = serde_json::from_str(idx.lines().next().unwrap()).unwrap();
+    let body = std::fs::read_to_string(runs[0].path().join(v["file"].as_str().unwrap())).unwrap();
+    assert_eq!(
+        crate::agent::capsule::Capsule::sha256(&body),
+        v["sha256"].as_str().unwrap(),
+        "侧存里的正文与索引里的 sha256 必须一致"
+    );
+    assert!(body.contains("正文-MARK-CAPSULE"), "{body}");
+    // ④ 项目目录里没多出东西（侧存不是写这儿）
+    let after: Vec<_> = std::fs::read_dir(&d.0)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(
+        after,
+        vec!["a.txt".to_string()],
+        "用户仓库里一个字节都不许写"
+    );
+}
+
+/// `read` 的唯一例外：**项目桶里的侧存文件可读（只读）**，但逃不出 state_root，
+/// 项目外的绝对路径照旧一律拒绝。
+#[test]
+fn read_may_reach_the_state_root_and_nothing_else() {
+    let d = TempDir::new("read-exc");
+    d.write("a.txt", "项目内");
+    let state = TempDir::new("read-exc-state");
+    std::fs::create_dir_all(state.0.join("ctx")).unwrap();
+    let inside = state.0.join("ctx").join("0001-read-deadbeef.txt");
+    std::fs::write(&inside, "侧存正文").unwrap();
+    let outside = state.0.parent().unwrap().join("ruyix_outside_probe.txt");
+    std::fs::write(&outside, "不该读到").unwrap();
+
+    let mut cfg = quiet_cfg();
+    cfg.project_state_root = state.0.to_string_lossy().to_string();
+    let ctx = Ctx::new(&d.0, WritePolicy::Apply)
+        .with_state_root(crate::config::project_state_root(&cfg, &d.0));
+
+    // ① 侧存文件：绝对路径可读（走例外）
+    let got = ctx.tool_read(&ReadSpec {
+        path: inside.to_string_lossy().to_string(),
+        offset: None,
+        limit: None,
+    });
+    assert!(
+        got.as_deref().unwrap_or("").contains("侧存正文"),
+        "侧存文件该读得到：{got:?}"
+    );
+    // ② 逃出 state_root（`..`）：拒绝
+    let escape = state
+        .0
+        .join("ctx")
+        .join("..")
+        .join("..")
+        .join("ruyix_outside_probe.txt");
+    assert!(
+        ctx.tool_read(&ReadSpec {
+            path: escape.to_string_lossy().to_string(),
+            offset: None,
+            limit: None,
+        })
+        .is_err(),
+        "`..` 逃出 state_root 必须被拒"
+    );
+    // ③ 项目文件的绝对路径：照旧拒绝（项目内用相对路径）
+    let abs = d.0.join("a.txt");
+    assert!(
+        ctx.tool_read(&ReadSpec {
+            path: abs.to_string_lossy().to_string(),
+            offset: None,
+            limit: None,
+        })
+        .is_err(),
+        "项目内文件仍只认相对路径"
+    );
+    let _ = std::fs::remove_file(&outside);
+}
+
+/// `capsule` 关着时行为与 P2 一模一样：结果留在内存里，**不建任何目录**
+#[test]
+fn capsule_off_writes_nothing_anywhere() {
+    let d = TempDir::new("capsule-off");
+    d.write("a.txt", "内容-MARK-1");
+    let state = TempDir::new("capsule-off-state");
+    let mut cfg = quiet_cfg();
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.dedup = true;
+    cfg.project_state_root = state.0.to_string_lossy().to_string();
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        r#"{"final":"x"}"#.to_string(),
+    ];
+    let (_, _, log) = block_on(run_logging(&cfg, &d.0, script));
+    assert!(
+        !log.contains("capsule"),
+        "关着时连一行 capsule 都不该出现：{log}"
+    );
+    assert!(!state.0.join("ctx").exists(), "关着时不建侧存目录");
+    assert!(log.contains("拦截重复 1"), "P2 的去重照旧：{log}");
+}
+
+// ============================================================================
+// v1.2 P4：重基线调度（`agent.ctx.schedule`）
+// ============================================================================
+
+fn sched_script() -> Vec<String> {
+    let mut v: Vec<String> = (1..=5)
+        .map(|i| format!(r#"{{"tool":"read","args":{{"path":"f{i}.txt"}}}}"#))
+        .collect();
+    v.push(r#"{"final":"读完了"}"#.to_string());
+    v
+}
+
+/// **P4 的验收判据**：调度器开着时，压缩的**时机由调度器判定**、不再由"过了几轮"决定。
+///
+/// 判据取的是**两个机制会给出不同答案**的那个场合：`keep_rounds = 6` 但**视野只剩 1-2 轮**
+/// （`horizon = 8`）。老规则会说"已经过了 6 轮 ⇒ 折"，而代价模型会算出一句反话 ——
+/// "付 0.9L 只省 1 轮，纯亏" ⇒ 一次都不折。trace 里三种理由都看得见。
+///
+/// 注：**长视野**下 DP 通常会同意"把阶梯压小"（carry 0.1 vs rebuild 0.9，压得勤反而便宜），
+/// 所以这一期的价值主要在**上界（预算强制压）**与**收尾（快结束时别重建）**这两处，
+/// 不是"比老规则折得更少"。这一点写在这里，免得后来人拿"折得少不少"当判据。
+#[test]
+fn the_scheduler_decides_when_to_rebase_not_the_round_count() {
+    let script = || {
+        let mut v: Vec<String> = (1..=10)
+            .map(|i| {
+                format!(
+                    r#"{{"tool":"read","args":{{"path":"f{}.txt"}}}}"#,
+                    (i % 3) + 1
+                )
+            })
+            .collect();
+        v.push(r#"{"final":"读完了"}"#.to_string());
+        v
+    };
+    let mk = || {
+        let d = TempDir::new("sched-vs-rounds");
+        for i in 1..=3 {
+            d.write(
+                &format!("f{i}.txt"),
+                "一小段正文
+",
+            );
+        }
+        d
+    };
+    let mut cfg_on = quiet_cfg();
+    cfg_on.agent.history_trim = true;
+    cfg_on.agent.history_keep_rounds = 6; // 老触发器：过 6 轮就该折
+    cfg_on.agent.ctx.metrics = true;
+    cfg_on.agent.ctx.schedule = true;
+    cfg_on.agent.ctx.horizon = 8; // 视野只剩 1-2 轮 ⇒ 重建摊不回来
+    let d1 = mk();
+    let (_, _, log_on) = block_on(run_logging(&cfg_on, &d1.0, script()));
+
+    let mut cfg_off = cfg_on.clone();
+    cfg_off.agent.ctx.schedule = false;
+    let d2 = mk();
+    let (_, _, log_off) = block_on(run_logging(&cfg_off, &d2.0, script()));
+
+    // 关着：老规则照旧（轮数够了就折）—— 对照组必须成立，否则"不同"说明不了什么
+    assert!(
+        log_off.contains("历史折叠"),
+        "关着调度器时，老触发条件必须一字不变：{log_off}"
+    );
+    // 开着：同一个 keep_rounds，调度器说不值得重建 ⇒ 一次都不折
+    assert!(
+        !log_on.contains("历史折叠"),
+        "调度器开着时，'过了几轮'不再是触发器：{log_on}"
+    );
+    // 三种理由在 trace 里都要看得见：下限挡着 / DP 判定 / 兜底
+    assert!(
+        log_on.contains("理由=下限"),
+        "前 6 轮该由下限挡着：{log_on}"
+    );
+    assert!(
+        log_on.contains("理由=DP") || log_on.contains("理由=ski-rental"),
+        "轮数够了之后必须由调度器判定：{log_on}"
+    );
+    assert!(
+        log_on.contains("字节代理计量"),
+        "trace 必须写明是**字节代理**计量（架构 §6）：{log_on}"
+    );
+}
+
+/// 预算越界 ⇒ **必须**压（G2 是硬约束）：trace 里理由必须写"预算"
+#[test]
+fn a_budget_overflow_forces_the_fold() {
+    let d = TempDir::new("sched-budget");
+    for i in 1..=5 {
+        d.write(&format!("f{i}.txt"), "一小段正文\n");
+    }
+    let mut cfg = quiet_cfg();
+    cfg.agent.history_trim = true;
+    cfg.agent.history_keep_rounds = 6; // 触发器够不着（5 轮就结束了）
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.schedule = true;
+    cfg.agent.ctx.budget_tokens = 1; // 任何阶梯都越界 ⇒ 每轮都该压
+    let (_, _, log) = block_on(run_logging(&cfg, &d.0, sched_script()));
+    assert!(log.contains("理由=预算"), "越过预算就该由预算强制压：{log}");
+    assert!(log.contains("历史折叠"), "预算压了就必须真折：{log}");
+}
+
+/// 视野跑完（未知 horizon）时走 ski-rental 兜底，理由必须写出来
+#[test]
+fn an_exhausted_horizon_falls_back_to_ski_rental() {
+    let d = TempDir::new("sched-ski");
+    for i in 1..=3 {
+        d.write(&format!("f{i}.txt"), "一小段正文\n");
+    }
+    let mut cfg = quiet_cfg();
+    cfg.agent.history_trim = true;
+    cfg.agent.history_keep_rounds = 1;
+    cfg.agent.ctx.metrics = true;
+    cfg.agent.ctx.schedule = true;
+    // 把视野设成 1：跑两步就"未知 horizon"了 ⇒ 该看到 ski-rental 的理由
+    cfg.agent.ctx.horizon = 1;
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"f1.txt"}}"#.to_string(),
+        r#"{"tool":"read","args":{"path":"f2.txt"}}"#.to_string(),
+        r#"{"final":"x"}"#.to_string(),
+    ];
+    let (_, _, log) = block_on(run_logging(&cfg, &d.0, script));
+    assert!(
+        log.contains("理由=ski-rental"),
+        "视野用完 ⇒ 走 ski-rental 兜底：{log}"
+    );
+}

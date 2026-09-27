@@ -35,6 +35,30 @@ pub async fn run_with_ask(
     // 一个字节都不进用户仓库。
     let mut ctx =
         Ctx::new(proj, policy).with_state_root(crate::config::project_state_root(cfg, proj));
+    // ---- P3：capsule 侧存（`agent.ctx.capsule`）----
+    // 建不出来就**退化为内存**并如实说一句：侧存是"更不容易丢掉事实"，不是"必须"。
+    if cfg.agent.ctx.capsule {
+        let state_root = ctx.state_root().to_path_buf();
+        match crate::agent::capsule::Capsule::create(&state_root, "ctx") {
+            Ok(c) => {
+                sink.log(
+                    "info",
+                    format!(
+                        "[agent] capsule 侧存：{}（结果落盘，账本只留引用）",
+                        c.dir().display()
+                    ),
+                );
+                ctx.progress_mut().attach_capsule(c);
+            }
+            Err(e) => sink.log(
+                "warn",
+                format!(
+                    "[agent] capsule 建不出来（{}），本次退化为内存侧存：{e}",
+                    state_root.display()
+                ),
+            ),
+        }
+    }
     let mut plan_steps: Vec<PlanStep> = Vec::new();
     // ---- 计划执行（`step.execute_plan` 开启时）----
     // 游标在**引擎**手里：让模型每轮自选"我要做第几步"必然乱序、跳步、重复，而且
@@ -85,6 +109,26 @@ pub async fn run_with_ask(
     let mut cache_hit_sum: u64 = 0;
     let mut cache_in_sum: u64 = 0;
     let mut cache_rounds: usize = 0;
+    // G2（有界上下文）的两个读数：prompt 峰值（厂商回报的真值）与被截断的轮数
+    let mut g2_max_prompt: usize = 0;
+    let mut g2_truncated: usize = 0;
+
+    // ---- P4：重基线调度（`agent.ctx.schedule`）----
+    // 关着 ⇒ `history_keep_rounds` 照旧是触发器；开着 ⇒ 它降级为**安全下限**（拍板 3）。
+    let sched_cfg = cfg.agent.ctx.schedule.then(|| scheduler::Cfg {
+        horizon: cfg.agent.ctx.horizon,
+        budget_tokens: cfg.agent.ctx.budget_tokens_effective(),
+        carry_rate: cfg.agent.ctx.carry_rate,
+        rebuild_rate: cfg.agent.ctx.rebuild_rate,
+        floor_rounds: cfg.agent.history_keep_rounds,
+    });
+    // 距上一次重基线过了几轮（调度器的状态之一）
+    let mut rounds_since_rebase = 0usize;
+    // 上一次重基线之后阶梯的字节数（"压完会剩下多少"的实测）
+    let mut base_bytes = 0usize;
+    // 上一轮量到的阶梯字节数 / 每轮实测增长
+    let mut ladder_bytes = 0usize;
+    let mut growth_bytes = 0usize;
 
     let mut msgs = vec![ChatMessage::system(ctx_root.root())];
     for m in tail_history(history, 12) {
@@ -418,6 +462,11 @@ pub async fn run_with_ask(
             }
         };
         out.usage.add(&reply.usage);
+        // G2：prompt 的峰值（真值来自厂商回报）+ 是否被 max_tokens 截断
+        g2_max_prompt = g2_max_prompt.max(reply.usage.prompt_tokens as usize);
+        if reply.finish_reason.as_deref() == Some("length") {
+            g2_truncated += 1;
+        }
         // 服务端联网是**黑盒注入**：检索结果直接进了上下文，标题与链接都不回传，
         // 引擎只拿得到查询词。把查询词当作一条取证记下来 —— 否则复核员眼里
         // 模型"凭空知道"最近的事，就会按"证据无处可查"打回，重演上一个死锁。
@@ -871,6 +920,13 @@ pub async fn run_with_ask(
                 .and_then(|p| p.as_ref())
                 .and_then(|p| p.reuse.as_ref())
             {
+                // 侧存形态要把"召回"这件事写在同一条 trace 里：`capsule 召回 + sha256 ✓`
+                // 就是"为召回而重跑 = 0"的可见证据（两个形状都保留 `dedup <tool> <norm>` 前缀，
+                // 判据与真跑读数都按这个形状数）。
+                Some(r) if r.from_capsule => format!(
+                    "[agent] {head} dedup {tool} {brief} ← 复用第 {} 轮的结果                     （capsule 召回，sha256 ✓，资源版本未变，未重跑）",
+                    r.step
+                ),
                 Some(r) => format!(
                     "[agent] {head} dedup {tool} {brief} ← 复用第 {} 轮的结果（资源版本未变，未重跑）",
                     r.step
@@ -1047,17 +1103,66 @@ pub async fn run_with_ask(
             ),
         });
         if cfg.agent.history_trim {
-            let (folded, saved) =
-                fold_history(&mut msgs, &round_slots, cfg.agent.history_keep_rounds);
-            if folded > 0 {
+            let keep = cfg.agent.history_keep_rounds.max(1);
+            // 阶梯现在多大（字节；token 由 `estimate_tokens` 换算 —— **字节代理**，
+            // 架构 §6 允许，但 trace 里必须写明是代理）
+            let now_bytes: usize = msgs.iter().map(|m| m.content.len()).sum();
+            if let Some(sc) = &sched_cfg {
+                // ---- P4：何时压由调度器说了算（`keep_rounds` 只是安全下限）----
+                // MPC：用**实测**的增长重新规划一次，只取第一步的动作。
+                let st = scheduler::State {
+                    ladder_tokens: scheduler::estimate_tokens(now_bytes),
+                    base_tokens: scheduler::estimate_tokens(base_bytes.max(1)),
+                    growth_tokens: scheduler::estimate_tokens(growth_bytes),
+                    rounds_since: rounds_since_rebase,
+                    // 视野是**配置的 H**（默认 96 = MAX_STEPS）：`0` = 已经跑过 H ⇒ 未知 horizon，
+                    // 由 ski-rental 兜底（架构 §7）。用 MAX_STEPS 硬编码会让 horizon 配置失效 ——
+                    // 那正是"拍出来的数"的另一种写法。
+                    remaining: sc.horizon.saturating_sub(step),
+                };
+                let d = scheduler::decide(sc, &st);
+                // 每次决策都留痕：形状是契约的一部分（ui-smoke U70 与真 run 读数按它数）
                 sink.log(
                     "info",
                     format!(
-                        "[agent] 第 {step} 轮 历史折叠 {folded} 轮（省 {saved} 字节；保留最近 {} 轮正文）",
-                        cfg.agent.history_keep_rounds
+                        "[agent] 第 {step} 轮 {}（字节代理计量；阶梯 {} token / 每轮 +{}）",
+                        scheduler::render(&d),
+                        st.ladder_tokens,
+                        st.growth_tokens
                     ),
                 );
+                if d.rebase {
+                    let (folded, saved) = fold_history(&mut msgs, &round_slots, keep);
+                    sink.log(
+                        "info",
+                        format!(
+                            "[agent] 第 {step} 轮 历史折叠 {folded} 轮（省 {saved} 字节；下限仍保 {keep} 轮正文）"
+                        ),
+                    );
+                    rounds_since_rebase = 0;
+                    base_bytes = msgs.iter().map(|m| m.content.len()).sum();
+                } else {
+                    rounds_since_rebase = rounds_since_rebase.saturating_add(1);
+                }
+            } else {
+                // 关掉时：老触发条件一字不变（`fold_history` 幂等，每轮都调）
+                let (folded, saved) = fold_history(&mut msgs, &round_slots, keep);
+                if folded > 0 {
+                    sink.log(
+                        "info",
+                        format!(
+                            "[agent] 第 {step} 轮 历史折叠 {folded} 轮（省 {saved} 字节；保留最近 {keep} 轮正文）"
+                        ),
+                    );
+                }
             }
+            // 每轮增长要**从第二轮起**才算：第一轮 `ladder_bytes` 还是 0，
+            // 拿它作基线量出来的"增长"等于整条阶梯（实测踩过：2565 token/轮 的假增长
+            // 会让 DP 直接判"该压"）。
+            if ladder_bytes > 0 {
+                growth_bytes = now_bytes.saturating_sub(ladder_bytes);
+            }
+            ladder_bytes = now_bytes;
         }
 
         // 模型已经对失败做出过回应（无论它选了哪个动作），把控制权交回引擎继续派发。
@@ -1146,15 +1251,26 @@ pub async fn run_with_ask(
                 cache_rounds
             )
         };
+        // G2（有界上下文）：prompt 峰值 vs 预算 B —— 判据是"不退化"，所以要**每次都报**，
+        // 哪怕没越界（不报就没人知道它到底有没有挨到边）。
+        let budget = cfg.agent.ctx.budget_tokens_effective();
+        let g2 = format!(
+            " · prompt 峰值 {g2_max_prompt} token（预算 B = {budget}{}） · 被 max_tokens 截断 {g2_truncated} 次",
+            if g2_max_prompt > budget {
+                "，**已越界**"
+            } else {
+                "，未越界"
+            }
+        );
         sink.log(
             "info",
             clip(
                 &format!(
-                    "[agent] 上下文计量小结：加权公共前缀 {} · 共 {} 轮（首轮按 0 前缀计 —— 它本来就没有可复用的东西）{vendor}",
+                    "[agent] 上下文计量小结：加权公共前缀 {} · 共 {} 轮（首轮按 0 前缀计 —— 它本来就没有可复用的东西）{vendor}{g2}",
                     tally.render(),
                     tally.rounds
                 ),
-                300,
+                400,
             ),
         );
     }

@@ -26,6 +26,7 @@
 //! P3 把它换成 `<便携根>/projects/<键>/ctx/<run-id>/` 的 capsule 侧存 + sha256 校验之后，
 //! 这里不再有上限（"历史不删"是记忆层的公理）。
 
+use super::capsule::{Capsule, Ref};
 use super::*;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -552,7 +553,43 @@ pub fn snapshot(
 // 账本
 // ============================================================================
 
-/// 一条账本记录（只增不改）。`result` = 上次的真结果（P2 在内存，P3 换 capsule 侧存）。
+/// 上次那条结果正文放在哪儿。
+///
+/// - `Inline`：P2 的形态（内存里有界，超限整条挤掉）；
+/// - `Stored`：P3 的形态（capsule 侧存，账本只留引用 —— 于是 §5 那条内存上限自然退场）。
+///
+/// 两种形态的**命中语义完全一样**（都要"逐字节还回去"），区别只在正文住在哪儿。
+#[derive(Clone, Debug)]
+pub enum Body {
+    Inline(String),
+    Stored(Ref),
+}
+
+impl Body {
+    /// 占内存的字节数（`Stored` 是 0 —— 正文不在内存里，这一条决定了 P3 之后上限退场）
+    pub fn mem_len(&self) -> usize {
+        match self {
+            Body::Inline(s) => s.len(),
+            Body::Stored(_) => 0,
+        }
+    }
+
+    /// 取回正文：`Inline` 直接给；`Stored` 走 capsule 读回（**sha256 校验**，不符就报错）
+    pub fn text(&self, capsule: Option<&mut Capsule>) -> Result<String, String> {
+        match self {
+            Body::Inline(s) => Ok(s.clone()),
+            Body::Stored(r) => match capsule {
+                Some(c) => c.get(r),
+                None => Err(format!(
+                    "这条结果存在 capsule 里（{}），但本次 run 没有挂侧存 —— 取不回正文",
+                    r.file
+                )),
+            },
+        }
+    }
+}
+
+/// 一条账本记录（只增不改）。`body` = 上次的真结果（P2 在内存，P3 在 capsule 侧存）。
 #[derive(Clone, Debug)]
 pub struct LedgerEntry {
     pub tool: Tool,
@@ -562,10 +599,28 @@ pub struct LedgerEntry {
     pub versions: VersionVec,
     /// 第一次执行它的轮次（标注行要写"第 N 轮"）
     pub step: u32,
-    pub result: String,
+    pub body: Body,
     pub bytes: usize,
     /// 被复用了几次（trace / 小结用）
     pub hits: u32,
+}
+
+/// 版本向量的 JSON 形态（写进 capsule 索引，供人翻账：这条结果是什么时候、基于哪一版）
+pub fn versions_json(v: &VersionVec) -> String {
+    let paths: BTreeMap<&str, String> = v
+        .paths
+        .iter()
+        .map(|(p, ver)| (p.as_str(), format!("{ver:?}")))
+        .collect();
+    serde_json::json!({ "repo": v.repo, "paths": paths, "unknown": v.unknown }).to_string()
+}
+
+/// 一次召回的结果：正文 + 它是第几轮执行的 + 正文是不是从 capsule 读回来的。
+#[derive(Clone, Debug)]
+pub struct Recall {
+    pub text: String,
+    pub step: u32,
+    pub from_capsule: bool,
 }
 
 /// 一次执行的分类（**仪器**那一半：与策略无关，两臂都能量）。
@@ -670,15 +725,25 @@ pub struct Stats {
 }
 
 /// 去重账本：`by_digest`（精确命中）+ `order`（包含关系候选，按记录顺序）。
-#[derive(Clone, Debug)]
+///
+/// 不再派生 `Clone`：挂了 capsule 之后它持有侧存句柄（有计数与 IO 语义），
+/// "复制一份账本"在这个语义下没有意义。
+#[derive(Debug)]
 pub struct ContextLedger {
     entries: Vec<LedgerEntry>,
     by_digest: BTreeMap<u64, usize>,
-    /// 结果侧存上限（字节）。挤掉最老的 ⇒ 那条等于没记过（**fail-safe：下次真执行**）
+    /// 结果侧存上限（字节）。挤掉最老的 ⇒ 那条等于没记过（**fail-safe：下次真执行**）。
+    /// **只对 `Body::Inline` 生效**：挂了 capsule 之后正文不驻留内存，这条上限自然退场。
     cap_bytes: usize,
     bytes: usize,
     pub audit: ExecAudit,
     blocked: u64,
+    /// 结果侧存（`agent.ctx.capsule` 开时才挂）
+    capsule: Option<Capsule>,
+    /// 侧存写失败次数（写不进去就退化成内存，并且要如实报出来）
+    capsule_errors: u64,
+    /// 召回时读不回来 / sha256 不符的次数（**必须为 0**；非 0 说明侧存坏了，不许静默）
+    recall_errors: u64,
 }
 
 impl ContextLedger {
@@ -690,7 +755,28 @@ impl ContextLedger {
             bytes: 0,
             audit: ExecAudit::default(),
             blocked: 0,
+            capsule: None,
+            capsule_errors: 0,
+            recall_errors: 0,
         }
+    }
+
+    /// 挂上 capsule 侧存（P3）。挂上之后新记的结果走 `Body::Stored`。
+    pub fn attach_capsule(&mut self, c: Capsule) {
+        self.capsule = Some(c);
+    }
+
+    pub fn capsule(&self) -> Option<&Capsule> {
+        self.capsule.as_ref()
+    }
+
+    pub fn capsule_mut(&mut self) -> Option<&mut Capsule> {
+        self.capsule.as_mut()
+    }
+
+    /// 侧存写失败（调用方会退化为内存，这里只记账）
+    pub fn note_capsule_error(&mut self) {
+        self.capsule_errors += 1;
     }
 
     /// 查一条可复用的记录。命中条件（两件都要）：① 规范化键一致（或**包含关系**覆盖）
@@ -727,12 +813,12 @@ impl ContextLedger {
 
     /// 记一条**真的执行了**的调用（结果侧存 + 版本向量）。命中（被拦下）的那些**不记** ——
     /// 与上游一致：账本只记"执行过什么"，复用不产生新记录。
-    pub fn record(&mut self, call: LedgerCall, result: String, versions: VersionVec, step: u32) {
+    pub fn record(&mut self, call: LedgerCall, body: Body, versions: VersionVec, step: u32) {
         // 版本不可判的**不许入账**：留一条"永远不新鲜"的记录只占内存
         if versions.unknown {
             return;
         }
-        let bytes = result.len();
+        let bytes = body.mem_len();
         let e = LedgerEntry {
             tool: call.tool,
             norm: call.norm.clone(),
@@ -740,7 +826,7 @@ impl ContextLedger {
             span: call.span.clone(),
             versions,
             step,
-            result,
+            body,
             bytes,
             hits: 0,
         };
@@ -789,6 +875,50 @@ impl ContextLedger {
         self.audit.classify(0, &VersionVec::default(), false)
     }
 
+    /// **召回**：命中就取回正文（一次调用把"查键 + 取正文 + 计数"做完）。
+    ///
+    /// 为什么单独开一条而不是让调用方 `lookup` 完再自己取：取正文可能是 IO（capsule），
+    /// 而"命中计数"必须与"取到了正文"绑在一起 —— 只计数却没取到，读数就是假的。
+    /// capsule 读失败 ⇒ 返回 `None`（**fail-safe：调用方照常执行**），并把失败计进 `recall_errors`。
+    pub fn recall(&mut self, call: &LedgerCall, now: &VersionVec) -> Option<Recall> {
+        let (i, from_capsule) = {
+            let e = self.lookup(call, now)?;
+            let i = self.entries.iter().position(|x| std::ptr::eq(x, e))?;
+            (i, matches!(e.body, Body::Stored(_)))
+        };
+        let text = match self.entries[i].body.text(self.capsule.as_mut()) {
+            Ok(t) => t,
+            Err(_) => {
+                self.recall_errors += 1;
+                return None;
+            }
+        };
+        self.blocked += 1;
+        self.entries[i].hits += 1;
+        Some(Recall {
+            text,
+            step: self.entries[i].step,
+            from_capsule,
+        })
+    }
+
+    /// 侧存统计（落盘条数 / 召回次数 / 校验失败次数）+ 写失败次数
+    pub fn capsule_stats(&self) -> Option<(usize, usize, usize, u64)> {
+        self.capsule.as_ref().map(|c| {
+            let (puts, recalls, corrupted) = c.stats();
+            (puts, recalls, corrupted, self.capsule_errors)
+        })
+    }
+
+    /// 这次 run 有没有召回过（P3 的读数）
+    pub fn recalled(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.body, Body::Stored(_)))
+            .map(|e| e.hits as u64)
+            .sum()
+    }
+
     /// 记一次"命中"（账本没执行，但我们要知道省了几次 —— 也是 P2 的验收读数）。
     pub fn note_hit_for(&mut self, call: &LedgerCall, now: &VersionVec) {
         self.blocked += 1;
@@ -828,7 +958,7 @@ impl ContextLedger {
     pub fn render_stats(&self) -> String {
         let kb = |n: usize| format!("{:.1}KB", n as f64 / 1024.0);
         let s = self.stats();
-        format!(
+        let line = format!(
             "去重账本：拦截重复 {} · 唯一执行 {} · 仍重复执行 {} · 版本失效重执行 {} · 不纯执行 {} · 侧存 {} 条/{}",
             s.blocked,
             s.unique,
@@ -837,7 +967,13 @@ impl ContextLedger {
             s.effectful,
             s.entries,
             kb(s.bytes)
-        )
+        );
+        if let Some((puts, recalls, corrupted, werrs)) = self.capsule_stats() {
+            return format!(
+                "{line}（capsule 落盘 {puts} 条 · 召回 {recalls} 次 · 校验失败 {corrupted}                  · 写失败 {werrs}；召回即磁盘读，**不重跑工具**）"
+            );
+        }
+        line
     }
 }
 
@@ -863,6 +999,8 @@ pub struct Reuse {
     pub text: String,
     /// 上一次执行它是第几轮（标注行要写"第 N 轮"）
     pub step: u32,
+    /// 正文是从 capsule 侧存读回来的（trace 要标出来 —— "召回不重跑"这条判据的可见证据）
+    pub from_capsule: bool,
 }
 
 /// 仓库级版本（`git HEAD + 工作树脏否`）。不是仓库 / 拿不到 ⇒ `None`
@@ -900,13 +1038,15 @@ pub(super) fn precheck(
             let brief = call.norm.clone();
             let tool = call.tool.name();
             let reuse = if consult {
-                match ctx.progress().dedup_lookup(&call, &versions) {
-                    Some((text, step)) => {
-                        ctx.progress_mut().dedup_note_hit(&call, &versions);
-                        Some(Reuse { text, step })
-                    }
-                    None => None,
-                }
+                // 一次调用做完"查键 + 取正文 + 计数"：侧存形态要读盘（可能读不回来），
+                // 取不到正文就**不算命中**（照常执行）—— 计数与取正文必须绑在一起。
+                ctx.progress_mut()
+                    .dedup_recall(&call, &versions)
+                    .map(|r| Reuse {
+                        text: r.text,
+                        step: r.step,
+                        from_capsule: r.from_capsule,
+                    })
             } else {
                 None
             };
@@ -1016,7 +1156,7 @@ mod tests {
         let mut l = ContextLedger::new(1 << 20);
         let whole = read_call("a.rs", None, None);
         let v = versions(&[("a.rs", Ver::File(1, 10))], None);
-        l.record(whole, "全文".into(), v.clone(), 3);
+        l.record(whole, Body::Inline("全文".into()), v.clone(), 3);
 
         let hit = l.lookup(&read_call("a.rs", Some(10), Some(20)), &v);
         assert!(hit.is_some(), "整份读过之后，区间读该被它覆盖");
@@ -1026,7 +1166,7 @@ mod tests {
         let mut l2 = ContextLedger::new(1 << 20);
         l2.record(
             read_call("a.rs", Some(10), Some(20)),
-            "片段".into(),
+            Body::Inline("片段".into()),
             v.clone(),
             1,
         );
@@ -1038,7 +1178,7 @@ mod tests {
         let mut l3 = ContextLedger::new(1 << 20);
         l3.record(
             read_call("a.rs", Some(1), Some(100)),
-            "100 行".into(),
+            Body::Inline("100 行".into()),
             v.clone(),
             1,
         );
@@ -1056,7 +1196,7 @@ mod tests {
         let mut l4 = ContextLedger::new(1 << 20);
         let all = exec_call("git grep -n delta").unwrap();
         let rv = versions(&[], Some(("HEAD1", false)));
-        l4.record(all, "全仓命中".into(), rv.clone(), 2);
+        l4.record(all, Body::Inline("全仓命中".into()), rv.clone(), 2);
         let same = exec_call("git grep -n delta").unwrap();
         assert!(l4.lookup(&same, &rv).is_some(), "同一条命令该命中");
         let other_path = exec_call("git grep -n delta -- src/core").unwrap();
@@ -1077,7 +1217,12 @@ mod tests {
         let mut l = ContextLedger::new(1 << 20);
         let call = read_call("a.rs", None, None);
         let v1 = versions(&[("a.rs", Ver::File(1, 10))], None);
-        l.record(call.clone(), "v1 的内容".into(), v1.clone(), 1);
+        l.record(
+            call.clone(),
+            Body::Inline("v1 的内容".into()),
+            v1.clone(),
+            1,
+        );
         assert!(l.lookup(&call, &v1).is_some(), "版本没变 ⇒ 复用");
 
         let v2 = versions(&[("a.rs", Ver::File(2, 10))], None);
@@ -1128,12 +1273,17 @@ mod tests {
         unknown.unknown = true;
 
         // 拿不到版本的那次**不记账**
-        l.record(call.clone(), "内容".into(), unknown.clone(), 1);
+        l.record(
+            call.clone(),
+            Body::Inline("内容".into()),
+            unknown.clone(),
+            1,
+        );
         assert_eq!(l.stats().entries, 0, "版本不可判的条目不该入账");
 
         // 记过一条之后，来一次"版本不可判"的查询也不许命中
         let good = versions(&[("a.rs", Ver::File(1, 10))], None);
-        l.record(call.clone(), "内容".into(), good, 1);
+        l.record(call.clone(), Body::Inline("内容".into()), good, 1);
         assert!(l.lookup(&call, &unknown).is_none(), "查不到版本 ⇒ 执行");
 
         // 文件不存在（Missing）也一样：下次它可能出现
@@ -1154,10 +1304,14 @@ mod tests {
         let call = read_call("a.rs", None, None);
         let body = "--- a.rs ---\nfn main() {}\n（尾部有记号 UNIQ-42）";
         let v = versions(&[("a.rs", Ver::File(9, 42))], None);
-        l.record(call.clone(), body.to_string(), v.clone(), 7);
+        l.record(call.clone(), Body::Inline(body.to_string()), v.clone(), 7);
 
         let hit = l.lookup(&call, &v).expect("该命中");
-        assert_eq!(hit.result, body, "复用的必须是**逐字节相同**的原文");
+        assert_eq!(
+            hit.body.text(None).unwrap(),
+            body,
+            "复用的必须是**逐字节相同**的原文"
+        );
         assert_eq!(hit.step, 7, "标注行要能说出\"第 N 轮已执行过\"");
 
         // 标注行（架构文档 §4 的原话）
@@ -1165,7 +1319,7 @@ mod tests {
         assert!(note.contains("第 7 轮已执行过同一纯调用"));
         assert!(note.contains("资源版本未变"));
         assert!(note.contains("本次直接复用，未重跑"));
-        let returned = format!("{}{note}", hit.result);
+        let returned = format!("{}{note}", hit.body.text(None).unwrap());
         assert!(
             returned.starts_with(body),
             "标注是**尾部追加**的，正文一字不动"
@@ -1180,7 +1334,7 @@ mod tests {
         for i in 0..5 {
             let c = read_call(&format!("f{i}.rs"), None, None);
             let vs = versions(&[(format!("f{i}.rs").as_str(), Ver::File(1, 1))], None);
-            l.record(c, "x".repeat(40), vs, i as u32);
+            l.record(c, Body::Inline("x".repeat(40)), vs, i as u32);
         }
         assert!(l.stats().entries <= 2, "上限该把老的挤掉：{:?}", l.stats());
         let old = read_call("f0.rs", None, None);
@@ -1371,7 +1525,12 @@ mod tests {
                         mismatches.push(format!("{where_}：上游**执行**了，我们却想复用"));
                     }
                     l.audit.classify(c.digest, &versions, true);
-                    l.record(c.clone(), format!("<body {n}>"), versions.clone(), step);
+                    l.record(
+                        c.clone(),
+                        Body::Inline(format!("<body {n}>")),
+                        versions.clone(),
+                        step,
+                    );
                 }
                 (None, true) => mismatches.push(format!(
                     "{where_}：上游把它当**纯工具**命中了，我们的白名单不认"
