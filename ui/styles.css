@@ -50,10 +50,34 @@ html, body {
   user-select: none;
 }
 
-/* 编辑器区域内允许文本选择 */
+/* 允许文本选择：**内容面 + 表单控件**。
+   chrome（标题栏 / 菜单 / 命令栏 / 状态栏 / 工具条）仍旧禁选 —— 那是拖拽与连点的地基；
+   但 `html, body { user-select: none }` 是**继承**的，所以凡是"用来看和复制"的地方都得显式开。
+
+   2026-09-28 补：原先这里只列了编辑器三件，于是**会话聊天、引擎日志、差异面板、帮助页、
+   面板输出全都选不中**（用户报的「agent 聊天界面的内容无法选中复制」就是这个）。改成按
+   **面板容器**开，子元素继承：`#navigator`（文件树/项目/能力面板）、`#editor-area`（编辑器 +
+   帮助 + 会话 + 配置 + 记忆/服务/进程日志等所有视图 + git 面板）、弹窗；再叠一层通用可复制
+   元素（`pre` / `code` / `kbd`）与表单控件（`input` 继承 `none` 之后连输入框都选不中）。
+
+   终端不受影响：`ui/packages/xterm.css` 自己写了 `user-select: none`（它自带选择层）。
+   判据在 `scripts/session-trace-layout.js`（**真浏览器**里量 computed style：内容面必须
+   `text`、chrome 必须仍是 `none`）。 */
+#navigator,
+#editor-area,
+#git-panel,
+#modal-overlay,
+#project-edit-modal,
 .editor-code-backdrop,
 .editor-textarea,
-.editor-gutter {
+.editor-gutter,
+pre,
+code,
+kbd,
+input,
+textarea,
+select,
+[contenteditable="true"] {
   user-select: text;
 }
 

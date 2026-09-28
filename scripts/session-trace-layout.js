@@ -18,6 +18,9 @@
  *   4. 轨迹块**没有**横向滚动条，也不撑破消息盒 —— 这是"flex 子项要 min-width:0"
  *      与"块要 align-self:stretch 拿容器宽度"两条不变量；
  *   5. 图标与文字在同一行（tag 不是被挤到自己一行上）。
+ *   6. **内容面能拖蓝复制**：会话气泡/轨迹/输入框/导航/编辑器的 computed `user-select` 必须是
+ *      `text`，而标题栏/状态栏/命令栏必须仍是 `none`（继承来的 `none` 会把内容盖住 ——
+ *      用户报的「agent 聊天界面的内容无法选中复制」就是它；不许用"把全局翻成可选"来糊）。
  *
  * 用法：
  *   node scripts/session-trace-layout.js          # 有 Edge 就跑，没有就 SKIP（退出码 0）
@@ -105,16 +108,26 @@ const driver = `
     UI.attach();
     const s = await UI.newSession(false);
     const wrap = UI.ensureChatEl(window.state.tabs[0]);
-    // 直接挂到 body 并给死宽高：样式表里 .session-* 全是**无祖先限定**的选择器
-    // （逐条 grep 过），所以这里量到的就是真机上那套几何。fixed 只是为了出图时
-    // 它不会落在应用外壳（#app 占满 100vh）下面看不到 —— 宽高固定，几何不受影响
+    // 挂到**真机的位置**：index.html 里 #editor-area > #session-view > #session-container
+    // （会话 tab 就开在中央编辑区），并把沿途容器点亮（它们默认 display:none）。
+    //
+    // 2026-09-28 改：原来直接 document.body.appendChild(wrap)，理由是".session-* 全是
+    // 无祖先限定的选择器" —— 那条对**几何**仍然成立，但对**继承属性**不成立：新加的
+    // #editor-area { user-select: text } 是祖先限定的，挂 body 上量到的 user-select
+    // 就不是真机那个值（判据 6 当场红：msgs=none）。夹具要跟真 DOM 同构，不能只跟几何同构。
+    for (const sel of ["#editor-area", "#session-view"]) {
+      const el = document.querySelector(sel);
+      if (el) el.style.display = "block";
+    }
+    const host = document.querySelector("#session-container") || document.body;
+    // fixed 只为出图时不被应用外壳（#app 占满 100vh）盖住；宽高是写死的，几何不受影响
     wrap.style.position = "fixed";
     wrap.style.left = "0";
     wrap.style.top = "0";
     wrap.style.zIndex = "9999";
     wrap.style.width = "${WIDE}px";
     wrap.style.height = "620px";
-    document.body.appendChild(wrap);
+    host.appendChild(wrap);
 
     UI.sendMessage(s, wrap, "把会话气泡变成看得见的执行轨迹");
     for (let i = 0; i < 30; i++) await Promise.resolve();
@@ -158,6 +171,26 @@ const driver = `
     }
     out.long = long;
     out.expected = { longChars: LONG.length, wide: ${WIDE} };
+    // 能不能选中复制（2026-09-28 补）：html, body 上的 user-select:none 是**继承**的，
+    // 所以"这条内容能不能被拖蓝复制"完全由 computed user-select 决定 —— 这正是浏览器
+    // 判定的那一个值，在 DOM 桩里量不到。内容面必须 text，chrome 必须仍是 none
+    // （后者证明我们开的是"内容面"而不是"把全局翻成可选"）。
+    // 注意：本文件是模板字符串，注释里**不许出现反引号**（会把模板提前收掉）。
+    const usel = (sel) => {
+      const el = document.querySelector(sel);
+      return el ? getComputedStyle(el).userSelect : "MISSING";
+    };
+    out.select = {
+      msgs: usel("[data-msgs]"),
+      bubble: usel("[data-msgs] .session-bubble"),
+      traceText: usel("[data-msgs] .session-trace-text"),
+      input: usel(".session-input"),
+      navigator: usel("#navigator"),
+      editor: usel("#editor-area"),
+      titlebar: usel("#titlebar"),
+      statusbar: usel("#statusbar"),
+      commandBar: usel("#command-bar"),
+    };
   } catch (err) {
     out.errors.push("DRIVER: " + ((err && err.stack) || err));
   }
@@ -282,6 +315,24 @@ rows.every((r) => r.title > 0)
 rows.every((r) => r.sameRow)
   ? ok("图标与文字在同一行")
   : fail("有行的图标被挤到了自己一行上");
+
+// 判据 6：**内容面能被拖蓝复制**，而 chrome 仍旧禁选。
+// `html, body { user-select: none }` 是**继承**的 ⇒ 只给编辑器三件开选择时，会话气泡、
+// 轨迹、差异面板全选不中（用户报的「agent 聊天界面的内容无法选中复制」）。
+// 这里量的是浏览器自己用的那个值（computed `user-select`），不是"代码里写了没写"。
+const sel = out.select || {};
+const wantText = ["msgs", "bubble", "traceText", "input", "navigator", "editor"];
+const wantNone = ["titlebar", "statusbar", "commandBar"];
+const notText = wantText.filter((k) => sel[k] !== "text");
+const notNone = wantNone.filter((k) => sel[k] !== "none");
+notText.length === 0
+  ? ok(`内容面可选（${wantText.join(" / ")} 的 user-select 都是 text）`)
+  : fail(`还是选不中：${notText.map((k) => k + "=" + sel[k]).join(" / ")} —— ` +
+      "会话/编辑器容器上没有 user-select:text（继承下来的 none 把它盖住了）");
+notNone.length === 0
+  ? ok("chrome 仍旧禁选（标题栏 / 状态栏 / 命令栏 user-select:none）")
+  : fail(`chrome 被放开成可选：${notNone.map((k) => k + "=" + sel[k]).join(" / ")} —— ` +
+      "那是把全局翻成可选，不是给内容面开选择");
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (bad) {
