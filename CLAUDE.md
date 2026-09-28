@@ -66,6 +66,11 @@ sources; used by the memory embedding model),
 │   ├── src/nav.rs        # 外链/导航闸门（P0）：nav_verdict 三结局 + open_external 白名单出口（2026-09-28 从 main.rs 拆出）
 │   ├── src/mem_cmds.rs   # 项目记忆（v1.1）命令层：mem_scope/mem_root + 9 个 mem_*（2026-09-28 从 main.rs 拆出）
 │   ├── src/proc_cmds.rs  # 托管进程与运行目标：proc_list/proc_stop/proc_log_read + run_target/resolve_run_dir/spawn_terminal（2026-09-28 从 main.rs 拆出）
+│   ├── src/highlight.rs  # 语法高亮：Tok/TOK_TABLE/HighlightPayload + highlight_spans/highlight_code/highlight_plugins + unit_table/build_line_highlights（2026-09-28 从 main.rs 拆出）
+│   ├── src/pty_cmds.rs   # PTY 终端命令 + 终端目标（get_term_targets）（2026-09-28 从 main.rs 拆出）
+│   ├── src/fs_cmds.rs    # 文件/目录命令：list_dir/read_file(_base64)/write_file/create_*/delete_path/path_exists/rename_path（2026-09-28 从 main.rs 拆出）
+│   ├── src/project_cmds.rs # 项目命令：open_project/get_projects/update_project/delete_project/状态桶/运行目标清单/单实例（2026-09-28 从 main.rs 拆出）
+│   ├── src/plugin_cmds.rs  # 执行状态与插件命令：get_execute_status/set_execute_entry/ai_execute_check/lua_translate（2026-09-28 从 main.rs 拆出）
 │   ├── src/config.rs     # ConfigManager: 3-scope config, projects, run targets, config form scan/save/apply
 │   ├── src/pty.rs        # PtyManager: spawn/write/resize/close PTY sessions
 │   ├── src/ai.rs         # AI translation: natural language → standard commands

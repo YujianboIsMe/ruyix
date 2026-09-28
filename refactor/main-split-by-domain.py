@@ -58,7 +58,8 @@ PLG_HEADER = """\
 //! · **执行状态**（[`get_execute_status`] / [`set_execute_entry`]）：编辑器右上角那个 ▶ 的判据 ——
 //!   能不能跑、有没有绑定运行目标、有没有建议命令（预置清单来的）。判据落在**清单内容**上
 //!   （`runner::manifest_run_specs`），不是按扩展名猜。
-//! · **插件**（[`reload_plugins`] / [`lua_translate`]）：插件注册表加载与 Lua 翻译入口。
+//! · **插件**（[`lua_translate`]）：Lua 翻译入口（注册表本体由 `main.rs` 的启动段
+//!   `reload_plugins` 载入后作为 `Mutex<plugin::Registry>` 状态注入）。
 //! · [`ai_execute_check`]：模型对"这条命令能不能跑"的判断入口。
 
 """
@@ -77,9 +78,11 @@ RANGES = [
     ("project_cmds", "fn", "is_another_instance", "fn", "get_run_targets",
      ["is_another_instance", "get_last_project", "get_projects", "set_project_lang",
       "update_project", "delete_project", "get_run_targets"]),
-    ("plugin_cmds", "struct", "ExecuteStatus", "fn", "reload_plugins",
+    # 注意：`reload_plugins`（载入插件注册表的**启动**助手，被 main() 调）**不搬** ——
+    # 它没有 `#[tauri::command]`、不进 invoke_handler，属于"构造应用状态"那一段，留在 main.rs。
+    ("plugin_cmds", "struct", "ExecuteStatus", "fn", "lua_translate",
      ["ExecuteStatus", "get_execute_status", "set_execute_entry", "ai_execute_check",
-      "lua_translate", "reload_plugins"]),
+      "lua_translate"]),
 ]
 
 MODS = {
@@ -88,9 +91,16 @@ MODS = {
                      "use std::path::Path;\nuse std::sync::Mutex;\nuse crate::{config, instance, paths};\n",
                      "mod proc_cmds;\n"),
     "plugin_cmds": (PLG, PLG_HEADER,
-                    "use std::path::Path;\nuse std::sync::Mutex;\n"
-                    "use crate::{config, paths, plugin, preinstalled, runner};\n",
+                    # `Path` 在这段里都是 `std::path::Path::new(..)` 全限定写法 ⇒ 不需要 import
+                    "use std::sync::Mutex;\nuse crate::{config, runner};\n",
                     "mod plugin;\n"),
+}
+
+PREFIXES = {
+    "fs_cmds": [("clean_path(", "crate::clean_path(", 3)],
+    "project_cmds": [("clean_path(", "crate::clean_path(", 1)],
+    "plugin_cmds": [("clean_path(", "crate::clean_path(", 2),
+                    ("ai::check_executable", "crate::ai::check_executable", 1)],
 }
 
 REGS = {
@@ -100,7 +110,7 @@ REGS = {
                      "is_another_instance", "get_last_project", "get_projects",
                      "set_project_lang", "update_project", "delete_project", "get_run_targets"],
     "plugin_cmds": ["get_execute_status", "set_execute_entry", "ai_execute_check",
-                    "lua_translate", "reload_plugins"],
+                    "lua_translate"],
 }
 
 
@@ -112,6 +122,16 @@ def rd(p):
 def wr(p, t):
     with io.open(p, "w", encoding="utf-8", newline="") as f:
         f.write(t)
+
+
+def sub(t, old, new, n=1, tag=""):
+    """CRLF 感知的锚点替换 + 命中数断言（少了它，`            cmd,\n` 在 CRLF 文件里一条都匹配不上）。"""
+    nl = "\r\n" if "\r\n" in t else "\n"
+    o, w = old.replace("\n", nl), new.replace("\n", nl)
+    c = t.count(o)
+    if c != n:
+        raise SystemExit("!! %s 命中 %d 次（期望 %d）" % (tag, c, n))
+    return t.replace(o, w), c
 
 
 def items(src):
@@ -188,13 +208,19 @@ def main():
         vis = []
         for l in body:
             m = re.match(r"^(async )?fn (\w+)\(", l)
-            if m and m.group(2) in REGS[mod] + ["reload_plugins"]:
+            if m and m.group(2) in REGS[mod]:
                 vis.append("pub " + l)
             elif re.match(r"^struct (\w+) \{", l):
                 vis.append("pub " + l)
             else:
                 vis.append(l)
-        wr(path, header.replace("\n", nl) + imports.replace("\n", nl) + nl + nl.join(vis) + nl)
+        body_t = nl.join(vis)
+        # crate 根共享工具 / 兄弟模块：子模块里要显式走 `crate::`（编译器 E0425/E0433 会点名）
+        for old, new, n in PREFIXES[mod]:
+            if body_t.count(old) != n:
+                raise SystemExit("!! %s 里 %r 命中 %d 次（期望 %d）" % (mod, old, body_t.count(old), n))
+            body_t = body_t.replace(old, new)
+        wr(path, header.replace("\n", nl) + imports.replace("\n", nl) + nl + body_t + nl)
 
     # 2) main.rs：删段 + 注册加前缀 + mod 声明
     rest = list(lines)
@@ -203,13 +229,10 @@ def main():
     out = nl.join(rest)
     for mod, cmds in REGS.items():
         for c in cmds:
-            if out.count("            %s,\n" % c) != 1:
-                raise SystemExit("!! 注册 %s 命中 != 1" % c)
-            out = out.replace("            %s,\n" % c, "            %s::%s,\n" % (mod, c), 1)
+            out, _ = sub(out, "            %s,\n" % c, "            %s::%s,\n" % (mod, c),
+                         1, "注册 %s" % c)
     for mod, (_, _, _, anchor) in MODS.items():
-        if out.count(anchor) != 1:
-            raise SystemExit("!! mod 声明锚点 %r 命中 != 1" % anchor)
-        out = out.replace(anchor, anchor + "mod %s;\n" % mod, 1)
+        out, _ = sub(out, anchor, anchor + "mod %s;\n" % mod, 1, "mod 声明 %s" % mod)
     wr(MAIN, out)
 
     after = items(rd(MAIN)) | items(rd(TESTS)) | items(rd(FS)) | items(rd(PROJ)) | items(rd(PLG))

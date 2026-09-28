@@ -5,6 +5,7 @@ mod agent;
 mod ai;
 mod capability;
 mod config;
+mod fs_cmds;
 mod git;
 mod highlight;
 mod instance;
@@ -13,8 +14,10 @@ mod mem_cmds;
 mod nav;
 mod paths;
 mod plugin;
+mod plugin_cmds;
 mod preinstalled;
 mod proc_cmds;
+mod project_cmds;
 mod pty;
 mod pty_cmds;
 mod runner;
@@ -100,429 +103,9 @@ fn debug_log_path() -> std::path::PathBuf {
 // 数据结构
 // ============================================
 
-#[derive(serde::Serialize, Clone)]
-struct ProjectInfo {
-    name: String,
-    path: String,
-    lang: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct DirEntry {
-    name: String,
-    path: String,
-    is_dir: bool,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct FileContent {
-    path: String,
-    content: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct FileBase64 {
-    path: String,
-    mime: String,
-    base64: String,
-}
 // ============================================
 // Tauri 命令
 // ============================================
-
-#[tauri::command]
-fn open_project(
-    path: String,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<ProjectInfo, String> {
-    let p = Path::new(&path);
-
-    if !p.exists() {
-        return Err(format!("路径不存在: {}", p.display()));
-    }
-    if !p.is_dir() {
-        return Err("路径不是目录，请输入项目文件夹路径".to_string());
-    }
-
-    let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let clean = clean_path(&canonical);
-    let name = canonical
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
-    // 持久化到 projects 配置（返回保存的项目语言）
-    let lang = config_mgr
-        .lock()
-        .map_err(|e| e.to_string())?
-        .set_current_project(&clean, &name)
-        .unwrap_or_else(|_| config::default_lang());
-
-    // 项目桶自证（v1.0.0）：`<根>/projects/<key>/project.toml` —— 项目改名/移动后
-    // 旧桶成孤儿，这份文件让"这桶是谁的"一眼可见（面板据此提示，绝不自动删）。
-    let _ = paths::current().stamp_project(&clean);
-
-    Ok(ProjectInfo {
-        name,
-        path: clean,
-        lang,
-    })
-}
-
-/// 项目状态桶清单（v1.0.0 孤儿面板）：key / 体积 / 自证的原始项目路径 / 那路径还在不在。
-/// 所有状态都在便携根里，用户要能**看见**并**删掉**它们 —— 这就是"绿色"的另一半。
-#[tauri::command]
-fn project_buckets() -> Vec<paths::BucketInfo> {
-    paths::current().list_buckets()
-}
-
-/// 删除一个项目状态桶（整桶）。**只在用户确认后调用**：我们绝不自动删用户的任何东西
-/// （桶里是暂存、备份、会话存档 —— 自动删等于替用户做决定）。
-#[tauri::command]
-fn project_bucket_delete(key: String) -> Result<String, String> {
-    paths::current().delete_bucket(&key)
-}
-
-#[tauri::command]
-fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err("路径不是目录".to_string());
-    }
-
-    let dir_iter = std::fs::read_dir(p).map_err(|e| e.to_string())?;
-    let mut entries = Vec::new();
-
-    for entry in dir_iter {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-
-        if is_dir && name.starts_with('.') {
-            continue;
-        }
-
-        entries.push(DirEntry {
-            name,
-            path: clean_path(&entry.path()),
-            is_dir,
-        });
-    }
-
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-
-    Ok(entries)
-}
-
-#[tauri::command]
-fn read_file(path: String) -> Result<FileContent, String> {
-    let p = Path::new(&path);
-
-    if !p.exists() {
-        return Err(format!("文件不存在: {}", p.display()));
-    }
-    if !p.is_file() {
-        return Err("路径不是文件".to_string());
-    }
-
-    let content = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
-
-    Ok(FileContent {
-        path: clean_path(p),
-        content,
-    })
-}
-
-/// 根据文件扩展名返回 MIME 类型
-fn mime_from_ext(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("bmp") => "image/bmp",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("ico") | Some("icon") => "image/x-icon",
-        _ => "image/png",
-    }
-}
-
-#[tauri::command]
-fn read_file_base64(path: String) -> Result<FileBase64, String> {
-    use base64::Engine;
-
-    let p = Path::new(&path);
-
-    if !p.exists() {
-        return Err(format!("文件不存在: {}", p.display()));
-    }
-    if !p.is_file() {
-        return Err("路径不是文件".to_string());
-    }
-
-    let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
-    let mime = mime_from_ext(p);
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-
-    Ok(FileBase64 {
-        path: clean_path(p),
-        mime: mime.to_string(),
-        base64: b64,
-    })
-}
-
-#[tauri::command]
-fn write_file(path: String, content: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    std::fs::write(p, &content).map_err(|e| format!("保存失败: {}", e))
-}
-
-#[tauri::command]
-fn create_file(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    if p.exists() {
-        return Err(format!("文件已存在: {}", p.display()));
-    }
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {}", e))?;
-    }
-    std::fs::write(p, "").map_err(|e| format!("创建文件失败: {}", e))
-}
-
-#[tauri::command]
-fn create_dir(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    std::fs::create_dir_all(p).map_err(|e| format!("创建目录失败: {}", e))
-}
-
-#[tauri::command]
-fn delete_path(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    if !p.exists() {
-        return Err(format!("路径不存在: {}", p.display()));
-    }
-    if p.is_dir() {
-        std::fs::remove_dir_all(p).map_err(|e| format!("删除目录失败: {}", e))
-    } else {
-        std::fs::remove_file(p).map_err(|e| format!("删除文件失败: {}", e))
-    }
-}
-
-/// 执行状态返回
-#[derive(serde::Serialize)]
-struct ExecuteStatus {
-    /// None = 未知, Some(true) = 可运行, Some(false) = 不可运行
-    known: Option<bool>,
-    /// 如果可运行，是否已有运行目标绑定了该文件
-    has_target: bool,
-    /// 绑定的目标名称（若有）
-    target_name: Option<String>,
-    /// 建议的运行命令（若来自预置清单）
-    suggested_cmd: Option<String>,
-    /// 建议的运行目标列表：package.json 的每个 scripts 各一条
-    suggested_targets: Vec<runner::RunSpec>,
-}
-
-#[tauri::command]
-fn get_execute_status(
-    path: String,
-    project_root: Option<String>,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<ExecuteStatus, String> {
-    let p = std::path::Path::new(&path);
-    let file_name = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    let exec_map = mgr.load_execute_map();
-
-    // 三层查找：预置清单 → 文件名匹配 → 扩展名匹配
-    let mut known: Option<bool> = None;
-    let mut suggested_cmd: Option<String> = None;
-    let mut suggested_targets: Vec<runner::RunSpec> = Vec::new();
-
-    // 1) 预置清单（优先级最高，保证知名文件不被扩展名级条目覆盖）
-    //    命令来自文件内容：package.json 按 scripts 逐条生成运行目标，
-    //    而不是写死的 npm start
-    match runner::manifest_run_specs(p) {
-        Some(specs) => {
-            known = Some(true);
-            suggested_cmd = specs.first().map(|s| s.cmd.clone());
-            suggested_targets = specs;
-        }
-        None => {
-            // 不是清单文件或内容解析失败 → 回退到静态命令表
-            if let Some(manifest) = config::manifest_for_path(p) {
-                known = Some(true);
-                suggested_cmd = Some(manifest.cmd.to_string());
-            }
-        }
-    }
-
-    // 2) execute.toml 文件名精确匹配
-    if known.is_none() && !file_name.is_empty() {
-        known = exec_map.get(&file_name).copied();
-    }
-
-    // 3) execute.toml 扩展名匹配
-    if known.is_none() && !ext.is_empty() {
-        known = exec_map.get(&ext).copied();
-    }
-
-    // 扩展名为空（如 Makefile、Dockerfile）且以上均未匹配 → 未知
-    if known.is_none() && ext.is_empty() {
-        known = Some(false);
-    }
-
-    let mut has_target = false;
-    let mut target_name = None;
-    if known == Some(true)
-        && let Some(root) = project_root
-        && let Ok(targets) = mgr.load_run_targets(Some(&root))
-    {
-        for t in &targets {
-            // 匹配 bind 字段：显式绑定的文件路径
-            if let Some(ref bind) = t.bind {
-                let full_bind = std::path::Path::new(&root).join(bind);
-                if let Ok(full) = full_bind.canonicalize() {
-                    let bind_path = clean_path(&full);
-                    let input_path = clean_path(std::path::Path::new(&path));
-                    if input_path == bind_path {
-                        has_target = true;
-                        target_name = t.name.clone().or_else(|| Some(t.key.clone()));
-                        break;
-                    }
-                }
-            }
-            // 匹配 cmd 字段：命令中包含文件路径或文件名
-            if let Some(ref cmd) = t.cmd
-                && (cmd.contains(&path) || cmd.contains(&file_name))
-            {
-                has_target = true;
-                target_name = t.name.clone().or_else(|| Some(t.key.clone()));
-                break;
-            }
-        }
-    }
-    Ok(ExecuteStatus {
-        known,
-        has_target,
-        target_name,
-        suggested_cmd,
-        suggested_targets,
-    })
-}
-
-#[tauri::command]
-fn set_execute_entry(
-    path: String,
-    can_run: bool,
-    as_file: Option<bool>,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<(), String> {
-    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    let p = std::path::Path::new(&path);
-    // 确定存储键：知名清单文件 → 文件名；否则按 as_file 决定
-    let is_file = as_file.unwrap_or(false) || config::manifest_for_path(p).is_some();
-    let key = if is_file {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-    } else {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-    };
-    if key.is_empty() {
-        return Err("无法确定存储键".to_string());
-    }
-    mgr.save_execute_entry(&key, can_run)
-}
-
-#[tauri::command]
-async fn ai_execute_check(
-    path: String,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<String, String> {
-    ai::check_executable(&config_mgr, &path).await
-}
-
-/// Lua 脚本翻译：在沙箱中执行 learn.lua，匹配自然语言 → 标准命令
-#[tauri::command]
-fn lua_translate(
-    input: String,
-    project_root: Option<String>,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<Option<String>, String> {
-    eprintln!("[RUST-LUA] 输入: {}", input);
-    let root = match project_root {
-        Some(r) => r,
-        None => {
-            eprintln!("[RUST-LUA] 无项目，跳过");
-            return Ok(None);
-        }
-    };
-    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    let lua_content = mgr.load_lua_script(&root)?;
-    if lua_content.trim().is_empty() {
-        eprintln!("[RUST-LUA] learn.lua 为空，跳过");
-        return Ok(None);
-    }
-    eprintln!(
-        "[RUST-LUA] learn.lua 内容 ({} 字节):\n{}",
-        lua_content.len(),
-        lua_content
-    );
-
-    let full_script = format!("local input = ...\n{}\nreturn nil", lua_content);
-
-    let lua = mlua::Lua::new();
-    // 沙箱：移除危险全局函数
-    for name in ["os", "io", "require", "loadfile", "dofile", "load"] {
-        lua.globals()
-            .set(name, mlua::Value::Nil)
-            .map_err(|e| format!("Lua 沙箱失败: {}", e))?;
-    }
-
-    let result: mlua::Value = lua.load(&full_script).call(input).map_err(|e| {
-        eprintln!("[RUST-LUA] 执行失败: {}", e);
-        format!("Lua 执行失败: {}", e)
-    })?;
-
-    eprintln!("[RUST-LUA] Lua 返回值类型: {:?}", result.type_name());
-    // 返回值：nil → None，字符串 → Some
-    if result.is_nil() {
-        eprintln!("[RUST-LUA] → nil (未命中)");
-        Ok(None)
-    } else if let Some(s) = result.as_str() {
-        let s = s.trim().to_string();
-        eprintln!("[RUST-LUA] → 命中: {}", s);
-        if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
-    } else {
-        eprintln!("[RUST-LUA] → 非字符串返回值，忽略");
-        Ok(None)
-    }
-}
 
 /// 载入插件注册表（全局 + 项目级）并把结果写进 `<根>/global/logs/plugins.jsonl`。
 ///
@@ -562,85 +145,6 @@ fn reload_plugins(
         println!("[plugin] {n}");
     }
     reg
-}
-
-#[tauri::command]
-fn path_exists(path: String) -> bool {
-    std::path::Path::new(&path).exists()
-}
-
-#[tauri::command]
-fn rename_path(from: String, to: String) -> Result<(), String> {
-    let src = Path::new(&from);
-    if !src.exists() {
-        return Err(format!("路径不存在: {}", src.display()));
-    }
-    std::fs::rename(src, Path::new(&to)).map_err(|e| format!("重命名失败: {}", e))
-}
-/// 是否有其他实例正在运行（第二实例不自动打开上次项目）
-#[tauri::command]
-fn is_another_instance() -> bool {
-    instance::is_other_instance()
-}
-
-/// 获取上次打开的项目路径（供前端启动时自动打开）
-#[tauri::command]
-fn get_last_project(
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<Option<String>, String> {
-    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
-    Ok(cfg.load_projects().current)
-}
-
-/// 获取所有已知项目列表（含 name/path/lang）
-#[tauri::command]
-fn get_projects(
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<Vec<config::ProjectEntry>, String> {
-    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
-    Ok(cfg.load_projects().list)
-}
-
-/// 设置项目语言
-#[tauri::command]
-fn set_project_lang(
-    path: String,
-    lang: String,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<(), String> {
-    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
-    cfg.set_project_lang(&path, &lang)
-}
-
-/// 更新项目名称与语言（路径不可修改）
-#[tauri::command]
-fn update_project(
-    path: String,
-    name: String,
-    lang: String,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<(), String> {
-    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
-    cfg.update_project(&path, &name, &lang)
-}
-
-/// 从项目列表删除项目（不删除项目文件夹）
-#[tauri::command]
-fn delete_project(
-    path: String,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<(), String> {
-    let cfg = config_mgr.lock().map_err(|e| e.to_string())?;
-    cfg.delete_project(&path)
-}
-
-#[tauri::command]
-fn get_run_targets(
-    project_root: Option<String>,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<Vec<config::RunTarget>, String> {
-    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.load_run_targets(project_root.as_deref())
 }
 
 // ============================================
@@ -1589,30 +1093,30 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            open_project,
-            list_dir,
-            read_file,
-            read_file_base64,
-            write_file,
-            create_file,
-            create_dir,
-            delete_path,
-            get_execute_status,
-            set_execute_entry,
-            ai_execute_check,
-            lua_translate,
-            path_exists,
-            rename_path,
+            project_cmds::open_project,
+            fs_cmds::list_dir,
+            fs_cmds::read_file,
+            fs_cmds::read_file_base64,
+            fs_cmds::write_file,
+            fs_cmds::create_file,
+            fs_cmds::create_dir,
+            fs_cmds::delete_path,
+            plugin_cmds::get_execute_status,
+            plugin_cmds::set_execute_entry,
+            plugin_cmds::ai_execute_check,
+            plugin_cmds::lua_translate,
+            fs_cmds::path_exists,
+            fs_cmds::rename_path,
             highlight::highlight_code,
-            is_another_instance,
-            get_last_project,
-            get_projects,
-            project_buckets,
-            project_bucket_delete,
-            set_project_lang,
-            update_project,
-            delete_project,
-            get_run_targets,
+            project_cmds::is_another_instance,
+            project_cmds::get_last_project,
+            project_cmds::get_projects,
+            project_cmds::project_buckets,
+            project_cmds::project_bucket_delete,
+            project_cmds::set_project_lang,
+            project_cmds::update_project,
+            project_cmds::delete_project,
+            project_cmds::get_run_targets,
             highlight::highlight_plugins,
             pty_cmds::get_term_targets,
             proc_cmds::run_target,
