@@ -2621,6 +2621,39 @@ function runSessionTraceLayoutProbe() {
  * ⇒ 中间两个条目一藏，两条线贴到一起。**只有能执行之前的那道闸拦得住它** —— 静态检查看代码是"对的"。
  * 跟 U32/U42 一样，本机没浏览器时该脚本自行 SKIP（跳过会**大声说出来**）。
  */
+/**
+ * U74 palette-not-vscode：调色板**不是 VS Code Dark+ 的**（2026-09-28 换皮）。
+ *
+ * 用户原话："我现在的 UI 太像 VS code 了，审美疲劳了"。诊断是硬事实：旧 `:root` 里
+ * `#1e1e1e` / `#252526` / `#2d2d30` / `#3e3e42` / `#cccccc` / `#007acc` 是 Dark+ 的**原值** ——
+ * 七个一个不差。所以这条门禁就钉三件事：
+ *   ① 那七个原值**不许作为取值出现**（注释里提它们算文档，不算违规 ⇒ 先剥注释再找）；
+ *   ② 文字分四档（`--text-primary` / `--text-secondary` / `--text-muted` / `--text-statusbar`）——
+ *      层级靠灰度，不靠字重；
+ *   ③ **强调色不做大面积底色**：`--bg-statusbar` 不许等于 `--accent`（整条蓝是最像 VS Code 的一处）。
+ * 对比度那半条在真浏览器里量（session-trace-layout 判据 9）。
+ */
+function checkPaletteNotVscode() {
+  const css = read("ui/styles.css").replace(/\/\*[\s\S]*?\*\//g, ""); // 剥掉注释再查
+  const banned = ["#1e1e1e", "#252526", "#2d2d30", "#3e3e42", "#cccccc", "#007acc", "#e81123"];
+  const hit = banned.filter((c) => css.toLowerCase().includes(c));
+  check("U74", "palette-not-vscode",
+    hit.length === 0,
+    "styles.css 里又出现了 VS Code Dark+ 的原值：" + hit.join(" ") +
+      "（想要深色就挑我们自己的石墨刻度，见 :root 那段注释）");
+  const root = css.slice(css.indexOf(":root"), css.indexOf(":root") + 2000);
+  const need = ["--text-primary", "--text-secondary", "--text-muted", "--text-statusbar"];
+  check("U74", "palette-not-vscode",
+    need.every((k) => root.includes(k + ":")),
+    "文字四档缺失（" + need.filter((k) => !root.includes(k + ":")).join(" ") + "）—— 层级要能靠灰度表达");
+  const status = (root.match(/--bg-statusbar:\s*([^;]+);/) || [])[1] || "";
+  const accent = (root.match(/--accent:\s*([^;]+);/) || [])[1] || "";
+  check("U74", "palette-not-vscode",
+    status && accent && status.trim() !== accent.trim(),
+    "状态栏底色又等于强调色了（--bg-statusbar=" + status + " / --accent=" + accent +
+      "）—— 整条强调色是最像 VS Code 的一处，状态栏要深灰 + 发丝线");
+}
+
 function runContextMenuLayoutProbe() {
   const script = path.join(ROOT, "scripts", "context-menu-layout.js");
   const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
@@ -5241,6 +5274,7 @@ async function main() {
     ["U41", "session-trace", runSessionTraceChecks],
     ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
     ["U73", "context-menu-sep-real", runContextMenuLayoutProbe],
+    ["U74", "palette-not-vscode", checkPaletteNotVscode],
     ["U43", "terminal-layout-real", runTerminalLayoutProbe],
     ["U55", "memory-layout-real", runMemoryLayoutProbe],
     ["U44", "nav-layout-real", runNavLayoutProbe],

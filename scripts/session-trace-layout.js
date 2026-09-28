@@ -225,6 +225,52 @@ const driver = `
       modelEl.innerHTML =
         "<option>DeepSeek-V4.1-Flash</option><option>DeepSeek-V3.2-Pro（deepseek-v4-pro）</option>";
     }
+    // 判据 9（2026-09-28 换皮时补）：**对比度**。换调色板最容易犯的错是"看着高级、其实看不清"，
+    // 而这件事只有浏览器算得出来（computed color + 相对亮度）。量两组不透明对：
+    //   ① 状态栏（换皮时从整条蓝改成深灰，最需要盯）；② 消息区底色 vs 气泡文字。
+    // 注：气泡自己的底色是半透明的，这里量的是**它坐在哪块底上**（近似，但方向正确）。
+    const lum = (rgb) => {
+      const m = String(rgb).match(/[0-9.]+/g) || [0, 0, 0];
+      const f = (v) => {
+        const c = v / 255;
+        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(+m[0]) + 0.7152 * f(+m[1]) + 0.0722 * f(+m[2]);
+    };
+    const ratio = (el, bgEl) => {
+      const a1 = lum(getComputedStyle(el).color) + 0.05;
+      const b1 = lum(getComputedStyle(bgEl).backgroundColor) + 0.05;
+      return Math.round((Math.max(a1, b1) / Math.min(a1, b1)) * 100) / 100;
+    };
+    const sb = document.querySelector("#statusbar");
+    const sbItem = sb && sb.querySelector(".status-item");
+    const msgsEl = wrap.querySelector("[data-msgs]");
+    const agentBubble = msgsEl && msgsEl.querySelector(".session-msg--agent .session-bubble");
+    const userBubble = msgsEl && msgsEl.querySelector(".session-msg--user .session-bubble");
+    // 半透明底色要先**合成**再算：气泡的背景是 accent 的 22%，直接拿 rgba 算出来的比值是假的
+    // （第一次就差点被这个骗过去 —— 用户气泡是半透明的，量不到就等于没量）。
+    const blend = (over, under) => {
+      const a1 = String(over).match(/[0-9.]+/g) || [];
+      const b1 = String(under).match(/[0-9.]+/g) || [];
+      const al = a1.length > 3 ? +a1[3] : 1;
+      const mix = [0, 1, 2].map((i) => Math.round(+a1[i] * al + +b1[i] * (1 - al)));
+      return "rgb(" + mix.join(",") + ")";
+    };
+    const ratioOn = (el, underBg) => {
+      const cs = getComputedStyle(el);
+      const bg = blend(cs.backgroundColor, underBg);
+      const a1 = lum(cs.color) + 0.05;
+      const b1 = lum(bg) + 0.05;
+      return Math.round((Math.max(a1, b1) / Math.min(a1, b1)) * 100) / 100;
+    };
+    const under = msgsEl ? getComputedStyle(msgsEl).backgroundColor : "rgb(0,0,0)";
+    out.contrast = {
+      statusbar: sb && sbItem ? ratio(sbItem, sb) : null,
+      statusbarBg: sb ? getComputedStyle(sb).backgroundColor : null,
+      agent: agentBubble ? ratioOn(agentBubble, under) : null,
+      user: userBubble ? ratioOn(userBubble, under) : null,
+      msgsBg: msgsEl ? getComputedStyle(msgsEl).backgroundColor : null,
+    };
     const tb = wrap.querySelector(".session-toolbar");
     out.toolbar = tb
       ? {
@@ -411,6 +457,21 @@ at.afterHidden === true && at.pendingLeft === 0 && at.afterCount === 0
 at.inHistory >= 1
   ? ok(`图进了聊天历史（消息区 ${at.inHistory} 张缩略图）`)
   : fail("图没进聊天历史（消息区 0 张缩略图）—— 发送时要把图挂到那条用户消息上");
+
+// 判据 9：对比度（WCAG 正文 4.5:1）。换皮不许"好看了但看不清"。
+const ct = out.contrast || {};
+const pairs = [
+  ["状态栏文字", ct.statusbar, 4.5],
+  ["助手气泡文字", ct.agent, 4.5],
+  ["用户气泡文字", ct.user, 4.5],
+];
+for (const [name, r, min] of pairs) {
+  r === null || typeof r === "undefined"
+    ? fail(`${name}：量不到（元素或样式变了？）`)
+    : r >= min
+      ? ok(`${name}对比度 ${r}:1 ≥ ${min}:1`)
+      : fail(`${name}对比度只有 ${r}:1（要 ≥ ${min}:1）—— 灰阶挑得太近，深色主题更容易犯这个错`);
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (bad) {

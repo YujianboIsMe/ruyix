@@ -2,27 +2,52 @@
    Darkhorse Code — Dark IDE Theme
    ============================================ */
 
+/* ============================================
+   调色板（2026-09-28 换皮：去 VS Code 化）
+   ============================================
+   旧值不是"有点像 VS Code"，是 **Dark+ 的原值**：`#1e1e1e` 编辑器底、`#252526` 侧栏、
+   `#2d2d30` 标题栏、`#3e3e42` 分隔线、`#cccccc` 前景、`#007acc` 强调色 —— 七个一个不差，
+   所以"审美疲劳"的真正来源是配色基因，而不是布局。改这里一处就全站换脸（强调色在
+   全文件被引用 30 处、`--hover-bg` 更广，都是同一个旋钮）。
+   三条纪律（ui-smoke **U74** 钉着）：
+   ① 那七个原值**不许再出现**（谁顺手抄一条 VS Code 的色值，门禁拦下）；
+   ② 文字分**四档**（主 / 次 / 弱 / 状态栏），层级靠灰度而不是字重；
+   ③ **强调色不做大面积底色**：状态栏那根整条蓝是最像 VS Code 的一处，改成深灰 + 发丝线，
+      强调色只留给"当前 / 选中 / 主按钮"。 */
 :root {
   color-scheme: dark; /* 原生控件（select/option）也走深色 */
-  --bg-primary: #1e1e1e;
-  --bg-secondary: #252526;
-  --bg-titlebar: #2d2d30;
-  --bg-statusbar: #007acc;
-  --bg-command: #1e1e1e;
-  --text-primary: #cccccc;
-  --text-secondary: #969696;
-  --text-statusbar: #ffffff;
-  --border-color: #3e3e42;
-  --hover-bg: #3e3e42;
-  --accent: #007acc;
-  --danger: #e81123;
+
+  /* ---- 中性层：偏冷的石墨 ---- */
+  --bg-primary: #15171b; /* 主画布（编辑器 / 会话） */
+  --bg-secondary: #1b1e23; /* 面板、侧栏 */
+  --bg-titlebar: #101216; /* 标题栏：比面板更沉 */
+  --bg-command: #15171b;
+  --bg-statusbar: #101216; /* 状态栏不再是强调色 */
+  --border-color: #272c34; /* 发丝线：与底色差 6~8%，不是硬线 */
+  --hover-bg: #242830; /* hover / 选中底 */
+
+  /* ---- 文字四档 ---- */
+  --text-primary: #e3e7ec;
+  --text-secondary: #98a2ad;
+  --text-muted: #6a7480; /* 第四档：占位符、时间戳、计数 */
+  --text-statusbar: #c7cdd5;
+
+  /* ---- 强调色（青的一族；深底上比 #0096cc 提亮一档以保对比度）---- */
+  --accent: #2ba7d5;
+  --accent-dim: #1d7fa6;
+  --danger: #e2544f;
+  --ok: #56c596;
+  --warn: #d9a441;
+
+  /* 这两个名在别处以 `var(--x, 旧值)` 的形态出现过：在这里定死，fallback 就不再是真值 */
+  --input-bg: #1b1e23;
 }
 
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
-  scrollbar-color: #c1c1c1 transparent;
+  scrollbar-color: #3a4250 transparent;
   scrollbar-width: thin;
 }
 
@@ -36,7 +61,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: #3a4250;
   border-radius: 3px;
 }
 
@@ -847,11 +872,11 @@ select,
 }
 
 .run-target-edit:hover {
-  background: rgba(255, 200, 80, 0.15);
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
 }
 
 .run-target-del:hover {
-  background: rgba(255, 80, 80, 0.15);
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
 
 .run-targets-empty {
@@ -1483,11 +1508,11 @@ select,
 }
 
 .project-list-item .project-item-edit:hover {
-  background: rgba(255, 200, 80, 0.15);
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
 }
 
 .project-list-item .project-item-del:hover {
-  background: rgba(255, 80, 80, 0.15);
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
 
 /* 修改项目弹窗 */
@@ -1839,7 +1864,7 @@ select,
 .git-stage-all-btn:hover {
   color: #6a9955;
   border-color: #6a9955;
-  background: rgba(106, 153, 85, 0.12);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
 }
 
 .git-file-tree {
@@ -1900,7 +1925,7 @@ select,
 
 .git-stage-btn:hover {
   opacity: 1;
-  background: rgba(106, 153, 85, 0.2);
+  background: color-mix(in srgb, var(--ok) 20%, transparent);
 }
 
 /* 文件夹节点 */
@@ -1922,7 +1947,7 @@ select,
 .git-st-r { color: #c586c0; } /* renamed   */
 .git-st-c { color: #c586c0; } /* copied    */
 .git-st-u { color: #f48771; } /* unmerged  */
-.git-st-\? { color: #969696; } /* untracked */
+.git-st-\? { color: var(--text-secondary); } /* untracked */
 
 .git-empty {
   padding: 6px 12px;
@@ -2078,6 +2103,7 @@ select,
   align-items: center;
   height: 22px;
   background: var(--bg-statusbar);
+  border-top: 1px solid var(--border-color); /* 与上方内容的分界用发丝线，不用整条色块 */
   padding: 0 10px;
   flex-shrink: 0;
 }
@@ -2086,6 +2112,11 @@ select,
   color: var(--text-statusbar);
   font-size: 12px;
   padding: 0 6px;
+}
+
+/* 强调色只在"这条能点 / 正被指到"时出现（面积小、反馈明确） */
+.status-item:hover {
+  color: var(--accent);
 }
 
 .status-spacer {
@@ -2273,18 +2304,18 @@ select,
 
 .agent-pill--run {
   color: #4fc1ff;
-  border-color: rgba(79, 193, 255, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   animation: agentPulse 1.2s ease-in-out infinite;
 }
 
 .agent-pill--ok {
   color: #89d185;
-  border-color: rgba(137, 209, 133, 0.5);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
 .agent-pill--err {
   color: #f14c4c;
-  border-color: rgba(241, 76, 76, 0.5);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
 .agent-pill--off {
@@ -2332,18 +2363,18 @@ select,
 
 .agent-stage--running {
   color: #4fc1ff;
-  border-color: rgba(79, 193, 255, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   animation: agentPulse 1.2s ease-in-out infinite;
 }
 
 .agent-stage--done {
   color: #89d185;
-  border-color: rgba(137, 209, 133, 0.5);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
 .agent-stage--error {
   color: #f14c4c;
-  border-color: rgba(241, 76, 76, 0.5);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
 .agent-stage--skip {
@@ -2444,7 +2475,7 @@ select,
 }
 
 .agent-step--error {
-  border-color: rgba(241, 76, 76, 0.5);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
 .agent-step--error .agent-step-icon {
@@ -2539,17 +2570,17 @@ select,
 
 .agent-badge--ok {
   color: #89d185;
-  border-color: rgba(137, 209, 133, 0.5);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
 .agent-badge--err {
   color: #f14c4c;
-  border-color: rgba(241, 76, 76, 0.5);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
 .agent-badge--run {
   color: #4fc1ff;
-  border-color: rgba(79, 193, 255, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   animation: agentPulse 1.2s ease-in-out infinite;
 }
 
@@ -2697,14 +2728,14 @@ select,
 }
 
 .agent-btn--cancel:hover {
-  border-color: rgba(241, 76, 76, 0.5);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
 .agent-btn--demo {
   width: 100%;
   margin-bottom: 4px;
   color: #d7ba7d;
-  border-color: rgba(215, 186, 125, 0.4);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
 }
 
 .agent-btn--demo:hover {
@@ -2747,7 +2778,7 @@ select,
 
 .agent-chip--warn {
   color: #d7ba7d;
-  border-color: rgba(215, 186, 125, 0.4);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
 }
 
 .agent-history-list {
@@ -2913,7 +2944,7 @@ select,
 
 .mcp-icon-btn:hover {
   color: #f48771;
-  background: rgba(244, 135, 113, 0.1);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .mcp-mini-btn {
@@ -2984,7 +3015,7 @@ select,
   padding: 1px 6px;
   font-size: 10px;
   color: #569cd6;
-  border: 1px solid rgba(86, 156, 214, 0.4);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius: 8px;
 }
 
@@ -3057,7 +3088,7 @@ select,
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg-primary, #1e1e1e);
+  background: var(--bg-primary);
 }
 
 .session-msgs {
@@ -3110,7 +3141,7 @@ select,
 }
 
 .session-msg--user .session-bubble {
-  background: rgba(86, 156, 214, 0.22);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--text-primary, #d4d4d4);
 }
 
@@ -3191,7 +3222,7 @@ select,
 .session-ask-input {
   flex: 1 1 auto;
   min-width: 0;
-  background: var(--input-bg, #1e1e1e);
+  background: var(--input-bg);
   border: 1px solid var(--border-color);
   color: inherit;
   font-size: 12px;
@@ -3329,7 +3360,7 @@ select,
   margin-top: 6px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: var(--bg-secondary, #1e1e1e);
+  background: var(--bg-secondary);
   padding: 8px 10px;
   max-width: 100%;
 }
@@ -3401,7 +3432,7 @@ select,
 }
 
 .session-apply-kind--modify {
-  background: rgba(86, 156, 214, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: #569cd6;
 }
 
@@ -3447,7 +3478,7 @@ select,
 }
 
 .session-apply-pre--before {
-  background: rgba(244, 135, 113, 0.1);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .session-apply-pre--after {
@@ -3735,7 +3766,7 @@ select,
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #1e1e1e; /* 与终端同色：周围一圈亮色会把终端衬得很小 */
+  background: var(--bg-primary); /* 与终端同色：周围一圈亮色会把终端衬得很小 */
 }
 
 .proc-log-panes,
@@ -3754,8 +3785,8 @@ select,
   gap: 10px;
   padding: 5px 12px;
   font-size: 12px;
-  color: #d4d4d4;
-  background: #252526;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
   border-bottom: 1px solid #37373d;
 }
 
@@ -3769,7 +3800,7 @@ select,
   flex: none;
   padding: 1px 7px;
   border-radius: 3px;
-  background: #333333;
+  background: var(--hover-bg);
   color: #ce9178;
 }
 
@@ -3793,7 +3824,7 @@ select,
   padding: 2px 10px;
   font-size: 12px;
   color: #d4d4d4;
-  background: #333333;
+  background: var(--hover-bg);
   border: 1px solid #3f3f3f;
   border-radius: 4px;
   cursor: pointer;
@@ -4308,7 +4339,7 @@ select,
 }
 
 .mem-input {
-  background: var(--input-bg, #252526);
+  background: var(--input-bg);
   color: inherit;
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -4604,4 +4635,10 @@ select,
 
 .session-web--on {
   opacity: 1;
+}
+
+/* 选中文本：浏览器默认那块蓝与我们的强调色不一路，统一成强调色的低饱和版。
+   （能选中的范围见 #navigator / #editor-area / 弹窗那几条 —— 选区只出现在内容面。） */
+::selection {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
 }
