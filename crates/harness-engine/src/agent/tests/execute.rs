@@ -169,7 +169,7 @@ fn a_handle_lookup_must_not_reach_across_projects() {
     };
     let spec = crate::proc::StartSpec {
         cmd: sleeper.into(),
-        ready_cmd: Some(r#"netstat -ano | findstr ":65532" | findstr "LISTENING""#.into()),
+        ready_cmd: Some(no_listener_cmd()),
         ready_timeout_secs: Some(2),
         keep_alive: false,
     };
@@ -195,7 +195,7 @@ fn a_handle_lookup_must_not_reach_across_projects() {
     // 并跑时把别人的条目一起收了，症状是"handle 的进程已被停止"而进程其实还活着。
     let spec_b = crate::proc::StartSpec {
         cmd: sleeper.into(),
-        ready_cmd: Some(r#"netstat -ano | findstr ":65532" | findstr "LISTENING""#.into()),
+        ready_cmd: Some(no_listener_cmd()),
         ready_timeout_secs: Some(2),
         keep_alive: false,
     };
@@ -213,6 +213,21 @@ fn a_handle_lookup_must_not_reach_across_projects() {
         "清理 A 不许抹掉 B 的条目（否则并跑用例会互相看不见）"
     );
     crate::proc::shutdown_for(&b.0, false);
+}
+
+/// "没人监听这个端口"的就绪判据，端口**现场取**（绑 `:0` 拿一个空闲端口，随即放掉）。
+///
+/// 为什么不用写死的 65532：判据是"起之前先探一次，命中就拒绝"（那条守卫掐的是
+/// "上一轮服务还占着端口 ⇒ 这次就绪是假的"），而**端口是全局资源** —— 机器上任何东西
+/// （别的 app、另一次并跑的 `cargo test`）临时占着它，这条用例就会在 `expect` 上炸，
+/// 而报错读起来像"起不来进程"，方向全错。实测：11 次全量里出现过 1 次这种假红；
+/// 10 次干净复跑都没再现 —— 这正是"假红"的形状（跟被测代码无关，跟环境抢资源有关）。
+fn no_listener_cmd() -> String {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(65532); // 绑不上（极罕见）⇒ 退回老端口，行为与改前一致
+    format!(r#"netstat -ano | findstr ":{port}" | findstr "LISTENING""#)
 }
 
 // ---- 托管进程的交付对账（用户报的那个「服务没启动起来」）----
@@ -283,7 +298,7 @@ fn a_missed_criterion_carries_the_port_comparison() {
     };
     let spec = crate::proc::StartSpec {
         cmd: sleeper.into(),
-        ready_cmd: Some(r#"netstat -ano | findstr ":65533" | findstr "LISTENING""#.into()),
+        ready_cmd: Some(no_listener_cmd()),
         // 5 秒而不是 1 秒：**判据没变**（这个端口谁都不监听，必然"没命中"），
         // 变的是余量 —— 1 秒在并行跑全量时会翻分支，表现为"handle 已从进程表移除"。
         ready_timeout_secs: Some(5),
