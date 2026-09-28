@@ -273,6 +273,23 @@ mod tests {
         v
     }
 
+    /// 前端发来的 JSON 形状：**嵌套字段不做 camelCase 转换**（Tauri 只转命令参数名），
+    /// 所以字段名必须与 Rust 侧一字不差 —— 写错的话症状是"用户点了发送才报一个看不懂的错"。
+    /// 这条把形状钉在测试里，不靠"我读代码时是对的"。
+    #[test]
+    fn the_json_shape_the_ui_sends_deserializes() {
+        let raw = r#"[{"name":"屏幕截图.png","mime":"image/png","data_base64":"QUJD"}]"#;
+        let items: Vec<Attachment> = serde_json::from_str(raw).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "屏幕截图.png");
+        assert_eq!(items[0].mime, "image/png");
+        assert_eq!(items[0].data_base64, "QUJD");
+        // 文件名可以缺（前端没有必须给文件名的义务）
+        let bare: Vec<Attachment> =
+            serde_json::from_str(r#"[{"mime":"image/png","data_base64":"QUJD"}]"#).unwrap();
+        assert_eq!(bare[0].name, "");
+    }
+
     fn att(name: &str, mime: &str, bytes: &[u8]) -> Attachment {
         Attachment {
             name: name.into(),
