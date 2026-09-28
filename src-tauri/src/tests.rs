@@ -15,6 +15,7 @@
 //! `#[cfg(test)]` 门禁的测试专供参照，顺带去掉它那行属性 —— 整个文件都只在测试构建里编译。
 
 use super::*;
+use crate::nav::{Nav, check_open_url, nav_verdict};
 #[cfg(feature = "preinstalled")]
 use arborium::Highlighter;
 

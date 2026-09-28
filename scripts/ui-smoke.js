@@ -713,18 +713,23 @@ function runStaticChecks() {
   //     · 前端另有一重捕获阶段拦截，判定表与后端一致（改一处必须同步另一处）。
   const confJson = read("src-tauri/tauri.conf.json");
   const extJs = read("ui/scripts/external.js");
+  // 判定与出口 2026-09-28 拆进了 nav.rs（main.rs 只留接线）—— 契约的对象是**模块**，
+  // 不是文件名：搬走之后这几条跟着去读 nav.rs，另加一条钉"线还在 main.rs 上"。
+  const navRs = read("src-tauri/src/nav.rs");
   check("U24", "external-link",
     has(mainRs, "fn build_main_window") && has(mainRs, "on_navigation") &&
       has(mainRs, "on_new_window") && !/"windows"\s*:\s*\[\s*\{/.test(confJson),
     "主窗口必须建在 Rust 里并挂 on_navigation（tauri.conf.json 的 app.windows 不能再有窗口：配置窗口没有导航闸门）");
   check("U24", "external-link",
-    ["fn nav_verdict", "fn is_app_host", "fn is_document_path", "Nav::External", "Nav::Refuse"]
-      .every((s) => has(mainRs, s)),
-    "导航判定必须落在 main.rs::nav_verdict（放行 / 交给系统浏览器 / 拒掉 三结局）");
+    has(mainRs, "mod nav;") && has(mainRs, "nav::nav_verdict") && has(mainRs, "nav::open_external,"),
+    "闸门拆进 nav.rs 之后 main.rs 的接线断了（缺 mod nav / on_navigation 没调 nav::nav_verdict / 没注册 nav::open_external）");
   check("U24", "external-link",
-    has(mainRs, "fn open_external") && has(mainRs, "fn check_open_url") &&
-      has(mainRs, "ShellExecuteW") && has(mainRs, "open_external,"),
-    "外链出口必须是 open_external（白名单 + 系统默认处理程序），且已注册到 invoke_handler");
+    ["fn nav_verdict", "fn is_app_host", "fn is_document_path", "Nav::External", "Nav::Refuse"]
+      .every((s) => has(navRs, s)),
+    "导航判定必须落在 nav.rs::nav_verdict（放行 / 交给系统浏览器 / 拒掉 三结局）");
+  check("U24", "external-link",
+    has(navRs, "fn open_external") && has(navRs, "fn check_open_url") && has(navRs, "ShellExecuteW"),
+    "外链出口必须是 open_external（白名单 + 系统默认处理程序，ShellExecuteW 不走 shell）");
   check("U24", "external-link",
     has(html, 'src="scripts/external.js"') && has(uiSrc, "ExternalLinks?.install") &&
       has(commandJs, 'case "url":') && has(commandJs, '"open_external"'),
