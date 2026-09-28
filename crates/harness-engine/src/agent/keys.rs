@@ -89,7 +89,12 @@ impl LedgerCall {
         format!("\n（第 {step} 轮已执行过同一纯调用，资源版本未变；本次直接复用，未重跑）")
     }
 
-    pub(crate) fn new(tool: Tool, norm: String, span: Option<SpanKey>, resources: Vec<String>) -> Self {
+    pub(crate) fn new(
+        tool: Tool,
+        norm: String,
+        span: Option<SpanKey>,
+        resources: Vec<String>,
+    ) -> Self {
         let mut h = format!("{}|{}", tool.name(), norm);
         if let Some(s) = &span {
             h.push_str(&format!("|S:{}:{}:{}", s.resource, s.lo, s.hi));
