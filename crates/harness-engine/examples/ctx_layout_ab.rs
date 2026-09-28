@@ -352,6 +352,7 @@ fn requests(llm: &FakeLlm) -> Vec<Vec<ChatMessage>> {
                     content: m["content"].as_str().unwrap_or_default().to_string(),
                     tool_calls: None,
                     tool_call_id: None,
+                    images: Vec::new(),
                 })
                 .collect()
         })

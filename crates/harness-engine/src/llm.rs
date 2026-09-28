@@ -11,7 +11,7 @@ use crate::config::LlmConfig;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -23,12 +23,77 @@ pub struct ChatMessage {
     /// 我们自己的 JSON 形状回显（模型看得懂，且与老协议的历史写法一致），观察结果照旧走
     /// user 消息。这样既拿到"模型的原生调用有地方可去"，又不用把观察结果全部改成 tool
     /// 角色 + 逐条对 id（那会牵动历史折叠、批次与所有观察落点）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// （`Serialize` 是手写的，见下面 —— 所以这里没有 `#[serde(...)]` 属性；"None 就不出现"
+    /// 这条语义由手写实现担着。）
     pub tool_calls: Option<Vec<ToolCall>>,
     /// 工具协议：`role = tool` 的结果消息指向它答复的那次调用（混合形态下暂不用，
     /// 留着这条通路是为了将来真要切"纯标准协议"时不用再动结构）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 随这条消息一起发的图片（v1.3 多模态输入）。空 = 纯文本，这是默认且**绝大多数**情形；
+    /// 也只有空的时候序列化结果与以前的 derive **逐字节相同**（见手写的 `Serialize`）。
+    pub images: Vec<ImagePart>,
+}
+
+/// 一条随消息发出去的图片（v1.3）。
+///
+/// 只有**任务消息**（第一条 user）会带图。`data_base64` 是**裸** base64（不带 `data:` 前缀）
+/// —— 前缀由各协议自己拼：anthropic 要 `{type:image, source:{type:base64, media_type, data}}`，
+/// OpenAI 兼容路要 `{type:image_url, image_url:{url:"data:<mime>;base64,<data>"}}`。
+///
+/// 为什么引擎只收 base64 而不是路径：**引擎零文件系统假设**（它连项目目录都是调用方给的）。
+/// 读盘 / 缩放 / 类型白名单全在宿主侧做完（`agent::attachments`），引擎只负责"把给定的字节
+/// 按协议摆对位置"。
+///
+/// 实测（2026-09-28，`api.deepseek.com`，`model=deepseek-flash`）：两条路由都收图且**真的看得见**
+/// （8×8 纯色块答对颜色）；7.2 MB PNG（9.6 MB base64）也能过，但往返 **84 秒** ⇒ 体积由宿主
+/// 先缩（> 2 MB 缩到最长边 ≤ 1600px），引擎不做任何图像处理（零依赖）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImagePart {
+    /// 形如 `image/png`。宿主只放白名单里的值（png / jpeg / webp）过来。
+    pub mime: String,
+    /// 裸 base64，**不含** `data:` 前缀。
+    pub data_base64: String,
+}
+
+/// **手写的 `Serialize`**（不是 derive）。唯一的理由：有图时 `content` 要变成**数组**，
+/// 而 OpenAI 兼容路的请求体是直接把 `ChatMessage` 序列化出去的（`chat_parts` 里
+/// `"messages": messages`）—— 派生实现只会吐字符串。
+///
+/// 两条不变式（都有单测钉着）：
+/// 1. **无图 ⇒ 与老 derive 逐字节相同**：`{"role":…,"content":"…"}`，`tool_calls` / `tool_call_id`
+///    只在 `Some` 时出现、键序与字段声明序一致。v1.2 的公共前缀缓存与全部既有请求体都靠它；
+/// 2. 有图 ⇒ `content` 是 `[{type:text}, {type:image_url, image_url:{url:"data:<mime>;base64,<…>"}}]`
+///    —— 这是 OpenAI 兼容路的形状；anthropic 路的形状在 `anthropic_parts` 里另拼
+///    （读图和 `web_search` 不同：**两条路都收**，只是块形状不同，不必换协议）。
+impl Serialize for ChatMessage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("role", &self.role)?;
+        if self.images.is_empty() {
+            m.serialize_entry("content", &self.content)?;
+        } else {
+            let mut parts: Vec<serde_json::Value> =
+                vec![serde_json::json!({ "type": "text", "text": self.content })];
+            for im in &self.images {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", im.mime, im.data_base64),
+                    },
+                }));
+            }
+            m.serialize_entry("content", &parts)?;
+        }
+        if let Some(c) = &self.tool_calls {
+            m.serialize_entry("tool_calls", c)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            m.serialize_entry("tool_call_id", id)?;
+        }
+        m.end()
+    }
 }
 
 /// 模型**发出来**的一次工具调用（响应里 `message.tool_calls` 的一项）。
@@ -58,6 +123,7 @@ impl ChatMessage {
             content: c.into(),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
     pub fn user(c: impl Into<String>) -> Self {
@@ -66,6 +132,7 @@ impl ChatMessage {
             content: c.into(),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
     pub fn assistant(c: impl Into<String>) -> Self {
@@ -74,6 +141,7 @@ impl ChatMessage {
             content: c.into(),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
     /// 工具结果消息（`role = tool`）—— 混合形态下暂未使用，见 [`ChatMessage::tool_calls`]。
@@ -83,7 +151,16 @@ impl ChatMessage {
             content: c.into(),
             tool_calls: None,
             tool_call_id: Some(id.into()),
+            images: Vec::new(),
         }
+    }
+    /// 给这条消息挂上图片（v1.3）：只有**任务消息**（第一条 user）会这么用。
+    ///
+    /// 挂上之后这条消息的 `content` 在线上就变成块数组（见手写的 [`Serialize`]），
+    /// 其余消息一字不动 —— "有图才变形状"是有意为之：无图路径必须与旧版本逐字节相同。
+    pub fn with_images(mut self, images: Vec<ImagePart>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -687,6 +764,29 @@ const TOOL_DECLS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// 读图能力闸（v1.3）：**fail-closed** —— 模型不在"能读图"的能力表里（或表里写着 `false`）时，
+/// 带图的请求直接拒绝，并把原因说清楚。
+///
+/// 为什么宁可拒绝也不"把图丢掉继续发"：丢掉图之后模型会**对着纯文本问题编答案**，而用户以为
+/// 自己发了图 —— 那是拿一个看起来正常的答复冒充"看图说话"，比报错坏得多（与 ISSUE-5
+/// 「模型名 fail-closed」同一条纪律）。宿主侧还有一道同样的闸（UI 上禁用附件入口 + 写明原因），
+/// 这里是最外面那道 —— 任何调用方（eval / examples / 以后的别的宿主）都绕不过。
+fn reject_images_for_a_blind_model(
+    cfg: &LlmConfig,
+    messages: &[ChatMessage],
+) -> Result<(), String> {
+    if messages.iter().all(|m| m.images.is_empty()) || model_caps(&cfg.model).multimodal {
+        return Ok(());
+    }
+    let n: usize = messages.iter().map(|m| m.images.len()).sum();
+    Err(format!(
+        "当前模型 `{}` 不在「能读图」的能力表里，但这次请求带了 {n} 张图 —— 已拒绝发送。\
+         请换成能读图的模型（deepseek-flash / deepseek-v4-flash / deepseek-v4-flash-vision-exp），\
+         或者把图去掉再发。（引擎不会把图悄悄丢下、再当作纯文本请求发出去。）",
+        cfg.model
+    ))
+}
+
 fn chat_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
@@ -872,6 +972,26 @@ fn anthropic_tool_decls(names: &[&str]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// anthropic 路的 user 消息：**无图是纯字符串**（既有形状一字不动），有图才变块数组。
+///
+/// 为什么不去改 `ChatMessage` 的手写 `Serialize` 让它也吐 anthropic 形状：**两条协议的块形状
+/// 不同**（这就是它俩的差别所在），而 `Serialize` 只能吐一种 —— 那条路走 OpenAI 兼容形状
+/// （`chat_parts` 直接把 `ChatMessage` 序列化进请求体）。所以 anthropic 侧在**拼请求体这一步**
+/// 分叉，和 `tool` 角色变成 `tool_result` 块同一个位置、同一个理由。
+fn anthropic_user_msg(m: &ChatMessage) -> serde_json::Value {
+    if m.images.is_empty() {
+        return serde_json::json!({ "role": "user", "content": m.content });
+    }
+    let mut blocks = vec![serde_json::json!({ "type": "text", "text": m.content })];
+    for im in &m.images {
+        blocks.push(serde_json::json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": im.mime, "data": im.data_base64 },
+        }));
+    }
+    serde_json::json!({ "role": "user", "content": blocks })
+}
+
 fn anthropic_parts(
     cfg: &LlmConfig,
     messages: &[ChatMessage],
@@ -891,7 +1011,7 @@ fn anthropic_parts(
                 }
                 system_text.push_str(&m.content);
             }
-            "user" => msgs.push(serde_json::json!({ "role": "user", "content": m.content })),
+            "user" => msgs.push(anthropic_user_msg(m)),
             "assistant" => {
                 // 带工具调用的助手消息要用 anthropic 的 `tool_use` 块回灌（而不是塞进文本）：
                 // 我们这条路平时用"调用流水 + 用户观察"的文本回放（`tool_calls_echo`），
@@ -1267,6 +1387,7 @@ pub async fn chat_with_tools(
             "尚未配置 DeepSeek API Key（设置面板里填，或设环境变量 DEEPSEEK_API_KEY）".into(),
         );
     }
+    reject_images_for_a_blind_model(cfg, messages)?;
     let (out, last_err) =
         attempt_loop(cfg, messages, json_mode, tool_names, fallback.is_some()).await;
     if let Some(o) = out {
@@ -2073,7 +2194,6 @@ mod tests {
         );
         assert!(model_caps("deepseek-v4-flash").multimodal);
         assert!(!model_caps("deepseek-v4-pro").multimodal);
-
         // 联网能力**按协议分**（2026-09-25 四个模型两条路各打一遍实测）：
         // flash 在 `/responses` 上搜不了，但在 anthropic 路上能搜 —— 两列都要钉住，
         // 只钉一列就会重演"整条协议被写死成不支持"。
@@ -2913,5 +3033,100 @@ mod protocol_tests {
                 .unwrap()["path"],
             "a.txt"
         );
+    }
+
+    // ---------------- v1.3 多模态输入：形状与能力闸 ----------------
+
+    /// **无图路径必须逐字节不变** —— 这条是整件事的地基：v1.2 的公共前缀缓存、
+    /// 全部既有请求体形态、以及工具协议那条 DSML 修复都踩在它上面。
+    #[test]
+    fn chat_message_serializes_identically_without_images() {
+        assert_eq!(
+            serde_json::to_string(&ChatMessage::user("看这个")).unwrap(),
+            r#"{"role":"user","content":"看这个"}"#
+        );
+        // 带 tool_calls 的老路径也要一字不差，且 None 的字段不出现
+        let mut a = ChatMessage::assistant("调用一下");
+        a.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            kind: "function".into(),
+            function: ToolCallFn {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        let j = serde_json::to_value(&a).unwrap();
+        assert_eq!(j["content"], serde_json::json!("调用一下"));
+        assert_eq!(j["tool_calls"][0]["function"]["name"], "read");
+        assert!(
+            j.get("tool_call_id").is_none(),
+            "None 的字段不该出现在请求体里"
+        );
+    }
+
+    /// 有图 ⇒ OpenAI 兼容路的 `content` 变块数组（`chat_parts` 是直接把 `ChatMessage`
+    /// 序列化出去的，所以形状由手写的 `Serialize` 定）。
+    #[test]
+    fn a_message_with_images_serializes_as_an_openai_content_array() {
+        let m = ChatMessage::user("这张图什么颜色？").with_images(vec![ImagePart {
+            mime: "image/png".into(),
+            data_base64: "AAAA".into(),
+        }]);
+        let j = serde_json::to_value(&m).unwrap();
+        let parts = j["content"].as_array().expect("有图 ⇒ content 是块数组");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "这张图什么颜色？");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    /// anthropic 路是**另一套块形状**（这是两条协议的真实差别），且在拼请求体那一步分叉。
+    #[test]
+    fn anthropic_route_puts_images_in_base64_blocks() {
+        let m = ChatMessage::user("看图").with_images(vec![ImagePart {
+            mime: "image/jpeg".into(),
+            data_base64: "ZZZ".into(),
+        }]);
+        let v = anthropic_user_msg(&m);
+        assert_eq!(v["role"], "user");
+        let blocks = v["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(blocks[1]["source"]["data"], "ZZZ");
+        // 无图 ⇒ 仍是纯字符串（既有形状）
+        assert_eq!(
+            anthropic_user_msg(&ChatMessage::user("无图"))["content"],
+            serde_json::json!("无图")
+        );
+    }
+
+    /// 能力闸：不能读图的模型**拒绝**带图请求（宁可报错也不把图悄悄丢掉）。
+    #[test]
+    fn a_blind_model_refuses_image_requests() {
+        let msg = || {
+            ChatMessage::user("看图").with_images(vec![ImagePart {
+                mime: "image/png".into(),
+                data_base64: "AAAA".into(),
+            }])
+        };
+        let blind = LlmConfig {
+            model: "deepseek-v4-pro".into(),
+            ..Default::default()
+        };
+        let err = reject_images_for_a_blind_model(&blind, &[msg()]).unwrap_err();
+        assert!(err.contains("不在「能读图」的能力表里"), "{err}");
+        assert!(err.contains("1 张图"), "{err}");
+        // 同一张图给能读图的模型 ⇒ 放行
+        let vision = LlmConfig {
+            model: "deepseek-flash".into(),
+            ..Default::default()
+        };
+        assert!(reject_images_for_a_blind_model(&vision, &[msg()]).is_ok());
+        // 无图 ⇒ 什么模型都放行
+        let plain = vec![ChatMessage::user("只有文字")];
+        assert!(reject_images_for_a_blind_model(&blind, &plain).is_ok());
     }
 }

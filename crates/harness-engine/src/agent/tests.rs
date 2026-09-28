@@ -336,6 +336,7 @@ fn req_msgs(llm: &crate::testllm::FakeLlm, i: usize) -> Vec<ChatMessage> {
             content: m["content"].as_str().unwrap_or_default().to_string(),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         })
         .collect()
 }
