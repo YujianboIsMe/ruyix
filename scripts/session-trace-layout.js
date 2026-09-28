@@ -132,6 +132,30 @@ const driver = `
     UI.sendMessage(s, wrap, "把会话气泡变成看得见的执行轨迹");
     for (let i = 0; i < 30; i++) await Promise.resolve();
 
+    // ---- 附件（v1.3）：发送之后待发条必须清空，图必须出现在**历史里那条消息**上 ----
+    // 复刻用户报的现场：先往待发条塞一张（1x1 PNG 的 data URL 当预览，不需要 FileReader），
+    // 再发一条带图的消息。判据在下面（本文件是模板字符串，注释里不许有反引号）。
+    const SHOT = {
+      name: "shot.png",
+      mime: "image/png",
+      data_base64: "iVBORw0KGgo=",
+      _preview:
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+    };
+    s._pending = [SHOT];
+    UI.renderPending(wrap, s);
+    const pendingEl = wrap.querySelector("[data-pending]");
+    out.attach = {
+      beforeCount: pendingEl.querySelectorAll(".session-shot-thumb").length,
+      beforeHidden: pendingEl.hidden,
+    };
+    UI.sendMessage(s, wrap, "这图里是什么？（截图附件）", [SHOT]);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    out.attach.afterCount = pendingEl.querySelectorAll(".session-shot-thumb").length;
+    out.attach.afterHidden = pendingEl.hidden;
+    out.attach.pendingLeft = (s._pending || []).length;
+    out.attach.inHistory = wrap.querySelectorAll("[data-msgs] .session-shot-thumb").length;
+
     // 喂真事件：阶段 / 计划 / 两条长调用 / 一条失败 / 收尾
     const LONG = "ui/scripts/session.js（905-1145）" + "很长的补充说明".repeat(12);
     const fire = (n, p) => handlers.get(n)({ payload: p });
@@ -374,6 +398,19 @@ msel && msel.w <= mcap
   : fail(`模型下拉太宽（${msel ? msel.w : "?"}px > 上限 ${mcap}px，工具栏宽 ${tbm ? tbm.clientW : "?"}px）` +
       " —— 给它 max-width（现在 15rem）并靠右成组放那三颗按钮");
 tbm ? ok(`工具栏各控件宽度：${tbm.kids.map((k) => k.cls + "=" + k.w + "px").join(" / ")}`) : null;
+
+// 判据 8：截图附件的三件事（用户报过"图发出去之后输入区还挂着、历史里又找不到"）。
+const at = out.attach || {};
+at.beforeCount === 1 && at.beforeHidden === false
+  ? ok("待发条能显示待发的图（1 张）")
+  : fail(`待发条没显示图（${at.beforeCount} 张 / hidden=${at.beforeHidden}）—— 夹具或 renderPending 坏了`);
+at.afterHidden === true && at.pendingLeft === 0 && at.afterCount === 0
+  ? ok("发送之后待发条清空（输入区不再挂着那张图）")
+  : fail(`发送之后待发条没清空（hidden=${at.afterHidden} / 缩略图 ${at.afterCount} 张 / s._pending=${at.pendingLeft}）` +
+      " —— 图要跟着消息走，不能留在输入区（用户报的就是这个）");
+at.inHistory >= 1
+  ? ok(`图进了聊天历史（消息区 ${at.inHistory} 张缩略图）`)
+  : fail("图没进聊天历史（消息区 0 张缩略图）—— 发送时要把图挂到那条用户消息上");
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (bad) {

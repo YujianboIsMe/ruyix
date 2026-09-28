@@ -201,16 +201,40 @@
     return { ok: true, why: "" };
   }
 
+  /**
+   * 一条消息要显示的截图：**宿主回执优先，回执还没到就用内存里的预览**。
+   *
+   * 为什么必须有「回执还没到」这一支：`attachments`（路径 + 元数据）是 run **跑完**才回填的，
+   * 而图在按下发送那一刻就已经属于这条消息了 —— 跑着的时候、以及这一轮失败（没有回执）时，
+   * 气泡里都得看得见。少了它，用户看到的就是「图明明发出去了，历史里却找不到」。
+   */
+  function shotItems(m) {
+    const stored = m.attachments ?? [];
+    if (stored.length) {
+      return stored.map((a, i) => ({
+        src: (m._preview && m._preview[i]) || shotCache.get(a.path) || "",
+        path: a.path,
+        name: a.name || L("截图", "screenshot"),
+        bytes: a.bytes || 0,
+      }));
+    }
+    return (m._preview ?? []).map((url, i) => ({
+      src: url,
+      path: "",
+      name: L(`截图 ${i + 1}`, `screenshot ${i + 1}`),
+      bytes: 0,
+    }));
+  }
+
   /** 一条消息随行的截图（缩略图）。没有 src 的先留占位，交给 `hydrateShots` 读盘补上。 */
   function shotStripHtml(m) {
-    const list = m.attachments ?? [];
+    const list = shotItems(m);
     if (!list.length) return "";
     const items = list
-      .map((a, i) => {
-        const src = (m._preview && m._preview[i]) || shotCache.get(a.path) || "";
+      .map((a) => {
         const kb = a.bytes ? ` · ${Math.round(a.bytes / 1024)} KB` : "";
-        const attrs = src ? `src="${esc(src)}"` : `data-shot-src="${esc(a.path)}"`;
-        return `<img class="session-shot-thumb session-shot-thumb--msg" ${attrs}` +
+        const src = a.src ? `src="${esc(a.src)}"` : `data-shot-src="${esc(a.path)}"`;
+        return `<img class="session-shot-thumb session-shot-thumb--msg" ${src}` +
           ` data-shot="${esc(a.path)}" alt="${esc(a.name)}" title="${esc(a.name)}${kb}">`;
       })
       .join("");
@@ -1471,6 +1495,10 @@
       _preview: withShots.map((p) => p._preview),
     };
     s.messages.push(userMsg);
+    // 待发条**随发送清空**：图从「输入区」移到「历史里那条消息」上。
+    // 用户报的就是这里 —— 发完之后输入区还挂着那张图（看着像没发出去），历史里又找不到它。
+    s._pending = [];
+    renderPending(wrap, s);
     fillMsgs(wrap, s);
     // 先落盘用户这句话：run 跑一半崩了 / 被强杀，也不至于整段对话消失。
     // **必须 await**：同一会话两次落盘共用同一个 `.json.tmp`，并发时会有一次 rename 失败。
@@ -1769,6 +1797,8 @@
   }
 
   window.SessionUI = {
+  // 探针用：复刻「发送前待发条里有图」的现场（见 scripts/session-trace-layout.js 判据 8）
+  renderPending,
     attach, handleCommand, ensureChatEl, projectClosed, refreshList, syncForProject,
     newSession, openSession, sendMessage, renderOutline,
   };
