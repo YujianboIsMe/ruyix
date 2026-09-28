@@ -15,6 +15,14 @@
 //! `#[cfg(test)]` 门禁的测试专供参照，顺带去掉它那行属性 —— 整个文件都只在测试构建里编译。
 
 use super::*;
+#[cfg(not(feature = "preinstalled"))]
+use crate::highlight::detect_language;
+#[cfg(feature = "preinstalled")]
+use crate::highlight::{
+    HighlightPayload, TOK_TABLE, build_line_highlights, is_builtin_token, overridden_highlighter,
+    resolve_token_name,
+};
+use crate::highlight::{builtin_token_names, highlight_spans};
 use crate::nav::{Nav, check_open_url, nav_verdict};
 use crate::proc_cmds::{resolve_run_dir, run_target};
 #[cfg(feature = "preinstalled")]

@@ -376,7 +376,7 @@ fn load_one(
         let new_names: Vec<&String> = spec
             .token_map
             .values()
-            .filter(|v| !crate::is_builtin_token(v))
+            .filter(|v| !crate::highlight::is_builtin_token(v))
             .collect();
         if let Some(missing) = new_names.iter().find(|v| !css_has_token(&css, v)) {
             notes.push(format!(
@@ -833,7 +833,7 @@ token_map = { "a" = "table-key", "b" = "keyword", "c" = "table-key" }
         for ext in ["py", "rs", "html", "css", "js", "md", "sql", "java"] {
             assert!(reg.lang_for_ext(ext).is_some(), "{ext} 应该能高亮");
         }
-        for tok in crate::builtin_token_names() {
+        for tok in crate::highlight::builtin_token_names() {
             assert!(
                 css_has_token(&p.css, tok),
                 "预装主题里缺 .tok-{tok}（渲染成默认色 = 看起来像高亮丢了）"
