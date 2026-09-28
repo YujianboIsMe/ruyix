@@ -339,6 +339,32 @@ platforms = ["plan9"]
         );
     }
 
+    /// `load()` 真的把行**并进引擎表**（解析纯函数的测试证明不了这一步）。
+    ///
+    /// 行刻意**带 marker**（不当常驻项）：`register_extra` 是进程级、追加语义，注册一条常驻行
+    /// 会污染同进程里别的用例（引擎侧那一刀踩过）。这里只断言"引擎能看到这一行"。
+    #[test]
+    fn load_merges_the_rows_into_the_engine_table() {
+        let d = tmp("merge");
+        write_plugin(
+            &d,
+            "merge-demo",
+            r#"
+[[discover]]
+name = "rsi-merge-demo"
+bin = "zzz-rsi-merge-demo"
+markers = ["rsi-merge-marker.toml"]
+"#,
+        );
+        let rep = load(&d);
+        assert_eq!(rep.discover_rows, 1);
+        let all = engine::discover::all_tools();
+        assert!(
+            all.iter().any(|t| t.bin == "zzz-rsi-merge-demo"),
+            "装载之后引擎的全表里必须有这一行"
+        );
+    }
+
     /// 没有 `plugins/tools/` 目录 = 没人用这个能力，**不是错误**（不产生 note）。
     #[test]
     fn a_missing_directory_is_not_an_error() {
