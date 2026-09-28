@@ -70,3 +70,70 @@ node scripts/check-style.js     # 0 error
 **留的规矩**（已写进 `doc/编码规范.md`）：测试代码要么放**文件末尾**的内联 `mod tests`，
 要么单独成文件（`*tests.rs`，按文件名排除）；别把测试模块夹在生产代码中间 ——
 U52 靠这两条之一才能把"测试"和"生产"分开。
+
+---
+
+## ISSUE-2：macOS 上全绿、Windows 上**编不过** —— `#[cfg]` 掉的那半句被当成"多余的 mut"
+
+**状态**：**已修**（2026-09-28，拉回 `origin/master` 的 macOS 端口那一批之后）。
+
+**症状（可复现）**
+
+拉回 `19aab97`（commit 说明就一句「fix an issue found by cargo」）之后，Windows 上：
+
+```
+$ cargo test
+error[E0596]: cannot borrow `s` as mutable, as it is not declared as mutable
+   --> crates\harness-engine\src\agent.rs:481:5
+    |
+481 |     s.push_str( "…Windows 检索提示…" );
+    |     ^ cannot borrow as mutable
+help: consider changing this to be mutable
+479 |     let mut s = AGENT_SYSTEM.to_string();
+```
+
+同一次拉取还带进来两处：`cargo fmt --check` 红（`agent/vendor.rs:208`、`main.rs:1954/1980` 三处没格式化）、
+`cargo clippy --all-targets` 1 条告警（`paths.rs:264` `.filter_map(|k| std::env::var_os(k))` 冗余闭包）。
+而那份 commit 的说明里写的是「cargo test 全绿（439+166）；check-style 通过；ui-smoke 416/416」——
+**那是 macOS 上的读数**。
+
+**根因（一条，很清楚）**
+
+`agent_system_prompt()` = `AGENT_SYSTEM` + Windows 检索提示，提示那句挂 `#[cfg(target_os = "windows")]`：
+
+- **macOS**：整句 `push_str` 被编掉 ⇒ `let mut s` 的 `mut` 没人用 ⇒ `unused_mut` 告警
+  （19aab97 说的"cargo 发现的问题"就是它），于是把 `mut` 删了 —— 在 mac 上确实干净了；
+- **Windows**：那句话**要**编译 ⇒ `let s` 紧接 `s.push_str(...)` ⇒ `E0596`。
+
+**一个平台上"多余的 mut"，正是另一个平台上的编译错误。** 平台无关的两个失真同时存在：
+那份"门禁"清单里没有 `cargo fmt --check` 和 `cargo clippy`（恰恰是这两条抓住了格式化与冗余闭包）。
+
+**改法**
+
+1. `agent_system_prompt()` 改成**每个平台一整段、整段套 `#[cfg]`**（非 Windows 段直接
+   `AGENT_SYSTEM.to_string()`）—— 两边都既不缺 `mut` 也不多 `mut`。
+2. `cargo fmt --all`（上面那三处）。
+3. `paths.rs:264` → `.filter_map(std::env::var_os)`。
+4. 连带修一条被格式化"误伤"的门禁：U64 的 `/refresh_vendor\(&app, vendor\.inner\(\), …/` 写死了
+   **单行**，而 rustfmt 的 `fn_call_width` 会把这条调用折成多行 ⇒ `cargo fmt` 一跑它就红。
+   改成空白宽松（`\s*`）—— 断言要钉的是「调用装配对不对」，不是「写没写成一行」。
+
+**判据**
+
+```
+cargo test（全工作区）        442 + 168 passed / 0 failed（ignored 8 + 3+3+2）
+cargo fmt --check            通过
+cargo clippy --all-targets   0 warning
+node scripts/ui-smoke.js     424/424
+node scripts/check-style.js  0 error
+```
+
+**教训（写下来免得再犯）**
+
+跨平台改动**在 mac 上的绿灯不能替代 Windows 上的一次编译**：`cargo test` 在 mac 上永远看不到
+Windows 的 cfg 分支，clippy / fmt 也看不见（它们各编各的那一半）。所以：
+
+- 平台分支相关的改动，**在提交前至少在本机能编的那个平台上真跑一次编译**；
+- 反过来，`cargo fmt --check` / `cargo clippy --all-targets` / `cargo test` / `ui-smoke` / `check-style`
+  五条是**独立**的：任何一条不在清单里，都会有整整一类失真没人看（这次一次漏掉三类中的两类）。
+

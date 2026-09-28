@@ -475,14 +475,25 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 /// Windows 上 findstr 的多文件掩码语义不稳（`/c:"串"` 配多个通配符经常漏配），
 /// 实测模型要试 5-6 个变体才命中 —— 一行提示换掉这些试错轮。
 /// `AGENT_SYSTEM` 保持常量不动（测试直接断言其内容），平台差异在这里拼接。
+///
+/// 两个平台各写一段、**整段用 `#[cfg]` 门禁**（而不是 `let mut s` + 给 `push_str` 加门禁）：
+/// 那样在非 Windows 上 `mut` 没人用 ⇒ `unused_mut` 告警，而本仓库 `cargo clippy` 要求 0 告警。
+/// 这个坑真踩过：19aab97 在 macOS 上把 `let mut s` 改成 `let s`（那边 `push_str` 被 cfg 掉、
+/// 于是 `mut` 是多余的），Windows 上这行却要编译 ⇒ `E0596: cannot borrow 's' as mutable`。
 fn agent_system_prompt() -> String {
-    let s = AGENT_SYSTEM.to_string();
+    #[cfg(not(target_os = "windows"))]
+    {
+        AGENT_SYSTEM.to_string()
+    }
     #[cfg(target_os = "windows")]
-    s.push_str(
-        "\n\nWindows 检索提示：内容搜索优先 git grep -i -l <词>（快且稳、跟随 .gitignore，项目不是 git 仓库时不可用）；\
+    {
+        let mut s = AGENT_SYSTEM.to_string();
+        s.push_str(
+            "\n\nWindows 检索提示：内容搜索优先 git grep -i -l <词>（快且稳、跟随 .gitignore，项目不是 git 仓库时不可用）；\
          \nfindstr 的多文件掩码行为不稳（/c:\"串\" 配多个通配符常漏配），需要时单掩码多次跑，或 for /r %f in (*.java) do findstr /m /c:\"词\" \"%f\" 逐个遍历。",
-    );
-    s
+        );
+        s
+    }
 }
 
 /// 确认模式（Stage）下必须显式告诉模型的三件事 —— 不写它，模型会拿 `execute` 的失败

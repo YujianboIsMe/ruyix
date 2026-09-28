@@ -1954,7 +1954,12 @@ fn config_form_save(
     // 上面那个作用域结束 = 配置锁已释放（见 emit_config_changed 的注释：
     // 握着锁发事件会撞自己 —— 监听者收到事件就会回头调要锁的配置命令）
     emit_config_changed(&app, &scope, &entries, false);
-    refresh_vendor(&app, vendor.inner(), config_mgr.inner(), project_root.as_deref());
+    refresh_vendor(
+        &app,
+        vendor.inner(),
+        config_mgr.inner(),
+        project_root.as_deref(),
+    );
     Ok(report)
 }
 
@@ -1980,7 +1985,12 @@ fn config_form_apply(
     };
     // 「应用」比「保存」更该广播：运行时内存真的变了，界面里所有派生状态当场就旧了
     emit_config_changed(&app, &scope, &entries, true);
-    refresh_vendor(&app, vendor.inner(), config_mgr.inner(), project_root.as_deref());
+    refresh_vendor(
+        &app,
+        vendor.inner(),
+        config_mgr.inner(),
+        project_root.as_deref(),
+    );
     Ok(report)
 }
 

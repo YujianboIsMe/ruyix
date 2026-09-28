@@ -261,7 +261,7 @@ impl Paths {
     pub fn is_in_temp(&self) -> bool {
         let mut roots: Vec<PathBuf> = ["TEMP", "TMP"]
             .iter()
-            .filter_map(|k| std::env::var_os(k))
+            .filter_map(std::env::var_os)
             .map(PathBuf::from)
             .collect();
         roots.push(std::env::temp_dir());

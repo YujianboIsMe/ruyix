@@ -208,11 +208,18 @@ mod tests {
     /// 空密钥 → `has_key = false`（空白也算没配）。
     #[test]
     fn blank_key_reports_no_key() {
-        assert!(!vendor("https://api.deepseek.com", "   ", "openai").snapshot().has_key);
+        assert!(
+            !vendor("https://api.deepseek.com", "   ", "openai")
+                .snapshot()
+                .has_key
+        );
         // 同一份空密钥的两份身份必须相等 —— 摘要对空白取值要稳定
         assert!(
-            vendor("https://api.deepseek.com", "", "openai")
-                .same_vendor(&vendor("https://api.deepseek.com", "   ", "openai"))
+            vendor("https://api.deepseek.com", "", "openai").same_vendor(&vendor(
+                "https://api.deepseek.com",
+                "   ",
+                "openai"
+            ))
         );
     }
 }

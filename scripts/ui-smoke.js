@@ -4125,7 +4125,9 @@ function runConfigEventChecks() {
     "刷新要覆盖环境探针那排 chip（key 变了，chip 上的「✗ key 未配置」就旧了）");
   check("U64", "vendor-changed-emitted",
     /fn refresh_vendor/.test(mainRs) && /"model:\/\/vendor-changed"/.test(mainRs) &&
-      /refresh_vendor\(&app, vendor\.inner\(\), config_mgr\.inner\(\)/.test(mainRs) &&
+      // 空白用 `\s*` 而不是写死一行：rustfmt 的 fn_call_width 会把这条调用折成多行，
+      // 钉死"单行"就等于钉死格式 —— 而 `cargo fmt --check` 是硬门禁，两者只能有一个。
+      /refresh_vendor\(\s*&app,\s*vendor\.inner\(\),\s*config_mgr\.inner\(\)/.test(mainRs) &&
       /fn same_vendor/.test(read("src-tauri/src/agent/vendor.rs")) &&
       /pub fn adopt/.test(read("src-tauri/src/agent/vendor.rs")) &&
       /fn vendor\b|mod vendor/.test(mainRs + read("src-tauri/src/agent/mod.rs")),
