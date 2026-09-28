@@ -153,6 +153,60 @@ pub const TOOLS: &[ToolSpec] = &[
     },
 ];
 
+/// 用户侧追加的工具行（`plugins/tools/<id>/tools.toml`，宿主启动时读进来 —— v1.4 §4.2）。
+///
+/// **为什么是"运行时追加"而不是改上面那张表**：`TOOLS` 是编译期常量表，用户侧改不了；
+/// 而自改闭环要求"加一个新工具 / 新包管理器"**只改数据、不改源码**。这里就是那个唯一的
+/// 加载点 —— 一次 I/O 接线（形状与 `plugins/highlight/<id>/theme.css` 被启动注入完全一样），
+/// 之后所有增长都发生在用户侧的 TOML 里。
+///
+/// `'static` 是**有意的泄漏**（`Box::leak`）：追加行在启动时装载一次、进程生命期内常驻，
+/// 行数有界（用户侧文件）。换成 `Cow<'static, str>` 要牵动 `ToolSpec` 的每个使用点，
+/// 换来的只是"行数从有界泄漏变成有界堆"——不划算。
+fn extra_tools() -> &'static Mutex<Vec<&'static ToolSpec>> {
+    static E: OnceLock<Mutex<Vec<&'static ToolSpec>>> = OnceLock::new();
+    E.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 把用户侧读来的字符串变成 `'static`（只在装载追加行时调用，见 [`extra_tools`] 的说明）。
+pub fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// 把用户侧的字面量列表变成 `'static` 切片（同上）。
+pub fn leak_strs(v: Vec<String>) -> &'static [&'static str] {
+    Box::leak(
+        v.into_iter()
+            .map(leak_str)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    )
+}
+
+/// 追加工具行。宿主在启动时调用一次；**追加**语义（同名 bin 不覆盖内置行，两个都在）。
+/// 返回这次加了几行。登记后清探测缓存 —— 否则新工具会被旧缓存判成"没有"。
+pub fn register_extra(specs: Vec<ToolSpec>) -> usize {
+    let n = specs.len();
+    if n == 0 {
+        return 0;
+    }
+    if let Ok(mut g) = extra_tools().lock() {
+        // 行本身也泄漏成 'static：表在进程内常驻，取引用比每次 clone 便宜，且读路径无锁开销问题
+        g.extend(specs.into_iter().map(|s| &*Box::leak(Box::new(s))));
+    }
+    invalidate_cache();
+    n
+}
+
+/// 内置行 + 用户侧追加行（内置在前，顺序稳定）。探测 / 可用清单都走它。
+pub fn all_tools() -> Vec<&'static ToolSpec> {
+    let mut v: Vec<&'static ToolSpec> = TOOLS.iter().collect();
+    if let Ok(g) = extra_tools().lock() {
+        v.extend(g.iter().copied());
+    }
+    v
+}
+
 /// 一个工具的探测结论。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
@@ -225,6 +279,7 @@ pub fn available_names(root: &Path) -> Vec<String> {
 }
 
 /// 待探的一项。
+#[derive(Debug)]
 struct Job {
     name: String,
     bin: String,
@@ -266,12 +321,28 @@ pub fn discover(root: &Path, cfg: &DiscoverConfig, python_bin: &str, node_bin: &
 
 /// 只做筛选，不起进程（可单测）。
 fn plan(root: &Path, extra: &[String], python_bin: &str, node_bin: &str) -> Vec<Job> {
+    plan_with(root, &all_tools(), extra, python_bin, node_bin)
+}
+
+/// [`plan`] 的**表注入**版本：表由调用方给（内置 + 追加行由 `plan` 拼好传进来）。
+///
+/// 为什么要把表抽成参数：单测要验"某一行在什么条件下算相关"，若只能通过
+/// [`register_extra`] 往全局注册表里塞，那条行就会**留在进程里污染别的用例**
+/// （实测：注册一条常驻行之后，"空项目只该探到 git"那两条用例当场红）。
+/// 形状与 `verify::run_check` 同款：能注入的依赖就别用全局。
+fn plan_with(
+    root: &Path,
+    table: &[&ToolSpec],
+    extra: &[String],
+    python_bin: &str,
+    node_bin: &str,
+) -> Vec<Job> {
     let entries = list_root(root);
     let has_marker = |m: &str| entries.contains(&m.to_ascii_lowercase());
     let has_ext = |x: &str| entries.iter().any(|e| e.ends_with(x));
 
     let mut jobs: Vec<Job> = Vec::new();
-    for t in TOOLS {
+    for t in table {
         let relevant = t.markers.is_empty()
             || t.markers.iter().any(|m| has_marker(m))
             || t.extensions.iter().any(|x| has_ext(x));
@@ -647,5 +718,68 @@ mod tests {
             .collect();
         let note = render_note(&found, false).unwrap();
         assert!(note.contains("还有 3 个没列出"), "{note}");
+    }
+    /// 一个测试用的行（字符串都泄漏 —— 与装载路径同一套 [leak_str] / [leak_strs]）
+    fn spec(name: &str, bin: &str, markers: &[&str]) -> ToolSpec {
+        ToolSpec {
+            name: leak_str(name.to_string()),
+            bin: leak_str(bin.to_string()),
+            version_args: leak_strs(vec!["--version".to_string()]),
+            markers: leak_strs(markers.iter().map(|m| m.to_string()).collect()),
+            extensions: leak_strs(vec![]),
+        }
+    }
+
+    /// 注册表：追加行真的进了全表，且**不与内置行互相覆盖**。
+    ///
+    /// 这些行刻意**带 marker**（不当常驻项）：常驻行会让"空项目只该探到 git"那两条用例红 ——
+    /// 注册表是进程级的，测试往里塞东西必须考虑对邻居的影响（这是本模块唯一一处全局可变态）。
+    #[test]
+    fn register_extra_appends_without_replacing_builtins() {
+        let before = all_tools().len();
+        let n = register_extra(vec![spec(
+            "rsi-test-tool",
+            "zzz-rsi-test-bin",
+            &["rsi-test-marker.toml"],
+        )]);
+        assert_eq!(n, 1, "追加一行要如实报数");
+        let all = all_tools();
+        assert_eq!(all.len(), before + 1, "全表 = 内置 + 追加");
+        assert!(
+            all.iter().any(|t| t.bin == "zzz-rsi-test-bin"),
+            "追加行必须出现在全表里"
+        );
+        // 同名 bin 并存（内置在前、追加在后），而不是覆盖
+        register_extra(vec![spec("git-extra", "git", &["rsi-test-marker.toml"])]);
+        let all = all_tools();
+        let pos: Vec<usize> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.bin == "git")
+            .map(|(i, _)| i)
+            .collect();
+        assert!(pos.len() >= 2, "同名行要并存：{pos:?}");
+        assert!(pos[0] < *pos.last().unwrap(), "内置行在前");
+    }
+
+    /// 门控：标记文件命中才"与本项目相关"（表注入 —— 不动全局注册表，见 [plan_with] 的说明）。
+    #[test]
+    fn a_marker_gates_whether_a_registered_row_is_relevant() {
+        let dir = crate::discover::tests::tmp_root(&["README.md"]);
+        let s = spec(
+            "rsi-test-tool",
+            "zzz-rsi-test-bin",
+            &["rsi-marker-only.toml"],
+        );
+        let table = vec![&s];
+        assert!(
+            plan_with(&dir, &table, &[], "python", "node").is_empty(),
+            "没有标记文件时，带 marker 的行不该被视为本项目相关"
+        );
+        std::fs::write(dir.join("rsi-marker-only.toml"), "").unwrap();
+        let jobs = plan_with(&dir, &table, &[], "python", "node");
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].bin, "zzz-rsi-test-bin");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
