@@ -132,6 +132,9 @@ sources; used by the memory embedding model),
 │   └── src/agent/tools.rs     # 工具执行：Ctx（覆盖层/台账）+ read/write/execute/proc/connect + 历史折叠 + settle_steps
 │   └── src/agent/tool_loop.rs # 主循环本体 run_with_ask（v0.12 从 agent.rs 抽离；子模块 + `use super::*` 的先例）
 │   └── src/agent/findings.rs / context.rs / ledger.rs / capsule.rs / scheduler.rs  # v1.1/v1.2 的账本与调度
+│   └── src/agent/keys.rs      # 调用键：路径/命令归一 + 纯度白名单 + 区间包含关系（从 ledger.rs 拆出）
+│   └── src/agent/dispatch.rs  # 波次调度与批量执行：Shape/conflicts/waves_by → exec_one/run_wave（从 action.rs 拆出）
+│   └── src/agent/ledger/tests.rs # `ContextLedger` 黄金测试（143/151 事件逐条对齐；从 ledger.rs 末尾搬出）
 │   └── src/step_agent.rs      # 计划步骤执行体（子 agent，上下文干净，v0.4）
 │   └── src/testllm.rs         # 脚本化假 LLM（单测与 examples 共用，不联网）
 │   └── examples/plan_only.rs  # plan-only e2e smoke (real LLM call via DEEPSEEK_API_KEY env)

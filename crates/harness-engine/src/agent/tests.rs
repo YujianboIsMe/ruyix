@@ -3631,8 +3631,8 @@ fn the_shipped_default_config_shows_the_algorithm_at_work() {
 }
 
 /// 一条读动作的账本键（测试里手搓用）
-fn ledger_read(path: &str) -> ledger::LedgerCall {
-    ledger::classify(&Action::Read(ReadSpec {
+fn ledger_read(path: &str) -> keys::LedgerCall {
+    keys::classify(&Action::Read(ReadSpec {
         path: path.to_string(),
         offset: None,
         limit: None,

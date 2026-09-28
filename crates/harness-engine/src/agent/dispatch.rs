@@ -428,7 +428,7 @@ pub(crate) fn reused_slot(plans: &[Option<ledger::Plan>], i: usize) -> Option<Ca
         Ok(format!(
             "{}{}",
             r.text,
-            ledger::LedgerCall::reuse_note(r.step)
+            keys::LedgerCall::reuse_note(r.step)
         )),
     ))
 }

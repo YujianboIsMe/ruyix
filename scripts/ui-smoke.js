@@ -232,7 +232,7 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
  * 就会把 8 条契约判红 —— 那是在报「文件挪了」，不是在报「契约破了」。契约的对象是**模块**，
  * 所以按模块读。`tests.rs` 排除在外：免得某条契约被测试里的字符串凑上。
  */
-function readEngineAgent() {
+function engineAgentFiles() {
   const files = ["crates/harness-engine/src/agent.rs"];
   const dir = path.join(ROOT, "crates/harness-engine/src/agent");
   if (fs.existsSync(dir)) {
@@ -242,7 +242,11 @@ function readEngineAgent() {
       }
     }
   }
-  return files.map(read).join("\n");
+  return files;
+}
+
+function readEngineAgent() {
+  return engineAgentFiles().map(read).join("\n");
 }
 
 /**
@@ -5076,15 +5080,12 @@ function runContextLayoutChecks() {
   // （不标注模型会怀疑"没执行成功"再试一次；两处实现迟早分叉成一处漏标）
   // 数法：**按文件读、各自在 `#[cfg(test)]` 处截断** —— 测试里断言这句话不算"实现"。
   const NOTE = "本次直接复用，未重跑";
-  const codeOf = (p) => readLf(p).split("#[cfg(test)]")[0];
-  const impls = [
-    "crates/harness-engine/src/agent.rs",
-    "crates/harness-engine/src/agent/ledger.rs",
-    "crates/harness-engine/src/agent/tool_loop.rs",
-    "crates/harness-engine/src/agent/context.rs",
-    "crates/harness-engine/src/agent/findings.rs",
-  ]
-    .map(codeOf)
+  // **契约的对象是模块**（本文件自己第 228 行的规矩）：这里原先是五个写死的文件名，
+  // 2026-09-28 把 `LedgerCall::reuse_note` 从 `agent/ledger.rs` 挪进 `agent/keys.rs` 之后，
+  // 它立刻报"0 处"—— 那是在报"文件挪了"，不是在报"契约破了"。改成按模块读 + 逐文件
+  // 砍掉 `#[cfg(test)]` 之后的生产代码（测试里的字符串不许凑上）。
+  const impls = engineAgentFiles()
+    .map((p) => readLf(p).split("#[cfg(test)]")[0])
     .join("\n")
     .split(NOTE).length - 1;
   check(

@@ -22,7 +22,7 @@
 //! - **取代不改历史**：被 `supersede` 的条目留在账本里、只从提示词中退出；
 //! - **字节要可观测**：`active_bytes` 报给 trace，否则上限有没有踩到没人知道。
 
-use super::ledger;
+use super::{keys, ledger};
 use std::path::{Path, PathBuf};
 
 /// 一条结论（模型写的）。
@@ -311,7 +311,7 @@ impl Progress {
     /// 原文逐字节一致（判据 8），标注行由调用方追加。
     pub fn dedup_lookup(
         &self,
-        call: &ledger::LedgerCall,
+        call: &keys::LedgerCall,
         now: &ledger::VersionVec,
     ) -> Option<(String, u32)> {
         let e = self.dedup.lookup(call, now)?;
@@ -324,7 +324,7 @@ impl Progress {
     }
 
     /// 记一次**命中**（没执行，但要能数出省了几次）。
-    pub fn dedup_note_hit(&mut self, call: &ledger::LedgerCall, now: &ledger::VersionVec) {
+    pub fn dedup_note_hit(&mut self, call: &keys::LedgerCall, now: &ledger::VersionVec) {
         self.dedup.note_hit_for(call, now);
     }
 
@@ -333,7 +333,7 @@ impl Progress {
     /// 落盘失败就**退化为内存**并如实计数（`capsule_errors`）—— 不因为存不下就不记。
     pub fn dedup_record(
         &mut self,
-        call: ledger::LedgerCall,
+        call: keys::LedgerCall,
         result: String,
         versions: ledger::VersionVec,
         step: u32,
@@ -369,7 +369,7 @@ impl Progress {
     /// 侧存形态走 capsule 读盘 + **sha256 校验**。返回 `None` = 没命中（或侧存读不回来）⇒ 照常执行。
     pub fn dedup_recall(
         &mut self,
-        call: &ledger::LedgerCall,
+        call: &keys::LedgerCall,
         now: &ledger::VersionVec,
     ) -> Option<ledger::Recall> {
         self.dedup.recall(call, now)
@@ -387,7 +387,7 @@ impl Progress {
     /// **被既有记录覆盖**的重复（整份读之后再读一个窗口），而那正是账本能省、对照臂会白跑的那类。
     pub fn dedup_audit(
         &mut self,
-        call: Option<&ledger::LedgerCall>,
+        call: Option<&keys::LedgerCall>,
         versions: &ledger::VersionVec,
     ) -> ledger::ExecKind {
         match call {

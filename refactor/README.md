@@ -14,6 +14,8 @@ main-split-highlight.py  # 1 拆 N 第五刀：语法高亮（三段）→ src-t
 main-split-pty.py        # 1 拆 N 第六刀：PTY 终端 + 终端目标 → src-tauri/src/pty_cmds.rs
 main-split-by-domain.py  # 1 拆 N 第七刀：Tauri 命令段按域 → fs_cmds.rs / project_cmds.rs / plugin_cmds.rs
 agent-split.py           # 引擎 agent.rs 3975 行按域 → agent/{types,gate,connect,prompt,action,tools}.rs（子模块 + use super::*）
+agent-split-dispatch.py  # agent/action.rs 的「波次调度 + 批量执行」→ agent/dispatch.rs
+agent-split-ledger.py    # agent/ledger.rs 的「调用键」→ agent/keys.rs；内联黄金测试 → agent/ledger/tests.rs
 u52-scan-scope.py        # 量 U52 到底扫到了多少（把内联测试模块挖掉，看剩下多少生产代码）—— ISSUE-1 的证据
 tr-snapshot.js           # 翻译表快照 diff：大改 ui/scripts/errors.js 时抓"有没有把别的句子翻歪"
 ```
