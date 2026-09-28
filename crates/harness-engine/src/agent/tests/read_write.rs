@@ -17,6 +17,7 @@ fn tool_read_file_dir_overlay_and_jail() {
         policy: WritePolicy::Stage,
         backup_dir: None,
         state_root: None,
+        write_allow: Vec::new(),
     };
     assert!(rd(&ctx, "src/main.rs").unwrap().contains("fn main()"));
     assert!(rd(&ctx, "src").unwrap().contains("main.rs"));
@@ -50,6 +51,7 @@ fn write_policies_stage_vs_apply() {
         policy: WritePolicy::Stage,
         backup_dir: None,
         state_root: None,
+        write_allow: Vec::new(),
     };
     ctx.tool_write("keep.txt", "new").unwrap();
     ctx.tool_write("created.txt", "hi").unwrap();
@@ -84,6 +86,7 @@ fn write_policies_stage_vs_apply() {
         policy: WritePolicy::Apply,
         backup_dir: None,
         state_root: None,
+        write_allow: Vec::new(),
     };
     ctx2.tool_write("keep.txt", "new").unwrap();
     assert_eq!(
@@ -308,4 +311,125 @@ fn read_may_reach_the_state_root_and_nothing_else() {
         "项目内文件仍只认相对路径"
     );
     let _ = std::fs::remove_file(&outside);
+}
+
+// ============================================
+// v1.4 P1：写入白名单（自改闭环的边界）
+// ============================================
+//
+// 判据 1（需求 §6）：改白名单外的文件 ⇒ **被拒**，且拒绝理由**指名是哪一类** ——
+// 不是提示词礼貌劝阻。这里的断言分三层：匹配规则 / 拒绝发生在落盘之前 / 并发波那条也过闸。
+
+/// 模式语法：段内 `*` / `?`、整段 `**`（含"零段"）、**大小写敏感**（宁严不宽）
+#[test]
+fn write_allow_patterns_match_documented_forms() {
+    let cases = [
+        (
+            "plugins/tools/*/tools.toml",
+            "plugins/tools/demo/tools.toml",
+            true,
+        ),
+        (
+            "plugins/tools/*/tools.toml",
+            "plugins/tools/demo/nested/tools.toml",
+            false,
+        ),
+        ("plugins/prompts/**", "plugins/prompts/a/b/c.md", true),
+        ("plugins/prompts/**", "plugins/prompts", true),
+        ("plugins/prompts/**", "plugins/other/a.md", false),
+        ("*.py", "calc.py", true),
+        ("*.py", "src/calc.py", false),
+        ("src/*.py", "src/calc.py", true),
+        ("src/?alc.py", "src/calc.py", true),
+        ("**", "any/deep/file.txt", true),
+        ("", "a.txt", false),
+        (
+            "plugins/tools/*/tools.toml",
+            "plugins/tools/demo/Tools.toml",
+            false,
+        ),
+    ];
+    for (pat, rel, want) in cases {
+        assert_eq!(allow_matches(pat, rel), want, "模式 {pat:?} 对 {rel:?}");
+    }
+}
+
+/// 白名单外 ⇒ 拒绝，且**拒绝在落盘之前**（磁盘、备份、覆盖层都没动）；白名单内 ⇒ 照常
+#[test]
+fn writes_outside_the_whitelist_are_refused_before_anything_is_written() {
+    let d = TempDir::new("allow-basic");
+    let mut ctx = Ctx::new(&d.0, WritePolicy::Apply)
+        .with_write_allow(vec!["plugins/tools/*/tools.toml".into(), "*.md".into()]);
+
+    assert!(
+        ctx.tool_write("notes.md", "改这里").is_ok(),
+        "白名单内该照常写"
+    );
+    let e = ctx
+        .tool_write("global/ai.toml", "偷改别人家的配置")
+        .unwrap_err();
+    assert!(e.contains("global/ai.toml"), "要**指名路径**：{e}");
+    assert!(
+        e.contains("不在本 run 的写入白名单内"),
+        "要说明是哪一类：{e}"
+    );
+    assert!(
+        e.contains("plugins/tools/*/tools.toml"),
+        "要把白名单原文列出来（模型据此一轮就能改对）：{e}"
+    );
+    // "拒绝在落盘之前"这句必须真成立 —— 只写在注释里就是一句口号
+    assert!(!d.0.join("global/ai.toml").exists(), "白名单外不许落盘");
+    assert_eq!(ctx.changes.len(), 1, "只有白名单内那一次进账");
+    assert!(
+        !ctx.overlay.contains_key("global/ai.toml"),
+        "覆盖层也不该有它（否则 read 会看到一次并不存在的改动）"
+    );
+}
+
+/// 空白名单 = **不启用**（出厂默认；老行为一字不变）
+#[test]
+fn an_empty_whitelist_changes_nothing() {
+    let d = TempDir::new("allow-off");
+    let mut ctx = Ctx::new(&d.0, WritePolicy::Apply);
+    assert!(ctx.tool_write("anything/at/all.txt", "随便写").is_ok());
+    assert!(d.0.join("anything/at/all.txt").is_file());
+}
+
+/// **并发波**那条路径也必须过闸 —— 它绕开了 `Ctx::apply_write`，是同一类闸最容易漏的一处
+/// （`dispatch` 里自己 `resolve_write` + `flush_write_disk`）。
+#[test]
+fn the_parallel_wave_is_guarded_too() {
+    let d = TempDir::new("allow-wave");
+    let mk = |path: &str, body: &str| {
+        parse_one(&serde_json::json!({"tool":"write","args":{"path":path,"content":body}}))
+            .expect("write 该能解析")
+    };
+    let mut cfg = quiet_cfg();
+    cfg.agent.write_allow = vec!["ok/**".into()];
+    let allow = cfg.agent.write_allow.clone();
+    let mut ctx = Ctx::new(&d.0, WritePolicy::Apply).with_write_allow(allow);
+    let actions = vec![mk("ok/a.txt", "允许"), mk("bad.txt", "越界")];
+    let plans = vec![None, None];
+    let mut slots: Vec<Option<CallResult>> = vec![None, None];
+    block_on(run_wave(
+        &cfg,
+        &d.0,
+        WritePolicy::Apply,
+        &NoConnector,
+        &mut ctx,
+        &actions,
+        &plans,
+        &[0, 1],
+        &mut slots,
+    ));
+    let ok = slots[0].clone().expect("白名单内该有结果").2;
+    let bad = slots[1].clone().expect("越界该有结果").2;
+    assert!(ok.is_ok(), "白名单内该写成功：{ok:?}");
+    let e = bad.unwrap_err();
+    assert!(
+        e.contains("bad.txt") && e.contains("白名单"),
+        "越界要给具体理由：{e}"
+    );
+    assert!(d.0.join("ok/a.txt").is_file());
+    assert!(!d.0.join("bad.txt").exists(), "越界的文件不许出现在磁盘上");
 }

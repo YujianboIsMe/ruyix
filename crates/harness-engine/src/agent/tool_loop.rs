@@ -38,8 +38,10 @@ pub async fn run_with_ask(
     let started = Instant::now();
     // 项目状态根由宿主注入（`<便携根>/projects/<项目 key>`）：暂存 / 备份都写那儿，
     // 一个字节都不进用户仓库。
-    let mut ctx =
-        Ctx::new(proj, policy).with_state_root(crate::config::project_state_root(cfg, proj));
+    let mut ctx = Ctx::new(proj, policy)
+            .with_state_root(crate::config::project_state_root(cfg, proj))
+            // v1.4 P1：写入白名单。step 子 agent 借的是**同一个** `&mut Ctx`，所以一并生效。
+            .with_write_allow(cfg.agent.write_allow.clone());
     // ---- P3：capsule 侧存（`agent.ctx.capsule`）----
     // 建不出来就**退化为内存**并如实说一句：侧存是"更不容易丢掉事实"，不是"必须"。
     if cfg.agent.ctx.capsule {

@@ -4,6 +4,9 @@
 # 注意：这里的键是**引擎侧**的配置形状（`AppConfig`），不是宿主那份扁平的 `ruyix.code.*` 键。
 # 例如宿主的 `ruyix.code.harness.discover.extra` 是逗号分隔字符串，引擎里 `discover.extra` 是数组。
 [agent]
+# v1.4 P1：写入白名单（自改闭环的边界）。`*.py` 只放行根目录的 Python 文件 ——
+# 夹具任务 4 就是"白名单外的写入必须被引擎拒"的证据。
+write_allow = ["*.py"]
 max_elapsed_secs = 1680
 
 [discover]

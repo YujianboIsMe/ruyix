@@ -41,6 +41,8 @@ pub struct Ctx<'a> {
     /// **项目状态根**（宿主注入；暂存与备份落这里，绝不落进项目）。
     /// `None` = 走兜底（临时目录）—— 引擎单测与"宿主没注入"的情况都走它。
     pub(crate) state_root: Option<PathBuf>,
+    /// **写入白名单**（v1.4 P1，宿主注入）。空 = 不启用（老行为一字不变）。
+    pub(crate) write_allow: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -54,6 +56,7 @@ impl<'a> Ctx<'a> {
             policy,
             backup_dir: None,
             state_root: None,
+            write_allow: Vec::new(),
         }
     }
 
@@ -77,6 +80,30 @@ impl<'a> Ctx<'a> {
         } else {
             None
         }
+    }
+
+    /// 注入写入白名单（v1.4 P1）。空列表 = 不启用。
+    pub(crate) fn with_write_allow(mut self, allow: Vec<String>) -> Self {
+        self.write_allow = allow;
+        self
+    }
+
+    /// **写入白名单闸**（v1.4 P1）：白名单非空且 `rel` 不匹配任何一条 ⇒ 拒绝。
+    ///
+    /// 拒绝理由必须**具体**（需求 §1.2 ②：不是提示词礼貌劝阻）：指名路径、说明它属于
+    /// "白名单外"这一类、把本 run 的白名单原文列出来，并说明**磁盘与覆盖层都没动** ——
+    /// 模型据此一轮就能改正，而不是接着猜。
+    pub(crate) fn guard_write(&self, rel: &str) -> Result<(), String> {
+        if self.write_allow.is_empty() || self.write_allow.iter().any(|p| allow_matches(p, rel)) {
+            return Ok(());
+        }
+        Err(format!(
+            "写 {rel} 被拒：它**不在本 run 的写入白名单内**（白名单 {} 条：{}）。\
+             引擎在解析内容与落盘**之前**拒绝 —— 磁盘、备份、覆盖层都没有这次改动。\
+             白名单外的改动一律不许：改成白名单内的路径，或者如实报告做不到。",
+            self.write_allow.len(),
+            self.write_allow.join("、")
+        ))
     }
 
     pub(crate) fn state_root(&self) -> PathBuf {
@@ -220,6 +247,8 @@ impl<'a> Ctx<'a> {
     /// 落盘通道仍然只有 [`Ctx::commit_with`] 一条。
     pub(crate) fn apply_write(&mut self, spec: &WriteSpec) -> Result<String, String> {
         let rel = safe_rel_path(&spec.path)?;
+        // 白名单闸：**在解析内容与落盘之前**（拒绝时磁盘与覆盖层都不动）
+        self.guard_write(&rel)?;
         let before = self.before_of(&rel);
         let after = resolve_write(&rel, &spec.body, before.as_deref())?;
         let len = after.len();
@@ -317,6 +346,58 @@ impl<'a> Ctx<'a> {
             .map_err(|e| format!("写暂存清单失败：{e}"))?;
         Ok(dir)
     }
+}
+
+/// 白名单模式匹配（v1.4 P1）。语法见 `config::AgentConfig::write_allow`。
+///
+/// 单独成函数、单独测：白名单是**判据的一部分**（判错了就等于没有闸），
+/// 所以它必须是纯函数、可枚举地测，而不是埋在路径解析里。
+pub(crate) fn allow_matches(pat: &str, rel: &str) -> bool {
+    let p: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+    let r: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    if p.is_empty() {
+        return false;
+    }
+    fn go(p: &[&str], r: &[&str]) -> bool {
+        match p.split_first() {
+            None => r.is_empty(),
+            // 整段 `**`：吃掉 0..n 段（`plugins/**` 也能匹配 `plugins` 本身）
+            Some((&"**", rest)) => (0..=r.len()).any(|k| go(rest, &r[k..])),
+            Some((seg, rest)) => match r.split_first() {
+                Some((head, tail)) if seg_match(seg, head) => go(rest, tail),
+                _ => false,
+            },
+        }
+    }
+    go(&p, &r)
+}
+
+/// 段内通配（`*` = 任意字符但不跨 `/`，`?` = 一个字符）。经典双指针回溯。
+fn seg_match(pat: &str, s: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = s.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            mark = ti;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 /// execute 的破坏性模式拒绝清单。这是绊线不是沙箱 —— 真正的隔离在 verify 的 docker 沙箱；

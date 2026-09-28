@@ -395,6 +395,18 @@ pub struct AgentConfig {
     /// 最近几轮的正文**不动**（更老的才折叠）。数字越大越安全、上下文越贵。
     #[serde(default = "d_agent_history_keep_rounds")]
     pub history_keep_rounds: usize,
+    /// **写入白名单**（v1.4 P1）：非空时，**只有**匹配这些模式的项目内相对路径才允许 `write`。
+    ///
+    /// 空 = 不启用（默认，老行为逐字节不变）。用途是"自改闭环"那类**只许改指定数据面**的运行：
+    /// 白名单外一律**引擎在落盘/暂存之前拒绝**，不是提示词礼貌劝阻（需求 §1.2 ②）。
+    /// 模式语法：`/` 分段；段内 `*` = 任意字符（不含 `/`）、`?` = 一个字符；整段 `**` = 任意层级。
+    /// 例：`plugins/tools/*/tools.toml`、`plugins/prompts/**`、`*.md`。
+    ///
+    /// **边界（如实说）**：这条闸管的是 `write` 原语。`execute` 仍是"绊线不是沙箱"
+    /// （见 `agent::execute_allowed`），所以自改闭环真正的不越界靠**把 run 放在一份副本里跑**
+    /// （P2 的驱动器）；这条闸挡的是"模型直接改错文件"这一类。
+    #[serde(default)]
+    pub write_allow: Vec<String>,
     /// **进展记忆**（`record_findings` + 引擎账本 + 两条守卫）。关掉即回到老行为（一行回滚）。
     ///
     /// 见 `doc/v1.1/需求-Agent-进展记忆与循环守卫-v1.1.md`：折叠只该折噪声，
@@ -559,6 +571,7 @@ impl Default for AgentConfig {
             batch_parallel: d_agent_batch_parallel(),
             history_trim: d_true(),
             history_keep_rounds: d_agent_history_keep_rounds(),
+            write_allow: Vec::new(),
             findings_enabled: d_true(),
             findings_max_bytes: d_agent_findings_max_bytes(),
             stall_rounds: d_agent_stall_rounds(),

@@ -569,6 +569,11 @@ pub(crate) async fn run_wave(
                 // `before` 与"归约成整份内容"都在主线程做（要碰覆盖层：edits 得先读到当前内容）
                 // —— 线程里只做磁盘
                 Ok(rel) => {
+                    // 白名单闸：并发波这条路径**绕开了** `Ctx::apply_write`，闸必须在这里也过一遍
+                    if let Err(e) = ctx.guard_write(&rel) {
+                        slots[i] = Some(("write".into(), spec.brief(), Err(e)));
+                        continue;
+                    }
                     let before = ctx.before_of(&rel);
                     match resolve_write(&rel, &spec.body, before.as_deref()) {
                         Ok(after) => writes.push((i, rel, before, after)),

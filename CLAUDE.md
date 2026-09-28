@@ -19,7 +19,7 @@ node scripts/editor-layout.js      # 编辑器真实布局（无头 Edge；找�
 node scripts/session-trace-layout.js  # 会话执行轨迹的真实布局（同上，省略号/折行/滚动条）
 cargo clippy --all-targets         # 静态检查，必须 0 warning
 cargo test                         # 单元测试（引擎 322+8 ignored / ruyix 120+3 ignored）
-cargo run -q -p harness-engine --example rsi_bench -- --self-check   # v1.4 评测台自检（11 条不变量、零成本、确定性；见 doc/v1.4/评测台-最小形状-v1.4.md）
+cargo run -q -p harness-engine --example rsi_bench -- --self-check   # v1.4 评测台自检（12 条不变量、零成本、确定性；见 doc/v1.4/评测台-最小形状-v1.4.md）
 ```
 
 Notes: `ui/packages/xterm.js` / `ui/packages/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
