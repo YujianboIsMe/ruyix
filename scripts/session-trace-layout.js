@@ -194,6 +194,13 @@ const driver = `
     // 判据 7（2026-09-28 补）：工具栏一排控件**同高**且不撑破。
     // 量的是真浏览器算出来的 offsetHeight：.session-model-select 当初一条样式都没有，
     // 走的是浏览器默认 select 外观 —— 这种「两套盒模型混在一行」在代码里看不出来，只能量。
+    // 厂商对象在探针里是空的（模型下拉会显示「（模型未知）」= 很窄），那把宽度判据就量了个假的。
+    // 这里塞两条**真实长度**的模型名，量的才是"真机上这个下拉有多宽"（真机里由 ai_vendor 填）。
+    const modelEl = wrap.querySelector("[data-model]");
+    if (modelEl) {
+      modelEl.innerHTML =
+        "<option>DeepSeek-V4.1-Flash</option><option>DeepSeek-V3.2-Pro（deepseek-v4-pro）</option>";
+    }
     const tb = wrap.querySelector(".session-toolbar");
     out.toolbar = tb
       ? {
@@ -357,7 +364,16 @@ tbm && hs.length === 1
 tbm && tbm.scrollW <= tbm.clientW + 1
   ? ok(`工具栏没撑破（scrollWidth ${tbm.scrollW} ≤ clientWidth ${tbm.clientW}）`)
   : fail(`工具栏撑破了（scrollWidth ${tbm ? tbm.scrollW : "?"} > clientWidth ${tbm ? tbm.clientW : "?"}）` +
-      " —— 模型下拉没吃剩余宽度的话，这排会溢出或换行");
+      " —— 这排控件的宽度和超出了容器（下拉要有 max-width，按钮组要靠右）");
+// 模型下拉**不许吃掉半行**：select 的固有宽度按最长那条 option 算，模型名带厂商前缀本来就长，
+// 不封顶它会一路撑到 600px、把三颗按钮挤到边上（用户报「模型下拉太宽」就是这一条）。
+const msel = tbm && tbm.kids.find((k) => String(k.cls).indexOf("session-model-select") >= 0);
+const mcap = tbm ? Math.min(260, Math.round(tbm.clientW * 0.45)) : 0;
+msel && msel.w <= mcap
+  ? ok(`模型下拉贴着内容走（${msel.w}px ≤ 上限 ${mcap}px）`)
+  : fail(`模型下拉太宽（${msel ? msel.w : "?"}px > 上限 ${mcap}px，工具栏宽 ${tbm ? tbm.clientW : "?"}px）` +
+      " —— 给它 max-width（现在 15rem）并靠右成组放那三颗按钮");
+tbm ? ok(`工具栏各控件宽度：${tbm.kids.map((k) => k.cls + "=" + k.w + "px").join(" / ")}`) : null;
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (bad) {

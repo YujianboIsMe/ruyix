@@ -4562,12 +4562,23 @@ select,
   cursor: pointer;
 }
 
-/* 模型名最长 ⇒ 让它吃掉剩下的宽度：换行会把这排挤成两行，比截断更丑 */
+/* 模型下拉：**贴着内容走**，但封顶（用户报「模型下拉太宽」）。
+   为什么不能不管它：select 的固有宽度按**最长那条 option** 算，而模型名带厂商前缀
+   （`DeepSeek-V4.1-Flash`）本来就长 ⇒ 它会一路吃到半行，看着像这一排的主角。
+   给它 15rem 封顶 + 省略号，完整名字仍在每项的 title 里（hover 看全）。
+   为什么不是"吃掉剩余宽度"：那一版（flex:1 1 auto）实测把模型下拉撑到 600px，
+   旁边的 📎/🌏/▶ 被挤到最右，工具栏读起来是"一个巨大的下拉 + 三颗小按钮"。 */
 .session-model-select {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
-  max-width: 62%;
+  max-width: 15rem;
   text-overflow: ellipsis;
+}
+
+/* 左边是"这次怎么跑"（模式 + 模型），右边是"干什么"（📎 / 🌏 / ▶）——
+   三颗按钮靠右成组，中间留白，比把下拉拉长填满更像一个工具栏。 */
+.session-attach {
+  margin-left: auto;
 }
 
 .session-mode-select {
