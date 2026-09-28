@@ -307,3 +307,32 @@ fn an_exhausted_horizon_falls_back_to_ski_rental() {
         "视野用完 ⇒ 走 ski-rental 兜底：{log}"
     );
 }
+
+/// 字节代理：图算**固定配额**，不按 base64 字面量算。
+///
+/// 这不是精度洁癖：调度器拿这个数判"超没超预算"，而超预算在 P4 里是**强制压**历史。
+/// 一张 1600px 截图的 base64 有 30 万字节 —— 按字面量算就是 7.5 万 token，于是每一轮
+/// 都判"该压"，历史被反复折叠成摘要；而厂商实际按**像素**计价，这张图只有 1k 出头 token。
+#[test]
+fn the_byte_proxy_counts_an_image_as_a_fixed_allowance_not_as_base64() {
+    let one = |n: usize| {
+        ChatMessage::user("hi").with_images(vec![ImagePart {
+            mime: "image/png".into(),
+            data_base64: "A".repeat(n),
+        }])
+    };
+    assert_eq!(
+        msgs_bytes(&[ChatMessage::user("hi")]),
+        2,
+        "无图 = 纯文本字节"
+    );
+    let small = msgs_bytes(&[one(1)]);
+    let huge = msgs_bytes(&[one(300_000)]);
+    assert_eq!(small, huge, "30 万字节的 base64 不许让阶梯读数虚涨");
+    assert_eq!(huge, 2 + IMAGE_PROXY_BYTES, "一张图 = 一个固定配额");
+    assert_eq!(
+        msgs_bytes(&[one(1), ChatMessage::user("hi")]),
+        huge + 2,
+        "多消息照样累加"
+    );
+}

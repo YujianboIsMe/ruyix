@@ -11,6 +11,7 @@
 
 pub mod apply;
 pub mod ask;
+pub mod attachments;
 pub mod config_bridge;
 pub mod connect;
 pub mod env_setup;
@@ -152,6 +153,9 @@ pub struct ReplyAgent {
     /// Apply 策略：被覆盖文件的备份目录
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_dir: Option<String>,
+    /// 本次随消息落盘的截图（v1.3）：UI 按路径出缩略图并存进会话消息
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shots: Vec<attachments::StoredShot>,
     /// 机械验证的每一次结论（窄层 + 全量层，v0.3）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verifications: Vec<engine::agent::VerifyOutcome>,
@@ -178,6 +182,8 @@ pub async fn agent_reply(
     history: Vec<engine::agent::HistoryMsg>,
     mode: Option<String>,
     project_root: Option<String>,
+    // 随这条消息发出去的截图（前端已缩过；这里只做闸 + 落盘 + 转成引擎要的字节）
+    attachments: Option<Vec<attachments::Attachment>>,
     // 会话 id（UI 传；没有就退回"任务前缀"当坐标 —— 换回的依据必须具体到能翻到）
     session_id: Option<String>,
 ) -> Result<ReplyAgent, String> {
@@ -211,6 +217,10 @@ pub async fn agent_reply(
     };
     engine::mem::set_scope(&crate::paths::Paths::from_root(&root).project_key(&root));
     let cfg = build_cfg(&config, Some(&root))?;
+    // 截图：**先落盘再跑**。落不下就整条消息失败（半张图发出去比报错更坏），
+    // 也绝不允许"图没带上但照样跑了" —— 模型会对着纯文本问题编答案，用户以为它看过图。
+    let ing = attachments::store(&root, attachments.as_deref().unwrap_or(&[]))?;
+    let (shots, images) = (ing.shots, ing.parts);
     let policy = match mode.as_deref() {
         Some("write") | Some("auto") => engine::agent::WritePolicy::Apply,
         _ => engine::agent::WritePolicy::Stage,
@@ -240,6 +250,7 @@ pub async fn agent_reply(
         proj,
         &task,
         &compacted_history,
+        &images,
         policy,
         &conn,
         &asker,
@@ -253,6 +264,7 @@ pub async fn agent_reply(
         changes: out.changes,
         stage_dir: out.stage_dir,
         backup_dir: out.backup_dir,
+        shots,
         verifications: out.verifications,
         reflections: out.reflections,
         asks: out.asks,

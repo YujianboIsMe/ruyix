@@ -41,6 +41,10 @@ pub(crate) const CONNECT_CLIP: usize = 400;
 /// 不设上限的话"失败 → 重排 → 又失败 → 再重排"能烧光整个轮次预算却什么都不产出。
 pub(crate) const MAX_PLAN_RESETS: u32 = 2;
 
+/// 一张图在字节代理里的固定配额（≈1200 token，见 `msgs_bytes`）。
+/// 小到不会虚报规模、大到能让"阶梯大小"这个数把图算进去。
+pub(crate) const IMAGE_PROXY_BYTES: usize = 4 * 1200;
+
 /// 会话历史消息（调用方从 session 消息流裁剪后传入；只认 user/assistant）
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HistoryMsg {

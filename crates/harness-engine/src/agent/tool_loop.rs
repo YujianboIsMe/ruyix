@@ -14,12 +14,17 @@
 use super::*;
 
 /// 工具循环（带提问通道）：宿主把 [`Asker`] 落地（ruyix 走 `agent://ask` + 会话问题卡 + `agent_ask_answer`）。
+///
+/// `images` 是**这一条用户消息**随行的图（v1.3 多模态；裸 base64，读盘/缩放全在宿主侧）。
+/// 只贴在第一条 user 消息上 —— 它是任务消息，属 v1.2 那套上下文布局里的**不可变根之后的头条**，
+/// 整轮都在；历史里旧消息的图不重发（见 `ChatMessage::images` 的约定）。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_ask(
     cfg: &AppConfig,
     proj: &Path,
     task: &str,
     history: &[HistoryMsg],
+    images: &[ImagePart],
     policy: WritePolicy,
     conn: &dyn Connector,
     asker: &dyn Asker,
@@ -184,7 +189,11 @@ pub async fn run_with_ask(
     if llm::web_search_on(&cfg.llm) {
         head.push_str(&format!("\n\n{WEB_SEARCH_HINT}"));
     }
-    msgs.push(ChatMessage::user(format!("{head}\n\n用户消息：\n{task}")));
+    // 有图就随任务消息一起发（无图时 `with_images(vec![])` 与原来逐字节相同：
+    // 手写的 `Serialize` 只在非空时把 content 变成块数组）
+    msgs.push(
+        ChatMessage::user(format!("{head}\n\n用户消息：\n{task}")).with_images(images.to_vec()),
+    );
 
     sink.stage(
         "agent",
@@ -1106,7 +1115,7 @@ pub async fn run_with_ask(
             let keep = cfg.agent.history_keep_rounds.max(1);
             // 阶梯现在多大（字节；token 由 `estimate_tokens` 换算 —— **字节代理**，
             // 架构 §6 允许，但 trace 里必须写明是代理）
-            let now_bytes: usize = msgs.iter().map(|m| m.content.len()).sum();
+            let now_bytes: usize = msgs_bytes(&msgs);
             if let Some(sc) = &sched_cfg {
                 // ---- P4：何时压由调度器说了算（`keep_rounds` 只是安全下限）----
                 // MPC：用**实测**的增长重新规划一次，只取第一步的动作。
@@ -1140,7 +1149,7 @@ pub async fn run_with_ask(
                         ),
                     );
                     rounds_since_rebase = 0;
-                    base_bytes = msgs.iter().map(|m| m.content.len()).sum();
+                    base_bytes = msgs_bytes(&msgs);
                 } else {
                     rounds_since_rebase = rounds_since_rebase.saturating_add(1);
                 }

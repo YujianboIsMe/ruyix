@@ -855,6 +855,19 @@ pub fn tail_history(history: &[HistoryMsg], n: usize) -> Vec<HistoryMsg> {
     }
 }
 
+/// 阶梯的**字节代理**：`content` 字节 + 每张图的固定配额（`IMAGE_PROXY_BYTES`）。
+///
+/// 为什么图的 base64 不按字面量：**base64 字节不是 token**。厂商按**像素**计价一张图
+/// （1600px 的截图约 1.1k~1.6k token），而同样这张图的 base64 有 30 万字节 —— 直接量它
+/// 会让调度器以为阶梯已经 7.5 万 token、于是每一轮都判"超预算"把历史压掉（p4 的判序是
+/// 预算 → 下限 → DP，预算越界是**强制**压）。一张常量配额既不虚报规模，也不会污染
+/// "每轮增长"的读数（增长仍是纯文本的增长）。
+pub(crate) fn msgs_bytes(msgs: &[ChatMessage]) -> usize {
+    msgs.iter()
+        .map(|m| m.content.len() + m.images.len() * IMAGE_PROXY_BYTES)
+        .sum()
+}
+
 /// 一轮工具调用在 `msgs` 里的两个落点，以及它折叠后各自替换成什么。
 ///
 /// 为什么记下标、而不给消息加个"这是第几轮"的字段：`ChatMessage` 是 `{role, content}` 且

@@ -106,6 +106,12 @@ pub struct SessionMsg {
     /// 本轮的执行轨迹（v0.0.5 UI：跑的时候实时刷、跑完跟着消息存档）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<TraceSnap>,
+    /// 这条消息随行的截图（v1.3）：只存**路径 + 元数据**，字节在 `<便携根>/projects/<键>/shots/`。
+    ///
+    /// 字段必须在这里声明：`agent_session_save` 把会话整个过一遍 serde，
+    /// 没声明的字段会被静默抹掉（磁盘与内存里那个 tab 一起丢，v1.0 踩过这个坑）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<super::attachments::StoredShot>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -240,6 +246,7 @@ mod tests {
                     reflect: vec![],
                     ask: vec![],
                     trace: vec![],
+                    attachments: vec![],
                 })
                 .collect(),
         }
@@ -267,6 +274,7 @@ mod tests {
             reflect: vec![],
             ask: vec![],
             trace: vec![],
+            attachments: vec![],
         });
         save(&s, &root).unwrap();
 
@@ -331,6 +339,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 截图附件必须**扛得住往返**：`SessionMsg.attachments` 是后加的字段，
+    /// 一旦没在结构体里声明，`save` → `load` 这一趟 serde 会把它悄悄抹掉 ——
+    /// 磁盘与内存里那个 tab 一起丢，而 UI 上只是"缩略图不见了"（v1.0 踩过同一类坑）。
+    #[test]
+    fn attachments_survive_a_save_load_roundtrip() {
+        let root = dir("attachments");
+        let root = root.to_str().unwrap().to_string();
+        let shot = super::super::attachments::StoredShot {
+            path: "C:/ruyix/projects/D-Projects-x/shots/20260928-101112-shot.png".into(),
+            name: "20260928-101112-shot.png".into(),
+            mime: "image/png".into(),
+            bytes: 1234,
+        };
+        let s = Session {
+            id: "sess_shot".into(),
+            title: "带截图".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            messages: vec![SessionMsg {
+                role: "user".into(),
+                text: "这个按钮位置不对".into(),
+                ts: "t1".into(),
+                run_id: None,
+                status: None,
+                plan: None,
+                verify: vec![],
+                reflect: vec![],
+                ask: vec![],
+                trace: vec![],
+                attachments: vec![shot.clone()],
+            }],
+        };
+        save(&s, &root).unwrap();
+        let back = load(&root, "sess_shot").unwrap();
+        assert_eq!(
+            back.messages[0].attachments,
+            vec![shot],
+            "附件被往返抹掉了（字段没声明？）"
+        );
+        // 落盘的 JSON 里真带着附件；而**老会话**（没有这个字段的 JSON）照旧解析：缺字段 = 空
+        let raw = std::fs::read_to_string(sessions_dir(&root).join("sess_shot.json")).unwrap();
+        assert!(raw.contains("attachments") && raw.contains("20260928-101112-shot.png"));
+        std::fs::write(
+            sessions_dir(&root).join("sess_old.json"),
+            "{\"id\":\"sess_old\",\"title\":\"老\",\"messages\":[{\"role\":\"user\",\"text\":\"hi\"}]}",
+        )
+        .unwrap();
+        let old = load(&root, "sess_old").unwrap();
+        assert!(
+            old.messages[0].attachments.is_empty(),
+            "缺字段该退化成空，不许解析失败"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn roundtrip_and_list_order() {
         let root = dir("roundtrip");
@@ -352,6 +415,7 @@ mod tests {
                     reflect: vec![],
                     ask: vec![],
                     trace: vec![],
+                    attachments: vec![],
                 },
                 SessionMsg {
                     role: "assistant".into(),
@@ -364,6 +428,7 @@ mod tests {
                     reflect: vec![],
                     ask: vec![],
                     trace: vec![],
+                    attachments: vec![],
                 },
             ],
         };
@@ -489,6 +554,7 @@ mod tests {
                         text: "第 2 轮 write ✗ 锚点在文件里出现 2 次".into(),
                     },
                 ],
+                attachments: vec![],
             }],
         };
         save(&s, &root).unwrap();

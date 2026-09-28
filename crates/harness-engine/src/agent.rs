@@ -28,7 +28,7 @@ use crate::discover;
 use crate::exec::{self, CancelFlag, clip, is_cancelled};
 use crate::generate::{StepOutcome, safe_rel_path};
 use crate::lint;
-use crate::llm::{self, ChatMessage, Usage};
+use crate::llm::{self, ChatMessage, ImagePart, Usage};
 use crate::pipeline::Sink;
 use crate::plan::{Plan, PlanStep};
 use crate::reflect::{self, Reflection};
@@ -67,8 +67,19 @@ pub async fn run(
     cancel: &CancelFlag,
     sink: &dyn Sink,
 ) -> Result<AgentOutcome, String> {
+    // 多模态：规划管线（`agent_run` / `agent_plan`，走 `pipeline`）没有附件入口 ——
+    // 附件属于**会话**那条路（`agent_reply` → `run_with_ask` 带 images）。
     run_with_ask(
-        cfg, proj, task, history, policy, conn, &NoAsker, cancel, sink,
+        cfg,
+        proj,
+        task,
+        history,
+        &[],
+        policy,
+        conn,
+        &NoAsker,
+        cancel,
+        sink,
     )
     .await
 }

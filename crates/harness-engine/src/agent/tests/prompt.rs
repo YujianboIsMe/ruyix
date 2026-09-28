@@ -288,3 +288,74 @@ fn prompt_advertises_both_write_shapes_and_the_read_window() {
     assert!(crate::step_agent::STEP_SYSTEM.contains("offset"));
     assert!(!crate::step_agent::STEP_SYSTEM.contains("交回的必须是整份内容"));
 }
+
+/// 多模态：任务消息带图 ⇒ **第一条请求**里就有图块（OpenAI 兼容路的形状）。
+///
+/// 为什么要在循环这一层量（而不是只测 `llm.rs` 里的序列化）：图是随**第一条 user 消息**
+/// 出去的，而那条消息是引擎自己拼的（`head` + `用户消息：` 前缀）—— 贴错位置（贴进历史、
+/// 或者干脆没贴）在序列化单测里看不出来。
+///
+/// 只量 openai 路：假 LLM 桩只服务 `/chat/completions` 这一条路由，anthropic 那条的
+/// **块形状**在 `llm.rs::protocol_tests::anthropic_route_puts_images_in_base64_blocks`
+/// 里量（同一件事不必两处都测 —— 两处都测等于两处都要维护）。
+#[test]
+fn the_task_image_goes_out_with_the_first_request() {
+    let d = TempDir::new("vision-first-request");
+    let llm = crate::testllm::fake_llm(vec![r#"{"final":"看到了：红色方块"}"#.into()]);
+    let mut cfg = ask_cfg(&llm);
+    // 必须是**能读图**的模型，否则先被能力闸拦下（那是另一条用例的事）
+    cfg.llm.model = "deepseek-flash".into();
+    cfg.llm.api_format = "openai".into();
+    let img = ImagePart {
+        mime: "image/png".into(),
+        data_base64: "QUJD".into(),
+    };
+    let out = block_on(run_with_ask(
+        &cfg,
+        &d.0,
+        "这张截图里是什么？",
+        &[],
+        &[img],
+        WritePolicy::Apply,
+        &NoConnector,
+        &NoAsker,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .unwrap();
+    assert_eq!(out.answer, "看到了：红色方块");
+    let body = llm.request(0);
+    assert!(body.contains("image_url"), "缺图块：{body}");
+    assert!(body.contains("QUJD"), "图的字节没发出去：{body}");
+    assert!(body.contains("这张截图里是什么"), "文字部分还得在：{body}");
+}
+
+/// 读图能力闸在**循环这一层**也成立：盲模型 + 图 ⇒ 拒绝，
+/// 而且拒绝发生在**发请求之前**（一张图都不许漏出去 —— 把图丢掉再当纯文本发，
+/// 等于拿一个看起来正常的答复冒充"看图说话"）。
+#[test]
+fn a_blind_model_is_refused_before_anything_is_sent() {
+    let d = TempDir::new("vision-blind");
+    let llm = crate::testllm::fake_llm(vec![r#"{"final":"没看到图"}"#.into()]);
+    let mut cfg = ask_cfg(&llm);
+    cfg.llm.model = "deepseek-v4-pro".into(); // 表里写着读不了图
+    let img = ImagePart {
+        mime: "image/png".into(),
+        data_base64: "QUJD".into(),
+    };
+    let err = block_on(run_with_ask(
+        &cfg,
+        &d.0,
+        "看图",
+        &[],
+        &[img],
+        WritePolicy::Apply,
+        &NoConnector,
+        &NoAsker,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect_err("盲模型带图必须被拒");
+    assert!(err.contains("能读图"), "{err}");
+    assert_eq!(llm.count(), 0, "请求不该发出去");
+}

@@ -206,6 +206,7 @@ fn run(cfg: &AppConfig, proj: &Path, task: &str, sink: &PrintSink) -> Result<Str
             &proj_path,
             task,
             &[],
+            &[],
             WritePolicy::Stage,
             &NoConnector,
             &NoAsker,

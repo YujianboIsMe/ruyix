@@ -56,6 +56,7 @@ fn run_loop(cfg: &crate::config::AppConfig, root: &std::path::Path) -> AgentOutc
         root,
         "任务",
         &[],
+        &[],
         WritePolicy::Apply,
         &NoConnector,
         &NoAsker,

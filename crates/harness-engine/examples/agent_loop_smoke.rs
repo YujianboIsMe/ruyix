@@ -475,6 +475,7 @@ fn run_loop_ask(
                 role: "user".into(),
                 text: "你好".into(),
             }],
+            &[],
             WritePolicy::Apply,
             &conn,
             &asker,
