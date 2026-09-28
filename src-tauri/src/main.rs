@@ -8,29 +8,20 @@ mod config;
 mod git;
 mod instance;
 mod mcp;
+mod mem_cmds;
 mod nav;
 mod paths;
 mod plugin;
 mod preinstalled;
+mod proc_cmds;
 mod pty;
 mod runner;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::sync::Mutex;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
-
-/// CREATE_NEW_CONSOLE — 为新进程创建独立控制台窗口
-#[cfg(windows)]
-const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-
-/// CREATE_NO_WINDOW — 阻止子进程新建控制台窗口（release GUI 子系统无控制台，
-/// 不加此标志控制台子进程会闪黑窗口；输出仍通过管道捕获）
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ============================================
 // 辅助函数
@@ -941,408 +932,6 @@ fn get_term_targets(
 ) -> Result<Vec<config::RunTarget>, String> {
     let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
     mgr.load_term_targets(project_root.as_deref())
-}
-
-// ============================================
-// 托管进程（"服务"面板）
-// ============================================
-//
-// 为什么宿主必须能看见它们：agent 用 background 起的服务（mvn spring-boot:run / java -jar）
-// 是**宿主** spawn 的，却不在宿主的进程树里 —— 以前它们只活在引擎的进程表里，
-// UI 上等于不存在：起得来、看不见、也停不掉（只能靠任务管理器按 pid 找）。
-// ---------------------------------------------------------------- 项目记忆（v1.1）
-
-/// 记忆作用域：有项目用项目 key，没项目就是机器级。
-fn mem_scope(root_paths: &crate::paths::Paths, project_root: Option<&str>) -> String {
-    match project_root.filter(|s| !s.trim().is_empty()) {
-        Some(p) => root_paths.project_key(p),
-        None => harness_engine::mem::GLOBAL_SCOPE.to_string(),
-    }
-}
-
-/// 便携根（记忆库与模型都在它下面）。引擎不认识便携根，所以由宿主每次算出来。
-fn mem_root() -> crate::paths::Paths {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
-    crate::paths::Paths::discover(&exe_dir)
-}
-
-/// 模型自检：装着没有 / 装坏了 / 就绪，**带一句人话**（面板与状态栏都用它）。
-#[tauri::command]
-fn mem_model_status() -> serde_json::Value {
-    let st = harness_engine::mem::fetch::status();
-    serde_json::json!({
-        "ready": st.is_ready(),
-        "line": st.line(),
-        "dir": harness_engine::mem::fetch::target_dir().ok().map(|d| d.display().to_string()),
-        "need_bytes": harness_engine::mem::fetch::required_bytes(),
-    })
-}
-
-/// 一条命令把模型补齐（面板上的〔取模型〕）。**立即返回**，进度走 `mem://model` 事件 ——
-/// 96MB 的下载不该把界面卡住，也不该让命令挂在那儿。
-#[tauri::command]
-async fn mem_model_fetch(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let st = harness_engine::mem::fetch::status();
-    if st.is_ready() {
-        return Ok(serde_json::json!({ "started": false, "line": st.line() }));
-    }
-    let h = app.clone();
-    let h2 = app.clone();
-    let start_line = st.line();
-    // spawn 是 async move：给它一份自己的，函数出口那份留给返回值
-    let line_for_task = start_line.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = h.emit(
-            "mem://model",
-            serde_json::json!({ "phase": "start", "line": line_for_task }),
-        );
-        let res = harness_engine::mem::fetch::fetch(|p| {
-            let _ = h2.emit(
-                "mem://model",
-                serde_json::json!({
-                    "phase": "progress",
-                    "file": p.file, "index": p.index, "of": p.of,
-                    "done": p.done, "total": p.total, "tag": p.tag,
-                }),
-            );
-        })
-        .await;
-        match res {
-            Ok(rep) => {
-                if let Some(m) = harness_engine::mem::current() {
-                    let where_ = harness_engine::mem::fetch::target_dir()
-                        .map(|d| d.display().to_string())
-                        .unwrap_or_default();
-                    let _ = m.record_obs(
-                        harness_engine::mem::GLOBAL_SCOPE,
-                        "mem.embed.model",
-                        &where_,
-                        harness_engine::mem::Origin::Probe,
-                        &[],
-                        None,
-                    );
-                }
-                let _ = h.emit(
-                    "mem://model",
-                    serde_json::json!({
-                        "phase": "done",
-                        "fetched": rep.fetched.len(), "skipped": rep.skipped.len(), "bytes": rep.bytes,
-                    }),
-                );
-            }
-            Err(e) => {
-                let _ = h.emit(
-                    "mem://model",
-                    serde_json::json!({ "phase": "error", "line": e }),
-                );
-            }
-        }
-    });
-    Ok(serde_json::json!({ "started": true, "line": start_line }))
-}
-
-/// 记忆库状态：账本/信念/收据/向量条数 + 向量腿是否可用（**带人话原因**）。
-#[tauri::command]
-fn mem_status(project_root: Option<String>) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current().ok_or("记忆库未安装（启动时打开失败）")?;
-    let st = m.stats(&scope)?;
-    Ok(serde_json::json!({
-        "scope": scope,
-        "db": rp.memory_dir().join("mem.db").display().to_string(),
-        "events": st.events,
-        "beliefs_active": st.beliefs_active,
-        "beliefs_all": st.beliefs_all,
-        "receipts": st.receipts,
-        "vectors": st.vectors,
-        "embed_available": harness_engine::mem::embed::is_available(),
-        "embed_reason": harness_engine::mem::embed::unavailable_reason(),
-    }))
-}
-
-/// 当前信念（`now`）：**先结构性过滤掉被推翻的**，再打分。query 为空 = 按最近更新取前 N。
-#[tauri::command]
-fn mem_beliefs(
-    query: Option<String>,
-    limit: Option<usize>,
-    project_root: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
-    let hits = m.beliefs_now(
-        &scope,
-        query.as_deref().unwrap_or(""),
-        limit.unwrap_or(50).min(500),
-        None,
-    )?;
-    Ok(serde_json::json!({
-        "scope": scope,
-        "hits": hits.iter().map(|h| serde_json::json!({
-            "key": h.key, "value": h.value, "status": h.status,
-            "valid_from": h.valid_from, "valid_to": h.valid_to,
-            "prov": h.prov.len(), "score": h.score,
-        })).collect::<Vec<_>>()
-    }))
-}
-
-/// `why`：一条信念的完整修订链与依据 —— "你凭什么这么认为"。
-#[tauri::command]
-fn mem_why(key: String, project_root: Option<String>) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
-    let evs = m.why(&scope, &key)?;
-    Ok(serde_json::json!({
-        "scope": scope,
-        "chain": evs.iter().map(|e| serde_json::json!({
-            "seq": e.seq, "ts": e.ts, "kind": e.kind.as_str(), "op": e.op,
-            "value": e.value, "origin": e.origin.as_str(), "reason": e.reason,
-            "prov": e.prov, "id": e.id,
-        })).collect::<Vec<_>>()
-    }))
-}
-
-/// `as-of`：某时刻的信念（**包含**当时成立、后来被推翻的）。
-#[tauri::command]
-fn mem_as_of(
-    at: i64,
-    key: Option<String>,
-    project_root: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
-    let hits = m.beliefs_as_of(&scope, key.as_deref(), at)?;
-    Ok(serde_json::json!({
-        "scope": scope, "at": at,
-        "hits": hits.iter().map(|h| serde_json::json!({
-            "key": h.key, "value": h.value, "status": h.status,
-            "valid_from": h.valid_from, "valid_to": h.valid_to,
-        })).collect::<Vec<_>>()
-    }))
-}
-
-/// 收据：每次压缩/逐出"丢了什么、怎么换回来"（损失核算）。
-#[tauri::command]
-fn mem_receipts(
-    limit: Option<usize>,
-    project_root: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
-    let rs = m.receipts(&scope, limit.unwrap_or(50).min(500))?;
-    Ok(serde_json::json!({
-        "scope": scope,
-        "receipts": rs.iter().map(|r| serde_json::json!({
-            "id": r.id, "ts": r.ts, "kind": r.kind,
-            "covered": r.covered.len(), "dropped": r.dropped,
-            "rehydrate": r.rehydrate, "note": r.note,
-        })).collect::<Vec<_>>()
-    }))
-}
-
-/// 人写一条（`origin=human`）：与探针/引擎决策在账本里同列，但来源可区分 ——
-/// 这是"谁说的"这个问题的最小答案。
-#[tauri::command]
-fn mem_record(
-    key: String,
-    value: String,
-    reason: Option<String>,
-    project_root: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current().ok_or("记忆库未安装")?;
-    let ev = m.record_obs(
-        &scope,
-        key.trim(),
-        &value,
-        harness_engine::mem::Origin::Human,
-        &[],
-        None,
-    )?;
-    Ok(serde_json::json!({ "scope": scope, "id": ev.id, "reason": reason }))
-}
-
-/// 从账本重放重建派生层（`beliefs`/FTS/向量）—— **EC 的可操作形态**。
-#[tauri::command]
-async fn mem_rebuild(project_root: Option<String>) -> Result<serde_json::Value, String> {
-    let rp = mem_root();
-    let scope = mem_scope(&rp, project_root.as_deref());
-    let m = harness_engine::mem::current()
-        .ok_or("记忆库未安装")?
-        .clone();
-    let n = tauri::async_runtime::spawn_blocking(move || m.rebuild(Some(&scope)))
-        .await
-        .map_err(|e| format!("重建失败: {e}"))??;
-    Ok(serde_json::json!({ "replayed_events": n }))
-}
-
-// 面板读的是引擎那**同一份**表（`harness_engine::proc::listing`），不另立一份，
-// 否则面板和模型就会各说各话。
-
-/// 全部托管进程（含已退出待查的），状态已刷新。
-#[tauri::command]
-fn proc_list() -> Vec<harness_engine::proc::ProcInfo> {
-    harness_engine::proc::listing()
-}
-
-/// 按 pid 停掉一个托管进程，**连子进程树一起**（只杀 mvn 不杀 java 就是又造一个孤儿）。
-///
-/// 走 `spawn_blocking`：`kill_tree` + `wait` 会等进程真的退掉（秒级），
-/// 放在主线程会把 UI 卡住这段。
-#[tauri::command]
-async fn proc_stop(pid: u32) -> Result<harness_engine::proc::ProcInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || harness_engine::proc::stop_pid(pid))
-        .await
-        .map_err(|e| format!("停止任务失败：{e}"))?
-}
-
-/// **增量**读一段托管进程的日志 —— 面板的"输出"标签页靠它做 `tail -f`。
-///
-/// `offset = None` 是首读（只回看尾部 128KB）；之后带上一轮返回的 `next_offset` 续读。
-/// 切分点只落在换行上，理由见 `harness_engine::proc::read_log_chunk`。
-///
-/// 读文件是微秒级的事（不像 `proc_stop` 要等进程退），不必 `spawn_blocking`。
-#[tauri::command]
-fn proc_log_read(
-    pid: u32,
-    offset: Option<u64>,
-    max_bytes: Option<usize>,
-) -> Result<harness_engine::proc::LogChunk, String> {
-    harness_engine::proc::read_log_chunk(
-        pid,
-        offset,
-        max_bytes.unwrap_or(harness_engine::proc::LOG_CHUNK_MAX),
-    )
-}
-
-#[derive(serde::Serialize, Clone)]
-struct RunOutput {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    killed: bool,
-}
-
-/// 运行目标的工作目录解析。
-///
-/// - 未绑定文件 → 项目根目录
-/// - 绑定了文件 → 该文件**所在目录**（如 `admin-web\package.json` → `<项目根>\admin-web`），
-///   `npm start` 这类必须在清单文件所在目录执行的命令才能正确运行
-/// - 绑定了目录 → 该目录本身
-/// - 目录不存在、或解析后越出项目根（bind 写成 `../..`）→ 回退到项目根
-fn resolve_run_dir(project_root: Option<&str>, bind: Option<&str>) -> Option<String> {
-    let root = project_root?;
-    let root_path = Path::new(root);
-
-    let Some(bind) = bind.map(str::trim).filter(|b| !b.is_empty()) else {
-        return Some(root.to_string());
-    };
-
-    let bind_path = root_path.join(bind);
-    let dir = if bind_path.is_dir() {
-        bind_path
-    } else {
-        match bind_path.parent() {
-            // parent 为空串表示 bind 就在项目根下（如 "package.json"）
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => root_path.to_path_buf(),
-        }
-    };
-
-    // 越界防护：解析后的真实路径必须落在项目根内
-    match (root_path.canonicalize(), dir.canonicalize()) {
-        (Ok(root_canon), Ok(dir_canon)) if dir_canon.starts_with(&root_canon) => {
-            Some(clean_path(&dir_canon))
-        }
-        _ => Some(root.to_string()),
-    }
-}
-
-/// 运行目标：执行一次性命令并回传输出。
-///
-/// `bind` 为运行目标绑定的清单文件（项目相对路径），用于决定工作目录：
-/// 绑定 `admin-web\package.json` 时命令在 `<项目根>\admin-web` 下执行。
-#[tauri::command]
-async fn run_target(
-    cmd: String,
-    project_root: Option<String>,
-    bind: Option<String>,
-) -> Result<RunOutput, String> {
-    let parts = split_cmd(&cmd);
-    if parts.is_empty() {
-        return Err("空命令".to_string());
-    }
-
-    let program = resolve_windows_cmd(&parts[0]);
-    let args = parts[1..].to_vec();
-
-    // 工作目录必须在进闭包前算好（project_root 会被 move）
-    let run_dir = resolve_run_dir(project_root.as_deref(), bind.as_deref());
-
-    // 后台线程执行，避免阻塞 UI
-    tauri::async_runtime::spawn_blocking(move || {
-        use std::process::Command;
-
-        let mut cmd = Command::new(&program);
-        cmd.args(&args)
-            .env("PYTHONIOENCODING", "utf-8")
-            .env("PYTHONUTF8", "1")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        // Windows 专属：阻止子进程闪黑控制台窗口（见 CREATE_NO_WINDOW 说明）
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Some(ref dir) = run_dir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd.output().map_err(|e| format!("执行失败: {}", e))?;
-
-        Ok(RunOutput {
-            exit_code: output.status.code(),
-            // 按活动代码页解码：中文 Windows 上 mvn / java / cmd 的输出是 GBK，
-            // 直接 from_utf8_lossy 会把这行输出变成乱码（与 agent 侧同一处实现）。
-            stdout: harness_engine::exec::decode_output(&output.stdout),
-            stderr: harness_engine::exec::decode_output(&output.stderr),
-            killed: false,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// 在新控制台窗口中启动终端程序（CREATE_NEW_CONSOLE 标志，不经过 PTY）
-#[tauri::command]
-fn spawn_terminal(cmd: String, project_root: Option<String>) -> Result<(), String> {
-    let parts = split_cmd(&cmd);
-    if parts.is_empty() {
-        return Err("空命令".to_string());
-    }
-
-    let program = resolve_windows_cmd(&parts[0]);
-    let args = &parts[1..];
-
-    // CLI 程序（powershell、python 等）在 Windows 上需 CREATE_NEW_CONSOLE
-    // 创建独立窗口；GUI 程序（如 git-bash.exe）会自行创建窗口，此标志对其无影响。
-    // macOS/Linux 上 spawn 默认不新建终端窗口，由调用方所在的终端决定呈现。
-    let mut c = std::process::Command::new(program);
-    c.args(args);
-    #[cfg(windows)]
-    c.creation_flags(CREATE_NEW_CONSOLE);
-    if let Some(ref dir) = project_root {
-        c.current_dir(dir);
-    }
-    c.spawn().map_err(|e| format!("启动失败: {}", e))?;
-
-    Ok(())
 }
 
 // ============================================
@@ -2509,21 +2098,21 @@ fn main() {
             get_run_targets,
             highlight_plugins,
             get_term_targets,
-            run_target,
-            proc_list,
-            mem_status,
-            mem_model_status,
-            mem_model_fetch,
-            mem_beliefs,
-            mem_why,
-            mem_as_of,
-            mem_receipts,
-            mem_rebuild,
-            mem_record,
-            proc_stop,
-            proc_log_read,
+            proc_cmds::run_target,
+            proc_cmds::proc_list,
+            mem_cmds::mem_status,
+            mem_cmds::mem_model_status,
+            mem_cmds::mem_model_fetch,
+            mem_cmds::mem_beliefs,
+            mem_cmds::mem_why,
+            mem_cmds::mem_as_of,
+            mem_cmds::mem_receipts,
+            mem_cmds::mem_rebuild,
+            mem_cmds::mem_record,
+            proc_cmds::proc_stop,
+            proc_cmds::proc_log_read,
             nav::open_external,
-            spawn_terminal,
+            proc_cmds::spawn_terminal,
             pty_spawn,
             pty_write,
             pty_resize,

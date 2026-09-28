@@ -7,6 +7,9 @@
 ```
 mainjs-split/            # ui/scripts/main.js 4332 → 1053 行的拆分（7 个模块）；见它的 README
 host-tests-split.py      # src-tauri/src/main.rs 的 1 拆 2：测试搬进 src-tauri/src/tests.rs
+main-split-nav.py        # 1 拆 N 第二刀：导航闸门/外链出口 → src-tauri/src/nav.rs
+main-split-mem.py        # 1 拆 N 第三刀：项目记忆 → src-tauri/src/mem_cmds.rs
+main-split-proc.py       # 1 拆 N 第四刀：托管进程/运行目标 → src-tauri/src/proc_cmds.rs
 u52-scan-scope.py        # 量 U52 到底扫到了多少（把内联测试模块挖掉，看剩下多少生产代码）—— ISSUE-1 的证据
 tr-snapshot.js           # 翻译表快照 diff：大改 ui/scripts/errors.js 时抓"有没有把别的句子翻歪"
 ```

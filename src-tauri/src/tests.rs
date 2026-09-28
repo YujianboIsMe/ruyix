@@ -16,6 +16,7 @@
 
 use super::*;
 use crate::nav::{Nav, check_open_url, nav_verdict};
+use crate::proc_cmds::{resolve_run_dir, run_target};
 #[cfg(feature = "preinstalled")]
 use arborium::Highlighter;
 

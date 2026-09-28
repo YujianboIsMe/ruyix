@@ -901,16 +901,17 @@ function runStaticChecks() {
   // ② **编码**：中文 Windows 上 cmd/java/mvn/git 输出是 GBK，`from_utf8_lossy` 解成乱码，
   //    模型读不懂"不是内部或外部命令"，只能换个更离谱的命令继续试（"命令总是不对"的直接原因）。
   //    必须一处实现多处消费：引擎 run_with_cap + 宿主 run_target / probe_tool / git.rs。
+  //    （2026-09-28：`run_target` 搬进了 `proc_cmds.rs` —— 断言跟着读模块，别钉文件名。）
   const gitRs = read("src-tauri/src/git.rs");
   const capabilityRs = read("src-tauri/src/capability.rs");
   check("U21", "exec-safety",
     has(execRs, "pub fn decode_output(") &&
       has(execRs, "GetACP") &&
       has(execRs, "decode_output(&out_buf") &&
-      has(mainRs, "harness_engine::exec::decode_output") &&
+      has(read("src-tauri/src/proc_cmds.rs"), "harness_engine::exec::decode_output") &&
       has(gitRs, "harness_engine::exec::decode_output") &&
       has(capabilityRs, "harness_engine::exec::decode_output"),
-    "输出编码没接上：引擎 decode_output（按活动代码页）+ 宿主三处复用，缺一不可");
+    "输出编码没接上：引擎 decode_output（按活动代码页）+ 宿主三处复用（proc_cmds / git / capability），缺一不可");
   check("U21", "exec-safety",
     has(intentRs, "pub(crate) fn preflight_execute(") &&
       has(intentRs, "const SHELL_BUILTINS") &&
@@ -1366,9 +1367,12 @@ function runStaticChecks() {
       has(managedRs, "next_offset") && has(managedRs, "truncated_head") &&
       has(managedRs, "fn skip_to_line_start"),
     "proc.rs 缺增量读日志的入口（LogChunk / read_log_chunk / 行首对齐）");
+  // `proc_log_read` 的实现 2026-09-28 搬进了 proc_cmds.rs：断言跟着读模块，
+  // 注册那一半留在 main.rs（`proc_cmds::proc_log_read,` —— 注册是接线，不是实现）。
   check("U30", "proc-log",
-    /fn proc_log_read\(/.test(mainRs) && has(mainRs, "proc_log_read,"),
-    "main.rs 没注册 proc_log_read —— 前端拿不到日志");
+    /fn proc_log_read\(/.test(read("src-tauri/src/proc_cmds.rs")) &&
+      has(mainRs, "proc_cmds::proc_log_read,"),
+    "proc_log_read 没实现（proc_cmds.rs）或没注册到 invoke_handler（main.rs）—— 前端拿不到日志");
   check("U30", "proc-log",
     ["menu-service", "service-view", "proc-log-view", "proc-log-panes"]
       .every((id) => has(html, `id="${id}"`)) && has(html, 'src="scripts/proc-log.js"'),
