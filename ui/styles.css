@@ -4524,3 +4524,66 @@ select,
   font-size: 12px;
   margin-top: 10px;
 }
+
+/* ============================================
+   会话工具栏：一排控件**同高同语言**（2026-09-28 修）
+   ============================================
+   症状（用户报「组件不在同一高度」）：模式下拉、模型下拉、📎、🌏、▶ 挤在一行里高矮不齐。
+   成因是**两套盒模型混在一行**：`.agent-btn` 有自己的 padding/字号，而 `.session-model-select`
+   当时一条样式都没有 ⇒ 走浏览器默认的 select 外观（比旁边高一截、圆角也不一样）。
+   规矩：高度 / 圆角 / 字号 / 盒模型在这一段里定死一次，谁也别自己说了算；
+   本段放在文件**末尾**，靠"后写的赢"盖掉前面 `.session-toolbar .agent-btn` 的 padding。 */
+.session-toolbar > select,
+.session-toolbar > button {
+  height: 30px;
+  min-height: 30px;
+  box-sizing: border-box;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 6px;
+}
+
+.session-toolbar > button {
+  width: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px; /* emoji 与 12px 的中文/数字不是同一个视觉大小，图标那颗单独给 */
+}
+
+.session-toolbar > select {
+  padding: 0 6px;
+  font-family: inherit;
+  color: var(--text-primary, #d4d4d4);
+  background: var(--bg-input, rgba(0, 0, 0, 0.3));
+  border: 1px solid var(--border-color);
+  outline: none;
+  cursor: pointer;
+}
+
+/* 模型名最长 ⇒ 让它吃掉剩下的宽度：换行会把这排挤成两行，比截断更丑 */
+.session-model-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  text-overflow: ellipsis;
+}
+
+.session-mode-select {
+  flex: 0 0 auto;
+}
+
+/* 隐藏的 file input（📎 点它）：`hidden` 属性本就够，这行是防"哪天有人把 hidden 去掉" */
+.session-file {
+  display: none;
+}
+
+/* 图标按钮的三种状态色：与旁边两颗同高，只差底色 */
+.session-web {
+  opacity: 0.45;
+}
+
+.session-web--on {
+  opacity: 1;
+}

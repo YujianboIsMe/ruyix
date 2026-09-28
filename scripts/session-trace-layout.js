@@ -191,6 +191,19 @@ const driver = `
       statusbar: usel("#statusbar"),
       commandBar: usel("#command-bar"),
     };
+    // 判据 7（2026-09-28 补）：工具栏一排控件**同高**且不撑破。
+    // 量的是真浏览器算出来的 offsetHeight：.session-model-select 当初一条样式都没有，
+    // 走的是浏览器默认 select 外观 —— 这种「两套盒模型混在一行」在代码里看不出来，只能量。
+    const tb = wrap.querySelector(".session-toolbar");
+    out.toolbar = tb
+      ? {
+          kids: Array.from(tb.children)
+            .filter((el) => el.offsetHeight)
+            .map((el) => ({ cls: el.className, h: el.offsetHeight, w: el.offsetWidth })),
+          clientW: tb.clientWidth,
+          scrollW: tb.scrollWidth,
+        }
+      : null;
   } catch (err) {
     out.errors.push("DRIVER: " + ((err && err.stack) || err));
   }
@@ -333,6 +346,18 @@ notNone.length === 0
   ? ok("chrome 仍旧禁选（标题栏 / 状态栏 / 命令栏 user-select:none）")
   : fail(`chrome 被放开成可选：${notNone.map((k) => k + "=" + sel[k]).join(" / ")} —— ` +
       "那是把全局翻成可选，不是给内容面开选择");
+
+// 判据 7：工具栏**同高**，且不撑破（横向滚动条 / 换行都是"没做完"的样子）。
+const tbm = out.toolbar;
+const hs = tbm ? [...new Set(tbm.kids.map((k) => k.h))] : [];
+tbm && hs.length === 1
+  ? ok(`工具栏一排控件同高（${hs[0]}px × ${tbm.kids.length} 个）`)
+  : fail(`工具栏高度不齐：${tbm ? tbm.kids.map((k) => k.cls + "=" + k.h + "px").join(" / ") : "没量到 .session-toolbar"}` +
+      " —— 下拉与按钮走了两套盒模型（高度/圆角/字号要在同一段里定死）");
+tbm && tbm.scrollW <= tbm.clientW + 1
+  ? ok(`工具栏没撑破（scrollWidth ${tbm.scrollW} ≤ clientWidth ${tbm.clientW}）`)
+  : fail(`工具栏撑破了（scrollWidth ${tbm ? tbm.scrollW : "?"} > clientWidth ${tbm ? tbm.clientW : "?"}）` +
+      " —— 模型下拉没吃剩余宽度的话，这排会溢出或换行");
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (bad) {
