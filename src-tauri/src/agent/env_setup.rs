@@ -14,6 +14,68 @@ use harness_engine as engine;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// 用户侧的一条包管理器行（`plugins/tools/<id>/tools.toml` 的 `[[pm]]`，v1.4 §4.2）。
+///
+/// **为什么要有它**：内置那七个管理器是 `enum` 里的变体 + `match` 臂，"再加一个包管理器"
+/// 就得改源码 —— 而自改闭环要求这类增长**只改数据**。这是加载点，形状与命令发现表同一套。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmSpec {
+    /// 行标识（日志里认这个名字，例如 `volta`）
+    pub id: String,
+    /// 探测与执行用的二进制名
+    pub bin: String,
+    /// 安装命令模板：`{pkg}` 会被替换成包名（**过 shell 执行**，见 `exec::run_line`）
+    pub install: String,
+    /// 适用平台（`windows` / `macos` / `linux`）；**空 = 全平台**
+    pub platforms: Vec<String>,
+    /// 安装要不要提权（unix 走 `sudo -n`）
+    pub elevate: bool,
+    /// 工具名 → 本管理器认的包名；表里没有的原样透传
+    pub packages: std::collections::BTreeMap<String, String>,
+}
+
+/// 用户侧追加的行（启动时装载一次，见 [`register_custom`]）。
+fn custom_rows() -> &'static std::sync::Mutex<Vec<&'static PmSpec>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Vec<&'static PmSpec>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 登记用户侧的包管理器行（宿主启动时调用一次）。返回这次加了几行。
+///
+/// 行本身**有意泄漏**成 `'static`：一是 `Pm::Custom` 要 `&'static PmSpec`（枚举是 `Copy`，
+/// 存引用比存 String 便宜），二是装载只发生一次、行数有界（用户侧文件）。
+/// 注意：登记必须发生在**第一次** `pick_manager()` / `candidates()` 之前 —— 那两处各有一份
+/// 进程内缓存（启动顺序天然满足：装载在构造应用状态时，探测要等一次 run）。
+pub fn register_custom(specs: Vec<PmSpec>) -> usize {
+    let n = specs.len();
+    if n == 0 {
+        return 0;
+    }
+    if let Ok(mut g) = custom_rows().lock() {
+        g.extend(specs.into_iter().map(|s| &*Box::leak(Box::new(s))));
+    }
+    n
+}
+
+/// 本平台适用的自定义行（`platforms` 为空 ⇒ 全平台）。
+fn custom_for_this_platform() -> Vec<Pm> {
+    let me = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let Ok(g) = custom_rows().lock() else {
+        return Vec::new();
+    };
+    g.iter()
+        .filter(|s| s.platforms.is_empty() || s.platforms.iter().any(|p| p == me))
+        .map(|s| Pm::Custom(s))
+        .collect()
+}
+
 /// 单次安装的超时。包要下载、可能要编译，给足 —— 这是后台动作，模型在等它。
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// 探测包管理器是否存在（`where` / `command -v`）的超时
@@ -39,6 +101,8 @@ pub enum Pm {
     AptGet,
     Dnf,
     Pacman,
+    /// 用户侧追加的行（`plugins/tools/<id>/tools.toml`）
+    Custom(&'static PmSpec),
 }
 
 impl Pm {
@@ -51,11 +115,15 @@ impl Pm {
             Pm::AptGet => "apt-get",
             Pm::Dnf => "dnf",
             Pm::Pacman => "pacman",
+            Pm::Custom(s) => s.bin.as_str(),
         }
     }
 
     pub fn name(self) -> &'static str {
-        self.bin()
+        match self {
+            Pm::Custom(s) => s.id.as_str(),
+            other => other.bin(),
+        }
     }
 
     /// 工具名 → 本包管理器认的包名 / ID。表里没有的原样透传
@@ -126,6 +194,11 @@ impl Pm {
                 "go" => "go",
                 _ => t,
             },
+            // 用户侧的行：包名映射由它的 `[pm.packages]` 给，没有就原样透传
+            Pm::Custom(s) => match s.packages.get(t) {
+                Some(p) => p.as_str(),
+                None => t,
+            },
         };
         a.to_string()
     }
@@ -145,6 +218,10 @@ impl Pm {
             Pm::AptGet => elevated(&format!("apt-get install -y {p}")),
             Pm::Dnf => elevated(&format!("dnf install -y {p}")),
             Pm::Pacman => elevated(&format!("pacman -S --noconfirm {p}")),
+            Pm::Custom(s) => {
+                let line = s.install.replace("{pkg}", &p);
+                if s.elevate { elevated(&line) } else { line }
+            }
         }
     }
 }
@@ -162,7 +239,7 @@ fn elevated(line: &str) -> String {
 }
 
 /// 平台默认优先级（挑第一个 `where` / `command -v` 得到的）
-pub fn candidates() -> &'static [Pm] {
+fn platform_defaults() -> &'static [Pm] {
     #[cfg(target_os = "windows")]
     {
         &[Pm::Winget, Pm::Scoop, Pm::Choco]
@@ -175,6 +252,19 @@ pub fn candidates() -> &'static [Pm] {
     {
         &[Pm::AptGet, Pm::Dnf, Pm::Pacman]
     }
+}
+
+/// 候选清单 = **平台默认** + 用户侧追加行（v1.4 §4.2）。
+///
+/// 进程内缓存一次（合并结果在进程生命期内不变 —— 与 `pick_manager` 同一口径）。
+/// 因此 [`register_custom`] 必须在这之前跑：启动时装载、探测要等一次 run，顺序天然满足。
+pub fn candidates() -> &'static [Pm] {
+    static ALL: std::sync::OnceLock<Vec<Pm>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut v: Vec<Pm> = platform_defaults().to_vec();
+        v.extend(custom_for_this_platform());
+        v
+    })
 }
 
 /// 本机可用的第一个包管理器（宿主裁量：优先级在 [`candidates`]）。

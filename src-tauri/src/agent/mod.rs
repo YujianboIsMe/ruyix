@@ -22,6 +22,7 @@ mod repo_clean_tests;
 pub mod sessions;
 pub mod sink;
 pub mod stage;
+pub mod tool_plugins;
 pub mod vendor;
 
 use crate::config::ConfigManager;

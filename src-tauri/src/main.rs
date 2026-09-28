@@ -981,6 +981,21 @@ fn main() {
             .unwrap_or(None),
     ));
 
+    // ---- 用户侧工具表（v1.4 §4.2 的加载点）：`plugins/tools/<id>/tools.toml`。
+    // **只在这里装载一次**：它追加的是引擎的**进程级**表（命令发现 / 包管理器候选），
+    // 跟着项目重复装载只会重复追加（登记是追加语义、同名并存）。
+    // 坏文件不静默：跳过 + 留一条指名到文件与字段的 note（打印出去）。
+    {
+        let rep = agent::tool_plugins::load(&plugins_root);
+        println!(
+            "[plugin] 工具表：+{} 条命令发现行 / +{} 条包管理器候选",
+            rep.discover_rows, rep.pm_rows
+        );
+        for n in &rep.notes {
+            println!("[plugin] {n}");
+        }
+    }
+
     // 模型厂商对象（宿主 runtime）：启动时按当前配置播种；之后每次配置变化由
     // `refresh_vendor` 比对身份，变了才 +1 版本并广播 `model://vendor-changed` ——
     // 会话面板只认这一个事件，于是"拧一下 🌏 就把选中的模型弹回 pro"的回环从根上没了。
