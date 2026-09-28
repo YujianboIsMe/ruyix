@@ -4605,8 +4605,9 @@ async function runTerminalTargetChecks() {
   check(
     "U51",
     "terminal-shared-scanner",
-    has(rustMain, "fn get_term_targets(") &&
-      has(rustMain, "get_term_targets,") &&
+    // `get_term_targets` 2026-09-28 搬进 pty_cmds.rs：实现断言跟着读模块，注册仍钉 main.rs
+    has(read("src-tauri/src/pty_cmds.rs"), "fn get_term_targets(") &&
+      has(rustMain, "pty_cmds::get_term_targets,") &&
       has(rustCfg, "fn scan_target_file(") &&
       has(rustCfg, "load_term_targets") &&
       has(rustCfg, 'scan_target_file("term.toml", "term"') &&

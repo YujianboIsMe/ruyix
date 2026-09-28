@@ -16,6 +16,7 @@ mod plugin;
 mod preinstalled;
 mod proc_cmds;
 mod pty;
+mod pty_cmds;
 mod runner;
 
 use std::path::Path;
@@ -642,62 +643,13 @@ fn get_run_targets(
     mgr.load_run_targets(project_root.as_deref())
 }
 
-/// 终端目标（导航区「终端资源」里可点的终端）：与运行目标同一套形状，用户可增删改。
-#[tauri::command]
-fn get_term_targets(
-    project_root: Option<String>,
-    config_mgr: tauri::State<'_, Mutex<config::ConfigManager>>,
-) -> Result<Vec<config::RunTarget>, String> {
-    let mgr = config_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.load_term_targets(project_root.as_deref())
-}
-
 // ============================================
-// PTY 终端命令
+// 辅助：命令行拆分 / Windows .cmd 解析（crate 根共享）
 // ============================================
-
-#[tauri::command]
-fn pty_spawn(
-    window: tauri::Window,
-    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
-    cmd: String,
-    tab_id: String,
-    project_root: Option<String>,
-) -> Result<(), String> {
-    let mut mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.spawn(window, tab_id, &cmd, project_root.as_deref())
-}
-
-#[tauri::command]
-fn pty_write(
-    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
-    tab_id: String,
-    data: String,
-) -> Result<(), String> {
-    let mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.write(&tab_id, &data)
-}
-
-#[tauri::command]
-fn pty_resize(
-    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
-    tab_id: String,
-    rows: u16,
-    cols: u16,
-) -> Result<(), String> {
-    let mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.resize(&tab_id, rows, cols)
-}
-
-#[tauri::command]
-fn pty_close(
-    pty_mgr: tauri::State<'_, Mutex<pty::PtyManager>>,
-    tab_id: String,
-) -> Result<(), String> {
-    let mut mgr = pty_mgr.lock().map_err(|e| e.to_string())?;
-    mgr.close(&tab_id);
-    Ok(())
-}
+//
+// 为什么留在 crate 根而不是某个域模块里：`git.rs` / `pty.rs`（PTY 管理器）/ 搬出去的
+// `proc_cmds.rs` / `pty_cmds.rs` 都用 `crate::split_cmd` / `crate::resolve_windows_cmd`
+// 调它们 —— 是**跨模块**工具（crate 根的私有项对后代模块可见），不是谁家的私有实现。
 
 /// 按空格拆分命令行，支持引号包裹。
 /// 引号内 `\"` / `\'` 转义为字面引号；其余 `\` 保留（不转义）。
@@ -1662,7 +1614,7 @@ fn main() {
             delete_project,
             get_run_targets,
             highlight::highlight_plugins,
-            get_term_targets,
+            pty_cmds::get_term_targets,
             proc_cmds::run_target,
             proc_cmds::proc_list,
             mem_cmds::mem_status,
@@ -1678,10 +1630,10 @@ fn main() {
             proc_cmds::proc_log_read,
             nav::open_external,
             proc_cmds::spawn_terminal,
-            pty_spawn,
-            pty_write,
-            pty_resize,
-            pty_close,
+            pty_cmds::pty_spawn,
+            pty_cmds::pty_write,
+            pty_cmds::pty_resize,
+            pty_cmds::pty_close,
             config_get,
             config_set,
             config_delete,
