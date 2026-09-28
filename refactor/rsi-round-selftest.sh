@@ -102,6 +102,8 @@ echo
 echo "########## ⑥ patch 生成器（「候选更优」那一支出产物的路径，单独验）"
 python - "$W" <<'PY'
 import importlib.util, pathlib, sys
+
+sys.dont_write_bytecode = True  # import 模板别在仓库里留下 __pycache__
 spec = importlib.util.spec_from_file_location("rsi_round", "doc/v1.4/templates/rsi/rsi_round.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)

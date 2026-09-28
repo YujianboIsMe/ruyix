@@ -38,3 +38,7 @@ training/outputs/
 # 探针出的截图是 scratch（不该进仓库；我自己踩过一次：add -A 在前、移走文件在后）
 /*-shot.png
 /mem-probe.png
+
+# Python 缓存（自检 import 模板时可能生成；不进仓库）
+__pycache__/
+*.pyc
