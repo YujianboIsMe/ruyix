@@ -192,6 +192,45 @@ function setupContextMenu() {
   document.addEventListener("click", () => hideContextMenu(menu));
 }
 
+/**
+ * 折叠"多余的"分隔线（2026-09-28）。
+ *
+ * 为什么需要它：分隔线在 HTML 里是**静态写死**的，而菜单项会按上下文隐藏（文件 vs 文件夹、
+ * 项目根 vs 子目录）。于是"中间两个条目一藏，两条线就贴到一起" —— 菜单里出现两根并列的灰条
+ * （用户报「there must be only 1 bar」）。
+ *
+ * 规矩：**可见序列里，分隔线只许出现在两个可见菜单项之间**。所以按可见邻居判：
+ * - 前面没有可见项（开头）、或前面紧邻的就是另一条分隔线 ⇒ 多余；
+ * - 后面没有可见项（收尾）⇒ 只是装饰，也去掉（看着像漏了一块）。
+ * 相邻两条只留**前面**那条 —— 两条之间什么都没夹，留一条就够。
+ */
+function collapseSeparators(menu) {
+  const kids = Array.from(menu.children);
+  const shown = (el) => el.style.display !== "none";
+  const isSep = (el) => el.classList.contains("context-menu-sep");
+  // 先把线摆回"显示"，再按可见邻居决定去留（上一轮可能把它们藏过）
+  kids.forEach((el) => {
+    if (isSep(el)) el.style.display = "";
+  });
+  let kept = false; // 上一条可见元素是不是"已留下的分隔线"
+  kids.forEach((el, i) => {
+    if (!shown(el)) return;
+    if (!isSep(el)) {
+      kept = false;
+      return;
+    }
+    const prev = kids.slice(0, i).filter(shown).pop();
+    const rest = kids.slice(i + 1).filter(shown);
+    const okHere =
+      !kept &&
+      prev &&
+      !isSep(prev) &&
+      rest.some((x) => !isSep(x));
+    if (!okHere) el.style.display = "none";
+    else kept = true;
+  });
+}
+
 async function showContextMenu(menu, x, y, isDir) {
   // 文件夹 vs 文件
   menu.querySelectorAll(".context-menu-folder-only").forEach(el => el.style.display = isDir ? "" : "none");
@@ -227,6 +266,10 @@ async function showContextMenu(menu, x, y, isDir) {
       fileItems.forEach(el => el.style.display = "none");
     }
   }
+
+  // 分隔线**最后**按可见性折叠：文件/文件夹条目是在上面那些分支里才隐藏的，
+  // 早一步折叠等于什么都没做（实测：文件夹菜单照样两根灰条并排）。
+  collapseSeparators(menu);
 
   menu.style.left = x + "px";
   menu.style.top = y + "px";

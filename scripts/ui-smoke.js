@@ -2613,6 +2613,33 @@ function runSessionTraceLayoutProbe() {
 }
 
 /**
+ * U73 context-menu-sep-real：右键菜单的**分隔线**（真几何，交给 scripts/context-menu-layout.js）。
+ *
+ * 用户报过两次同一件事：「bars are too bold」+「there must be only 1 bar」。两件都只在真浏览器里
+ * 才看得见：① 分隔线的 div 同时挂着 `context-menu-item` ⇒ 吃到 6px 上下内边距、背景铺满内边距盒
+ * ⇒ 1px 的线成了 13px 的粗灰条（CSS 里明明写着 height:1px）；② 分隔线静态写死、条目按上下文隐藏
+ * ⇒ 中间两个条目一藏，两条线贴到一起。**只有能执行之前的那道闸拦得住它** —— 静态检查看代码是"对的"。
+ * 跟 U32/U42 一样，本机没浏览器时该脚本自行 SKIP（跳过会**大声说出来**）。
+ */
+function runContextMenuLayoutProbe() {
+  const script = path.join(ROOT, "scripts", "context-menu-layout.js");
+  const r = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 240000 });
+  const out = ((r.stdout || "") + "\n" + (r.stderr || "")).trim();
+  if (/^SKIP:/m.test(out)) {
+    console.log("  · U73 跳过：" + (out.split("\n")[0] || "").replace(/^SKIP:\s*/, ""));
+    return;
+  }
+  const brief = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^(FAIL|context-menu-layout|分隔线)/.test(l))
+    .join(" ⏐ ");
+  check("U73", "context-menu-sep-real",
+    r.status === 0,
+    "右键菜单分隔线探针未通过（退出码 " + r.status + "）：" + (brief || out.slice(0, 500)));
+}
+
+/**
  * U45 tab-context-menu：编辑器多标签的右键菜单（v0.11）。
  *
  * 病根：文件树早就把浏览器默认右键拦掉了（setupContextMenu），**标签栏没拦** —— 于是编辑器多标签
@@ -5213,6 +5240,7 @@ async function main() {
     ["U40", "anthropic-format", runAnthropicFormatChecks],
     ["U41", "session-trace", runSessionTraceChecks],
     ["U42", "session-trace-layout-real", runSessionTraceLayoutProbe],
+    ["U73", "context-menu-sep-real", runContextMenuLayoutProbe],
     ["U43", "terminal-layout-real", runTerminalLayoutProbe],
     ["U55", "memory-layout-real", runMemoryLayoutProbe],
     ["U44", "nav-layout-real", runNavLayoutProbe],

@@ -1337,10 +1337,17 @@ select,
   pointer-events: none;
 }
 
+/* 分隔线（2026-09-28 修）：原来这些 div 同时挂着 `context-menu-item` 与 `context-menu-sep`，
+   ⇒ 吃到菜单项的 `padding: 6px 16px`，而背景铺满**内边距盒** ⇒ 1px 的线变成一根 13px 的
+   粗灰条（用户报「bars are too bold」）。CSS 里明明写着 height:1px，光读代码看不出来。
+   两条纪律：① 分隔线**不是**菜单项，HTML 里别给它 `-item` 类；② 这里显式 `padding: 0`，
+   哪天又被挂上 `-item`，也只会退回"1px 的线"而不是退回那根粗条。 */
 .context-menu-sep {
   height: 1px;
+  padding: 0;
+  margin: 4px 8px;
   background: var(--border-color);
-  margin: 3px 8px;
+  pointer-events: none; /* 它不是可点项：别吃掉菜单项的 hover 判定 */
 }
 
 /* --- 项目列表 --- */

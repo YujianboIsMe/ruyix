@@ -23,10 +23,11 @@ cargo test                         # 单元测试（引擎 322+8 ignored / ruyix
 
 Notes: `ui/packages/xterm.js` / `ui/packages/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
 no npm/bundler, so never add npm tooling — `scripts/check-style.js` is the style gate.
-`scripts/editor-layout.js` and `scripts/session-trace-layout.js` are the exception to "Node-only gates":
+`scripts/editor-layout.js`, `scripts/session-trace-layout.js` and `scripts/context-menu-layout.js` are the exception to "Node-only gates":
 they drive the real `index.html` + `styles.css` + panel JS in headless Edge/Chrome because
 scrollbar/geometry bugs (double scrollbars, caret vs. backdrop misalignment, a line that should
-ellipsize but wraps or widens its box instead) do not exist in a DOM stub — ui-smoke U32 / U41
+ellipsize but wraps or widens its box instead, a menu separator that renders as a 13px bar because
+its div also carries the item class) do not exist in a DOM stub — ui-smoke U32 / U41 / U73
 call them (and skip loudly when no browser is installed, so a green run there is only claimable
 when a browser was actually found).
 
