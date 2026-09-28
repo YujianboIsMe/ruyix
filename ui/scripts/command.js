@@ -778,6 +778,11 @@ async function handleCloseCommand(args) {
 
 /**
  * 校验并拼接项目相对路径。返回完整路径，失败返回 null（已弹 setStatus）。
+ *
+ * 分隔符**跟项目根自己的那一种走**：根来自后端（Windows `D:\proj`、mac/Linux `/Users/…/proj`），
+ * 相对路径这一侧（命令栏手输 / 导航双击 / 右键新建）写成 `/` 还是 `\` 都要接得住。
+ * 以前这里写死 `+ "\\" +` —— 在 macOS 上拼出 `/Users/…/proj\src\main.rs` 这种路径，
+ * `read_file` 当然找不到（用户实测：导航里点文件 → 状态栏「打开文件失败」+ 一条带反斜杠的路径）。
  */
 function resolveProjectPath(rawPath) {
   if (!state.currentProject) {
@@ -788,7 +793,11 @@ function resolveProjectPath(rawPath) {
     setStatus(I18N.t("status.no_permission"), "error");
     return null;
   }
-  return state.currentProject.path + "\\" + rawPath;
+  // 根去掉尾部分隔符，再按它自己的那一种拼；相对路径里的连续分隔符一并归一
+  const base = String(state.currentProject.path).replace(/[/\\]+$/, "");
+  const sep = base.includes("\\") ? "\\" : "/";
+  const rel = String(rawPath).replace(/^[/\\]+/, "").replace(/[/\\]+/g, sep);
+  return rel ? base + sep + rel : base;
 }
 
 // ============================================

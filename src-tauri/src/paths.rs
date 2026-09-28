@@ -249,18 +249,25 @@ impl Paths {
         RootVerdict::Ok
     }
 
-    /// 根是不是落在系统临时目录里（`%TEMP%` / `%TMP%`）。
+    /// 根是不是落在系统临时目录里（Windows 的 `%TEMP%`/`%TMP%`；mac/Linux 的 `TMPDIR`/`/tmp`）。
     ///
     /// 这一条只用来识别"**从压缩包里直接双击**"：Windows 的 ZipFolder 会把整包解到
     /// `%TEMP%\Temp<n>_<名字>.zip\…` 再运行，而那个位置会被磁盘清理/存储感知收走 ——
     /// 用户看到的现象是"我的设置怎么每次都丢"，没人会联想到临时目录。
+    ///
+    /// 三个来源都看：Windows 的 ZipFolder 用 `TEMP`/`TMP`（两者可能不同，哪一个都可能），
+    /// 而 mac/Linux 的临时目录是 `TMPDIR` —— 只看前两个会把 macOS 上的临时根判成 `Ok`
+    /// （单测实测抓到的）。`std::env::temp_dir()` 正好是各平台自己的那个口径。
     pub fn is_in_temp(&self) -> bool {
-        ["TEMP", "TMP"].iter().any(|k| {
-            std::env::var_os(k).is_some_and(|v| {
-                let p = PathBuf::from(v);
-                !p.as_os_str().is_empty() && is_under(&self.root, &p)
-            })
-        })
+        let mut roots: Vec<PathBuf> = ["TEMP", "TMP"]
+            .iter()
+            .filter_map(|k| std::env::var_os(k))
+            .map(PathBuf::from)
+            .collect();
+        roots.push(std::env::temp_dir());
+        roots
+            .iter()
+            .any(|p| !p.as_os_str().is_empty() && is_under(&self.root, p))
     }
 
     /// 首启按模板创建缺失的目录与说明文件。
@@ -524,9 +531,22 @@ pub fn project_key(project: &str) -> String {
     };
 
     let mut slug = String::with_capacity(canon.len());
+    // 连续分隔符只出一个 `-`：`D:\\Projects` 这种**双写**反斜杠在 TOML / 剪贴板 / 老配置里
+    // 很常见（用户实测：同一份路径时对时错，就是这一处），重复出 `-` 会让同一个项目拼出两个桶。
+    // 只在**分隔符**之间折叠 —— `a-\b` 里的那个字面 `-` 照旧保留（不然两个不同路径会撞成一个 key）。
+    let mut prev_sep = false;
     for ch in canon.chars() {
         match ch {
-            '\\' | '/' => slug.push('-'),
+            '\\' | '/' => {
+                if !prev_sep {
+                    slug.push('-');
+                }
+                prev_sep = true;
+                continue;
+            }
+            _ => prev_sep = false,
+        }
+        match ch {
             // 盘符冒号**直接丢掉**（`D:\Projects` → `D-Projects`）；其余非法字符换 `_`
             ':' => {}
             '*' | '?' | '"' | '<' | '>' | '|' => slug.push('_'),

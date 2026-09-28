@@ -510,13 +510,19 @@ mod tests {
     fn project_file_roundtrip() {
         let dir = std::env::temp_dir().join(format!("ruyix-mcp-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        crate::paths::set_test_root(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 建目录后**先 canonicalize 再当项目路径**：`project_key` 只在目录已存在时 canonicalize
+        // （拿真实大小写），而 macOS 的 `/var` 是 `/private/var` 的符号链接 —— 不先归一，
+        // 写（那一刻目录还不存在）与读（写完目录已存在）会算出**两个 key**，读回 0 条。
+        let dir = dir.canonicalize().unwrap();
+        crate::paths::set_test_root(dir.clone());
+        let root = dir.to_str().unwrap();
         write_file_servers(
-            &project_path(dir.to_str().unwrap()),
+            &project_path(root),
             &[server("fs", "mcp-fs"), server("git", "mcp-git")],
         )
         .unwrap();
-        let list = read_file_servers(&project_path(dir.to_str().unwrap()));
+        let list = read_file_servers(&project_path(root));
         assert_eq!(list.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

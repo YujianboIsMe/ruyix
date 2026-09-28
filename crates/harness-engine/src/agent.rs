@@ -476,7 +476,7 @@ pub const AGENT_SYSTEM: &str = r#"你是 ruyix IDE 里的编程 Agent，通过�
 /// 实测模型要试 5-6 个变体才命中 —— 一行提示换掉这些试错轮。
 /// `AGENT_SYSTEM` 保持常量不动（测试直接断言其内容），平台差异在这里拼接。
 fn agent_system_prompt() -> String {
-    let mut s = AGENT_SYSTEM.to_string();
+    let s = AGENT_SYSTEM.to_string();
     #[cfg(target_os = "windows")]
     s.push_str(
         "\n\nWindows 检索提示：内容搜索优先 git grep -i -l <词>（快且稳、跟随 .gitignore，项目不是 git 仓库时不可用）；\

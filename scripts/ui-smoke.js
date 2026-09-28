@@ -529,8 +529,10 @@ function runStaticChecks() {
   check("U35", "web-search-toggle",
     /if \(!caps\.web_search\)/.test(webBody) && /webBtn\.disabled = true/.test(webBody),
     "模型没有联网能力时必须禁用按钮（模型能力矩阵在引擎里，前端不抄一份）");
-  check("U35", "web-search-toggle", webBody.includes("ai_model_caps"),
-    "按钮状态要问后端 ai_model_caps，不许前端自己猜模型能不能联网");
+  check("U35", "web-search-toggle", webBody.includes("caps.web_search"),
+    "按钮状态要问宿主回的厂商对象（ai_vendor.caps），不许前端自己猜模型能不能联网");
+  check("U35", "web-search-toggle", /invoke\("ai_vendor"/.test(sessJs),
+    "按钮/下拉的能力来自宿主 ai_vendor（厂商对象）—— 前端不自己拼能力");
   check("U35", "web-search-toggle",
     /session-web--on/.test(sessJs) && /session-web--on/.test(read("ui/styles.css")),
     "开/关要有可见区别（session-web--on 的 class 与样式都要有）");
@@ -3360,6 +3362,56 @@ async function runContextMenuChecks() {
     `复制失败要报 error（不能假装成功）: ok=${ok} ${JSON.stringify(statuses)}`);
 }
 
+/**
+ * U71 path-join-separator：**项目相对路径的拼接不许写死 Windows 分隔符**（用户报的真 bug）。
+ *
+ * 现场：macOS 上在导航里点文件 → 状态栏「打开文件失败」+ 一条带反斜杠的路径
+ * （`/Users/…/proj\src\main.rs`）。根因是 `resolveProjectPath` 里写死
+ * `state.currentProject.path + "\\" + rel` —— 项目根是 POSIX 路径时，拼出来的东西
+ * 根本不是磁盘上的那条路径，`read_file` 当然找不到。
+ *
+ * 判据：分隔符跟**根自己的那一种**走；相对路径写成 `/` 还是 `\` 都要接得住；
+ * 绝对路径仍要被拦（安全闸不许松）。
+ */
+function runPathJoinChecks() {
+  const src = readLf("ui/scripts/command.js");
+  const start = src.indexOf("function resolveProjectPath(rawPath) {");
+  const end = start >= 0 ? src.indexOf("\n}\n", start) : -1;
+  check("U71", "path-join", start >= 0 && end > start,
+    "command.js 里定位不到 resolveProjectPath 源码（切片锚点失效）");
+  if (start < 0 || end <= start) return;
+
+  const zh = JSON.parse(read("ui/lang/zh-CN.json"));
+  const statuses = [];
+  const I18N = { t: (k) => zh[k] ?? k };
+  const state = { currentProject: { path: "" } };
+  const setStatus = (msg, kind) => statuses.push({ msg, kind });
+  const body = src.slice(start, end + 3);
+  const fn = new Function("state", "I18N", "setStatus",
+    `${body}\nreturn resolveProjectPath;`)(state, I18N, setStatus);
+
+  // Windows 根 → 反斜杠拼接（老行为不许变）
+  state.currentProject.path = "D:\\proj";
+  check("U71", "path-join",
+    fn("src\\main.rs") === "D:\\proj\\src\\main.rs" && fn("src/main.rs") === "D:\\proj\\src\\main.rs",
+    `Windows 根要拼反斜杠，实际 "${fn("src/main.rs")}"`);
+
+  // POSIX 根（macOS/Linux）→ **正**斜杠拼接、不残留反斜杠 —— 这条就是用户报的那个 bug
+  state.currentProject.path = "/Users/mac/proj";
+  const got = fn("src/main.rs");
+  check("U71", "path-join", got === "/Users/mac/proj/src/main.rs" && !got.includes("\\"),
+    `POSIX 根要拼正斜杠且不留反斜杠，实际 ${JSON.stringify(got)}`);
+  check("U71", "path-join", fn("src\\main.rs") === "/Users/mac/proj/src/main.rs",
+    "相对路径写成反斜杠时也要归一到根的写法（导航与命令栏两种来源）");
+
+  // 绝对路径仍必须被拦（安全闸：这条松了等于允许读写项目外的东西）
+  statuses.length = 0;
+  check("U71", "path-join",
+    fn("/etc/passwd") === null && fn("C:\\Windows\\x") === null &&
+      statuses.length === 2 && statuses.every((s) => s.kind === "error"),
+    `绝对路径要被拦下并报 error，实际 ${JSON.stringify(statuses)}`);
+}
+
 // ============================================
 // 入口
 // ============================================
@@ -3864,11 +3916,12 @@ function runChatToolbarChecks() {
  * U59 model-dropdown：会话工具栏的**模型下拉框**（用户需求：探测供应商模型列表，在对话界面就能换）。
  *
  * 判据四条，每条对应一个真会出事的坏法：
- *   ① 数据源是**厂商的** `/models`（宿主 `ai_models`），前端不维护名单 —— 名单进前端就会漂；
- *   ② 换模型写 **runtime** 作用域的 **`ai.model`**（D8 单一来源：宿主 config_bridge 读 ai.model
- *      再映射给引擎的 llm.model）—— 落盘会把一次试探变成长期默认；而写 `llm.model` 是**死写** ✗，
- *      宿主根本不读它（用户实测：「切到 flash」永远不生效，下拉框被弹回去）；
- *   ③ 换完要**重新问能力**（联网/录音的可用性跟着模型走），否则按钮状态停在旧模型上；
+ *   ① 数据源是**厂商的** `/models`（宿主 `ai_vendor` 里那份厂商对象），前端不维护名单 —— 名单进前端就会漂；
+ *   ② 换模型写 **runtime** 作用域的 **`ai.model`**，且**键名是 `model`**：宿主的完整键 =
+ *      `ruyix.code.<section>.<key>`，section 是 `ai` —— 写 `key: "ai.model"` 会拼出
+ *      `ruyix.code.ai.ai.model` 这个**没人读**的死键（用户实测：「切到 flash」永远不生效，
+ *      引擎仍用配置里的默认，下拉框还会被下一次重取弹回去）；也不落盘（落盘会把一次试探变成长期默认）；
+ *   ③ 换完要**重取厂商对象**（联网/录音的可用性跟着模型走），否则按钮状态停在旧模型上；
  *   ④ 拿不到列表**不许编**：只留当前模型一项并说清为什么 —— 编一份清单等于让用户
  *      选一个可能跑不通的模型。
  */
@@ -3877,23 +3930,24 @@ function runModelDropdownChecks() {
   check("U59", "model-dropdown", sessJs.includes('class="session-model-select" data-model'),
     "会话工具栏里没有模型下拉框（data-model）");
   check("U59", "model-dropdown",
-    /invoke\("ai_models"\s*,\s*\{\s*projectRoot: root\(\)\s*\}\)/.test(sessJs),
-    "下拉框没从宿主 ai_models（厂商 /models）取列表 —— 前端不许自己维护模型名单");
+    /invoke\("ai_vendor"\s*,\s*\{\s*projectRoot: root\(\)\s*\}\)/.test(sessJs),
+    "下拉框没从宿主 ai_vendor（厂商对象 → 厂商 /models）取列表 —— 前端不许自己维护模型名单");
   const applyStart = sessJs.indexOf('modelSel.addEventListener("change"');
-  const applyBody = applyStart >= 0 ? sessJs.slice(applyStart, applyStart + 900) : "";
+  const applyBody = applyStart >= 0 ? sessJs.slice(applyStart, applyStart + 1200) : "";
   check("U59", "model-dropdown-runtime-scope",
-    applyBody.includes('key: "ai.model"') && applyBody.includes('scope: "runtime"'),
-    "换模型必须写 runtime 作用域的 ai.model（写 llm.model 是死写：宿主读的是 ai.model）（落盘会把一次试探变成长期默认）");
+    applyBody.includes('key: "model"') && applyBody.includes('scope: "runtime"') &&
+      !applyBody.includes('key: "ai.model"'),
+    "换模型必须写 runtime 作用域的 ai.model（键名 `model`；写 `ai.model` 会拼成没人读的 ruyix.code.ai.ai.model）（落盘会把一次试探变成长期默认）");
   check("U59", "model-dropdown-reprobe-caps",
-    applyBody.includes("ai_model_caps"),
-    "换完模型没重新问能力 —— 联网/录音按钮会停在旧模型的状态上");
+    applyBody.includes("reloadVendor"),
+    "换完模型没重取厂商对象 —— 联网/录音按钮会停在旧模型的状态上");
   check("U59", "model-dropdown-no-fake-list",
     /modelSel\.disabled = true/.test(sessJs) && sessJs.includes("拿不到厂商模型列表"),
     "拿不到厂商列表时必须降级（只留当前模型 + 说明），不许编一份可能跑不通的清单");
   const mainRs = read("src-tauri/src/main.rs");
   check("U59", "model-dropdown-backend",
-    mainRs.includes("ai_models,") && mainRs.includes("pub async fn models(") === false,
-    "宿主没注册 ai_models 命令");
+    mainRs.includes("ai_vendor,") && mainRs.includes("pub async fn models(") === false,
+    "宿主没注册 ai_vendor 命令");
   check("U59", "model-dropdown-vendor-modalities",
     mainRs.includes("input_modalities") && read("crates/harness-engine/src/llm.rs").includes("pub fn accepts("),
     "列表条目没带厂商声明的 input_modalities —— 录音/读图这些判断就只能靠猜");
@@ -4024,13 +4078,16 @@ async function runConfigSmearChecks() {
  * 真实场景：用户在配置里填完 API Key → 回到会话面板，那排 chip 里还写着「✗ key 未配置」。
  * 面板只在打开时探过一次，之后没人告诉它 key 变了 —— 界面在撒谎，用户只能以为"填了没用"。
  *
- * 契约四条：
+ * 契约五条：
  *   ① 宿主的保存 / 应用**都要发** `config://changed`，载荷带 `keys`（section + key）——
  *      带明细而不是一个布尔，订阅者才能按相关度过滤；
  *   ② **发事件前必须已放掉 config 锁**（监听者收到事件就回头调要锁的配置命令，握着锁发就是撞自己）；
- *   ③ 面板要收听，并且只对"会改变派生状态"的键动手：`ai.*` / `ai_fallback.*` / `harness.llm.*`
- *      （前两个是配置表单的键空间，第三个是会话里模型下拉框写的运行时 LLM 配置）；
- *   ④ 刷新动作要**至少覆盖两处**：环境探针那排 chip + 模型列表与能力（key 变了，模型列表也会变）。
+ *   ③ 面板收听 `config://changed`，且只对"会改变**环境状态**"的键动手：`ai.*` / `ai_fallback.*`
+ *      （key 配没配）。`harness.llm.*` 不再算 —— 模型清单/能力另有事件（见 ⑤）；
+ *   ④ 刷新动作覆盖环境探针那排 chip；
+ *   ⑤ **模型清单与能力只跟着 `model://vendor-changed` 重取**（宿主端点 / 密钥 / 协议之一变化才发）——
+ *      否则拧一下 🌏（写 harness.llm.web_search）也会重取模型，把刚选的按配置里的默认画回去
+ *      （事件回环，用户实测：toggle 联网就跳回 pro）。
  */
 function runConfigEventChecks() {
   const mainRs = read("src-tauri/src/main.rs");
@@ -4057,16 +4114,26 @@ function runConfigEventChecks() {
     })(),
     "发事件必须在配置锁释放之后 —— 监听者会回头调要锁的命令，握着锁发就是死锁");
   check("U64", "config-changed-listened",
-    /listen\("config:\/\/changed"/.test(sessJs) && /touchesKeyDependentState/.test(sessJs),
-    "会话面板要收听 config://changed，并按相关度过滤");
+    /listen\("config:\/\/changed"/.test(sessJs) && /touchesEnvState/.test(sessJs),
+    "会话面板要收听 config://changed，并按相关度过滤（只重探环境状态）");
   check("U64", "config-changed-relevance",
     /k\.section === "ai"/.test(sessJs) && /k\.section === "ai_fallback"/.test(sessJs) &&
-      /k\.section === "harness" && String\(k\.key\)\.startsWith\("llm\."\)/.test(sessJs),
-    "相关度要认两个键空间：ai.* / ai_fallback.*（配置表单）+ harness.llm.*（会话里的模型下拉框）");
-  check("U64", "config-changed-refreshes-both",
-    /function probeEnv/.test(sessJs) && /probeEnv\(\);/.test(sessJs) &&
-      /keyDependent\.push/.test(sessJs) && /ai_models/.test(sessJs),
-    "刷新要覆盖两处：环境探针 chip + 模型列表与能力（key 变了，能列出的模型也会变）");
+      !/startsWith\("llm\."\)/.test(sessJs),
+    "相关度只认 ai.* / ai_fallback.*（key 配没配）；harness.llm.* 归 model://vendor-changed 管");
+  check("U64", "config-changed-refreshes-chips",
+    /function probeEnv/.test(sessJs) && /probeEnv\(\);/.test(sessJs),
+    "刷新要覆盖环境探针那排 chip（key 变了，chip 上的「✗ key 未配置」就旧了）");
+  check("U64", "vendor-changed-emitted",
+    /fn refresh_vendor/.test(mainRs) && /"model:\/\/vendor-changed"/.test(mainRs) &&
+      /refresh_vendor\(&app, vendor\.inner\(\), config_mgr\.inner\(\)/.test(mainRs) &&
+      /fn same_vendor/.test(read("src-tauri/src/agent/vendor.rs")) &&
+      /pub fn adopt/.test(read("src-tauri/src/agent/vendor.rs")) &&
+      /fn vendor\b|mod vendor/.test(mainRs + read("src-tauri/src/agent/mod.rs")),
+    "宿主必须维护厂商对象（agent/vendor.rs），且只在身份（端点/密钥/协议）变化时发 model://vendor-changed");
+  check("U64", "vendor-changed-listened",
+    /listen\("model:\/\/vendor-changed"/.test(sessJs) && /vendorDependent\.push/.test(sessJs) &&
+      /invoke\("ai_vendor"/.test(sessJs),
+    "面板要收听 model://vendor-changed，重取厂商对象（这一条才驱动模型清单与能力）");
 }
 
 /**
@@ -4735,6 +4802,9 @@ function runPackageChecks() {
  * 下拉框永远停在初始化那一帧的「（模型未知）」（联网按钮同废）。
  *
  * 两条判据：① 不许再出现"调不存在的 refreshCaps"；② 取完数据**必须重画**（有 paintModel()）。
+ *
+ * 外加**事件回环**的判据（用户报：toggle 联网就跳回 pro）：模型/厂商只由
+ * `model://vendor-changed` 驱动重取，`config://changed` 只重探环境 chip。
  */
 function runModelChipChecks() {
   const raw = read("ui/scripts/session.js");
@@ -4745,18 +4815,25 @@ function runModelChipChecks() {
   const called = js.indexOf("await refreshCaps(") >= 0 || js.indexOf(" refreshCaps(") >= 0;
   check("U68", "no-undefined-refreshCaps", !called || defined,
     "session.js 里调用了 refreshCaps，但整个 ui/ 没有它的定义 —— 这类调用会静默 reject，让数据到了也不重画");
-  const i = js.indexOf("const reloadModelState");
+  const i = js.indexOf("const reloadVendor");
   const body = i >= 0 ? js.slice(i, i + 1600) : "";
-  check("U68", "repaint-after-fetch", body.indexOf("ai_models") >= 0 && body.indexOf("ai_model_caps") >= 0 && body.indexOf("paintModel();") >= 0,
-    "取完模型列表/能力之后必须重画下拉（否则永远停在初始化那一帧的模型未知）");
-  // 事件回环（用户实测「只能 pro，切不回 flash」）：换模型写的是 runtime `ai.model`，
-  // 而 `touchesKeyDependentState` 对任何 ai.*/llm.* 键都返回 true ⇒ 广播回来就重探 ⇒
-  // 用「后端当前配置」把刚选的模型画回去 ⇒ 用户永远换不动。两层都要挡。
+  check("U68", "repaint-after-fetch",
+    body.indexOf("ai_vendor") >= 0 && body.indexOf("paintModel();") >= 0,
+    "取回厂商对象之后必须重画下拉（否则永远停在初始化那一帧的模型未知）");
+  // 事件回环（用户实测：toggle 联网就跳回 pro）：config://changed 的处理器里**不许**重取厂商对象 ——
+  // 只有一个与厂商无关的键（harness.llm.web_search）变了也会被叫醒，用配置里的默认把刚选的画回去。
   const sess = read("ui/scripts/session.js");
-  const tks = sess.indexOf("function touchesKeyDependentState");
-  const tksBody = tks >= 0 ? sess.slice(tks, tks + 700) : "";
-  check("U68", "model-key-does-not-trigger-reprobe", tksBody.indexOf("/model/i") >= 0,
-    "touchesKeyDependentState 必须把模型键排除：否则换模型会触发重探，把刚选的画回去（事件回环）");
+  const ccStart = sess.indexOf('listen("config://changed"');
+  const ccEnd = ccStart >= 0 ? sess.indexOf("\n        });", ccStart) : -1;
+  const ccBody = ccStart >= 0 && ccEnd > ccStart ? sess.slice(ccStart, ccEnd) : "";
+  check("U68", "model-key-does-not-trigger-reprobe",
+    ccBody.indexOf("probeEnv") >= 0 && ccBody.indexOf("reloadVendor") < 0 &&
+      /touchesEnvState/.test(sess) && !/touchesKeyDependentState/.test(sess),
+    "config://changed 只重探环境 chip、**不重取厂商对象**：否则拧一下 🌏 就触发重取，把刚选的模型画回去（事件回环）");
+  check("U68", "vendor-event-drives-models",
+    /listen\("model:\/\/vendor-changed"/.test(sess) && /aliveVendorDependent/.test(sess) &&
+      /listen\("config:\/\/changed"/.test(sess),
+    "模型/厂商的重取必须由 model://vendor-changed 驱动（不是任意配置变化）");
   const mrs = read("src-tauri/src/main.rs");
   check("U68", "engine-managed-keys-not-broadcast",
     mrs.indexOf("fn is_engine_managed_key") >= 0 && mrs.indexOf("if meaningful.is_empty()") >= 0,
@@ -5089,6 +5166,7 @@ async function main() {
     ["U30", "proc-log-replay", runProcLogChecks],
     ["U24", "external-link-replay", runExternalLinkChecks],
     ["U33", "ctx-copy-path", runContextMenuChecks],
+  ["U71", "path-join-separator", runPathJoinChecks],
     ["U38", "open-project-args", runOpenProjectArgsChecks],
     ["U39", "failover-config", runFailoverChecks],
     ["U40", "anthropic-format", runAnthropicFormatChecks],

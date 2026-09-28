@@ -7,7 +7,7 @@
  * 在配置里填完 API Key → 回到会话面板，那排 chip 里还写着「✗ key 未配置」。
  *
  * 本脚本不靠"看着像刷新了"来判断，而是**在页面里给 `invoke` 装一个计数器**，
- * 直接数配置改完之后 `agent_env_probe` / `ai_models` 有没有被再调一次 ——
+ * 直接数配置改完之后 `agent_env_probe` / `ai_vendor` 有没有被再调一次 ——
  * 顺带验反方向：**改一个无关的键（`harness.discover.extra`）不该触发任何重取**。
  *
  * ## 用法
@@ -21,7 +21,7 @@
  *
  * | # | 动作 | 期望 |
  * |---|------|------|
- * | ① | `config_form_apply(runtime, ai.api_key=<dummy>)` | `agent_env_probe` 与 `ai_models` 的调用数**都 +1**，且模型下拉退化成"取不到清单" |
+ * | ① | `config_form_apply(runtime, ai.api_key=<dummy>)` | `agent_env_probe` 与 `ai_vendor` 的调用数**都 +1**，且模型下拉退化成"取不到清单" |
  * | ② | `config_form_apply(runtime, ai.api_key=<空>)`（删掉，回落到真 key） | 两者**再 +1**，模型列表**恢复**（这正是用户要的："保存完 key 面板自己就对了"） |
  * | ③ | `config_form_apply(runtime, harness.discover.extra=…)`（无关键） | 两者**都不动**（相关度过滤生效，不做无用功） |
  *
