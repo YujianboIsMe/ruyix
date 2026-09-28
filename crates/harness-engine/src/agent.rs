@@ -83,6 +83,8 @@ mod action;
 pub use action::*;
 mod connect;
 pub use connect::*;
+mod dispatch;
+pub(crate) use dispatch::*;
 mod gate;
 pub use gate::*;
 mod prompt;
