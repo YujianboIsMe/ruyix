@@ -1,0 +1,47 @@
+# 正样本（稍大）：既要修 mul，又要补一个 unittest 文件 —— 判据既**独立断言行为**，
+# 又要求 agent 写的测试**真的跑起来**（≥3 个用例），两条都不可省。
+#
+# 判据脚本放在 `judge/` 里，用 `{judge}` 引用：跑的时候它被拷到 **run 目录**（沙箱项目之外），
+# 所以 agent 连看都看不到考卷；cwd 仍是沙箱项目目录 —— 判据看到的必须是 agent 写出来的东西。
+prompt = "calc.py 里的 mul 实现错了：mul(3, 4) 应当返回 12。修好它，并补一个 test_calc.py，用 unittest 覆盖 add 与 mul 的至少三个用例。"
+notes = "判据 = 独立行为断言 + 『agent 的测试真的跑了 ≥3 个用例』；只看单条都会漏"
+tier = "full"
+
+[judge]
+cmd = "python {judge}/check.py"
+timeout_secs = 60
+
+[fake]
+final_text = "已修正 mul（改为 a * b），并补了 test_calc.py（覆盖 add 的 2 例 + mul 的 2 例）。"
+
+[[fake.turn]]
+write = [{ path = "calc.py", content = """
+def add(a, b):
+    return a + b
+
+
+def mul(a, b):
+    return a * b
+""" }]
+
+[[fake.turn]]
+write = [{ path = "test_calc.py", content = """
+import unittest
+
+from calc import add, mul
+
+
+class TestCalc(unittest.TestCase):
+    def test_add(self):
+        self.assertEqual(add(2, 3), 5)
+
+    def test_add_negative(self):
+        self.assertEqual(add(-1, 1), 0)
+
+    def test_mul(self):
+        self.assertEqual(mul(3, 4), 12)
+
+
+if __name__ == '__main__':
+    unittest.main()
+""" }]

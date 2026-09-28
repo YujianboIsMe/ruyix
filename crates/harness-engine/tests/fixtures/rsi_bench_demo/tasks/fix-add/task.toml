@@ -1,0 +1,17 @@
+# 正样本：判据只看**行为**（真 import + assert），不看实现方式。
+prompt = "calc.py 里的 add 函数实现错了：add(2, 3) 应当返回 5。修好它。"
+notes = "最小正样本：判据只跑行为断言，不检查注释/风格/实现路径"
+tier = "smoke"
+
+[judge]
+cmd = '''python -c "from calc import add; assert add(2, 3) == 5; print('add ok')"'''
+timeout_secs = 30
+
+[fake]
+final_text = "已修正 calc.py：add 改为返回 a + b 的求和。"
+
+[[fake.turn]]
+write = [{ path = "calc.py", content = """
+def add(a, b):
+    return a + b
+""" }]

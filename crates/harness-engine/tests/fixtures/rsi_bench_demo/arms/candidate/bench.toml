@@ -1,0 +1,10 @@
+# 候选臂：演示"一次自改"的形状 —— 覆盖 L1 数值参数 + 追加命令发现表行。
+# （这里的取值仍是无操作级别的，演示管道用；真候选应当是离线调参器给出的建议值。）
+#
+# 注意：这里的键是**引擎侧**的配置形状（`AppConfig`），不是宿主那份扁平的 `ruyix.code.*` 键。
+# 例如宿主的 `ruyix.code.harness.discover.extra` 是逗号分隔字符串，引擎里 `discover.extra` 是数组。
+[agent]
+max_elapsed_secs = 1680
+
+[discover]
+extra = ["pnpm", "yarn"]

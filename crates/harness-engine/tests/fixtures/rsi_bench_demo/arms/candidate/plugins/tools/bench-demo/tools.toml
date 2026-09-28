@@ -1,0 +1,10 @@
+# 候选臂追加的一条命令发现行（v1.4 §4.2 拍板 (a) 的用户侧加载点的**同一种形状**）。
+# 引擎侧真消费它：装载后 discover 的表里多这一行（`rsi_bench` 会打印登记行数）。
+# markers 非空 ⇒ 只有项目根出现 bench-demo.marker 时才探它，不污染别的项目。
+
+[[discover]]
+name = "bench-demo"
+bin = "bench-demo-tool"
+version_args = ["--version"]
+markers = ["bench-demo.marker"]
+extensions = []
