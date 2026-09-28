@@ -122,7 +122,16 @@ sources; used by the memory embedding model),
 │       └── en.json       # 🇬🇧 English
 
 ├── crates/harness-engine/  # Agent engine lib (zero tauri; plan/generate/lint/verify/repair/kb/exec/sandbox/gitops)
-│   └── src/agent/tool_loop.rs # 主循环本体 run_with_ask（780 行；v0.12 从 agent.rs 抽离，agent.rs 里只剩 mod + pub use）
+│   └── src/agent.rs           # **门面 + 主循环**：只剩 `run()` + 子模块声明 + 再导出（2026-09-28 拆完，
+│                              #   3975 → 112 行）。对外路径 `agent::X` 一字未变，靠 `pub use <子模块>::*`
+│   └── src/agent/types.rs     # 数据形状：常量上限 + HistoryMsg/WritePolicy/FileChange/StepTrace/Probe/AgentOutcome
+│   └── src/agent/gate.rs      # 门禁：机械验证结论（CheckItem/VerifyOutcome）+ 窄/全验证 + 复核回灌
+│   └── src/agent/connect.rs   # Connect 契约：ENV_CONNECTOR_KIND/Connector/NoConnector（宿主落地，引擎零知识）
+│   └── src/agent/prompt.rs    # 提示词与注入：AGENT_SYSTEM/agent_system_prompt/policy_system_note/batch_hint/ask_hint
+│   └── src/agent/action.rs    # 动作解析：模型输出 → Action（parse_* + 缺字段纠偏 + 波次调度）
+│   └── src/agent/tools.rs     # 工具执行：Ctx（覆盖层/台账）+ read/write/execute/proc/connect + 历史折叠 + settle_steps
+│   └── src/agent/tool_loop.rs # 主循环本体 run_with_ask（v0.12 从 agent.rs 抽离；子模块 + `use super::*` 的先例）
+│   └── src/agent/findings.rs / context.rs / ledger.rs / capsule.rs / scheduler.rs  # v1.1/v1.2 的账本与调度
 │   └── src/step_agent.rs      # 计划步骤执行体（子 agent，上下文干净，v0.4）
 │   └── src/testllm.rs         # 脚本化假 LLM（单测与 examples 共用，不联网）
 │   └── examples/plan_only.rs  # plan-only e2e smoke (real LLM call via DEEPSEEK_API_KEY env)
