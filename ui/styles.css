@@ -4427,3 +4427,100 @@ select,
   padding: 6px 0;
 }
 
+/* ============ 会话截图附件（v1.3 多模态输入） ============
+   待发条（选图/粘贴/拖进来之后、发出去之前）+ 气泡里的缩略图 + 点开看大图的浮层。
+   缩略图统一 `object-fit: cover`：截图多半是宽屏，等比铺满格子比留白更好认。 */
+.session-pending {
+  padding: 6px 10px 2px;
+  border-top: 1px solid var(--border-color);
+}
+
+.session-pending-head {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.session-pending-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.session-shot {
+  position: relative;
+  display: inline-flex;
+}
+
+.session-shot-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  cursor: zoom-in;
+}
+
+.session-shot-thumb--msg {
+  width: 96px;
+  height: 96px;
+}
+
+/* 图被删了：不当破图框，降透明度 + 说明（文案由 hydrateShots 写进 alt/title） */
+.session-shot-thumb--missing {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.session-shot-x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+  cursor: pointer;
+}
+
+.session-shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.session-chat--drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+.shot-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.88);
+  cursor: zoom-out;
+}
+
+.shot-lightbox img {
+  max-width: 96vw;
+  max-height: 88vh;
+  object-fit: contain;
+}
+
+.shot-lightbox-hint {
+  color: #ddd;
+  font-size: 12px;
+  margin-top: 10px;
+}

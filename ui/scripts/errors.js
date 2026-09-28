@@ -592,6 +592,25 @@
     ],
     // ㉕ `{key} 不能是 0（{key} 是行数/行号，从 1 起）`
     [/^(.+?)\s*不能是\s*0（.+?）$/, (m) => join(m[1], " must not be 0 (line numbers and counts start at 1)")],
+    // ---- 2026-09-28（v1.3 会话截图附件 `agent/attachments.rs`）----
+    // 这三条**没有**走词典：`张图` / `截图` 是这一版新出现的名词，逐词换会在英文界面里
+    // 留半句中文（"image #2 是空的"）—— 新机制第一次登场就把整句写完，比扩词典更直接。
+    // ㉖ `第 <N> 张图的 base64 解不开（<原因>）`
+    [
+      /^第\s*(.+?)\s*张图的\s*base64\s*解不开（(.*)）$/,
+      (m) => join("image #", m[1], " could not be base64-decoded (", m[2], ")"),
+    ],
+    // ㉗ `第 <N> 张图是空的`
+    [/^第\s*(.+?)\s*张图是空的$/, (m) => join("image #", m[1], " is empty")],
+    // ㉘ `截图目录建不出来 <路径>: <原因>` / `截图写不进去 <路径>: <原因>`
+    [
+      /^截图目录建不出来\s*(.*?)[:：]\s*(.*)$/,
+      (m) => join("cannot create the screenshot directory ", m[1], ": ", m[2]),
+    ],
+    [
+      /^截图写不进去\s*(.*?)[:：]\s*(.*)$/,
+      (m) => join("cannot write the screenshot ", m[1], ": ", m[2]),
+    ],
   ];
 
   function dictValue(k) {

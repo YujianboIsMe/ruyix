@@ -772,6 +772,34 @@ function runStaticChecks() {
       has(connRs, "call_tool") && has(connRs, "send_task"),
     "Connect 原语没接上宿主：mod.rs 未建 RuyixConnector / 未传 McpManager，或 connect.rs 缺 MCP/A2A 通路");
 
+  // U72 vision-attachments：把截图发给 Agent（v1.3 多模态）。五环缺一不可，任何一环断了
+  // 都是"看起来能发图、其实没发出去"——那比没有这个功能更坏（用户会拿答复当真）。
+  //   ① 前端三个入口（选图 / 粘贴 / 拖拽）共用一个落点（addFiles）：一份闸、一份文案；
+  //   ② 缩图在**浏览器**里做（canvas）——宿主与引擎都不该为此引图像依赖；
+  //   ③ 图**不进会话文件**：会话里存宿主回执的路径（attachments），内存预览（`_` 前缀）落盘剥掉；
+  //   ④ 引擎只在**有图**时改请求形状，且盲模型被拒（绝不静默丢图继续发）；
+  //   ⑤ 落盘在便携根的项目桶（`projects/<键>/shots/`），一个字节都不进用户仓库。
+  const sessMm = readUiModule("session.js");
+  check("U72", "vision-entry-points",
+    has(sessMm, "[data-attach]") && has(sessMm, "[data-file]") &&
+      has(sessMm, "clipboardData") && has(sessMm, "dataTransfer") && has(sessMm, "addFiles("),
+    "三个附件入口（📎 / 粘贴 / 拖拽）没接上，或没共用同一个 addFiles 落点");
+  check("U72", "vision-downscale-in-browser",
+    has(sessMm, 'createElement("canvas")') && has(sessMm, "toDataURL") && has(sessMm, "SHOT_MAX_EDGE"),
+    "缩图不在浏览器里做（canvas）—— 宿主/引擎不该为此引图像依赖");
+  check("U72", "vision-bytes-never-enter-the-session-file",
+    has(sessMm, "attachments: withShots.map(") && has(sessMm, 'k.startsWith("_")'),
+    "字节进了会话文件：发送时没带 attachments，或 persist 没剥掉 `_` 前缀的临时字段");
+  const mmLlmRs = read("crates/harness-engine/src/llm.rs");
+  const mmAttRs = read("src-tauri/src/agent/attachments.rs");
+  check("U72", "vision-blind-model-refused",
+    has(mmLlmRs, "fn reject_images_for_a_blind_model") && has(mmAttRs, "fn sniff"),
+    "引擎缺读图能力闸（盲模型必须拒），或宿主缺按字节嗅探");
+  check("U72", "vision-shots-in-the-project-bucket",
+    has(mmAttRs, 'pub const SHOT_DIR: &str = "shots"') &&
+      has(mmAttRs, "project_bucket(project_root, SHOT_DIR)"),
+    "截图没落在便携根的项目桶（不许写用户仓库）");
+
   // U15 outline-plan：模型返回计划 → 大纲区任务列表（✅ ⌛ ⛏️ ⚠️ 六态 + ❌ 失败 / ⏹️ 未完成）。
   // 链路五环缺一不可：引擎发 plan 事件 → sink emit → session.js 监听并渲染 → main.js 会话分支调用
   // → run 收尾时 settle_steps 把每个步骤都落到终态（否则没轮到派发的步骤会永远停在
