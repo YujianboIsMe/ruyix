@@ -842,17 +842,46 @@ fn skills_remove(
     Ok(capability::load_skills(project_root.as_deref()))
 }
 
+/// 窗口尺寸（逻辑像素）：请求 1200×800，但**不许超过屏幕可用区**。
+///
+/// 写死宽度的后果（用户实测 2026-09-28）：屏是 1080×1920 的竖屏，请求宽比屏宽还大，
+/// `center()` 于是把窗口摆到 x = -60 —— 左右各切掉一条，工具栏最右那几颗按钮
+/// （📎 / 🌏 / ▶）和状态栏永远看不见，而且窗口比屏大、拖不回屏幕里。
+/// 所以尺寸必须**按屏算**：屏比请求小就跟着小，屏大就照请求来。
+///
+/// 三个容易写错的点：
+/// - 用 `work_area`（已扣掉菜单栏 / Dock）而不是整块屏 —— 按整块屏算出的"刚好放得下"，
+///   上边缘会被 macOS 菜单栏压住，而无边框窗口没有标题栏可以拖；
+/// - 比之前先把**物理**像素换成**逻辑**像素：`inner_size` 吃逻辑像素，Retina 屏物理 2160
+///   宽逻辑只有 1080，直接拿物理值去比会以为屏有两米宽、夹了等于没夹；
+/// - 问不到屏（无头 / 远程会话）时按请求开，不在这里把窗口缩成一个方块。
+fn window_size_for_screen(app: &tauri::AppHandle) -> (f64, f64) {
+    const REQ_W: f64 = 1200.0;
+    const REQ_H: f64 = 800.0;
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        return (REQ_W, REQ_H);
+    };
+    let usable = monitor
+        .work_area()
+        .size
+        .to_logical::<f64>(monitor.scale_factor());
+    // 留 10% 余量：窗口贴着屏边看着就像被切了，也留一点拖动 / 系统手势的余地
+    (REQ_W.min(usable.width * 0.9), REQ_H.min(usable.height * 0.9))
+}
+
 /// 建主窗口。
 ///
 /// **窗口必须在 Rust 里建，不能留在 `tauri.conf.json` 的 `app.windows`** —— 只有 Builder 上挂得了
 /// `on_navigation`，而那就是这道 P0 的闸门；配置里生出来的窗口没有闸门，链接一点就顶掉整个 IDE。
-/// 原来的配置项逐条照抄（标题 / 尺寸 / 无边框 / 居中 / devtools），漏一个就是启动时的观感回归。
+/// 原来的配置项逐条照抄（标题 / 无边框 / 居中 / devtools），只有尺寸改成按屏算
+/// （见 [`window_size_for_screen`]），漏一个就是启动时的观感回归。
 fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let dev_url = app.config().build.dev_url.clone();
     let nav_dev_url = dev_url.clone();
+    let (win_w, win_h) = window_size_for_screen(app);
     tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
         .title("ruyix")
-        .inner_size(1200.0, 800.0)
+        .inner_size(win_w, win_h)
         .decorations(false)
         .center()
         .devtools(true)

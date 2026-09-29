@@ -5254,6 +5254,31 @@ function runContextLayoutChecks() {
 
 }
 
+/**
+ * U75 window-fits-screen：主窗口尺寸**按屏算**，不写死。
+ *
+ * 钉住用户实测（2026-09-28）：屏是 1080×1920 的竖屏，而窗口写死 1200 宽 ⇒ Tauri 的
+ * `center()` 把它摆到 x = -60，左右各切掉一条，工具栏最右那几颗按钮永远看不见，
+ * 窗口比屏大也拖不回屏幕里。判据不是"1200 挺好看"，而是**尺寸必须从屏幕推出来**：
+ * 请求值只做上限，实际大小由 `work_area`（已扣菜单栏 / Dock）× 0.9 决定。
+ *
+ * 为什么连 `work_area` 与 `scale_factor` 也一起钉：这两处改错**在开发机上完全看不出来**
+ * —— 大屏上请求值本就生效、Retina 上物理值也够大，只有小屏 / 竖屏才露馅。
+ */
+function runWindowFitChecks() {
+  const mainRs = read("src-tauri/src/main.rs");
+  const i = mainRs.indexOf("fn window_size_for_screen");
+  const body = i >= 0 ? mainRs.slice(i, i + 1600) : "";
+  check("U75", "window-size-from-screen",
+    i >= 0 && body.indexOf("primary_monitor()") >= 0 && body.indexOf("work_area()") >= 0 &&
+      body.indexOf("to_logical::<f64>") >= 0 && body.indexOf("scale_factor()") >= 0 &&
+      body.indexOf(".min(usable.width") >= 0 && body.indexOf(".min(usable.height") >= 0,
+    "窗口尺寸必须由屏幕算出来（primary_monitor → work_area → to_logical(scale_factor)）并按屏宽/屏高夹住请求值");
+  check("U75", "window-size-not-hardcoded",
+    !/\.inner_size\(\s*[0-9]/.test(mainRs) && /\.inner_size\(\s*win_w\s*,\s*win_h\s*\)/.test(mainRs),
+    "build_main_window 里不许再出现字面量的 inner_size(宽, 高) —— 竖屏 / 小屏上它会比屏幕还宽");
+}
+
 async function main() {
   // 逐个场景 try —— 单个场景崩溃时记一条 FAIL 并继续，别让整份报告消失
   const scenarios = [
@@ -5298,6 +5323,7 @@ async function main() {
   ["U68", "model-chip-repaint", runModelChipChecks],
   ["U70", "context-layout", runContextLayoutChecks],
     ["U65", "config-form-no-value-smear", runConfigSmearChecks],
+    ["U75", "window-fits-screen", runWindowFitChecks],
     ["U57", "startup-real", runStartupProbe],
   ];
   for (const [id, name, fn] of scenarios) {
