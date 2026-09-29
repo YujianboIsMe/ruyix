@@ -721,45 +721,53 @@ pub fn tool_decls_for(names: &[&str]) -> Vec<serde_json::Value> {
 }
 
 /// 工具的（名字 / 说明 / 参数 JSON 源串）表。**契约见 [`tool_decls`] 的文档。**
+///
+/// ## 事实的家（2026-09-29 分层重构）
+///
+/// 工具的**机械事实**——参数形态、默认值与上限、失败语义——只写在这里：
+/// 声明面是三个受众（主循环 / 步骤执行体 / 复核员）共享的唯一一份，模型在调用时刻
+/// 看的也是它。**选型策略**（何时用哪个、判据成对）归 `AGENT_SYSTEM` / `STEP_SYSTEM`；
+/// **本 run 的事实**（写入模式、批上限、提问限额）归首轮注入。别把同一事实写两处 ——
+/// 两处必漂移（"一次上限 400 行"与"超时上限 120 秒"就曾只在系统提示词里、这里没有）。
 const TOOL_DECLS: &[(&str, &str, &str)] = &[
     (
         "read",
-        "读项目内的文件（或目录列表）。大文件用 offset/limit 分段读；连续读多个互不依赖的文件请在一轮里发多个 read。",
-        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔"},"offset":{"type":"integer","description":"从第几行开始读（1 起）"},"limit":{"type":"integer","description":"最多读多少行"}},"required":["path"]}"#,
+        "读项目内的文件：路径给目录返回结构树，给文件返回内容。大文件用 offset/limit 窗口分段读。Git 历史用 execute 跑 git log / git show。",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔；给目录返回结构树，给 \".\" 返回项目根结构"},"offset":{"type":"integer","description":"从第几行开始读（行号从 1 起）"},"limit":{"type":"integer","description":"最多读多少行，一次上限 400 行"}},"required":["path"]}"#,
     ),
     (
         "write",
-        "写项目内的文件（整文件）。改已有文件优先用 edits 只传改动；新建文件或整篇重排才用 content 交回整份。两个都给会被拒。",
-        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径"},"content":{"type":"string","description":"整份新内容（新建/整篇重排）"},"edits":{"type":"array","description":"锚点替换（改已有文件的首选）","items":{"type":"object","properties":{"find":{"type":"string","description":"要被替换的原文（必须唯一）"},"replace":{"type":"string","description":"换成什么"}},"required":["find","replace"]}}},"required":["path"]}"#,
+        "写项目内的文件，两种形态二选一：改已有文件优先用 edits（只传改动，不重发全文）；新建文件、整篇重排、或没读过原文时才用 content 交回整份。两种形态同时给会被拒；content 不许是空串。",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径"},"content":{"type":"string","description":"整份新内容（新建 / 整篇重排用）"},"edits":{"type":"array","description":"锚点替换，按给定顺序对同一文件累积生效；任何一条 find 匹配不上或撞上多次，整批作废、一个字节都不落盘——改之前先 read 确认原文","items":{"type":"object","properties":{"find":{"type":"string","description":"要被替换的原文：必须与文件逐字符一致（含缩进）且在文件里恰好出现一次；不唯一就多带两行上下文"},"replace":{"type":"string","description":"换成什么"}},"required":["find","replace"]}}},"required":["path"]}"#,
     ),
     (
         "execute",
-        "在项目根执行命令。前台有界：{cmd, timeout_secs}（编译/测试/git）。起常驻服务：{cmd, background:true, ready_cmd, ready_timeout_secs, keep_alive}，ready_cmd 退出码 0 即算就绪，返回 handle。句柄操作：{op:\"status\"|\"log\"|\"stop\", handle}。",
-        r#"{"type":"object","properties":{"cmd":{"type":"string","description":"要执行的命令行"},"timeout_secs":{"type":"integer","description":"前台最长等多久"},"background":{"type":"boolean","description":"true = 托管常驻进程，起完就返"},"ready_cmd":{"type":"string","description":"后台就绪判据：退出码 0 即就绪"},"ready_timeout_secs":{"type":"integer","description":"等就绪的上限"},"keep_alive":{"type":"boolean","description":"run 结束是否保留这个进程（服务默认要留）"},"op":{"type":"string","description":"句柄操作：status / log / stop"},"handle":{"type":"string","description":"后台进程的句柄（op 时必填）"}},"required":[]}"#,
+        "在项目根执行命令（工作目录是项目根）。三种形态：前台 {cmd, timeout_secs}（编译 / 测试 / 格式化 / git）；起常驻服务 {cmd, background:true, ready_cmd, ready_timeout_secs, keep_alive}——永不退出的服务（spring-boot:run / java -jar / npm run dev）必须用它，别用 start / Start-Process 或往 %TEMP% 写 bat/ps1 那类花招（输出拿不到、进程还脱离掌控）；句柄操作 {op, handle}。重启同一个服务前先 op=「status」/「stop」：端口被上一次的进程占着时，「起不来」是假的。",
+        r#"{"type":"object","properties":{"cmd":{"type":"string","description":"要执行的命令行"},"timeout_secs":{"type":"integer","description":"前台最长等多久（秒）：默认 30，上限 120"},"background":{"type":"boolean","description":"true = 托管常驻进程，起完就返；输出全落在引擎给的日志文件里，别自己写重定向"},"ready_cmd":{"type":"string","description":"后台就绪判据：一条命令，退出码 0 即就绪；不写等于不等、起完即返"},"ready_timeout_secs":{"type":"integer","description":"等就绪判据命中的上限（秒）"},"keep_alive":{"type":"boolean","description":"决定进程活不活得过本次 run：不写 = false，run 一结束引擎连子进程树一起收掉；用户要服务留着跑就必须 true"},"op":{"type":"string","description":"句柄操作：status（查状态）/ log（读日志尾）/ stop（停掉，连子进程树）"},"handle":{"type":"string","description":"后台进程的句柄（op 时必填）"}},"required":[]}"#,
     ),
     (
         "connect",
-        "连项目之外的能力：MCP 工具与远端 agent。action=list 看清单；action=call 调 MCP 工具；action=send 给远端 agent 派任务。项目内的读写执行别用它。",
+        "连项目之外的能力：MCP 工具与远端 agent。action=list 看清单；action=call 调 MCP 工具；action=send 给远端 agent 派任务。可用清单在上下文里给过，没有的就别硬猜名字；项目内的读写执行别用它，也不要自己写脚本硬凑协议。",
         r#"{"type":"object","properties":{"action":{"type":"string","description":"list / call / send"},"server":{"type":"string","description":"MCP 服务器名（call）"},"tool":{"type":"string","description":"工具名（call）"},"arguments":{"type":"object","description":"工具参数（call）"},"agent":{"type":"string","description":"远端 agent 名（send）"},"text":{"type":"string","description":"派给远端 agent 的话（send）"}},"required":["action"]}"#,
     ),
     (
         "plan",
-        "任务清单：要动多个文件时先发，用户会在大纲区看到进度，引擎也按它逐步派发。files 只列**这一步真的会写**的文件（拿它对账，列多了会让做完的步骤看起来没做完）。",
+        "任务清单（给用户看进度，引擎也按它逐步派发）：要动多个文件时先发。files 只列**这一步真的会写（新建或整文件重写）**的文件——只是要读一读、参考一下的，或已经躺在项目里不用改的，都不要列；大纲的进度拿这份清单对账，列多了会让做完的步骤看起来没做完。",
         r#"{"type":"object","properties":{"steps":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string","description":"短标题"},"detail":{"type":"string","description":"这一步做什么（一句话）"},"files":{"type":"array","items":{"type":"string"},"description":"这一步真的会写的文件（相对路径）"},"kind":{"type":"string","description":"code / test / config / doc"}},"required":["title"]}}},"required":["steps"]}"#,
     ),
     (
         "ask_user",
-        "需求有歧义、且猜错会白做时，问委托人（独占一轮）。必须给 why：说明这个答案会决定接下来的什么动作。答案不构成任何授权。",
+        "需求有歧义、且猜错会白做时，问委托人。必须给 why：说明这个答案会决定接下来的什么动作。答案不构成任何授权。",
         r#"{"type":"object","properties":{"question":{"type":"string","description":"要问的问题"},"why":{"type":"string","description":"为什么必须问（决定接下来什么动作）"},"options":{"type":"array","items":{"type":"string"},"description":"候选答案（最多 5 个，用户也可自由输入）"},"default_index":{"type":"integer","description":"推荐第几个选项（0 起）"}},"required":["question","why"]}"#,
     ),
     (
         "record_findings",
-        "把**你已确认的事实**记进本 run 的进展记忆（永不折叠，下一轮仍可见）。每读出一件会改变后续决策的事实就记一条；claim 一句话，evidence 给 path:line 或 命令+退出码。修正旧结论时用 supersedes 指向旧条目 id（旧条留在账本里、不再出现在你眼前）。可与其它调用同批发出。",
-        r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"claim":{"type":"string"},"evidence":{"type":"string"},"note":{"type":"string"},"supersedes":{"type":"string"}},"required":["claim","evidence"]}}},"required":["items"]}"#,
+        "把**你已确认的事实**记进本 run 的进展记忆（永不折叠，下一轮仍可见）。每读出一件会改变后续决策的事实就记一条（宁多勿少）；给不出证据的断言不要记。修正旧结论用 supersedes 指向旧条目 id——取代不改历史：旧条留在账本里，只是不再出现在你眼前。可与其它调用同批发出（搭车记录不多花一轮）。",
+        r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"claim":{"type":"string","description":"结论一句话"},"evidence":{"type":"string","description":"证据：path:line 或 命令+退出码"},"note":{"type":"string","description":"理由与推理——协议不认散文，note 是你唯一能「想」的地方，别省着不写"},"supersedes":{"type":"string","description":"要修正的旧条目 id（提示词块和工具结果里都有）"}},"required":["claim","evidence"]}}},"required":["items"]}"#,
     ),
     (
         "final",
-        "交付：全部做完后调用它结束本轮。answer 是给用户的完整说明（Markdown：结论、改了哪些文件、验证结果），不要粘贴命令原始输出或整段文件内容。",
+        "交付：全部做完后调用它结束本 run。answer 是给用户的完整说明（Markdown：结论、改了哪些文件、验证结果），不要整段粘贴命令原始输出、编译/测试日志或文件内容——那些已在你自己的调用结果里（用户也能逐条看到），要引用就摘那一行结论（哪个端口、哪个版本号、第几行报错）。",
         r#"{"type":"object","properties":{"answer":{"type":"string","description":"给用户的完整说明（Markdown）"}},"required":["answer"]}"#,
     ),
 ];

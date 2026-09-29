@@ -63,16 +63,20 @@ fn staged_execute_note_gated_by_mode_and_changes() {
     );
 }
 
-/// 提示词必须把后台模式说清 —— 不说，模型就还用 start / Start-Process 那套花招，
-/// 而那正是这轮的病根（输出拿不到 + 进程脱离掌控 + 桌面弹窗）。
+/// 后台模式的**词汇**（background / ready_cmd / handle / 就绪）以工具声明为家 ——
+/// 声明面是三个受众共享的，模型在调用时刻看的就是它。不写这些词，模型就还用
+/// start / Start-Process 那套花招，而那正是这轮的病根（输出拿不到 + 进程脱离掌控 + 桌面弹窗）。
 #[test]
-fn system_prompt_documents_the_background_mode() {
-    for k in ["background", "ready_cmd", "handle", "就绪"] {
-        assert!(
-            AGENT_SYSTEM.contains(k),
-            "提示词缺 {k}：模型没有表达常驻的词汇"
-        );
+fn the_execute_declaration_documents_the_background_mode() {
+    let decl = crate::llm::tool_decls()
+        .into_iter()
+        .find(|t| t["function"]["name"] == "execute")
+        .expect("工具表必须有 execute");
+    let text = serde_json::to_string(&decl).unwrap();
+    for k in ["background", "ready_cmd", "handle", "就绪", "keep_alive"] {
+        assert!(text.contains(k), "execute 声明缺 {k}：{text}");
     }
+    assert!(text.contains("Start-Process"), "得把 start 花招点掉：{text}");
 }
 
 /// 命令发现：本机有什么命令必须**实测后告诉模型**，而不是让模型自己试。
@@ -261,7 +265,9 @@ fn the_batch_hint_follows_the_switch() {
     }
 }
 
-/// 提示词成对写：两种形状都得说清"什么时候用 / 什么时候别用"。
+/// 提示词成对写：**策略**判据（该用 / 别用）留在 AGENT_SYSTEM，**形状与机械事实**
+/// （edits / offset / 上限 / 失败语义）的家是工具声明 —— 子步骤与复核员共享那份声明面，
+/// 形状到不到场看 `tools` 数组，不看谁家的系统提示词里抄没抄。
 /// 老那句"必须是整份内容"必须消失 —— 留着它，模型看见新形状也不会用。
 #[test]
 fn prompt_advertises_both_write_shapes_and_the_read_window() {
@@ -283,10 +289,23 @@ fn prompt_advertises_both_write_shapes_and_the_read_window() {
         !AGENT_SYSTEM.contains("再用 write 交回整份新内容"),
         "规则 3 也得跟着改"
     );
-    // 子步骤提示词各自自洽：它没有 connect，但 read/write 的新形状必须有
-    assert!(crate::step_agent::STEP_SYSTEM.contains("edits"));
-    assert!(crate::step_agent::STEP_SYSTEM.contains("offset"));
-    assert!(!crate::step_agent::STEP_SYSTEM.contains("交回的必须是整份内容"));
+    // 机械事实的家：TOOL_DECLS（read 的窗口上限、write 的 find 唯一性与整批作废、
+    // execute 的超时上限 —— 这些曾经只在 AGENT_SYSTEM 里，两处必漂移）
+    let decls = serde_json::to_string(&crate::llm::tool_decls()).unwrap();
+    for k in [
+        "edits",
+        "offset",
+        "上限 400",
+        "恰好出现一次",
+        "整批作废",
+        "上限 120",
+    ] {
+        assert!(decls.contains(k), "工具声明缺 {k}：{decls}");
+    }
+    assert!(
+        !decls.contains("交回的必须是整份内容"),
+        "老判据不该在声明面复现"
+    );
 }
 
 /// 多模态：任务消息带图 ⇒ **第一条请求**里就有图块（OpenAI 兼容路的形状）。
