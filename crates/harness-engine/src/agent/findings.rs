@@ -519,7 +519,11 @@ impl Progress {
         spilled_now
     }
 
-    /// 渲染注入 system 尾部的那一块（findings + 账本）。
+    /// 渲染「进展记忆」块（findings + 账本）。**它落在哪儿由布局契约决定**
+    /// （`agent.ctx.layout`，v1.2）：
+    /// 关 ⇒ 拼进 `msgs[0]` 的 system 尾部（v1.1 行为，代价见 `context.rs` 的 I1）；
+    /// 开 ⇒ 它是**易变尾 A**：请求前追加、`llm::chat` 返回后立刻摘掉，`msgs[0]` 逐轮一字不动
+    /// （落点与摘尾在 `tool_loop.rs`，摘尾是为了不破坏 `fold_history` 的**下标纪律**）。
     pub fn render(&self) -> String {
         let mut out =
             String::from("\n\n## 已确认的事实（本 run 内不折叠；这是你的记忆，别重复探索）\n");
