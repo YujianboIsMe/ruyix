@@ -677,3 +677,28 @@ fn parameter_shapes_are_validated_at_parse_time() {
     assert!(parse_action(r#"{"tool":"read","args":{"path":"a.py","limit":0}}"#).is_err());
     assert!(parse_action(r#"{"tool":"read","args":{"path":"a.py","offset":-1}}"#).is_err());
 }
+
+/// LLM 调用本身失败的回灌文案：截断与波动两副药 —— 截断必须叫模型改小交付粒度，
+/// 否则它原样重发同样的体量再截断一次（2026-09-30 step 第 28-33 轮的实测病灶）。
+/// 反馈本身必须是合法 JSON（与 parse_failure_feedback 同一条教训：裸拼引号会炸）。
+#[test]
+fn llm_failure_feedback_distinguishes_truncation_from_flakiness() {
+    let trunc = llm_failure_feedback(
+        "DeepSeek 调用失败（已重试 3 次）: 模型返回了空内容（finish_reason=length，疑似被 max_tokens 截断，可在设置里调大）",
+    );
+    assert!(trunc.contains("改小交付粒度"), "{trunc}");
+    assert!(trunc.contains("edits"), "{trunc}");
+    assert!(
+        trunc.contains("整条都没收到"),
+        "要点名模型的上条输出根本没进上下文：{trunc}"
+    );
+
+    let flaky = llm_failure_feedback("DeepSeek 调用失败（已重试 3 次）: 模型返回了空内容");
+    assert!(!flaky.contains("截断"), "波动轮不该让模型以为自己被截断：{flaky}");
+
+    for f in [trunc, flaky] {
+        let v: serde_json::Value =
+            serde_json::from_str(&f).unwrap_or_else(|e| panic!("回灌必须是合法 JSON: {e}: {f}"));
+        assert!(v["error"].is_string(), "{f}");
+    }
+}

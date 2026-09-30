@@ -23,8 +23,9 @@ use crate::agent::{
     STEP_TOOLS_HINT, StepAction, VerifyOutcome, WriteBody, WriteSpec, batch_hint,
     batch_json_result, batch_waves_for_step, content_channel_error, flush_write_disk, json_result,
     narrow_verify, parse_failure_feedback, parse_step_actions, parse_step_tool_calls,
-    policy_system_note, proc_op_name, read_group, resolve_write, staged_execute_note,
-    tool_calls_echo, tool_exec_bg, tool_execute, tool_proc, write_edits_ok_text, write_ok_text,
+    llm_failure_feedback, policy_system_note, proc_op_name, read_group, resolve_write,
+    staged_execute_note, tool_calls_echo, tool_exec_bg, tool_execute, tool_proc,
+    write_edits_ok_text, write_ok_text,
 };
 use crate::config::AppConfig;
 use crate::discover;
@@ -600,10 +601,7 @@ pub async fn run_step(
         )
         .await
         {
-            Ok(r) => {
-                llm_failures = 0;
-                r
-            }
+            Ok(r) => r, // 清零挪到「解析成功」处：HTTP 成功但输出不可用（半成功）不许清零
             Err(e) => {
                 llm_failures += 1;
                 // 鉴权/余额这类确定性失败重试无意义：直接上抛（与主循环同一判据）
@@ -617,6 +615,9 @@ pub async fn run_step(
                         inp.index
                     ),
                 );
+                // 失败回灌进可变尾：模型对"上一条输出蒸发了"不再毫不知情，
+                // 下一条请求它就能改小体量（不回灌时实测原样重发、六轮零进展）
+                msgs.push(ChatMessage::user(llm_failure_feedback(&e)));
                 tokio::time::sleep(Duration::from_millis(1200 * llm_failures as u64)).await;
                 continue;
             }
@@ -641,7 +642,13 @@ pub async fn run_step(
             parse_step_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
         };
         let mut actions = match parsed {
-            Ok(a) => a,
+            // 这一轮**解析成功**才算真的成功，清零模型失败计数。半成功（HTTP 200 但输出
+            // 不可用）也清零的话，空内容/坏参数交替永远凑不满连续 3 次 —— 实测 step
+            // 第 28-33 轮就这样 ping-pong（坏参数轮把计数清零，步骤烧到预算为止）。
+            Ok(a) => {
+                llm_failures = 0;
+                a
+            }
             Err(e) => {
                 sink.log(
                     "warn",
@@ -816,7 +823,7 @@ mod tests {
     use super::*;
     use crate::agent::WritePolicy;
     use crate::exec::new_cancel_flag;
-    use crate::testllm::{FakeLlm, fake_llm};
+    use crate::testllm::{FakeLlm, fake_llm, fake_llm_raw};
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
@@ -1502,5 +1509,60 @@ mod tests {
                 "声明了工具表里没有的 {n}"
             );
         }
+    }
+
+    /// **半成功不清零 + 失败回灌**（2026-09-30 step 第 28-33 轮实测病灶的回归）：
+    /// 空内容 → 坏参数（HTTP 200 但解析失败）→ 空内容 → 空内容，必须在第 4 轮终止。
+    /// 修复前坏参数轮把模型失败计数清零，这个序列永远凑不满连续 3 次，一路烧到
+    /// 轮预算；且失败从不进上下文，模型对"输出蒸发了"毫不知情、原样重发同样的体量。
+    /// 判据直接看**请求体**：第 4 次请求（第 2 轮）必须带着上一轮的失败说明。
+    #[test]
+    fn a_half_successful_round_keeps_the_llm_failure_streak_and_feeds_back() {
+        let empty = ""; // content 空 + 无 tool_calls ⇒「模型返回了空内容」
+        let bad_args = r#"{"tool_calls":[{"type":"function","function":{"name":"read","arguments":"{\"file\":\"a.txt\"}"}}]}"#;
+        let llm = fake_llm_raw(vec![
+            empty.into(),
+            empty.into(),
+            empty.into(), // 第 1 轮（内部重试 3 次）
+            bad_args.into(), // 第 2 轮：HTTP 成功但解析失败 —— 半成功
+            empty.into(),
+            empty.into(),
+            empty.into(), // 第 3 轮
+            empty.into(),
+            empty.into(),
+            empty.into(), // 第 4 轮 ⇒ 连续 3 次，终止
+        ]);
+        let dir = temp_project("step-half-success");
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看一眼", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "看一眼",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let err = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect_err("计数凑满连续 3 次应当终止");
+        assert!(err.contains("模型调用失败"), "{err}");
+        assert!(
+            err.contains("空内容"),
+            "终止时的病应是空内容，不是剧本耗尽的网络错：{err}"
+        );
+        assert_eq!(llm.count(), 10, "3+1+3+3：坏参数轮不许清零计数");
+        assert!(
+            llm.request(3).contains("上一轮模型调用失败"),
+            "失败说明没进下一条请求：{}",
+            llm.request(3)
+        );
     }
 }

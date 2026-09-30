@@ -378,3 +378,55 @@ fn a_blind_model_is_refused_before_anything_is_sent() {
     assert!(err.contains("能读图"), "{err}");
     assert_eq!(llm.count(), 0, "请求不该发出去");
 }
+
+/// **失败回灌 + 半成功不清零**（主循环侧，2026-09-30 实测病灶的回归）：
+/// 空内容 → 坏参数（半成功）→ 空内容 → 空内容 ⇒ 第 4 轮以"空内容"终止，
+/// 且失败说明进了下一条请求的可变尾。修复前：坏参数轮清零计数 + 失败不回灌，
+/// 这个序列会烧到剧本耗尽、以"网络错误"收场 —— 两条断言都只在新行为下成立。
+#[test]
+fn llm_failure_feeds_back_and_half_success_keeps_the_streak() {
+    let empty = ""; // content 空 + 无 tool_calls ⇒「模型返回了空内容」
+    let bad_args = r#"{"tool_calls":[{"type":"function","function":{"name":"read","arguments":"{\"file\":\"a.txt\"}"}}]}"#;
+    let llm = crate::testllm::fake_llm_raw(vec![
+        empty.into(),
+        empty.into(),
+        empty.into(), // 第 1 轮（内部重试 3 次）
+        bad_args.into(), // 第 2 轮：HTTP 成功但解析失败 —— 半成功
+        empty.into(),
+        empty.into(),
+        empty.into(), // 第 3 轮
+        empty.into(),
+        empty.into(),
+        empty.into(), // 第 4 轮 ⇒ 连续 3 次，终止
+    ]);
+    let dir = TempDir::new("llm-fail-feedback");
+    let mut cfg = AppConfig::default();
+    cfg.llm.base_url = llm.base_url.clone();
+    cfg.llm.api_key = "smoke".into();
+    cfg.llm.model = "fake".into();
+    cfg.gate.narrow = false;
+    cfg.gate.full = false;
+    cfg.reflect.enabled = false;
+    cfg.step.execute_plan = false;
+    let err = block_on(run(
+        &cfg,
+        &dir.0,
+        "随便问一句",
+        &[],
+        WritePolicy::Apply,
+        &NoConnector,
+        &crate::exec::new_cancel_flag(),
+        &QuietSink,
+    ))
+    .expect_err("连续 3 轮模型调用失败应当终止");
+    assert!(
+        err.contains("空内容"),
+        "终止时的病应是空内容，不是剧本耗尽的网络错：{err}"
+    );
+    assert_eq!(llm.count(), 10, "3+1+3+3：坏参数轮不许清零计数");
+    assert!(
+        llm.request(3).contains("上一轮模型调用失败"),
+        "失败说明没进下一条请求：{}",
+        llm.request(3)
+    );
+}

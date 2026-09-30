@@ -450,10 +450,9 @@ pub async fn run_with_ask(
         }
 
         let reply = match llm_res {
-            Ok(r) => {
-                llm_failures = 0;
-                r
-            }
+            // 清零挪到「解析成功」处（unparsed_stream 旁边）：HTTP 成功但输出不可用
+            // （半成功）不许清零 —— 否则空内容/坏参数交替永远凑不满连续 3 次
+            Ok(r) => r,
             Err(e) => {
                 llm_failures += 1;
                 // 鉴权/余额这类确定性失败重试无意义；其余（空内容/网络抖动）退避后
@@ -468,6 +467,9 @@ pub async fn run_with_ask(
                         "[agent] 第 {step} 轮模型调用失败（连续 {llm_failures}/{LLM_FAIL_LIMIT}，退避后重试）：{e}"
                     ),
                 );
+                // 失败回灌进可变尾：模型对"上一条输出蒸发了"不再毫不知情，
+                // 下一条请求它就能改小体量（不回灌时实测原样重发、六轮零进展）
+                msgs.push(ChatMessage::user(llm_failure_feedback(&e)));
                 tokio::time::sleep(Duration::from_millis(1200 * llm_failures as u64)).await;
                 continue;
             }
@@ -553,7 +555,11 @@ pub async fn run_with_ask(
             }
         };
         // 这一轮解析成功 ⇒ 连续失败计数清零（偶发一次格式烂不该累计成"病"）。
+        // `llm_failures` 也在这里清零（而不是 HTTP 200 处）：半成功轮不许清零 ——
+        // 实测 step 第 28-33 轮，坏参数轮把模型失败计数清零，空内容/坏参数
+        // 交替永远凑不满连续 3 次，六轮零进展烧到底。
         unparsed_streak = 0;
+        llm_failures = 0;
         // ---- 停滞守卫的硬终止：上一轮已判停滞，这一轮模型又发工具调用 ⇒ 立刻收手 ----
         //
         // 必须硬：模型不照做就终止，而不是再等一轮 —— "守卫能被绕过"等于没守卫。

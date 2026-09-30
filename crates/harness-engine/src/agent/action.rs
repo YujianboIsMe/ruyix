@@ -1117,3 +1117,31 @@ pub(crate) fn parse_failure_feedback(
             .unwrap_or_else(|_| "\"输出无法解析，请重发一个 JSON 对象\"".into())
     )
 }
+
+/// LLM 调用**本身**失败的回灌（区别于 [`parse_failure_feedback`]：那边模型至少输出了
+/// 一段可议的文本，这边是**整条输出蒸发** —— 截断落在 thinking / 半截 tool_use 里，
+/// 引擎一个字节都没收到）。不回灌的后果实测过：模型对"上一条输出没了"毫不知情，
+/// 原样重发同一个超预算的大输出，六轮零进展（2026-09-30 step 第 28-33 轮）。
+///
+/// **落点是可变尾**：调用方把它 push 成下一条 user 消息（消息序列的末尾 = 易变尾 A 段），
+/// 不进 system；老的失败说明随历史折叠自然收走。
+///
+/// 截断与波动是两种病、两副药：截断必须叫模型改小交付粒度（edits / 分段写 / final 只写
+/// 结论），否则它原样重发再截断一次；波动只需要它继续。
+/// 截断判定走字符串：`err` 来自 llm.rs 的固定措辞（那边只产出带/不带 `finish_reason=length`
+/// 两种"空内容"消息，没有结构化通道）—— 改那两行字面量时这里要跟着看一眼。
+pub(crate) fn llm_failure_feedback(err: &str) -> String {
+    let hint = if err.contains("finish_reason=length") {
+        format!(
+            "你的上一条输出被 max_tokens 截断，引擎**整条都没收到**（不是格式问题）：{err}。\
+             不要原样重发同样的体量 —— 改小交付粒度：write 改用 edits 只传改动，\
+             大文件分多次小段写，final 只写结论不贴长文。"
+        )
+    } else {
+        format!("你的上一轮模型调用失败，引擎已重试仍未成功：{err}。请继续，输出尽量精简。")
+    };
+    format!(
+        "{{\"ok\": false, \"error\": {}}}",
+        serde_json::to_string(&hint).unwrap_or_else(|_| "\"模型调用失败，请继续\"".into())
+    )
+}

@@ -28,8 +28,12 @@ fn d_reasoning() -> String {
     "medium".into()
 }
 
+/// 16384：长程任务实测 8192 撑不住 —— anthropic 路思考与输出**共用**这个数
+/// （medium 档思考预算先吃一半），模型一发大 write 就被截成"空内容"，而重试
+/// 原样重发同样的体量，一路空转（2026-09-30 用户报的 step 第 28-33 轮）。
+/// 加大上限是治标；治本是把截断反馈回灌给模型（`llm_failure_feedback`），两个一起上。
 fn d_max_tokens() -> u32 {
-    8192
+    16384
 }
 fn d_llm_timeout() -> u64 {
     300
