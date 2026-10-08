@@ -146,7 +146,8 @@ sources; used by the memory embedding model),
 │   └── examples/agent_loop_smoke.rs  # 四原语工具循环 e2e（脚本化假 LLM，无需 Key，跑完自断言）
 ├── tools/lint/             # harness_lint python package (engine lint stage; HARNESS_LINT_DIR can override)
 ├── scripts/                # check-style.js (style gate), ui-smoke.js (UI smoke: contracts + panel replays),
-│                           # nav-guard-probe.mjs (真窗口证明：外链闸门，CDP 连 WebView2)
+│                           # nav-guard-probe.mjs (真窗口证明：外链闸门，CDP 连 WebView2)、
+│                           # rsi-round-selftest.sh (v1.4 RSI 一回合驱动器自检：脚本化臂、零成本)
 ├── doc/                  # Cross-version design docs (Chinese); v0.x/ = archived 0.x-era docs
 │                         # (需求-v0.x / bug-v0.x / release / 融合计划 … 全在 doc/v0.x/，见其 README.md)
 └── Cargo.toml            # Workspace manifest (members: src-tauri, crates/harness-engine)

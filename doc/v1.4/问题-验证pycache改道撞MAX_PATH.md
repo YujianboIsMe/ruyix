@@ -2,7 +2,8 @@
 
 > 归属版本：v1.4（P0 最小评测台**第一次真跑**时发现）· 2026-09-28
 > 状态：**已登记，未修**（修它要动 `crates/harness-engine/src/verify.rs`，属引擎改动 ⇒ 等拍板）
-> 复现脚本：`refactor/rsi-p0-accept.sh`；现场保留：`refactor/rsi-repro.sh` 里的 `RSI_KEEP=1`
+> 复现：`rsi_bench --self-check`（含「落点太深 ⇒ 跑之前拒绝」那条）+ `RSI_KEEP=1` 保留现场；
+> 当时那两个一次性脚本**已删**（2026-09-30），步骤在本文 §5 里写全
 
 ## 1. 现象
 
