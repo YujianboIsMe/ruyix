@@ -866,7 +866,10 @@ fn window_size_for_screen(app: &tauri::AppHandle) -> (f64, f64) {
         .size
         .to_logical::<f64>(monitor.scale_factor());
     // 留 10% 余量：窗口贴着屏边看着就像被切了，也留一点拖动 / 系统手势的余地
-    (REQ_W.min(usable.width * 0.9), REQ_H.min(usable.height * 0.9))
+    (
+        REQ_W.min(usable.width * 0.9),
+        REQ_H.min(usable.height * 0.9),
+    )
 }
 
 /// 建主窗口。
