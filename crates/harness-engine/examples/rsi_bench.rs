@@ -1006,7 +1006,9 @@ fn guard_long_paths(out: &Path, run_ids: &[String], max_file: usize) -> Result<S
             out.display()
         ));
     }
-    Ok(format!("py_compile 产物路径估算 {pyc}/{LIMIT} 字符"))
+    // 这句会进读数的"生效条件/闸"那一栏，所以措辞跟上事实：现在算的是**字节码**路径
+    // （语法格早已不写盘；真正还会写 pyc 的是测试 / import 那条路）。
+    Ok(format!("字节码路径估算 {pyc}/{LIMIT} 字符"))
 }
 
 /// 词法折叠路径里的 `.` / `..`（只为**显示**好看：读数里的路径是证据，不该长成 `x/../y`）。
@@ -1840,7 +1842,7 @@ fn self_check() {
                 &["fix-add__baseline__r1".to_string()],
                 "calc.py".len(),
             )
-            .is_ok_and(|s| s.contains("py_compile")),
+            .is_ok_and(|s| s.contains("字节码路径估算")),
             "",
         );
     }
