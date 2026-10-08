@@ -969,17 +969,19 @@ fn run_fake(
 
 /// **跑之前**就拒掉过深的落点（Windows 的 MAX_PATH 陷阱）。
 ///
-/// 病灶不是我们的代码，是 `verify` 的 python 语法检查：它把 `__pycache__` 改道到状态桶
-/// （`PYTHONPYCACHEPREFIX=<状态根>/verify/pycache`，为了"跑完仓库干净"），而 CPython 会把
-/// **源码的绝对路径**镜像到那个前缀底下 —— 于是 pyc 的真实路径长度 ≈ 2×落点深度 + 常数。
-/// 一旦越过 260，`py_compile` 直接 `[WinError 206] 文件名或扩展名太长` **退出 1**，
-/// 引擎把这条读成「语法/编译错误」并**打回 final**：一次写对了的改动被判成坏代码，
-/// 模型白跑几轮，读数里只留下"这版更差"。
+/// **这条闸的理由在 v1.4 A-5 之后变了**（2026-10-08），如实记着：
 ///
-/// 这是评测台第一次真跑就撞上的东西（保留现场 `agent.log` 里写着
-/// `✗ syntax calc.py：退出码 Some(1)`；同一条命令在短路径下 0 退出，见
-/// `doc/v1.4/评测台-最小形状-v1.4.md` §5）。尺子被环境弄坏 ⇒ 必须报"没有读数"，
-/// 所以在**跑之前**拒绝，而不是跑完再猜。
+/// - 当时（A-5 之前）：`verify` 的 python 语法检查用 `py_compile` 写字节码，并靠
+///   `PYTHONPYCACHEPREFIX` 把 `__pycache__` 改道到状态桶；CPython 会把**源码的绝对路径
+///   镜像**到那个前缀底下 ⇒ pyc 真实路径 ≈ 2×落点深度 + 常数，越过 260 就 `[WinError 206]`
+///   退出 1，被读成「语法/编译错误」并**打回 final**：一次写对了的改动被判成坏代码，
+///   读数里只留下"这版更差"（保留现场见 `doc/v1.4/问题-验证pycache改道撞MAX_PATH.md`）。
+/// - 现在：语法检查换成了不写盘的 `ast.parse`，越限还会如实报「环境不支持」
+///   （`verify::py_env_guard`）⇒ 那条假红链在**因果上**被切断。
+///
+/// 所以这条闸不是补丁，是**兜底**：落点太深时，判据自己跑 python（pytest / 判据脚本会 import
+/// 被测模块、在项目里写 `__pycache__`）仍可能撞 260 —— 与其把一整轮烧在一个注定失败的环境上，
+/// 不如**跑之前**拒绝并说清出路。
 fn guard_long_paths(out: &Path, run_ids: &[String], max_file: usize) -> Result<String, String> {
     const LIMIT: usize = 250; // 260 是硬限，留 10 字符余量
     // **必须按绝对路径估**：相对落点会被解析两次（见 `abs_out`），估出来的数会小一大截，
@@ -997,9 +999,10 @@ fn guard_long_paths(out: &Path, run_ids: &[String], max_file: usize) -> Result<S
     let pyc = state + src + 2 + 31; // 镜像时多一层盘符目录 + `__pycache__/x.cpython-311.pyc`
     if pyc > LIMIT {
         return Err(format!(
-            "落点太深：估算 py_compile 的产物路径 {pyc} 字符（上限 {LIMIT}）—— 越过 Windows 的 260 \
-             会让 py_compile 报 WinError 206 退出 1，被读成「语法/编译错误」（假红）。把 `--out` \
-             指到更短的路径（例如便携根下的 `projects/rsi/arms`，别落在深层临时目录里）。现在：{}",
+            "落点太深：估算字节码路径 {pyc} 字符（上限 {LIMIT}）—— 越过 Windows 的 260 会让 python \
+             报 WinError 206（引擎侧已不会把它读成「语法/编译错误」，见 A-5；这条闸是兜底，免得 \
+             把一整轮烧在注定失败的环境上）。把 `--out` 指到更短的路径（例如便携根下的 \
+             `projects/rsi/arms`，别落在深层临时目录里）。现在：{}",
             out.display()
         ));
     }

@@ -450,7 +450,9 @@ struct VerifyDirs {
     target: String,
     out: String,
     /// Python 字节码缓存（`__pycache__`）的改道目标：`PYTHONPYCACHEPREFIX`。
-    /// 不指走的话，`py_compile` 会写在**源码旁边**（你手跑也一样），而对"跑完仓库干净"的判据
+    /// **语法检查已经不用它**（v1.4 A-5-(a)：`ast.parse` 一个字节都不写）；它服务的是
+    /// **python 的 import / 测试**那条路（`import pytest` 探针、跑测试），那条仍会写字节码。
+    /// 不指走的话，`py_compile`/import 会写在**源码旁边**（你手跑也一样），而对"跑完仓库干净"的判据
     /// 那就算新增文件。
     pycache: String,
 }
@@ -482,6 +484,66 @@ fn py_envs(dirs: &VerifyDirs) -> [(&'static str, &str); 2] {
         ("PYTHONIOENCODING", "utf-8"),
         ("PYTHONPYCACHEPREFIX", dirs.pycache.as_str()),
     ]
+}
+
+/// Python 语法检查的探针（v1.4 A-5-(a)，2026-10-08 拍板）：**不写任何文件**。
+///
+/// 以前是 `python -m py_compile <f>`：它把字节码写盘，于是要用 `PYTHONPYCACHEPREFIX` 把
+/// `__pycache__` 改道到状态桶；而 CPython 会把**源码的绝对路径镜像**到那个前缀底下 ⇒
+/// pyc 真实路径 ≈ **2 × 落点深度 + 常数**，越过 Windows 的 260 就 `[WinError 206]` 退出 1，
+/// 被这条检查读成「语法/编译错误」并**打回 final**（实测：相对 `--out` 时 18/18 轮全被打回，
+/// 同一份夹具换绝对短路径就全过 —— 见 `doc/v1.4/问题-验证pycache改道撞MAX_PATH.md`）。
+///
+/// `ast.parse` 与 `py_compile` 在**语法层等价**（同一个 `compile(..., PyCF_ONLY_AST)`），
+/// 但一个字节都不写：没有 pyc ⇒ 没有 `__pycache__` ⇒ 既没有路径长度问题、也没有清理问题。
+/// 传 `bytes`（不是 str）：`compile()` 认源码里的 coding cookie 与 BOM，与 python 自己一致。
+/// 第二参传文件名：报错里才带得出是哪个文件（否则是 `<unknown>`）。
+/// 探针串刻意**不含空格**：它要过一层 shell（`cmd /C`）才到 python，少一层引号就少一个踩点。
+const PY_SYNTAX_PROBE: &str = "import ast,sys;ast.parse(open(sys.argv[1],'rb').read(),sys.argv[1])";
+
+/// 字节码路径的估算上限（260 是 Windows 的硬限，留 10 字符余量）。
+const PYC_PATH_LIMIT: usize = 250;
+
+/// 语法检查的环境（v1.4 A-5-(a)）：**不写任何字节码**。
+///
+/// 为什么这次可以用 `PYTHONDONTWRITEBYTECODE`：它管的是**导入系统**，而新探针只做
+/// `open` + `ast.parse` —— 写字节码的动作压根不存在，所以这条环境变量是"再上一道锁"：
+/// 连 stdlib 的 import（`import ast,sys`）也不会被缓存进 `PYTHONPYCACHEPREFIX` 底下。
+/// （`py_compile` 那种**显式写盘**的调用它管不了 —— 这也是当初不能靠它救场的原因。）
+///
+/// ⇒ 语法这一格的结论从此**与状态根无关**：不碰盘、不碰路径长度、不碰 cwd。
+fn syntax_envs() -> [(&'static str, &'static str); 2] {
+    [
+        ("PYTHONIOENCODING", "utf-8"),
+        ("PYTHONDONTWRITEBYTECODE", "1"),
+    ]
+}
+
+/// **环境闸**（v1.4 A-5-(c)，fail-closed）：验证产物必须落在**绝对**的状态根里，
+/// 且字节码改道的预估路径不能越限 —— 越了就是「环境不支持」，**不是**语法错。
+///
+/// 两条都实测过：相对状态根会以 `cwd`（= 项目目录）为基准落进**用户项目**（违背"绝不写用户
+/// 仓库"），还会把 pyc 路径再叠一层；前缀 + 镜像的绝对源码路径越过 260 ⇒ python 回
+/// `[WinError 206]` 退出 1，那条检查于是报「语法/编译错误」—— 一次写对的改动被判成坏代码。
+///
+/// 返回 `Err(理由)` 时调用方必须把它变成**跳过 + 原因**（"这一轮没有读数"）：
+/// 既不许当通过（那是拿环境冒充绿灯），也不许当失败（那是假红）。
+fn py_env_guard(dirs: &VerifyDirs, root: &Path) -> Result<(), String> {
+    let cache = Path::new(&dirs.pycache);
+    if !dirs.pycache.trim().is_empty() && !cache.is_absolute() {
+        return Err(format!(
+            "环境不支持：字节码改道路径不是绝对路径（{}）—— 宿主必须注入**绝对**的项目状态根；             相对路径会以运行目录为基准落进用户项目",
+            dirs.pycache
+        ));
+    }
+    // 最坏情况：前缀 + 镜像的绝对源码路径 + `__pycache__/<名字>.cpython-311.pyc`
+    let est = dirs.pycache.chars().count() + 2 + root.to_string_lossy().chars().count() + 31;
+    if est > PYC_PATH_LIMIT {
+        return Err(format!(
+            "环境不支持：字节码路径预估 {est} 字符（上限 {PYC_PATH_LIMIT}，Windows 硬限 260）——              越限会让 python 报 WinError 206 并被读成「语法/编译错误」（假红）。             把项目状态根放浅一点，或换到更短的盘符路径下"
+        ));
+    }
+    Ok(())
 }
 
 /// `cargo` 会在**项目里**写 `Cargo.lock`（它的行为，不是我们的）—— 但"跑完仓库里只剩用户
@@ -530,15 +592,17 @@ fn syntax_checks(
                 return out;
             }
             for f in py {
-                // py_compile 比 `python -c "import x"` 安全：不执行模块顶层代码
+                // `ast.parse`：只做语法解析，**不写任何文件**（也不执行模块顶层代码 —— 安全性与
+                // 老的 py_compile 同级，好处是一个字节都不落盘）。环境用 `syntax_envs`：
+                // 这条检查与状态根、路径长度、cwd 都不再有关系（那三样正是当初假红的来源）。
                 let o = run_check(
                     plan,
                     seq,
                     root,
                     &v.python_bin,
-                    &["-m", "py_compile", &f],
+                    &["-c", PY_SYNTAX_PROBE, &f],
                     duration(v, false),
-                    &py_envs(dirs),
+                    &syntax_envs(),
                 );
                 out.push(CheckResult::from_output("syntax", "python", &f, &o));
             }
@@ -672,7 +736,7 @@ pub fn staged_syntax_checks(
     }
     // 目录必须**逐次唯一**：`now_compact` 只到秒，同一秒内的两个并发调用（同进程的并行
     // 单测，或两个会话同时触发窄验证）会落进同一个目录。它们不仅互相覆盖同名文件，更致命
-    // 的是函数末尾会把目录整个删掉 —— 先跑完的那个一删，后者 `py_compile 0-ok.py` 就找不
+    // 的是函数末尾会把目录整个删掉 —— 先跑完的那个一删，后者 `ast.parse 0-ok.py` 就找不
     // 着文件，本该 passed 的判定变成 failed（串行跑绿、并行跑红，就是这么来的）。
     let dir = std::env::temp_dir().join(format!(
         "ruyix-syntax-{}-{}-{}",
@@ -711,12 +775,14 @@ pub fn staged_syntax_checks(
                     continue;
                 }
                 let o = if ext == "py" {
+                    // 同 `PY_SYNTAX_PROBE`：不写字节码（这里跑在临时目录里，越限问题不存在，
+                    // 但"不落盘"本身仍是这条窄验证要的性质 —— 它跑在**改动的内容**上）
                     exec::run(
                         &dir,
                         &v.python_bin,
-                        &["-m", "py_compile", &name],
+                        &["-c", PY_SYNTAX_PROBE, &name],
                         timeout,
-                        &[("PYTHONIOENCODING", "utf-8")],
+                        &syntax_envs(),
                     )
                 } else {
                     exec::run(&dir, &v.node_bin, &["--check", &name], timeout, &[])
@@ -862,6 +928,12 @@ fn test_checks(
                     "单元测试",
                     "没有找到 test_*.py / *_test.py",
                 ));
+                return out;
+            }
+            // 环境闸：这条路的 `import` / 测试**会写字节码**（走 `PYTHONPYCACHEPREFIX` 改道），
+            // 所以状态根必须绝对、路径不能越限 —— 坏了报"环境不支持"，不装成测试失败
+            if let Err(why) = py_env_guard(dirs, root) {
+                out.push(CheckResult::skipped("test", "python", "单元测试", &why));
                 return out;
             }
             // pytest 不在就退到 unittest（标准库，一定有）
@@ -1218,6 +1290,112 @@ mod tests {
         assert!(r.verdict.contains("通过"), "{}", r.verdict);
     }
 
+    /// **(a) 的平台无关判据**：语法检查跑完，一个字节码文件都不许出现。
+    /// 为什么强调"平台无关"：那条 `[WinError 206]` 的假红只在 Windows 的 260 上限下复现
+    /// （macOS 上限 ~1024，复现不了），而"不落盘"这条在任何平台都成立。
+    #[test]
+    fn python_syntax_check_writes_no_bytecode_at_all() {
+        let d = TempDir::new("py-nopyc");
+        let proj = d.0.join("project");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("ok.py"), "def add(a, b):\n    return a + b\n").unwrap();
+
+        let cfg = dev_cfg();
+        let state = crate::config::project_state_root(&cfg, &proj);
+        let r = run(&cfg, "run-nopyc", &proj, &crate::exec::new_cancel_flag());
+        assert_eq!(r.failed, 0, "这份代码该过: {:#?}", r.checks);
+        assert!(
+            !state.join("verify").join("pycache").exists(),
+            "语法检查不该再写字节码（(a) 之前这里会有一个 pycache 树）: {}",
+            state.join("verify").display()
+        );
+        assert!(
+            !proj.join("__pycache__").exists(),
+            "源码旁边也不许出现 __pycache__（那是写进用户项目）"
+        );
+    }
+
+    /// **(c) 的判据之一**：状态根是**相对**路径 ⇒ 用状态根的那一格报「环境不支持」，
+    /// 不许报成语法失败；而**语法格已经与环境解耦**，照常给结论。
+    ///
+    /// 相对状态根不只是长度问题：它会以 `cwd`（= 项目目录）为基准落进**用户项目**。
+    #[test]
+    fn a_relative_state_root_is_environment_not_syntax() {
+        let d = TempDir::new("py-relstate");
+        let proj = d.0.join("project");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("ok.py"), "x = 1\n").unwrap();
+        std::fs::write(proj.join("test_ok.py"), "def test_x():\n    assert True\n").unwrap();
+
+        let mut cfg = dev_cfg();
+        cfg.project_state_root = "relative-state".into();
+        let r = run(&cfg, "run-relstate", &proj, &crate::exec::new_cancel_flag());
+        assert_eq!(r.failed, 0, "环境问题不许报成失败: {:#?}", r.checks);
+        let syn = r
+            .checks
+            .iter()
+            .find(|c| c.kind == "syntax")
+            .expect("要有 syntax 检查项");
+        assert_eq!(
+            syn.status, "passed",
+            "语法格与状态根无关，该照常过: {:#?}",
+            syn
+        );
+        let t = r
+            .checks
+            .iter()
+            .find(|c| c.kind == "test")
+            .expect("要有 test 检查项");
+        assert_eq!(t.status, "skipped", "{:#?}", t);
+        assert!(
+            t.reason.contains("环境不支持") && t.reason.contains("绝对"),
+            "理由要指名环境与出路: {}",
+            t.reason
+        );
+    }
+
+    /// **(c) 的判据之二**：字节码路径预估越限 ⇒ 报「环境不支持」而不是语法错；
+    /// 同时证明**语法格不再受它影响**（当初正是这条路径把「写对了的 calc.py」判成「语法错误」）。
+    #[test]
+    fn an_overlong_bytecode_path_is_environment_not_syntax() {
+        let d = TempDir::new("py-longstate");
+        let proj = d.0.join("project");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("ok.py"), "x = 1\n").unwrap();
+        std::fs::write(proj.join("test_ok.py"), "def test_x():\n    assert True\n").unwrap();
+
+        let mut cfg = dev_cfg();
+        cfg.project_state_root =
+            d.0.join("深".repeat(80))
+                .join("state")
+                .to_string_lossy()
+                .to_string();
+        let r = run(
+            &cfg,
+            "run-longstate",
+            &proj,
+            &crate::exec::new_cancel_flag(),
+        );
+        assert_eq!(r.failed, 0, "环境问题不许报成失败: {:#?}", r.checks);
+        let syn = r
+            .checks
+            .iter()
+            .find(|c| c.kind == "syntax")
+            .expect("要有 syntax 检查项");
+        assert_eq!(syn.status, "passed", "语法格不该被路径长度影响: {:#?}", syn);
+        let t = r
+            .checks
+            .iter()
+            .find(|c| c.kind == "test")
+            .expect("要有 test 检查项");
+        assert_eq!(t.status, "skipped", "{:#?}", t);
+        assert!(
+            t.reason.contains("环境不支持") && t.reason.contains("上限"),
+            "理由要给出估算与上限: {}",
+            t.reason
+        );
+    }
+
     #[test]
     fn python_syntax_error_is_reported_with_real_command() {
         let d = TempDir::new("py-bad");
@@ -1229,7 +1407,11 @@ mod tests {
         let r = run(&cfg, "run-bad", &proj, &crate::exec::new_cancel_flag());
         assert_eq!(r.failed, 1, "应当恰好一个语法检查失败: {:#?}", r.checks);
         let c = r.checks.iter().find(|c| c.status == "failed").unwrap();
-        assert!(c.cmd.contains("py_compile"), "命令要回显给用户: {}", c.cmd);
+        assert!(
+            c.cmd.contains("ast.parse"),
+            "命令要回显给用户（v1.4 A-5-(a) 起是 ast.parse 探针，不再写字节码）: {}",
+            c.cmd
+        );
         assert!(!c.stderr.is_empty(), "要有真实 stderr");
         // 编译没过 → 测试必须标 skipped，不能假装跑过
         assert!(
