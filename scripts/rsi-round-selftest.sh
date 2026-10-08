@@ -68,7 +68,7 @@ AFTER=$(sha256sum "$W/plugins/tools/demo/tools.toml" | cut -d' ' -f1)
 echo
 echo "########## 断言"
 python - "$W" "$BEFORE" "$AFTER" <<'PY'
-import json, pathlib, sys
+import importlib.util, json, pathlib, sys
 W, before, after = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 home = W / "projects/rsi/rsi"
 fails = []
@@ -94,6 +94,18 @@ ck("候选臂与基准臂的数据面**确实不同**（提议落进了副本）
    (home / "arms/baseline/plugins/tools/demo/tools.toml").read_text(encoding="utf-8")
    != (home / "arms/round-1/plugins/tools/demo/tools.toml").read_text(encoding="utf-8"))
 ck("产物全在用户侧（projects/<键>/rsi/ 下）", str(rp).startswith(str(W / "projects")))
+# A-6（2026-10-08 拍板：不补 execute 闸、靠副本隔离）——判据是 receipt 能证明「这一轮在副本里跑」
+sh = r.get("surfaces_hash", {}).get("plugins", {})
+ck("receipt 逐面记了三方哈希（原件 / 基准臂 / 候选臂）",
+   set(sh) == {"portable_root", "baseline", "candidate"}, str(sorted(sh)))
+ck("便携根原件 == 基准臂（基准臂是原件的副本）", sh.get("portable_root") == sh.get("baseline"))
+ck("候选臂 ≠ 基准臂（提议落在副本里，原件不受影响）", sh.get("candidate") != sh.get("baseline"))
+spec = importlib.util.spec_from_file_location("rsi_round", "doc/v1.4/templates/rsi/rsi_round.py")
+m = importlib.util.module_from_spec(spec)
+sys.dont_write_bytecode = True
+spec.loader.exec_module(m)
+ck("receipt 里的原件哈希可复算（不是编的）",
+   sh.get("portable_root") == m.sha256_tree(W / "plugins")[0])
 print("\n自检：" + ("全过" if not fails else f"失败 {len(fails)} 条：{fails}"))
 sys.exit(1 if fails else 0)
 PY

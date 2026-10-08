@@ -49,6 +49,15 @@ def sha256_tree(root: pathlib.Path):
     return acc.hexdigest(), per
 
 
+def sha256_path(p: pathlib.Path):
+    """一个文件或一棵树的指纹（不存在就如实返回 None，不编一个空串冒充）。"""
+    if p.is_file():
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    if p.is_dir():
+        return sha256_tree(p)[0]
+    return None
+
+
 def changed(before, after):
     out = [f"改动 {k}" for k, v in after.items() if before.get(k) not in (None, v)]
     out += [f"新增 {k}" for k in after if k not in before]
@@ -217,6 +226,8 @@ class Rsi:
             "median_pct": {a["arm"]: a.get("median_pct") for a in r.get("arms", [])},
             "records": r.get("records"),
             "patch": patch,
+            # A-6 的判据：逐面三方哈希（原件 / 基准臂 / 候选臂）
+            "surfaces_hash": self.surface_hashes(base, cand),
             "notes": note,
             "next": ("人审 receipt + patch 决定合不合；合了才把候选提升成新的 baseline（v1.4 绝不自动合并）"
                      if better else "差额没到 MARGIN 或无读数 ⇒ 这一回合到此为止（判据 7）"),
@@ -230,8 +241,34 @@ class Rsi:
             print(f"patch  ：{patch}（**由人合并**；驱动器不写便携根的 surfaces）")
         else:
             print("没出 patch（这是对的：无信号不采纳）")
+        sh = rec["surfaces_hash"]
         for s in self.cfg["surfaces"]:
-            print(f"便携根的 {s} 一个字节都没动 ✓")
+            h = sh[s]
+            in_copy = h["portable_root"] == h["baseline"]
+            print(f"便携根的 {s} 一个字节都没动 ✓（逐面哈希：原件 {str(h['portable_root'])[:8]} / "
+                  f"基准臂 {str(h['baseline'])[:8]} / 候选臂 {str(h['candidate'])[:8]}）")
+            if not in_copy:
+                print(f"  ⚠ 基准臂与便携根原件**不一致** —— 原件在别人手里变过了？先 `propose` 重建基准臂再谈读数")
+
+    def surface_hashes(self, base, cand):
+        """**逐面三方哈希对照**（v1.4 拍板单 A-6 的判据，2026-10-08 拍板「不补 execute 闸、
+        靠副本隔离」）：receipt 必须能让人看出「这一轮确实是在副本里跑的」——
+
+        - `portable_root` = 便携根原件（跑完必须与跑前一致：**一个字节都没被写**）；
+        - `baseline`      = 基准臂（应当**等于**原件 —— 它是原件那一刻的副本）；
+        - `candidate`     = 候选臂（应当**不同于**基准臂，且不同之处正是本次提议）。
+
+        `execute` 这条原语的越界（例如 `python -c "open('x','w')"`）在 v1.4 范围外，
+        防线就落在这三行对照上：原件没动 ⇒ 就算模型在副本里越了界，也污染不到便携根。
+        """
+        out = {}
+        for s in self.cfg["surfaces"]:
+            out[s] = {
+                "portable_root": sha256_path(self.root / s),
+                "baseline": sha256_path(base / s),
+                "candidate": sha256_path(cand / s),
+            }
+        return out
 
     def write_patch(self, n, base, cand):
         """候选 vs 基准的 unified diff（`difflib`，零依赖）。只覆盖数据面副本。"""
