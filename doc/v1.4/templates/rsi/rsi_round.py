@@ -96,11 +96,23 @@ class Rsi:
         for s in surfaces:
             if pathlib.Path(s).is_absolute() or ".." in pathlib.Path(s).parts:
                 die(f"surfaces 里 {s!r} 不是便携根内的相对路径（白名单不许越出便携根）")
+        # 默认值 = v1.4 拍板单 A-2 / A-3 / A-4（2026-10-08 拍板「照建议来」）：
+        # A-2 第一版允许自改的面就是这两个加载点；A-3 每轮 3 轮 / 1 候选 / 1h 硬顶；
+        # A-4 既有门禁**声明式** —— 驱动器只跑 `gates` 里列出来的命令，不替人决定跑什么。
+        cands = int(rsi.get("candidates", 1))
+        if cands < 1:
+            die("[rsi].candidates 必须 >= 1")
+        gates = list(rsi.get("gates") or [])
+        for g in gates:
+            if not isinstance(g, str) or not g.strip():
+                die("[rsi].gates 里每一项都是要跑的命令字符串")
         self.cfg = {
             "surfaces": surfaces,
             "rounds": int(rsi.get("rounds", 3)),
+            "candidates": cands,
             "margin_pp": float(rsi.get("margin_pp", 5.0)),
             "budget_secs": int(rsi.get("budget_secs", 3600)),
+            "gates": gates,
             "bench_exe": rsi.get("bench_exe", ""),
             "tasks": rsi.get("tasks", "tasks"),
         }
@@ -153,7 +165,9 @@ class Rsi:
         print(f"允许自改的面: {', '.join(c['surfaces'])}")
         print(f"冻结考卷   : {self.tasks}（只读；跑前跑后各算一次哈希）")
         print(f"评测台     : {self.bench or '（未就位）'}")
-        print(f"每回合     : {c['rounds']} 轮 · MARGIN {c['margin_pp']} pp · 预算硬顶 {c['budget_secs']}s")
+        print(f"每回合     : {c['rounds']} 轮 · {c['candidates']} 个候选（A-3）· MARGIN {c['margin_pp']} pp "
+              f"· 预算硬顶 {c['budget_secs']}s")
+        print(f"门禁（A-4）: {'；'.join(c['gates']) if c['gates'] else '**没声明**（这一回合没有门禁证据）'}")
         print("")
         print("① 提议（人/agent 在副本上做）：")
         print(f"   基准臂 {self.arm('baseline')} ← 现状数据面的副本")
@@ -165,13 +179,87 @@ class Rsi:
         for s in c["surfaces"]:
             print(f"   （绝不允许写便携根的 {s}）")
 
+    def gates(self, in_dir):
+        """**声明式门禁**（A-4）：只跑 `allow.toml` 里列出来的命令，不替人决定跑什么。
+
+        跑在**候选臂**那份副本里（被审的就是它）。任何一条非 0 ⇒ 这一回合**不产 patch** ——
+        判据 4 的「门禁全绿」从此有证据，不再靠口头核对。没声明门禁时如实记空表并提示：
+        这一回合的门禁面是空的，那也是"没有证据"，不是"通过"。
+        """
+        out = []
+        for cmd in self.cfg.get("gates") or []:
+            print(f"门禁：{cmd}")
+            rc = subprocess.call(cmd, shell=True, cwd=str(in_dir))
+            out.append({"cmd": cmd, "rc": rc, "ok": rc == 0})
+        return out
+
+    def _brief(self, n):
+        """给**人**开这一局用的牌子（A-1「会话里由人驱动」的材料）。
+
+        为什么要有它：A-1 的全部动作就是"人打开这份副本、对 agent 说一句'按读数改'"，那这一句
+        得**有据可依** —— 上一轮哪个任务掉了分、允许改什么、预算多少、改完跑哪条命令，
+        全部写在牌子上，人不必去翻 receipt。
+        """
+        c = self.cfg
+        lines = [
+            f"# RSI 提议步的牌子（第 {n} 回合）",
+            "",
+            "这一局只改**副本**（就是本目录）。便携根里的原件不在这一链上，改它等于把"
+            "「原件没被写」那条判据作废。",
+            "",
+            f"- 允许自改的面：{', '.join(c['surfaces'])}",
+            f"- 预算（A-3）：{c['rounds']} 轮 · {c['candidates']} 个候选 · 硬顶 {c['budget_secs']}s",
+            f"- 候选数：本次要出 **{c['candidates']}** 个候选（先出第 1 个，不够再谈）",
+        ]
+        g = c.get("gates") or []
+        lines.append(f"- 门禁（A-4，声明式）：{'；'.join(g) if g else '**没声明**（这一回合没有门禁证据）'}")
+        lines += [
+            "- 不许动的：冻结考卷（`tasks/`）、判据、`receipts/`、`out/` —— 它们是适应度来源，"
+            "改了就等于自己给自己发分",
+            "",
+        ]
+        prev = self.home / "receipts" / f"round-{n - 1}.json"
+        if prev.is_file():
+            try:
+                r = json.loads(prev.read_text(encoding="utf-8"))
+            except Exception:
+                r = {}
+            lines += [f"## 上一回合（round-{n - 1}）的读数", "", f"- 裁决：{r.get('decision', '（没记）')}"]
+            per = {}
+            for rec in r.get("records") or []:
+                per.setdefault(rec.get("task"), {}).setdefault(rec.get("arm"), []).append(rec.get("kind"))
+            for tk in sorted(per):
+                arms = per[tk]
+                names = list(arms)
+                detail = "，".join(f"{a}: {'/'.join(arms[a])}" for a in names)
+                lines.append(f"- 任务 `{tk}`：{detail}")
+            if r.get("patch"):
+                lines.append(f"- 上一轮的 patch：`{r['patch']}`（人合并过没有？看 `receipts/promote-*.json`）")
+            if r.get("gates"):
+                gsum = "；".join("{}→rc={}".format(x.get("cmd"), x.get("rc")) for x in r["gates"])
+                lines.append("- 上一轮门禁：" + gsum)
+            lines.append("")
+        else:
+            lines += ["## 上一回合的读数", "", "（还没有读数：这一回合先按常识改第一个面。）", ""]
+        lines += [
+            "## 怎么走",
+            "",
+            "1. 在 ruyix 里把**本目录**作为项目打开（会话 → 对 agent 说「照牌子改」）；",
+            f"2. 改完：`python rsi_round.py --root <便携根> --key <键> score {n}`",
+            f"3. 出 patch 后：`… promote {n}`（复核证据 → 备份回滚点 → 提升 → 立刻回归；有回归自动退回）",
+        ]
+        return "\n".join(lines) + "\n"
+
     def propose(self, n, cmd):
         base = self.arm("baseline")
         if not base.is_dir():
             print("基准臂不存在，先建（现状数据面的副本）")
             self.make_arm(True, "baseline", "baseline")
         dst = self.make_arm(False, f"round-{n}", "baseline")
+        brief = dst / f"round-{n}.brief.md"
+        brief.write_text(self._brief(n), encoding="utf-8")
         print(f"候选臂已就位：{dst}")
+        print(f"牌子（A-1：人一开局要看的东西）：{brief}")
         print("要改的就是这份**副本**（不是便携根里的原件）。评测台只认 `plugins/tools/*/tools.toml` 这类形状。")
         if cmd:
             print(f"跑提议命令：{cmd}")
@@ -210,7 +298,15 @@ class Rsi:
         patch, note = None, []
         if drift:
             note.append("考卷在本回合内变过 ⇒ 作废（判据 2）")
-        if better:
+        # A-4：门禁**声明式** —— 只有裁决是「候选更优」时才值得跑（其余没资格产 patch），
+        # 但跑了就必须全绿，否则这一回合不产 patch（判据 4 的「门禁全绿」要留证据）
+        gres = self.gates(cand) if (better and not drift) else []
+        if not (self.cfg.get("gates") or []):
+            note.append("没声明门禁（A-4）—— 这一回合的门禁面是空的，那是「没有证据」，不是「通过」")
+        bad_gates = [g for g in gres if not g.get("ok")]
+        if bad_gates:
+            note.append("门禁没过：" + "；".join(f"{g['cmd']}（rc={g['rc']}）" for g in bad_gates))
+        if better and not drift and not bad_gates:
             patch = self.write_patch(n, base, cand)
         (self.home / "receipts").mkdir(exist_ok=True)
         rec = {
@@ -228,6 +324,8 @@ class Rsi:
             "median_pct": {a["arm"]: a.get("median_pct") for a in r.get("arms", [])},
             "records": r.get("records"),
             "patch": patch,
+            # A-4：门禁结论进 receipt —— 判据 4 从此有证据（空表 = 没声明，不是通过）
+            "gates": gres,
             # A-6 的判据：逐面三方哈希（原件 / 基准臂 / 候选臂）
             "surfaces_hash": self.surface_hashes(base, cand),
             "notes": note,
@@ -349,6 +447,10 @@ class Rsi:
             die(f"第 {n} 回合的裁决是「{rec.get('decision')}」—— 没有「候选更优」就不许提升（判据 7）")
         if not rec.get("patch"):
             die("这一回合没出 patch —— 没有可审的改动就不许提升")
+        bad = [g for g in (rec.get("gates") or []) if not g.get("ok")]
+        if bad:
+            die("这一回合的门禁没过（" + "；".join(f"{g['cmd']} rc={g['rc']}" for g in bad)
+                + "）—— 门禁没绿不许进主干（判据 4）")
         if not cand.is_dir():
             die(f"候选臂不在 {cand}（提升谁？）")
         if not base.is_dir():

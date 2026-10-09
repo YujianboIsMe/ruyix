@@ -280,8 +280,103 @@ print("\n自检(⑦)：" + ("全过" if not fails else f"失败 {len(fails)} 条
 sys.exit(1 if fails else 0)
 PY
 RC2=$?
+echo
+echo "########## ⑧ A-1 的牌子 + A-2/A-3/A-4（声明式门禁）"
+python - "$W" <<'PY'
+import importlib.util, json, pathlib, sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("rsi_round", "doc/v1.4/templates/rsi/rsi_round.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+class Args:
+    root = sys.argv[1]; key = "rsi"; bench = ""; bench_arg = []; propose_cmd = ""
+    skip_verify = False; tag = ""
+
+r = m.Rsi(Args())
+home = pathlib.Path(Args.root) / "projects/rsi/rsi"
+r.cfg = {"surfaces": ["plugins"], "rounds": 3, "candidates": 1, "margin_pp": 5.0,
+         "budget_secs": 3600, "gates": [], "bench_exe": "", "tasks": "tasks"}
+r.bench = pathlib.Path("stub-bench")
+r.tasks = home / "tasks"
+fails = []
+def ck(name, ok, extra=""):
+    print(("PASS " if ok else "FAIL ") + name + (f" —— {extra}" if extra else ""))
+    if not ok: fails.append(name)
+
+# ① A-1：propose 必须写牌子（人一开局要看的东西）
+r.propose(2, "")
+brief = home / "arms/round-2/round-2.brief.md"
+txt = brief.read_text(encoding="utf-8") if brief.is_file() else ""
+ck("propose 写了牌子（A-1：会话里由人驱动的材料）", brief.is_file())
+for need in ["允许自改的面", "预算（A-3）", "门禁（A-4", "score 2", "不许动的"]:
+    ck(f"牌子上有「{need}」", need in txt)
+ck("牌子上写了上一回合的读数（没有就明说没有）",
+   ("上一回合（round-1）的读数" in txt) or ("还没有读数" in txt))
+
+# ② A-4：门禁**声明式** —— 只跑清单里的命令，没过就不产 patch
+base, cand = home / "arms/baseline", home / "arms/round-2"
+cand.mkdir(parents=True, exist_ok=True)
+m.copy_tree(base / "plugins", cand / "plugins_tmp"); m.shutil.rmtree(cand / "plugins")
+m.copy_tree(base / "plugins", cand / "plugins")
+# 在副本上做一处真改动（否则 write_patch 会以「零差异」拒绝 —— 那条判据也要在）
+(cand / "plugins/tools/demo/tools.toml").write_text(
+    (cand / "plugins/tools/demo/tools.toml").read_text(encoding="utf-8") + '\n[[discover]]\nname = "x"\nbin = "x"\nmarkers = ["x"]\n',
+    encoding="utf-8")
+names = ["baseline", "round-2"]
+real_call = m.subprocess.call
+def stub_call(argv, *a, **k):
+    if isinstance(argv, str):                      # 门禁那条路（shell=True 传字符串）
+        return 0 if argv == "gate-ok" else 1
+    if "--arm" in argv:                            # 尺子那条路
+        out = pathlib.Path([argv[i + 1] for i, x in enumerate(argv) if x == "--out"][0])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "receipt.json").write_text(json.dumps({
+            "decision": "候选更优：+9.0 pp",
+            "arms": [{"arm": n} for n in names],
+            "records": [{"task": "t1", "arm": n, "kind": "ok"} for n in names],
+        }, ensure_ascii=False), encoding="utf-8")
+        return 0
+    return 0
+m.subprocess.call = stub_call
+try:
+    r.cfg["gates"] = ["gate-bad"]
+    r.score(2)
+    rec = json.loads((home / "receipts/round-2.json").read_text(encoding="utf-8"))
+    ck("门禁没过 ⇒ **不产 patch**（判据 4 有证据）",
+       rec.get("patch") is None and not (home / "out/round-2.patch").exists())
+    ck("receipt 记了门禁逐条退出码",
+       [g.get("rc") for g in rec.get("gates", [])] == [1], str(rec.get("gates")))
+    ck("receipt 的 notes 说清是门禁没过", any("门禁没过" in n for n in rec.get("notes", [])))
+
+    r.cfg["gates"] = ["gate-ok"]
+    r.score(2)
+    rec2 = json.loads((home / "receipts/round-2.json").read_text(encoding="utf-8"))
+    ck("门禁全绿 ⇒ 出 patch", bool(rec2.get("patch")) and (home / "out/round-2.patch").is_file())
+    ck("receipt 记了门禁全绿", [g.get("ok") for g in rec2.get("gates", [])] == [True])
+
+    # ③ 门禁没过的那份 receipt 不许被提升
+    payload = dict(rec2)
+    payload["gates"] = [{"cmd": "gate-bad", "rc": 1, "ok": False}]
+    (home / "receipts/round-2.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    rc = 0
+    try:
+        r.promote(2, verify=False)
+    except SystemExit as e:
+        rc = e.code
+    ck("门禁没绿 ⇒ promote 拒绝（不许进主干）", rc == 2, f"退出码 {rc}")
+finally:
+    m.subprocess.call = real_call
+
+print("\n自检(⑧)：" + ("全过" if not fails else f"失败 {len(fails)} 条：{fails}"))
+sys.exit(1 if fails else 0)
+PY
+RC3=$?
 rm -rf "$W"
 echo "EXIT=$RC"
 [ "$RC" = "0" ] || exit $RC
 echo "EXIT2=$RC2"
+echo "EXIT3=$RC3"
+[ "$RC3" = "0" ] || exit $RC3
 exit $RC2
