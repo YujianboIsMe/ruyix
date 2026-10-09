@@ -41,12 +41,41 @@ pub async fn run_with_ask(
     let mut ctx = Ctx::new(proj, policy)
             .with_state_root(crate::config::project_state_root(cfg, proj))
             // v1.4 P1：写入白名单。step 子 agent 借的是**同一个** `&mut Ctx`，所以一并生效。
-            .with_write_allow(cfg.agent.write_allow.clone());
-    // ---- P3：capsule 侧存（`agent.ctx.capsule`）----
-    // 建不出来就**退化为内存**并如实说一句：侧存是"更不容易丢掉事实"，不是"必须"。
+            .with_write_allow(cfg.agent.write_allow.clone())
+            // v1.5 会话层跨 run：宿主的会话历史里带着每个 run 的 id（新 → 旧）——
+            // 会话层检索就靠它把"前面几个 run 的留痕"找出来（不必再加一条链路）。
+            .with_session_runs(super::types::session_run_ids(history));
+    // ---- 本 run 的**留痕**（v1.5 会话层检索）+ capsule 侧存（P3）----
+    // 一个 run 一个目录（`<状态根>/ctx/<run-id>/`），两份文件各管一件事：
+    //   `transcript.jsonl` = 这一 run 的提问 / 每一次工具调用与结果 / 回答 —— **会话层检索读它**；
+    //   `index.jsonl`      = 折掉 / 可复用结果的召回（capsule 读它）。
+    // 留痕建不出来只意味着"这一 run 的内容搜不到"，不该拖垮这一 run ⇒ 降级 + 如实说。
+    let run_id = crate::workspace::new_run_id("ctx");
+    let ctx_dir = ctx.state_root().join("ctx").join(&run_id);
+    match crate::agent::transcript::Transcript::create(&ctx_dir) {
+        Ok(t) => {
+            sink.log(
+                "info",
+                format!(
+                    "[agent] 本 run 留痕：{}（会话层检索读它；提问/工具调用/回答都在这）",
+                    t.file().display()
+                ),
+            );
+            ctx.progress_mut().attach_transcript(t);
+            if let Some(t) = ctx.progress_mut().transcript_mut() {
+                t.prompt(task);
+            }
+        }
+        Err(e) => sink.log(
+            "warn",
+            format!(
+                "[agent] 留痕建不出来（{}）：{e} —— 这一 run 的提问/工具调用/回答搜不到",
+                ctx_dir.display()
+            ),
+        ),
+    }
     if cfg.agent.ctx.capsule {
-        let state_root = ctx.state_root().to_path_buf();
-        match crate::agent::capsule::Capsule::create(&state_root, "ctx") {
+        match crate::agent::capsule::Capsule::create_at(&ctx_dir) {
             Ok(c) => {
                 sink.log(
                     "info",
@@ -61,7 +90,7 @@ pub async fn run_with_ask(
                 "warn",
                 format!(
                     "[agent] capsule 建不出来（{}），本次退化为内存侧存：{e}",
-                    state_root.display()
+                    ctx_dir.display()
                 ),
             ),
         }
@@ -744,6 +773,10 @@ pub async fn run_with_ask(
                     continue;
                 }
                 None => {
+                    // 留痕也记下"交付的那一条"（只有被门禁接受的才算 —— 被拒的那条不是结论）
+                    if let Some(t) = ctx.progress_mut().transcript_mut() {
+                        t.final_text(&text);
+                    }
                     out.answer = text;
                     delivered = true;
                     sink.log("ok", clip(&format!("[agent] 完成，共 {step} 轮"), 200));
@@ -1102,6 +1135,18 @@ pub async fn run_with_ask(
             .collect::<Vec<_>>()
             .join("；");
 
+        // v1.5：把这一批**调用与结果**写进本 run 的留痕（会话层检索的正文来源）。
+        // 位置是刻意的：结果一产生就记，而**不是**只在被折掉时才记 —— 被折掉才记正是
+        // 此前"跨 run 搜不到"的根因（那时只有 capsule 里那一小块）。
+        if let Some(t) = ctx.progress_mut().transcript_mut() {
+            for (tool, brief, res) in &results {
+                match res {
+                    Ok(r) => t.call(tool, brief, true, r),
+                    Err(e) => t.call(tool, brief, false, e),
+                }
+            }
+        }
+
         // 回灌：单动作保持老形状（模型学过它），批走 results 数组、按声明顺序逐条给
         if n == 1 {
             let (_, _, r) = results.into_iter().next().expect("n == 1 时必有结果");
@@ -1328,6 +1373,9 @@ pub async fn run_with_ask(
     // 进展记忆（v1.1）：把**完整账本**交给调用方（含被取代的）—— 宿主据此写进会话存档，
     // 否则"模型确认过什么"跑完即焚（§8-5 当年拍了「是」却一直没落）。
     out.findings = ctx.progress().all().to_vec();
+    // 本 run 的留痕 id 交回宿主：宿主写进那条 assistant 消息的 `run_id`，
+    // 下一个 run 才找得回这一次的提问 / 工具调用 / 回答（会话层跨 run 的唯一钥匙）。
+    out.run_id = Some(run_id);
     out.elapsed_ms = started.elapsed().as_millis();
     Ok(out)
 }

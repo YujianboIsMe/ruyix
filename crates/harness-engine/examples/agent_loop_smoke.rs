@@ -152,6 +152,7 @@ fn run_loop(
             &[HistoryMsg {
                 role: "user".into(),
                 text: "你好".into(),
+                run_id: None,
             }],
             WritePolicy::Apply,
             &conn,
@@ -474,6 +475,7 @@ fn run_loop_ask(
             &[HistoryMsg {
                 role: "user".into(),
                 text: "你好".into(),
+                run_id: None,
             }],
             &[],
             WritePolicy::Apply,

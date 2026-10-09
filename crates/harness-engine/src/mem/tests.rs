@@ -689,6 +689,7 @@ fn 转录压实必须留收据且最新一句原样保留() {
                 "assistant".into()
             },
             text: format!("第 {i} 轮：{}", "内容".repeat(60)),
+            run_id: None,
         })
         .collect();
 

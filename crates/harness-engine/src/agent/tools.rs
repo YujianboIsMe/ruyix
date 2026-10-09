@@ -43,9 +43,19 @@ pub struct Ctx<'a> {
     pub(crate) state_root: Option<PathBuf>,
     /// **写入白名单**（v1.4 P1，宿主注入）。空 = 不启用（老行为一字不变）。
     pub(crate) write_allow: Vec<String>,
+    /// **本会话前面几个 run 的留痕 id**（v1.5 会话层跨 run 检索；新 → 旧）。
+    /// 主循环从 `history` 里取（见 `types::session_run_ids`），子步骤共用同一份 `Ctx`。
+    /// 空 = 只搜本 run（没有历史，如实少搜）。
+    pub(crate) session_runs: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
+    /// 本会话前面几个 run 的留痕 id（新 → 旧）—— 主循环从 `history` 里取。
+    pub(crate) fn with_session_runs(mut self, runs: Vec<String>) -> Self {
+        self.session_runs = runs;
+        self
+    }
+
     pub(crate) fn new(proj: &'a Path, policy: WritePolicy) -> Self {
         Self {
             proj,
@@ -57,6 +67,7 @@ impl<'a> Ctx<'a> {
             backup_dir: None,
             state_root: None,
             write_allow: Vec::new(),
+            session_runs: Vec::new(),
         }
     }
 

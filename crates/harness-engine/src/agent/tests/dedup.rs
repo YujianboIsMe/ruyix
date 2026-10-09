@@ -288,6 +288,23 @@ fn capsule_off_writes_nothing_anywhere() {
         !log.contains("capsule 侧存") && !log.contains("capsule 召回"),
         "关着时不该有侧存或召回：{log}"
     );
-    assert!(!state.0.join("ctx").exists(), "关着时不建侧存目录");
+    // v1.5 起这个目录里多了一条**独立于 capsule** 的东西：本 run 的**留痕**
+    // （`agent/transcript.rs`，出厂即用 —— 用户 2026-10-09 的刚需：会话内跨 run 问一件事）。
+    // 所以判据从"什么都不许写"改成"**写的是哪一个**"：关着 capsule ⇒ 一个侧存索引都没有，
+    // 但留痕照建（它是甸服的正文来源，与 capsule 开关无关）。
+    let ctx_dir = state.0.join("ctx");
+    let has = |name: &str| {
+        std::fs::read_dir(&ctx_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .any(|e| e.path().join(name).is_file())
+            })
+            .unwrap_or(false)
+    };
+    assert!(!has("index.jsonl"), "关着 capsule ⇒ 一个侧存索引都不许有");
+    assert!(
+        has("transcript.jsonl"),
+        "留痕是独立于 capsule 的（甸服的正文来源）"
+    );
     assert!(log.contains("拦截重复 1"), "P2 的去重照旧：{log}");
 }

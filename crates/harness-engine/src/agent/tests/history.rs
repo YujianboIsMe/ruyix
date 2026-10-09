@@ -8,6 +8,7 @@ fn tail_history_filters_and_caps() {
     let mk = |role: &str, text: &str| HistoryMsg {
         role: role.into(),
         text: text.into(),
+        run_id: None,
     };
     let h = vec![
         mk("system", "x"),

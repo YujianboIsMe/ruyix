@@ -117,6 +117,9 @@ pub struct Progress {
     cap_bytes: usize,
     /// **去重账本**（v1.2 P2）。`agent.ctx.dedup` 关着时没人查它也没人记它 ⇒ 空转。
     dedup: ledger::ContextLedger,
+    /// **本 run 的可检索留痕**（v1.5 会话层检索的正文来源）。
+    /// 与 capsule 是两个东西：capsule 管"折掉/可复用结果的召回"，它管"这个 run 说过什么、调过什么"。
+    transcript: Option<crate::agent::transcript::Transcript>,
     /// 本轮账本记下了**一次真执行**（不是命中）⇒ 算进展。
     ///
     /// 它替掉的是 [`Progress::note_round`] 里 `fresh_cmd` 那条近似：那个判据按
@@ -151,6 +154,7 @@ impl Default for Progress {
             fresh_cmd: false,
             dedup: ledger::ContextLedger::new(DEFAULT_DEDUP_CAP_BYTES),
             fresh_exec: false,
+            transcript: None,
         }
     }
 }
@@ -376,6 +380,21 @@ impl Progress {
         now: &ledger::VersionVec,
     ) -> Option<ledger::Recall> {
         self.dedup.recall(call, now)
+    }
+
+    /// 挂上**本 run 的留痕**（v1.5 会话层检索的正文来源；与 capsule 是两个东西：
+    /// capsule 管"折掉/可复用结果的召回"，留痕管"这个 run 说过什么、调过什么"）
+    pub fn attach_transcript(&mut self, t: crate::agent::transcript::Transcript) {
+        self.transcript = Some(t);
+    }
+
+    /// 本 run 的留痕（检索时读它；`None` = 没建起来 —— 那一层就报"这一 run 没有留痕"）
+    pub fn transcript(&self) -> Option<&crate::agent::transcript::Transcript> {
+        self.transcript.as_ref()
+    }
+
+    pub fn transcript_mut(&mut self) -> Option<&mut crate::agent::transcript::Transcript> {
+        self.transcript.as_mut()
     }
 
     /// 挂上侧存（由主循环在 run 开头决定挂不挂）

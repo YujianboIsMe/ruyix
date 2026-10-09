@@ -154,6 +154,10 @@ pub struct ReplyAgent {
     /// Apply 策略：被覆盖文件的备份目录
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_dir: Option<String>,
+    /// 本 run 的**留痕 id**（v1.5 会话层跨 run 检索的钥匙）：UI 把它存进那条 assistant
+    /// 消息的 `run_id`，下一个 run 才找得回"前面几个 run 说过什么"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     /// 本次随消息落盘的截图（v1.3）：UI 按路径出缩略图并存进会话消息
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shots: Vec<attachments::StoredShot>,
@@ -175,6 +179,43 @@ pub struct ReplyAgent {
     pub asks: Vec<engine::agent::AskRecord>,
     pub usage: engine::llm::Usage,
     pub elapsed_ms: u128,
+}
+
+/// 把"原始历史里有、压实结果里没有"的 run id 补成几条**中性备注**（v1.5 会话层跨 run 的钥匙）。
+///
+/// 为什么单拎出来成一个纯函数：这条链一断，甸服只会搜得到**本 run** —— 搜索结果少几条而已，
+/// **界面上完全看不出来**。所以它必须有判据（`the_compaction_must_not_eat_the_run_ids`）。
+///
+/// 为什么需要它：转录压实（`mem::compact_history`）只保留最近几条，而"第 1 个 run 说过什么"
+/// 恰恰可能在更早的地方；用户 2026-10-09 的场景（第 1 个 run 与第 3 个 run 有没有冲突）就是这样。
+pub(crate) const SESSION_RUN_NOTE: &str =
+    "（本会话更早的一个 run —— 它的内容用 read 的检索形状（scope=session）找，命中会标明 run。）";
+
+/// 上限 8：与引擎侧会话层一次最多搜几个 run（`search::SESSION_MAX_RUNS`）对齐 ——
+/// 补了也没人会搜，只会白占上下文。
+pub(crate) const SESSION_RUN_NOTE_MAX: usize = 8;
+
+pub(crate) fn carry_session_runs(
+    mut compacted: Vec<engine::agent::HistoryMsg>,
+    raw: &[engine::agent::HistoryMsg],
+) -> Vec<engine::agent::HistoryMsg> {
+    let mut added = 0usize;
+    for id in raw.iter().filter_map(|m| m.run_id.as_deref()) {
+        if added >= SESSION_RUN_NOTE_MAX {
+            break;
+        }
+        let id = id.trim();
+        if id.is_empty() || compacted.iter().any(|m| m.run_id.as_deref() == Some(id)) {
+            continue;
+        }
+        compacted.push(engine::agent::HistoryMsg {
+            role: "system".into(),
+            text: SESSION_RUN_NOTE.into(),
+            run_id: Some(id.to_string()),
+        });
+        added += 1;
+    }
+    compacted
 }
 
 #[tauri::command]
@@ -223,6 +264,10 @@ pub async fn agent_reply(
         }
         c.kept
     };
+    // 跨 run 检索的**钥匙**不能被转录压实吃掉：压实只保留最近几条，而"第 1 个 run 说过什么"
+    // 恰恰可能在更早的地方。所以把原始历史里有、压实结果里没有的 run id 补成几条**中性备注**
+    // （role=system）：模型看得见"更早还有哪些 run"，引擎拿得到它们去搜留痕。
+    let session_history = carry_session_runs(compacted_history, &history);
     engine::mem::set_scope(&crate::paths::Paths::from_root(&root).project_key(&root));
     let cfg = build_cfg(&config, Some(&root))?;
     // 截图：**先落盘再跑**。落不下就整条消息失败（半张图发出去比报错更坏），
@@ -257,7 +302,7 @@ pub async fn agent_reply(
         &cfg,
         proj,
         &task,
-        &compacted_history,
+        &session_history,
         &images,
         policy,
         &conn,
@@ -266,7 +311,9 @@ pub async fn agent_reply(
         &sink,
     )
     .await?;
+    let run_id = out.run_id.clone();
     Ok(ReplyAgent {
+        run_id,
         answer: out.answer,
         steps: out.steps,
         changes: out.changes,

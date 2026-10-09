@@ -126,6 +126,7 @@ fn main() {
         &[HistoryMsg {
             role: "user".into(),
             text: task.to_string(),
+            run_id: None,
         }],
         WritePolicy::Apply,
         &agent::NoConnector,

@@ -3,7 +3,8 @@
 > 归属版本：**v1.5**（第 1 服的**语义更正**，四层结构不动）
 > 由来：2026-10-09 用户更正 —— 「甸服就是 session，但它不应该包括本次 run 的，是本 session 内前几个 run。
 > 因为本次 run 的在上下文的可追加段里了，无需搜索！」
-> 状态：**待拍板**（§5 四条），批复后实施。相关文档：`需求-分层搜索-五服-v1.5.md`（四层本体）、
+> 状态：**已实施**（2026-10-09 用户"先把甸服修好，因为这是个刚需"；§5 四条按建议定稿：
+> 最近 8 个 run / 本刀不纳入未折原文 / 新→旧 / 不做跨 session）。落地形状见 §6。相关文档：`需求-分层搜索-五服-v1.5.md`（四层本体）、
 > `实施-分层搜索-v1.5.md`（落地与读数）、`五服搜索-人话版.md`（给人读的）。
 
 ---
@@ -63,3 +64,27 @@
 | 2 | 是否也纳入前几个 run **未折**的原始对话（`session.json` 的消息） | **本刀不纳入**（避免两套来源打架；要纳入就单独一刀） |
 | 3 | 顺序 | **新 → 旧**（近的更可能有用） |
 | 4 | 跨 session | **不做**（见 §3-C） |
+
+---
+
+## 6. 落地形状与读数（2026-10-09）
+
+| 面 | 位置 | 说明 |
+|---|---|---|
+| **留痕本体** | `crates/harness-engine/src/agent/transcript.rs`（新） | `ctx/<run-id>/transcript.jsonl`，一行一条：`prompt` / `call`（工具 + 参数摘要 + 结果，单条裁 4096 字节并**记下原文长度**）/ `final` / `capped`（到顶留痕，不静默丢）。只追加；`MAX_FILE_BYTES = 1MB`；检索**只读** |
+| 写留痕 | `agent/tool_loop.rs` | 与 capsule **同一个 run 目录**、两份文件各管一件事：`transcript.jsonl`（检索）/ `index.jsonl`（召回）。**独立于 `agent.ctx.capsule` 开关**（出厂即用）；建不出来只降级并如实说，不拖垮这一 run |
+| **跨 run 的钥匙** | `types::HistoryMsg.run_id` + `session_run_ids()`；`AgentOutcome.run_id` → 宿主 `ReplyAgent.run_id` → UI 存进消息 → 下一 run 的 history 带回来 | 为什么搭在 history 上：宿主本来就把整段会话发过来，`SessionMsg.run_id` 也已落盘 |
+| 钥匙不被压实吃掉 | `src-tauri/src/agent/mod.rs::carry_session_runs`（纯函数） | 转录压实只保留最近几条 ⇒ 更早的 run id 会被吃掉（而"第 1 个 run"恰恰可能在更早）⇒ 补成中性备注（role=system），上限 8，与引擎的 `SESSION_MAX_RUNS` 对齐 |
+| 检索 | `agent/search.rs::session` + `session_dirs` | 本 run + 历史里的 run（**新 → 旧**），最多 8 份；命中逐条标 `本 run` / `run <id>` + `提问`/`工具 X`/`工具 X 的结果`/`回答` + 留痕行号；**权威序不变**（文件 > 记忆，冲突并列） |
+| 版本源 | `transcript::version_of` | 参与检索那一组留痕的 `(标签, 字节, mtime)` 组合指纹 ⇒ 本 run 还在长 ⇒ 版本必变 ⇒ 自失效方向（与 §2.2 同向） |
+| 话术 | `agent/prompt.rs` / `llm.rs` | `session` = 本会话的留痕（含前面几个 run，命中标 run）；并加一句纪律：**还在你上下文里的不必搜** |
+| 判据 | `agent/tests/search.rs`（跨 run 端到端 + 缺留痕明说）· `agent/transcript.rs`（4 条）· 宿主 `the_compaction_must_not_eat_the_run_ids` · ui-smoke **U77**（两处接线 + 三处字段齐 + "真填真补"） | 逐条对 §4 |
+
+读数：引擎 **485 / 0 / 8** · 宿主 **182 / 0 / 3** · ui-smoke **449/449** · clippy --all-targets **0** · fmt 干净。
+
+### 与 §4 草案的一处**如实偏离**
+
+草案判据 1（"本 run **未折**的正文不在第 1 服的结果里"）**没有实现，也不打算实现**：留痕是这一 run 的
+**完整**记录，不区分"还在上下文"与"已离开"。要区分就得让引擎知道"哪几条还在上下文里"，而那是一个
+**会过期的推断** —— 错判（把在上下文里的东西报成"搜不到"）比多搜一次坏得多。
+那条纪律放在**话术**里（提示词明说"不必搜"），不进机制。

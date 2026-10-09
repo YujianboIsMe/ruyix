@@ -50,6 +50,30 @@ pub(crate) const IMAGE_PROXY_BYTES: usize = 4 * 1200;
 pub struct HistoryMsg {
     pub role: String,
     pub text: String,
+    /// 这条消息当时那个 run 的 id（v1.5 会话层跨 run 检索的**钥匙**）。
+    ///
+    /// 为什么搭在 `history` 上而不是加参数：宿主本来就把整段会话发过来，`SessionMsg.run_id`
+    /// 也已经落盘 —— 跨 run 检索要的"这个会话有哪几个 run"就在这段历史里，不必再开一条链路。
+    /// 老会话没这个字段 ⇒ `None` ⇒ 那段历史不进检索（如实少搜，不假装搜过）。
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// 这段历史里出现过的 run id（**新 → 旧**，去重，去掉空值）。
+///
+/// 会话层检索要按时间倒序找：新的更可能有用。顺序由 `history` 里的先后决定
+/// （宿主按时间顺序发），所以这里整体反转。
+pub fn session_run_ids(history: &[HistoryMsg]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in history.iter().rev() {
+        if let Some(id) = m.run_id.as_deref() {
+            let id = id.trim();
+            if !id.is_empty() && !out.iter().any(|x| x == id) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// 写入策略：确认模式 → Stage；写入/自主模式 → Apply
@@ -129,6 +153,13 @@ pub struct AgentOutcome {
     /// 看到的 active 视图，这里是完整账本（含被取代的）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<super::findings::Finding>,
+    /// 本 run 的**留痕 id**（`<状态根>/ctx/<run-id>/transcript.jsonl` 那个目录名）。
+    ///
+    /// 交回宿主是**必须**的：宿主把它写进那条 assistant 消息的 `run_id`，下一个 run 才找得回
+    /// 这一次的提问 / 工具调用 / 回答（会话层跨 run 检索的唯一钥匙）。此前聊天 run 不落
+    /// RunRecord ⇒ 一直是 `None`，于是"前面几个 run"根本无从枚举。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub usage: Usage,
     pub elapsed_ms: u128,
 }

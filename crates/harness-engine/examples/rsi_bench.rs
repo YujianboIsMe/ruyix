@@ -784,6 +784,7 @@ fn run_once(ctx: &RunCtx) -> Rec {
         &[HistoryMsg {
             role: "user".into(),
             text: task.spec.prompt.clone(),
+            run_id: None, // 评测台的一次任务 = 一个独立 run，没有"会话历史"要跨
         }],
         WritePolicy::Apply,
         &NoConnector,
@@ -940,6 +941,7 @@ fn run_fake(
         &[HistoryMsg {
             role: "user".into(),
             text: task.spec.prompt.clone(),
+            run_id: None, // 评测台的一次任务 = 一个独立 run，没有"会话历史"要跨
         }],
         WritePolicy::Apply,
         &NoConnector,

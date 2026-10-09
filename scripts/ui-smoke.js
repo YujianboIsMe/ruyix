@@ -1710,6 +1710,37 @@ async function runSessionChecks() {
       "文案要两种语言齐（U49 的老病）",
     );
 
+    // ---- U77：甸服跨 run 的**钥匙**在链上（v1.5 会话层；2026-10-09 用户刚需）----
+    //      链路：session.js 发 run_id → 宿主 carry_session_runs 补被压实吃掉的 → 引擎按 id 搜留痕
+    //      → outcome.run_id 回来 → UI 存回消息。断任何一处，现象只是"少搜到几个 run"，界面看不出来。
+    check(
+      "U77",
+      "session-xrun-key",
+      has(sessJs, "run_id: m.run_id ?? null"),
+      "history 里没带 run_id ⇒ 引擎永远只知道本 run，甸服跨不了 run",
+    );
+    check(
+      "U77",
+      "session-xrun-key",
+      has(sessJs, "placeholder.run_id = rep.run_id"),
+      "回复里的 run_id 没落到消息上 ⇒ 下一个 run 的 history 还是空的",
+    );
+    check(
+      "U77",
+      "session-xrun-key",
+      /pub run_id: Option<String>/.test(hostModRs) &&
+        /pub run_id: Option<String>/.test(hostSessRs) &&
+        /pub run_id: Option<String>/.test(engTypesRs),
+      "三处字段必须齐（引擎 outcome → 宿主 reply → 会话存档）：少一处被 serde 静默抹掉",
+    );
+    check(
+      "U77",
+      "session-xrun-key",
+      has(hostModRs, "let run_id = out.run_id.clone();") &&
+        has(hostModRs, "carry_session_runs(compacted_history, &history)"),
+      "宿主要**真填**并**真补**（只声明不填 = 键永远是空的，U76 同款教训）",
+    );
+
     // ---- U8：项目关闭收口（会话随项目走）----
     SessionUI.projectClosed();
     check("U8", "session-close",

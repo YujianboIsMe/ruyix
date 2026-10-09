@@ -59,6 +59,7 @@ const SKIP_DIRS: &[&str] = &[
     "build",
 ];
 
+#[allow(dead_code)]
 fn mtime_ms(md: &std::fs::Metadata) -> u64 {
     md.modified()
         .ok()
@@ -90,19 +91,20 @@ fn ts_note(secs: i64) -> String {
 pub(crate) fn stamp_version(v: &mut ledger::VersionVec, spec: &SearchSpec, ctx: &Ctx<'_>) {
     match spec.scope {
         SearchScope::Files => { /* 仓库版本已经在 `snapshot` 里取过了 */ }
-        SearchScope::Session => match ctx.progress().capsule() {
-            Some(c) => {
-                let idx = c.dir().join(capsule::INDEX_FILE);
-                match std::fs::metadata(&idx) {
-                    Ok(md) => {
-                        v.set_state("search:session", ledger::Ver::File(mtime_ms(&md), md.len()))
-                    }
-                    // 侧存还没建过（这一轮还没折过东西）⇒ "这一层是空的"这个答案可判
-                    Err(_) => v.set_state("search:session", ledger::Ver::Missing),
-                }
+        // 会话层：正文来自**本会话的留痕**（本 run + 前面几个 run，新 → 旧）。
+        // 版本 = 这一组留痕的 (目录名, 字节数, mtime) 组合指纹 —— 本 run 的那份还在长 ⇒ 版本必变
+        // ⇒ 下一次重跑（与 v1.5 会话层"自失效"那条同向：拿旧结果冒充新的更坏）。
+        SearchScope::Session => {
+            let dirs = session_dirs(ctx);
+            if dirs.is_empty() {
+                v.unknown = true;
+            } else {
+                v.set_state(
+                    "search:session",
+                    ledger::Ver::Overlay(context::digest(&transcript::version_of(&dirs))),
+                );
             }
-            None => v.unknown = true,
-        },
+        }
         SearchScope::ProjectMem | SearchScope::GlobalMem => match mem::current() {
             Some(m) => match mem::head_seq(m) {
                 Ok(seq) => v.set_state(
@@ -241,40 +243,82 @@ fn files(ctx: &Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, Strin
 
 // ---------------------------------------------------------------- 第 1 服：会话内
 
+/// 会话层一次最多搜几个 run 的留痕（本 run 也算在内）。
+///
+/// 8 是拍的：会话的"最近几轮"通常够用，再往前的边际价值低，而留痕是按内容扫的（有成本）。
+const SESSION_MAX_RUNS: usize = 8;
+
+/// 本会话要搜的留痕目录：**本 run 在最前**，然后是前面几个 run（新 → 旧），最多 [`SESSION_MAX_RUNS`] 份。
+///
+/// 新 → 旧 是刻意的：越近的话越可能有用。用户 2026-10-09 的场景（"第 1 个 run 与第 3 个 run
+/// 关于某字段有没有冲突"）两个都要看到，顺序只决定先说哪个。
+fn session_dirs(ctx: &Ctx<'_>) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(t) = ctx.progress().transcript() {
+        out.push(("本 run".to_string(), t.dir().to_path_buf()));
+    }
+    {
+        let root = ctx.state_root();
+        for id in ctx
+            .session_runs
+            .iter()
+            .take(SESSION_MAX_RUNS.saturating_sub(out.len()))
+        {
+            let d = root.join("ctx").join(id);
+            if d.join(transcript::FILE).is_file() {
+                out.push((format!("run {id}"), d));
+            }
+        }
+    }
+    out
+}
+
+/// 第 1 服：**本会话的留痕**（提问 / 每一次工具调用与结果 / 回答），本 run + 前面几个 run。
+///
+/// 为什么不是 capsule（原先的形状）：capsule 只留"被折掉 / 可复用"的那部分结果、且一 run 一目录
+/// ⇒ 用户那个场景（"我一个会话里第 1 个 run 与第 3 个 run 关于【user 表 password 字段长度】
+/// 有没有冲突"）**一个来源都搜不到** —— 提问与回答压根没进过 capsule，工具调用只留了被折掉的那点。
+/// 留痕（`transcript.jsonl`）才是这一层该读的正文。
 fn session(ctx: &mut Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, String> {
-    let Some(c) = ctx.progress_mut().capsule_mut() else {
+    let dirs = session_dirs(ctx);
+    if dirs.is_empty() {
         return Err(
-            "会话层检索需要本 run 的侧存（capsule），但这次 run 没挂上 —— 多半是引擎被当成库\
-             调用（headless / eval / 冒烟）。这一层本次没有读数。"
+            "会话层检索不了：这一 run 没有留痕（没建起来），也没有可搜的历史 run。这一层本次没有读数。"
                 .into(),
         );
-    };
-    let hits = c.search(&spec.q, limit)?;
+    }
+    let mut hits: Vec<(String, transcript::Hit)> = Vec::new();
+    for (label, d) in &dirs {
+        if hits.len() >= limit {
+            break;
+        }
+        for h in transcript::search_in(d, &spec.q, limit - hits.len()) {
+            hits.push((label.clone(), h));
+        }
+    }
     let mut out = format!(
-        "**会话内**（本 run **已折掉 / 已复用过的**正文，词 `{}`）：命中 {} 条。\n",
+        "**会话内**（本会话的留痕：提问 / 工具调用与结果 / 回答；词 `{}`）：命中 {} 条，查了 {} 份留痕。\n",
         spec.q,
-        hits.len()
+        hits.len(),
+        dirs.len()
     );
     out.push_str(
-        "（只搜折掉的那些：还在你上下文里的结果你直接看得到，不必搜。命中是**过去说过的话**，\
-         权威级别最低 —— 与磁盘不一致时以磁盘为准。）\n",
+        "（这是**过去说过的话**，权威级别最低 —— 与磁盘不一致时以磁盘为准。还在你上下文里的\
+         内容你直接看得到，不必搜：检索是给**离开上下文的东西**用的。）\n",
     );
-    for h in &hits {
+    for (label, h) in &hits {
         out.push_str(&format!(
-            "- 第 {} 轮 `{}` {} · 第 {} 行: {}\n",
-            h.step,
-            h.tool,
-            if h.target.is_empty() {
-                "（无目标）"
-            } else {
-                h.target.as_str()
-            },
-            h.line_no,
+            "- {} · {} · 留痕第 {} 行: {}\n",
+            label,
+            h.label,
+            h.line,
             clip(&h.text, HIT_CLIP)
         ));
     }
     if hits.is_empty() {
-        out.push_str("（没有命中：这一层里还没有出现过这个词。）\n");
+        out.push_str(
+            "（没有命中：这些留痕里没有出现过这个词 —— **没搜到不等于没发生过**，换个更具体的词再问一次。）\n",
+        );
     }
     Ok(out)
 }

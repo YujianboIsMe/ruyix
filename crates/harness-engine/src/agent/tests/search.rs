@@ -182,14 +182,89 @@ fn a_missing_memory_store_is_an_error_not_an_empty_answer() {
     }
 }
 
-/// **第 1 服**：没有侧存（headless / eval）时也是明说，不是"空的"。
+/// **第 1 服**：没有留痕（headless / eval / 建不起来）时也是明说，不是"空的"。
 #[test]
-fn the_session_scope_needs_a_capsule() {
+fn the_session_scope_needs_a_transcript() {
     let d = TempDir::new("search-session");
     let mut ctx = Ctx::new(&d.0, WritePolicy::Apply);
     let e = crate::agent::search::run(&mut ctx, &spec(SearchScope::Session, "x")).unwrap_err();
-    assert!(e.contains("侧存"), "{e}");
+    assert!(e.contains("留痕"), "{e}");
     assert!(e.contains("没有读数"), "{e}");
+}
+
+/// **用户 2026-10-09 的场景**：一个会话跑了 3 个 run，问"第 1 个和第 3 个关于【user 表 password
+/// 字段长度】有没有冲突" —— 这一条钉的就是甸服的正文来源与跨 run 能力。
+///
+/// 为什么此前一条都搜不到（记住这个反例，别再退回那个形状）：正文只存在于 capsule（只留
+/// "被折掉 / 可复用"的结果、一 run 一目录），而**提问与回答压根没存过**、工具调用只留了那一小块。
+/// 留痕（`transcript.jsonl`）才是这一层的正文：本 run + 历史里那几个 run 的提问/调用/回答。
+#[test]
+fn the_session_layer_searches_this_run_and_the_previous_ones() {
+    let d = TempDir::new("search-xrun-proj"); // 项目（检索绝不写它）
+    let state = TempDir::new("search-xrun-state"); // 状态根（留痕落这儿）
+    let before = tree_fingerprint(&d.0);
+
+    // 造两个"前面几个 run"的留痕 —— 就像那两个 run 当时真跑过
+    let ctx_root = state.0.join("ctx");
+    let mk = |id: &str, prompt: &str, result: &str| {
+        let mut t = crate::agent::transcript::Transcript::create(&ctx_root.join(id)).unwrap();
+        t.prompt(prompt);
+        t.call("read", "db/schema.sql", true, result);
+        t.final_text("已记下 password 字段的长度。");
+    };
+    mk(
+        "agent-20261001-100000",
+        "建 user 表：password 给 varchar(60)",
+        "password varchar(60)",
+    );
+    mk(
+        "agent-20261002-100000",
+        "需求变了：password 改成 varchar(72)",
+        "password varchar(72)",
+    );
+
+    // 本 run（第 3 个）：自己的留痕 + 历史里那两个 run 的 id（新 → 旧，宿主就是这么给的）
+    let mut ctx = ctx_with(&d.0, vec![], WritePolicy::Stage)
+        .with_state_root(state.0.clone())
+        .with_session_runs(vec![
+            "agent-20261002-100000".into(),
+            "agent-20261001-100000".into(),
+        ]);
+    let mut t =
+        crate::agent::transcript::Transcript::create(&ctx_root.join("agent-20261003-100000"))
+            .unwrap();
+    t.prompt("现在 password 字段到底多长？和最早的建表有没有冲突？");
+    t.call(
+        "execute",
+        "grep -n password db/schema.sql",
+        true,
+        "password varchar(72)",
+    );
+    ctx.progress_mut().attach_transcript(t);
+
+    let out = crate::agent::search::run(&mut ctx, &spec(SearchScope::Session, "password")).unwrap();
+    assert!(
+        out.contains("本 run"),
+        "本 run 的提问/调用要在结果里：{out}"
+    );
+    assert!(
+        out.contains("agent-20261001-100000"),
+        "第 1 个 run 要被搜到：{out}"
+    );
+    assert!(
+        out.contains("agent-20261002-100000"),
+        "第 2 个 run 要被搜到：{out}"
+    );
+    assert!(
+        out.contains("varchar(60)") && out.contains("varchar(72)"),
+        "两个 run 的**不同说法都要在**（冲突要看得出来，引擎不许替它挑一个）：{out}"
+    );
+    let (me, prev) = (
+        out.find("本 run").unwrap(),
+        out.find("agent-20261002").unwrap(),
+    );
+    assert!(me < prev, "顺序是 本 run → 新的历史 → 旧的历史：{out}");
+    assert_eq!(before, tree_fingerprint(&d.0), "检索一个字节都不许写项目");
 }
 
 /// **判据 1 的机制层**：检索在账本里是**一等纯工具** ——
@@ -223,6 +298,52 @@ fn the_ledger_treats_a_search_as_a_first_class_pure_call() {
     assert_eq!(c1.norm, c2.norm);
 }
 
+/// **接线**：真跑一遍工具循环 —— 留痕**真落盘**、run id **真交回**。
+///
+/// 模块级测试只能证明"给一份留痕我能搜到"；这一条证明"跑起来之后那份留痕真在"。
+/// 少这一条，改写留痕的三个位置（提问 / 调用 / final）任何一个断了都不会有人发现。
+#[test]
+fn a_real_run_writes_the_transcript_and_hands_the_run_id_back() {
+    let d = TempDir::new("tr-loop");
+    let state = TempDir::new("tr-loop-state");
+    d.write("a.txt", "内容-MARK-TR");
+    let mut cfg = quiet_cfg();
+    cfg.project_state_root = state.0.to_string_lossy().to_string();
+    let script = vec![
+        r#"{"tool":"read","args":{"path":"a.txt"}}"#.to_string(),
+        r#"{"final":"读完了：里面有 MARK-TR。"}"#.to_string(),
+    ];
+    let (_, out, _) = block_on(run_logging(&cfg, &d.0, script));
+
+    let id = out
+        .run_id
+        .clone()
+        .expect("引擎必须把本 run 的留痕 id 交回（跨 run 的钥匙）");
+    let dir = state.0.join("ctx").join(&id);
+    let text = std::fs::read_to_string(dir.join(crate::agent::transcript::FILE))
+        .unwrap_or_else(|e| panic!("留痕没落盘（{}）：{e}", dir.display()));
+    assert!(text.contains(r#""kind":"prompt""#), "提问要记：{text}");
+    assert!(
+        text.contains(r#""kind":"call""#) && text.contains("a.txt"),
+        "工具调用与它的 target 要记：{text}"
+    );
+    assert!(
+        text.contains(r#""kind":"final""#),
+        "交付的 final 要记：{text}"
+    );
+    // 同一份留痕**当场就能被会话层搜到**（正文来自工具结果）
+    let hits = crate::agent::transcript::search_in(&dir, "MARK-TR", 5);
+    assert!(
+        hits.iter().any(|h| h.text.contains("MARK-TR")),
+        "工具结果要能被搜到：{hits:?}"
+    );
+    // 也绝不写进用户项目
+    assert!(
+        !d.0.join("transcript.jsonl").exists() && !d.0.join("ctx").exists(),
+        "留痕不许落进用户仓库"
+    );
+}
+
 /// **判据 1 的版本层**：拿不到版本 ⇒ **每次真执行**（fail-safe）。
 /// 记忆库不在 / 侧存没挂 ⇒ `unknown`；文件层不额外盖章（走仓库版本）。
 #[test]
@@ -236,7 +357,10 @@ fn a_search_without_a_version_source_always_executes() {
 
     let mut v2 = ledger::VersionVec::default();
     crate::agent::search::stamp_version(&mut v2, &spec(SearchScope::Session, "x"), &ctx);
-    assert!(v2.unknown, "侧存没挂 ⇒ 版本不可判");
+    assert!(
+        v2.unknown,
+        "留痕没挂 ⇒ 版本不可判（宁可多跑一次，不拿旧结果冒充新的）"
+    );
 
     // 文件层：不盖状态版本，交给 `snapshot` 的仓库那一路（非 git ⇒ snapshot 自己判 unknown）
     let mut v3 = ledger::VersionVec::default();

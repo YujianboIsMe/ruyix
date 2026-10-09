@@ -1517,7 +1517,9 @@
     const history = s.messages
       .filter((m) => (m.role === "user" || m.role === "assistant") && m.text)
       .slice(-12)
-      .map((m) => ({ role: m.role, text: m.text }));
+      // `run_id` 是**跨 run 检索的钥匙**（v1.5 会话层）：宿主把它交给引擎，
+      // 引擎才知道"前面几个 run 的留痕是哪几份"。少了它，甸服永远只搜得到本 run。
+      .map((m) => ({ role: m.role, text: m.text, run_id: m.run_id ?? null }));
     // `attachments` 先空着，等宿主回执（落盘后的路径）再回填；
     // `_preview` 是内存里的 data URL —— `persist` 会把 `_` 开头的字段剥掉，不进会话文件
     const userMsg = {
@@ -1577,6 +1579,8 @@
       // 结论账本（v1.1 §8-5）：跑完跟消息走 —— 字段没在 SessionMsg 里声明的话会被
       // serde 静默抹掉（磁盘与内存一起丢），宿主侧已同步声明
       placeholder.findings = rep.findings ?? [];
+      // 本 run 的留痕 id：存进消息（`SessionMsg.run_id` 已声明），下一个 run 的 history 才带得上
+      if (rep.run_id) placeholder.run_id = rep.run_id;
       // 提问留痕（v0.8）：跟着消息存档，重开会话仍看得见问过什么、怎么答的
       placeholder.ask = rep.asks ?? [];
       placeholder.status = gateStatus(placeholder);

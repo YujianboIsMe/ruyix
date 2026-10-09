@@ -750,8 +750,8 @@ pub fn tool_decls_for(names: &[&str]) -> Vec<serde_json::Value> {
 const TOOL_DECLS: &[(&str, &str, &str)] = &[
     (
         "read",
-        "读项目内的文件：路径给目录返回结构树，给文件返回内容。大文件用 offset/limit 窗口分段读。**分层检索**改用 scope + q（一次只查一层）：files=项目文件（原生实现，不经过 shell）/ session=本会话已折掉的正文 / project_mem=项目记忆 / global_mem=全局记忆（跨项目）。记忆层的答案是主张、文件层的答案是事实，冲突时以文件为准并说出来。Git 历史用 execute 跑 git log / git show。",
-        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔；给目录返回结构树，给 \".\" 返回项目根结构；检索时（scope=files）可另给 path 限定子树"},"offset":{"type":"integer","description":"从第几行开始读（行号从 1 起）"},"limit":{"type":"integer","description":"最多读多少行，一次上限 400 行"},"scope":{"type":"string","enum":["files","session","project_mem","global_mem"],"description":"分层检索：查哪一层（与 path 形状二选一，必配 q）。files=项目文件 / session=本会话已折掉的正文 / project_mem=项目记忆 / global_mem=全局记忆"},"q":{"type":"string","description":"检索词（字面匹配、大小写不敏感）"},"max_hits":{"type":"integer","description":"最多几条命中，默认 50、上限 50"}},"required":[]}"#,
+        "读项目内的文件：路径给目录返回结构树，给文件返回内容。大文件用 offset/limit 窗口分段读。**分层检索**改用 scope + q（一次只查一层）：files=项目文件（原生实现，不经过 shell）/ session=本会话的留痕（提问 / 每次工具调用与结果 / 回答，**含前面几个 run**，命中标明属于哪个 run）/ project_mem=项目记忆 / global_mem=全局记忆（跨项目）。记忆层的答案是主张、文件层的答案是事实，冲突时以文件为准并说出来；还在上下文里的内容不必搜（那是给离开上下文的东西用的）。Git 历史用 execute 跑 git log / git show。",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔；给目录返回结构树，给 \".\" 返回项目根结构；检索时（scope=files）可另给 path 限定子树"},"offset":{"type":"integer","description":"从第几行开始读（行号从 1 起）"},"limit":{"type":"integer","description":"最多读多少行，一次上限 400 行"},"scope":{"type":"string","enum":["files","session","project_mem","global_mem"],"description":"分层检索：查哪一层（与 path 形状二选一，必配 q）。files=项目文件 / session=本会话留痕（提问/工具调用与结果/回答，含前面几个 run，命中标明哪个 run）/ project_mem=项目记忆 / global_mem=全局记忆"},"q":{"type":"string","description":"检索词（字面匹配、大小写不敏感）"},"max_hits":{"type":"integer","description":"最多几条命中，默认 50、上限 50"}},"required":[]}"#,
     ),
     (
         "write",

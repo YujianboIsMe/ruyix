@@ -220,6 +220,57 @@ pub fn delete(project_root: &str, id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// **跨 run 的钥匙不许被转录压实吃掉**（v1.5 会话层）。
+    ///
+    /// 断了的后果是"搜得到还是搜不到"里少了几个 run —— 界面上看不出来，所以必须由判据看着。
+    #[test]
+    fn the_compaction_must_not_eat_the_run_ids() {
+        let m = |text: &str, id: Option<&str>| harness_engine::agent::HistoryMsg {
+            role: "user".into(),
+            text: text.into(),
+            run_id: id.map(|s| s.to_string()),
+        };
+        let raw = vec![
+            m(
+                "第 1 个 run：建 user 表 password varchar(60)",
+                Some("agent-20261001-100000"),
+            ),
+            m(
+                "第 2 个 run：改成 varchar(72)",
+                Some("agent-20261002-100000"),
+            ),
+            m("第 3 个 run：有没有冲突？", Some("agent-20261003-100000")),
+        ];
+        // 压实只留下最后一条（这就是"第 1 个 run 的 id 被吃掉"的现场）
+        let out = crate::agent::carry_session_runs(vec![raw[2].clone()], &raw);
+        for id in [
+            "agent-20261001-100000",
+            "agent-20261002-100000",
+            "agent-20261003-100000",
+        ] {
+            assert!(
+                out.iter().any(|m| m.run_id.as_deref() == Some(id)),
+                "run id {id} 丢了 —— 甸服会搜不到那一个 run"
+            );
+        }
+        assert_eq!(
+            out.iter()
+                .filter(|m| m.run_id.as_deref() == Some("agent-20261003-100000"))
+                .count(),
+            1,
+            "已有的那条不许重复补"
+        );
+        // 补进来的必须是**中性备注**（role=system），不是假装成用户说过的话
+        let added = out
+            .iter()
+            .find(|m| m.run_id.as_deref() == Some("agent-20261001-100000"))
+            .unwrap();
+        assert_eq!(added.role, "system");
+        // 没有 id 的历史（老会话）不许凭空造 id
+        let none = crate::agent::carry_session_runs(vec![], &[m("老会话", None)]);
+        assert!(none.is_empty(), "没有 run id 就一条都不补");
+    }
+
     use super::*;
 
     /// 每个用例一个独立临时目录：同进程内的用例是并行跑的，共用目录会让

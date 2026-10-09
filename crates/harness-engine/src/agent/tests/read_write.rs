@@ -18,6 +18,7 @@ fn tool_read_file_dir_overlay_and_jail() {
         backup_dir: None,
         state_root: None,
         write_allow: Vec::new(),
+        session_runs: Vec::new(),
     };
     assert!(rd(&ctx, "src/main.rs").unwrap().contains("fn main()"));
     assert!(rd(&ctx, "src").unwrap().contains("main.rs"));
@@ -52,6 +53,7 @@ fn write_policies_stage_vs_apply() {
         backup_dir: None,
         state_root: None,
         write_allow: Vec::new(),
+        session_runs: Vec::new(),
     };
     ctx.tool_write("keep.txt", "new").unwrap();
     ctx.tool_write("created.txt", "hi").unwrap();
@@ -87,6 +89,7 @@ fn write_policies_stage_vs_apply() {
         backup_dir: None,
         state_root: None,
         write_allow: Vec::new(),
+        session_runs: Vec::new(),
     };
     ctx2.tool_write("keep.txt", "new").unwrap();
     assert_eq!(

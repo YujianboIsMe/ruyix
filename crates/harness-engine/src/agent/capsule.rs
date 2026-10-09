@@ -96,6 +96,23 @@ impl Capsule {
         })
     }
 
+    /// 接一个**调用方定好的**目录（要建）。
+    ///
+    /// 与 [`Capsule::create`] 的区别只有一处：`create` 自己生成 run-id，这条不生成 ——
+    /// 当同一 run 目录里还要放别的文件时（v1.5 的 `transcript.jsonl` 就是），
+    /// 目录必须由调用方定一次、两边共用，否则一个 run 会散成两个目录。
+    pub fn create_at(dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        Ok(Self {
+            index: dir.join(INDEX_FILE),
+            dir: dir.to_path_buf(),
+            puts: 0,
+            bytes: 0,
+            recalls: 0,
+            corrupted: 0,
+        })
+    }
+
     /// 只接一个现成目录（测试用；不建目录）
     #[cfg(test)]
     pub fn at(dir: PathBuf) -> Self {

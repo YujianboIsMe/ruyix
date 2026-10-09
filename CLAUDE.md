@@ -288,7 +288,7 @@ Such message-level fields **must be declared in `agent::sessions::SessionMsg`** 
 在账本里是**一等纯工具**（`Tool::Search`：键 = `scope`+归一后的词+归一后的限定路径，`span = None`
 —— 检索之间没有包含关系），否则"藏在 execute 里"那条老路依然不进账本（管道一加就判不纯）。
 
-**四层**（`session` 本 run 已折掉的正文 / `project_mem` / `global_mem` / `files`；`kb` 是第二刀）——
+**四层**（`session` **本会话的留痕** —— 提问 / 每一次工具调用与结果 / 回答，**含前面几个 run**（命中标出属于哪个 run；正文在 `agent/transcript.rs`，`ctx/<run-id>/transcript.jsonl`）/ `project_mem` / `global_mem` / `files`；`kb` 是第二刀）——
 四层里**三个后端早已存在**（`agent/capsule.rs` 侧存、`mem/` 的 `retrieve::now`、`kb/` 的 FTS5），缺的是
 **能主动问的统一入口**；唯一"能主动问"的文件层原先走 `execute`（`git grep`/`findstr`），代价是
 不进账本（带管道即不纯 ⇒ 换个拼法就能重跑）、Windows 专属提示词替工具擦屁股、结果没有来源与指纹。
@@ -300,8 +300,16 @@ Such message-level fields **must be declared in `agent::sessions::SessionMsg`** 
 **版本与去重**（`agent/ledger.rs::precheck` 里由 `search::stamp_version` 盖章）—— 四层各有各的
 "变了没有"，且**两处不能想当然**：① 记忆库跑 **WAL**，主库文件 `(mtime,size)` 在小写入时**不动**
 ⇒ 拿它当版本会**假新鲜**；改用**事件序号**（`mem::head_seq`）② **会话层是自失效的**：检索自己的
-结果也进侧存，而侧存索引就是这一层的版本源 ⇒ 下一次必然重跑（判据钉住：
-`the_session_layer_is_self_invalidating_and_that_is_the_safe_direction`）。文件层用**仓库版本**
+结果也进留痕，而那一组留痕的 `(字节, mtime)` 组合指纹就是这一层的版本源 ⇒ 下一次必然重跑（判据钉住：
+`the_session_layer_is_self_invalidating_and_that_is_the_safe_direction`）。
+**跨 run 的钥匙搭在 `HistoryMsg.run_id` 上**（2026-10-09 用户刚需：一个会话三个 run，"第 1 个和第 3 个
+关于某字段有没有冲突"）：宿主本来就把整段会话发过来，`SessionMsg.run_id` 也已经落盘 ⇒ 不必再开链路。
+环是这么闭的：引擎给本 run 开留痕并把它当 `AgentOutcome.run_id` 交回 → 宿主 `ReplyAgent.run_id` →
+UI 存进那条消息 → 下一个 run 的 history 带着它回来 → `session` 层按 id 找到前几个 run 的留痕。
+**转录压实不许把这个 id 吃掉**（压实只留最近几条，而"第 1 个 run"恰恰可能在更早）：宿主
+`carry_session_runs` 把原始历史里有、压实结果里没有的补成中性备注（role=system，上限 8）。
+判据：引擎 `agent/tests/search.rs` 的跨 run 端到端 + 宿主 `the_compaction_must_not_eat_the_run_ids`
++ ui-smoke **U77**（界面上那两处接线；少一处只是"少搜到几个 run"，界面看不出来）。文件层用**仓库版本**
 （`git HEAD + 工作树脏否`）⇒ **非 git 仓库里永不复用**（`repo = None ⇒ unknown`），这是有意的
 fail-safe 而非漏做。拿不到版本 ⇒ `unknown` ⇒ **每次都真执行**。
 
