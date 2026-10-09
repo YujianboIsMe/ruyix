@@ -98,6 +98,8 @@ async function initApp() {
   window.ToolsUI?.attach();
   window.SkillsUI?.attach();
   window.ConfigUI?.attach();
+  // 记忆面板的菜单接线：绑在启动期而不是面板建起来之后（否则菜单是死按钮，见 memory.js 的 attach）
+  window.MemoryUI?.attach();
   window.ServiceUI?.attach();
   window.ProcLogUI?.attach();
   // 外链闸门（前端这一重）：agent 回的链接一律交给系统浏览器，绝不让 WebView 自己导航过去

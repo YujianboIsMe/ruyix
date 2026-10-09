@@ -165,8 +165,6 @@ window.MemoryUI = (() => {
       const tr = e.target.closest("tr[data-key]");
       if (tr) void showWhy(tr.dataset.key);
     });
-    // 顶栏「记忆」菜单项：面板自己绑自己（免得 main.js 再长一段菜单接线）
-    document.getElementById("menu-memory")?.addEventListener("click", () => open());
     return root;
   }
 
@@ -366,27 +364,47 @@ window.MemoryUI = (() => {
     }
   }
 
+  /** 打开（或复用一个已存在的）记忆面板标签页 —— 与服务面板同一套惯例 */
+  function open() {
+    const s = window.state;
+    if (!s) return;
+    const existing = s.tabs.find((t) => t._isMemory);
+    if (existing) {
+      switchTab(existing.id);
+      return;
+    }
+    const t = {
+      id: "mem-" + Date.now().toString(),
+      name: T("mem.title"),
+      path: "",
+      content: "",
+      _isMemory: true,
+    };
+    s.tabs.push(t);
+    renderTabs();
+    switchTab(t.id);
+  }
+
+  /**
+   * 顶栏「记忆」菜单的接线。**必须在这里、而不是 build() 里** —— 这是"点不动"的病根：
+   *
+   * 面板是**点菜单才建**的，而 `build()` 只在面板已经建起来之后才跑。绑定写在 build()
+   * 里就成了先有鸡还是先有蛋：菜单等不到第一次点击，面板也就永远没机会被建出来，
+   * 于是那条绑定一辈子没执行过，按钮看上去就是死的。
+   *
+   * 现在与 `ServiceUI.attach()` 同一套惯例：启动期由 main.js 的 initApp 调一次，
+   * 绑好之后**任何时刻**点菜单都进得去（首次、关掉面板后再点，都一样）。
+   */
+  function attach() {
+    const btn = el("menu-memory");
+    if (!btn) return;
+    btn.addEventListener("click", () => open());
+    btn.style.cursor = "pointer";
+  }
+
   return {
-    /** 打开（或复用一个已存在的）记忆面板标签页 —— 与服务面板同一套惯例 */
-    open() {
-      const s = window.state;
-      if (!s) return;
-      const existing = s.tabs.find((t) => t._isMemory);
-      if (existing) {
-        switchTab(existing.id);
-        return;
-      }
-      const t = {
-        id: "mem-" + Date.now().toString(),
-        name: T("mem.title"),
-        path: "",
-        content: "",
-        _isMemory: true,
-      };
-      s.tabs.push(t);
-      renderTabs();
-      switchTab(t.id);
-    },
+    attach,
+    open,
 
     /** 进入这个标签页时挂载/刷新 */
     render(t) {

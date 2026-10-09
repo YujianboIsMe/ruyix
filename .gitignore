@@ -34,6 +34,8 @@ training/outputs/
 
 # Qwen Code 在本仓库生成的会话期文件（auto-skill 等）—— 工具脚手架，不是源码
 /.qwen/
+# 其它编辑/代理工具在本仓库留下的脚手架（内容是一份通用 Rust ignore 模板，非本项目配置）
+/.zcodeignore
 
 # 探针出的截图是 scratch（不该进仓库；我自己踩过一次：add -A 在前、移走文件在后）
 /*-shot.png

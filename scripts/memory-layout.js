@@ -10,21 +10,35 @@
  *
  * 做法：拼一个自包含页面（真 index.html 骨架 + 真 styles.css + 真 ui/scripts/*.js，
  * 后端形参照旧走 `window.__TAURI__` 桩，桩里给**带长值**的记忆数据），在无头 Edge 里：
- * `MemoryUI.open()` → 量 → 点「凭什么」展开修订链 → 量 → 切到服务面板（互斥的反面）→ 量 →
- * 缩窄外层 → 再量。全程用**真的**面板与**真的** CSS。
+ * 按启动期那条路**接线**（`MemoryUI.attach()`，与 main.js initApp 同一句）→
+ * **点顶栏「记忆」菜单项**（`#menu-memory.click()`）→ 量 → 再点一次（必须复用）→
+ * 点「凭什么」展开修订链 → 量 → 切到服务面板（互斥的反面）→ 量 → **再点菜单项切回来** →
+ * 缩窄外层 → 再量。全程用**真的**面板、**真的**菜单项与**真的** CSS。
+ *
+ * 为什么非要"点菜单项"而不是替面板喊一句 `MemoryUI.open()`：那条捷径恰好把本探针要抓的
+ * 病灶从视野里删掉了 —— 接线原先写在 `build()` 里，而 `build()` 只在面板**已经建起来之后**
+ * 才跑，于是"点菜单才建面板"与"建面板才接线"互为前提，绑定一次都没执行过，按钮看上去
+ * 就是死的。探针自己调 `open()` 时这条死路根本不在路径上，所以它一路全绿也照样漏。
+ * 判据 0 就是为它立的：**门必须由那一下点击打开**。
  *
  * 走 CDP（不是 `--dump-dom`）：dump-dom 只出一次初始帧，之后 rAF 不跑、ResizeObserver 不再
  * 派发（实测），而"缩窄窗口要跟着变"正是这条链路的事。需要 Node 22+（内置 fetch / WebSocket），
  * 不引入任何 npm 依赖。
  *
  * 判据（任何一条不成立即退出码 1）：
+ *   0. **菜单项点得动**（死按钮的回归闸）：点击之前没有记忆面板；点 `#menu-memory` 之后
+ *      面板可见且**恰好一个**记忆标签页；面板开着时再点 = 复用；切走后还能点回来；
+ *      并且 main.js 启动期那句 `MemoryUI?.attach()` 还在（不许挪回面板内部）；
  *   1. 面板**铺满**编辑区（宽高与容器同量级）—— 不是并排的半宽（bug 3 那一类）；
  *   2. 面板自己**不出现横向滚动条**：容器内 `scrollW <= clientW + 1`，页面也不横向滚；
  *   3. 唯一滚动容器是 `.mem-body`（纵向滚它，不是整块面板滚）；
  *   4. **超长的键/值不许撑破表格**：值变高（换行）而表格宽不涨；
  *   5. 展开「凭什么」修订链之后，上面第 2/4 条仍然成立；
  *   6. 切换到服务面板后记忆面板**必须隐藏**（互斥的反面：不许两块都在）；
- *   7. 外层缩窄时面板跟着缩，且仍然不出现横向滚动条。
+ *   7. 外层缩窄时面板跟着缩，且仍然不出现横向滚动条；
+ *   8. 接线留在**启动期**（`main.js` 的 initApp 里那句 `MemoryUI?.attach()`）：静态盯住它的
+ *      **函数体**，防止有人把绑定挪回面板内部（那正是死按钮的病根）；
+ *   9. 面板不是空壳：`mem_status` / `mem_beliefs` / `mem_receipts` 真的被调用过。
  *
  * 用法：
  *   node scripts/memory-layout.js                # 有 Edge 就跑，没有就 SKIP（退出码 0）
@@ -126,7 +140,8 @@ window.I18N = (() => {
 })();
 `;
 
-// 驱动：开面板 → 量 → 展开修订链 → 量 → 切走（互斥）→ 量 → 缩窄 → 量
+// 驱动：接线 → 点菜单项开面板 → 量 → 再点（复用）→ 展开修订链 → 量 → 切走（互斥）→
+//       量 → 点菜单项切回来 → 缩窄 → 量
 const I18N_ZH = JSON.parse(read("ui/lang/zh-CN.json"));
 const i18nStub = `window.__MEM_I18N__ = ${JSON.stringify(I18N_ZH)};`;
 
@@ -187,9 +202,37 @@ window.__PROBE_RESULT__ = (async function () {
     window.state.activeTabId = null;
     document.getElementById("app").style.width = "${WIDE}px";
 
-    window.MemoryUI.open();
+    // ── 判据 0：门必须由**那一下点击**打开 ────────────────────────────────
+    // 接线走与 main.js initApp 完全相同的那一句；**不**替面板喊 open()（那正是漏掉
+    // "死按钮"的原因：面板是点菜单才建的，而旧接线写在 build() 里 —— 先有鸡还是先有蛋）。
+    if (typeof window.MemoryUI?.attach !== "function") {
+      throw new Error("记忆面板没有 attach()（启动期接线的入口）—— 菜单又要成死按钮了");
+    }
+    window.MemoryUI.attach();
+    const menuBtn = document.getElementById("menu-memory");
+    if (!menuBtn) throw new Error("顶栏没有 #menu-memory 菜单项");
+    const memTabs = () => (window.state.tabs || []).filter((t) => t._isMemory).length;
+    out.menu = {
+      text: (menuBtn.textContent || "").trim(),
+      cursor: getComputedStyle(menuBtn).cursor,
+      visBefore: vis("memory-view"),
+      tabsBefore: memTabs(),
+    };
+
+    menuBtn.click();
     await settle(400);
+    out.afterClick = {
+      vis: vis("memory-view"),
+      service: vis("service-view"),
+      tabs: memTabs(),
+      tabTitle: (window.state.tabs || []).find((t) => t._isMemory)?.name || "",
+    };
     const wide = snap("wide");
+
+    // 面板开着时再点同一个菜单项：只许**复用**那个标签页，不许开出第二个
+    menuBtn.click();
+    await settle(200);
+    out.reclick = { tabs: memTabs() };
 
     // 展开「凭什么」：修订链是第二张表，它不许把面板撑出横向滚动条
     const link = document.querySelector("#mem-now-body button.mem-link");
@@ -202,9 +245,11 @@ window.__PROBE_RESULT__ = (async function () {
     await settle(200);
     const switched = snap("switched");
 
-    // 切回来（复用一个已存在的标签页）
-    window.MemoryUI.open();
+    // 切回来：**还是点那个菜单项**（标签页还在，走的是复用那条路）——
+    // "关掉面板后再点也得进得去"是用户视角的完整形态，绕过去调 open() 验不到它
+    menuBtn.click();
     await settle(300);
+    out.reopen = { vis: vis("memory-view"), service: vis("service-view"), tabs: memTabs() };
 
     // 缩窄外层：面板跟着缩，且仍然不许出现横向滚动条
     document.getElementById("app").style.width = "${NARROW}px";
@@ -426,6 +471,12 @@ async function cleanup() {
       `容器 ${wide.host && wide.host.w}×${wide.host && wide.host.h}px｜` +
       `窄屏：面板 ${narrow.panel && narrow.panel.w}px｜表格 ${wide.tableBars && wide.tableBars.scrollW}/${wide.tableBars && wide.tableBars.clientW}`
   );
+  console.log(
+    `菜单：#menu-memory「${(out.menu || {}).text}」cursor=${(out.menu || {}).cursor}｜` +
+      `点前 ${(out.menu || {}).visBefore} 可见/` +
+      `${(out.menu || {}).tabsBefore} 标签页 → 点后 ${(out.afterClick || {}).vis} 可见/` +
+      `${(out.afterClick || {}).tabs} 标签页｜再点 ${(out.reclick || {}).tabs} 个｜切回 ${(out.reopen || {}).vis}`
+  );
 
   const near = (a, b, tol) => a != null && b != null && Math.abs(a - b) <= tol;
 
@@ -493,7 +544,7 @@ async function cleanup() {
     );
   }
 
-  // 5. 互斥的反面：切到服务面板后记忆面板必须隐藏
+  // 6. 互斥的反面：切到服务面板后记忆面板必须隐藏
   if (switched.vis && switched.vis.memory === false && switched.vis.service === true) {
     ok("切到服务面板后记忆面板隐藏（互斥成立）");
   } else {
@@ -503,7 +554,7 @@ async function cleanup() {
     );
   }
 
-  // 6. 缩窄跟着缩
+  // 7. 缩窄跟着缩
   if (narrow.panel && wide.panel && narrow.panel.w < wide.panel.w - 100) {
     ok(`缩窄时面板跟着缩（${wide.panel.w} → ${narrow.panel.w}px）`);
   } else {
@@ -511,7 +562,64 @@ async function cleanup() {
   }
   noH(narrow, "窄屏");
 
-  // 7. 命令真的被调过（面板不是空壳）
+  // 0. **菜单项点得动**（判据 0，死按钮的回归闸）：门是**那一下点击**开的
+  //    （驱动里它排在最前面；断言放在最后 —— 先把几何量完，两条结论互不遮挡）
+  const menu = out.menu || {};
+  const ac = out.afterClick || {};
+  const rc = out.reclick || {};
+  const ro = out.reopen || {};
+  // 文案：探针这条路**没有**跑 initApp（refreshI18nUI 不执行），所以 #menu-memory 里还是
+  // index.html 写死的那两个字；真语言文件装上了会是 T("mem.menu")。两种都算"就位"，
+  // 空 or 别的键名才是真出问题（菜单项没了 / 挂错了元素）。
+  if (menu.text && (menu.text.indexOf("记忆") >= 0 || menu.text === "mem.menu")) {
+    ok(`顶栏菜单项就位（#menu-memory「${menu.text}」）`);
+  } else {
+    fail(`#menu-memory 的文案不对：${JSON.stringify(menu.text)}`);
+  }
+  if (menu.cursor === "pointer") ok("菜单项的接线确实跑到过（cursor: pointer，attach 不是空转）");
+  else fail(`菜单项 cursor=${menu.cursor} —— attach() 没跑到，按钮大概又点不动了`);
+  if (menu.visBefore === false && menu.tabsBefore === 0) {
+    ok("点击之前没有记忆面板（所以面板确实是这一下点开出来的）");
+  } else {
+    fail(
+      `点击前记忆面板就已经在了（可见 ${menu.visBefore} / 记忆标签页 ${menu.tabsBefore} 个）` +
+        ` —— 这条判据这一轮就白量了，"死按钮"照样能溜过去`
+    );
+  }
+  if (ac.vis === true && ac.tabs === 1 && ac.service === false) {
+    ok(`点菜单项开出了记忆面板（标签页「${ac.tabTitle}」，恰好 1 个；服务面板未跟着冒出来）`);
+  } else {
+    fail(
+      `点菜单项没开出面板：可见 ${ac.vis} / 记忆标签页 ${ac.tabs} 个 / 服务面板 ${ac.service}` +
+        ` —— 这正是"点不动"复发`
+    );
+  }
+  if (rc.tabs === 1) ok("面板开着时再点菜单项：复用标签页，没有开出第二个");
+  else fail(`重复点菜单项后记忆标签页变成 ${rc.tabs} 个（该复用，不许开第二个）`);
+  if (ro.vis === true && ro.service === false) {
+    ok("切到服务面板后再点菜单项：切回记忆面板（关掉再点也进得去）");
+  } else {
+    fail(
+      `切走后再点菜单项回不来：记忆 ${ro.vis} / 服务 ${ro.service}` +
+        `（"点不动"的另一种复发形态）`
+    );
+  }
+
+  // 8. 接线必须留在**启动期**（main.js initApp），不许退回面板内部：静态盯住那一句。
+  //    用"initApp 的函数体"而不是"文件里出现过 attach()" —— 后者在挪回面板内部时照样成立
+  //    （memory.js 自己也有 attach 定义），那样的判据等于没立。
+  const mainSrc = fs.readFileSync(path.join(ROOT, "ui", "scripts", "main.js"), "utf8");
+  const initBody = (mainSrc.match(/async function initApp\(\)\s*\{([\s\S]*?)\n\}/) || [])[1] || "";
+  if (/MemoryUI\?\.attach\(\)/.test(initBody)) {
+    ok("main.js 的 initApp 里调了 MemoryUI?.attach()（启动期接线还在）");
+  } else {
+    fail(
+      `main.js 的 initApp 里找不到 MemoryUI?.attach()（取到函数体 ${initBody.length} 字节）` +
+        ` —— 接线被挪回面板内部，按钮又要变死`
+    );
+  }
+
+  // 9. 命令真的被调过（面板不是空壳）
   const need = ["mem_status", "mem_beliefs", "mem_receipts"];
   const miss = need.filter((c) => !(out.calls || []).includes(c));
   if (miss.length === 0) ok("面板拉到了 mem_status / mem_beliefs / mem_receipts");

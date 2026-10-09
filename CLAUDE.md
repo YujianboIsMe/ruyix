@@ -17,6 +17,7 @@ node scripts/ui-smoke.js           # UI 冒烟：契约静态断言 + agent 面�
 node scripts/package-portable.js --no-build  # 出 zip（dist/ruyix-<ver>-win-x64.zip）。**改了打包脚本或模板清单后必须真跑一次** —— 它的错法是顶层 TDZ（const 声明顺序），`node --check` 不报
 node scripts/editor-layout.js      # 编辑器真实布局（无头 Edge；找不到浏览器时自行 SKIP）
 node scripts/session-trace-layout.js  # 会话执行轨迹的真实布局（同上，省略号/折行/滚动条）
+node scripts/memory-layout.js       # 记忆面板的真实几何 + 「点菜单项才开得起面板」那条回归闸（同上）
 cargo clippy --all-targets         # 静态检查，必须 0 warning
 cargo test                         # 单元测试（引擎 322+8 ignored / ruyix 120+3 ignored）
 cargo run -q -p harness-engine --example rsi_bench -- --self-check   # v1.4 评测台自检（12 条不变量、零成本、确定性；见 doc/v1.4/评测台-最小形状-v1.4.md）
@@ -24,13 +25,16 @@ cargo run -q -p harness-engine --example rsi_bench -- --self-check   # v1.4 评�
 
 Notes: `ui/packages/xterm.js` / `ui/packages/xterm.css` are vendored (MIT) and excluded from style checks; the frontend has
 no npm/bundler, so never add npm tooling — `scripts/check-style.js` is the style gate.
-`scripts/editor-layout.js`, `scripts/session-trace-layout.js` and `scripts/context-menu-layout.js` are the exception to "Node-only gates":
+`scripts/editor-layout.js`, `scripts/session-trace-layout.js`, `scripts/context-menu-layout.js` and
+`scripts/memory-layout.js` are the exception to "Node-only gates":
 they drive the real `index.html` + `styles.css` + panel JS in headless Edge/Chrome because
 scrollbar/geometry bugs (double scrollbars, caret vs. backdrop misalignment, a line that should
 ellipsize but wraps or widens its box instead, a menu separator that renders as a 13px bar because
-its div also carries the item class) do not exist in a DOM stub — ui-smoke U32 / U41 / U73
+its div also carries the item class) do not exist in a DOM stub — ui-smoke U32 / U41 / U55 / U73
 call them (and skip loudly when no browser is installed, so a green run there is only claimable
-when a browser was actually found).
+when a browser was actually found). `memory-layout.js` 的判据 0 专门钉"**面板必须由那一下菜单点击
+打开**"——接线写在 `build()` 里时"点菜单才建面板/建面板才接线"互为前提，那条绑定一次都没跑过，
+按钮看上去就是死的（2026-09-30 报的 bug）。
 
 ## Project Vision
 

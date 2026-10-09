@@ -4803,6 +4803,7 @@ async function runMemoryPanelChecks() {
   //   面板不存在时，那套账本/折叠/收据在 UI 上就没有任何出口。
   //   七环：面板存在且调真命令 · 只走唯一入口 showPane（否则和服务面板并排各半，bug 3 同病）·
   //   命令动词注册 · 文案两种语言齐（U49 的老病）· 缺模型要说人话 · 后端注册 ·
+  //   启动期接线必须存在（`#menu-memory` → `MemoryUI.attach()`；绑回 build() = 死按钮复发）。
   //   **记忆不许被插件化**（用户拍板：核心模块）。
   const memJs = read("ui/scripts/memory.js");
   const panelMainJs = readUiScripts();
@@ -4863,6 +4864,37 @@ async function runMemoryPanelChecks() {
     "memory-panel",
     /^pub mod mem;/m.test(read("crates/harness-engine/src/lib.rs")) && !has(panelMainRs, "plugins/memory"),
     "记忆是核心模块：pub mod mem; 必须无条件编译，且不许走 plugins/ 那条路",
+  );
+
+  // —— 接线必须存在（2026-09-30「记忆按钮点不动」的回归闸）——
+  //
+  // 病根：菜单绑定原先写在 `build()` 里，而 `build()` 只在面板**已经建起来之后**才跑；
+  // 面板又是"点菜单才建"的 —— "点菜单才建面板"与"建面板才接线"互为前提，那条绑定一次都没
+  // 执行过，于是按钮看上去就是死的（点多少下都没反应）。此前 U54 的八条判据全绿也照样漏：
+  // 面板确实存在、命令确实调得齐，**没人点得开**而已。
+  //
+  // 现在钉两件事，缺一条按钮迟早再死：
+  //   ① `memory.js` 把 `attach` **导出**（有 `function attach()` 且 `return { attach }`）；
+  //   ② `main.js` 的 initApp 在**启动期**调一次 `MemoryUI.attach()`。
+  //
+  // 判据必须落在 initApp 的**函数体**里：只判"文件里出现过 attach"等于没立 —— `memory.js`
+  // 自己也有 `function attach()`、导出对象里也有这个名字，把绑定挪回面板内部（`build()`）时
+  // 那句话照样命中（`scripts/memory-layout.js` 判据 8 同理，但那条没浏览器就 SKIP，
+  // 所以这条不吃浏览器的静态闸必须存在）。
+  check(
+    "U54",
+    "memory-panel",
+    has(memJs, "function attach()") && /^[ \t]*attach,[ \t]*$/m.test(memJs),
+    "memory.js 必须**导出** attach（`function attach()` + `return { attach }`）—— 接线没有出口就没人能接，菜单只能是死按钮",
+  );
+  const memInitBody =
+    (readUiModule("main.js").match(/async function initApp\(\)\s*\{([\s\S]*?)\n\}/) || [])[1] || "";
+  check(
+    "U54",
+    "memory-panel",
+    /MemoryUI\??\.attach\(\)/.test(memInitBody),
+    `main.js 的 initApp 里必须调 MemoryUI.attach()（取到函数体 ${memInitBody.length} 字节）` +
+      ` —— 接线被挪回面板内部（build()）时菜单又会点不动，这正是 2026-09-30 报的那个病`,
   );
 }
 
