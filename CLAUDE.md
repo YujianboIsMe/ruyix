@@ -306,7 +306,8 @@ Such message-level fields **must be declared in `agent::sessions::SessionMsg`** 
 fail-safe 而非漏做。拿不到版本 ⇒ `unknown` ⇒ **每次都真执行**。
 
 **写盘 = 零**：检索没有任何写路径（不碰 `apply_write` / 白名单 / 暂存 / 备份）；判据用**整棵树指纹**
-跑前跑后对比。落地记录与 14 条判据读数：`doc/v1.5/实施-分层搜索-v1.5.md`。
+跑前跑后对比。落地记录与 14 条判据读数：`doc/v1.5/实施-分层搜索-v1.5.md`；
+需求与形状：`doc/v1.5/需求-分层搜索-五服-v1.5.md`；给人读的：`doc/v1.5/五服搜索-人话版.md`。
 
 ### 外链：WebView 是画布，不是浏览器（P0）
 
