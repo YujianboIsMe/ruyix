@@ -121,6 +121,14 @@ pub struct AgentOutcome {
     /// 本轮的提问留痕（问题 / 为什么问 / 答案 / 没答到的原因）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asks: Vec<AskRecord>,
+    /// 模型在本 run 里确认过的事实 —— **完整账本**（被取代的也在，`superseded_by` 指出去向）。
+    ///
+    /// 为什么必须出去（v1.1 §8-5 当年拍了「是」，但一直没落）：findings 是"模型当时**凭什么**
+    /// 那么改"的唯一记录，不进 outcome 就是跑完即焚 —— 宿主无从写进会话存档，用户重开会话
+    /// 既看不到它确认过什么、也无从复核。**与落盘文件不是一回事**：`findings.md` 是模型在提示词里
+    /// 看到的 active 视图，这里是完整账本（含被取代的）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<super::findings::Finding>,
     pub usage: Usage,
     pub elapsed_ms: u128,
 }

@@ -26,7 +26,10 @@ use super::{keys, ledger};
 use std::path::{Path, PathBuf};
 
 /// 一条结论（模型写的）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Serialize/Deserialize`：它要随 `AgentOutcome` 出去、被宿主写进会话存档
+/// （v1.1 §8-5 当年拍了「是」却一直没落，于是"模型确认过什么"跑完即焚 —— 见 `types.rs` 那个字段）。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     /// 引擎分配的短 id（`F1`、`F2`…）—— 模型要 `supersede` 就得先知道它，所以工具结果里要回给模型。
     pub id: String,

@@ -7,6 +7,7 @@
 //! （agent 只在项目内可用，会话与项目同生命周期）。
 
 use harness_engine::agent::VerifyOutcome;
+use harness_engine::agent::findings::Finding;
 use harness_engine::plan::PlanStep;
 use harness_engine::reflect::Reflection;
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,13 @@ pub struct SessionMsg {
     /// 本轮的提问（v0.8：需求歧义问了什么、用户怎么答的）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ask: Vec<AskSnap>,
+    /// 模型本轮确认过的事实（v1.1 findings 账本，**含被取代的**；`supersededBy` 指出被谁取代）。
+    ///
+    /// 字段必须在这里声明：`agent_session_save` 把会话整个过一遍 serde，没声明的字段会被
+    /// **静默抹掉**（磁盘与内存里那个 tab 一起丢，v1.0 踩过）。语义：重开会话时要能看见
+    /// "模型当时凭什么那么改"；清空视图**不许动它落盘的那份**（见 `agent findings clear`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
     /// 本轮的执行轨迹（v0.0.5 UI：跑的时候实时刷、跑完跟着消息存档）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<TraceSnap>,
@@ -247,9 +255,49 @@ mod tests {
                     ask: vec![],
                     trace: vec![],
                     attachments: vec![],
+                    findings: vec![],
                 })
                 .collect(),
         }
+    }
+
+    /// **v1.1 §8-5 的宿主侧判据**：findings 跨 serde 往返**不许丢**。
+    ///
+    /// 不是形式主义：`SessionMsg` 里没声明的字段会被 `agent_session_save` 的 serde 整条抹掉
+    /// （磁盘与内存里那个 tab 一起丢，v1.0 真踩过 —— `plan` / `trace` 都是这么补上来的）。
+    #[test]
+    fn findings_survive_the_session_roundtrip() {
+        let root = dir("findings").to_str().unwrap().to_string();
+        let mut s = sess("sess_findings", "结论账本", 1);
+        s.messages[0].findings = vec![
+            Finding {
+                id: "F1".into(),
+                claim: "a.rs 里 x=1".into(),
+                evidence: "a.rs:1".into(),
+                note: "读出来的".into(),
+                superseded_by: Some("F2".into()),
+                spilled: false,
+            },
+            Finding {
+                id: "F2".into(),
+                claim: "已改成 x=2".into(),
+                evidence: "a.rs:1".into(),
+                note: String::new(),
+                superseded_by: None,
+                spilled: false,
+            },
+        ];
+        save(&s, &root).unwrap();
+
+        let back = load(&root, "sess_findings").unwrap();
+        let f = &back.messages[0].findings;
+        assert_eq!(f.len(), 2, "完整账本要跨 serde 往返：{f:?}");
+        assert_eq!(
+            f[0].superseded_by.as_deref(),
+            Some("F2"),
+            "被取代的指向不许丢"
+        );
+        assert_eq!(f[1].claim, "已改成 x=2");
     }
 
     /// **原子写**：写完之后不留临时文件；覆盖是"换整份"而不是"截断再写"。
@@ -275,6 +323,7 @@ mod tests {
             ask: vec![],
             trace: vec![],
             attachments: vec![],
+            findings: vec![],
         });
         save(&s, &root).unwrap();
 
@@ -369,6 +418,7 @@ mod tests {
                 ask: vec![],
                 trace: vec![],
                 attachments: vec![shot.clone()],
+                findings: vec![],
             }],
         };
         save(&s, &root).unwrap();
@@ -416,6 +466,7 @@ mod tests {
                     ask: vec![],
                     trace: vec![],
                     attachments: vec![],
+                    findings: vec![],
                 },
                 SessionMsg {
                     role: "assistant".into(),
@@ -429,6 +480,7 @@ mod tests {
                     ask: vec![],
                     trace: vec![],
                     attachments: vec![],
+                    findings: vec![],
                 },
             ],
         };
@@ -555,6 +607,7 @@ mod tests {
                     },
                 ],
                 attachments: vec![],
+                findings: vec![],
             }],
         };
         save(&s, &root).unwrap();

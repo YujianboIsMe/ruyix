@@ -260,3 +260,32 @@ fn stall_counts_only_rounds_without_progress() {
     }
     assert_eq!(p.stalled(9), 5, "从第 4 轮之后开始数");
 }
+
+/// **v1.1 §8-5 的判据**：跑完的 `AgentOutcome.findings` 是**完整账本** —— 被取代的那条也在，
+/// 且带 id / claim / evidence。宿主据此写进会话存档，用户重开会话才看得见"模型凭什么那么改"
+/// （不进 outcome 就等于跑完即焚 —— 当年拍了「是」却一直没落的那一条）。
+#[test]
+fn the_outcome_carries_the_findings_ledger_including_superseded_ones() {
+    let d = TempDir::new("findings-outcome");
+    d.write("a.rs", "let x = 1;\n");
+    let cfg = quiet_cfg();
+    let (_llm, out, _log) = block_on(run_logging(
+        &cfg,
+        &d.0,
+        vec![
+            r#"{"tool":"record_findings","args":{"items":[{"claim":"a.rs 里 x=1","evidence":"a.rs:1"}]}}"#
+                .into(),
+            r#"{"tool":"record_findings","args":{"items":[{"claim":"已改成 x=2","evidence":"a.rs:1","supersedes":"F1"}]}}"#
+                .into(),
+            r#"{"final":"记了两条"}"#.into(),
+        ],
+    ));
+    assert_eq!(out.findings.len(), 2, "完整账本：被取代的那条也要在");
+    assert_eq!(out.findings[0].id, "F1");
+    assert_eq!(out.findings[0].superseded_by.as_deref(), Some("F2"));
+    assert_eq!(out.findings[1].claim, "已改成 x=2");
+    assert!(
+        out.findings.iter().all(|f| !f.evidence.is_empty()),
+        "证据是指针，不许空"
+    );
+}

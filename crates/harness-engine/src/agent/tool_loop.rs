@@ -1320,6 +1320,9 @@ pub async fn run_with_ask(
             out.reflections.len()
         ),
     );
+    // 进展记忆（v1.1）：把**完整账本**交给调用方（含被取代的）—— 宿主据此写进会话存档，
+    // 否则"模型确认过什么"跑完即焚（§8-5 当年拍了「是」却一直没落）。
+    out.findings = ctx.progress().all().to_vec();
     out.elapsed_ms = started.elapsed().as_millis();
     Ok(out)
 }

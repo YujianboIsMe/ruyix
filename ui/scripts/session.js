@@ -863,6 +863,41 @@
   }
 
   /**
+   * 进展记忆小节（v1.1 findings 账本，§8-5）。
+   *
+   * 模型在跑的过程中用 `record_findings` 记下的**结论 + 证据**（"它凭什么这么改"）。此前这份
+   * 账本只活在 run 里、跑完即焚（交付记录里那条"拍了「是」却一直没落"）—— 用户既看不到，
+   * 重开会话更无从复核，所以补这一节。
+   *
+   * **被取代的条目照旧显示**（划掉记号 + 指向取代它的那条）：findings 的语义是"不改历史"，
+   * 界面不该比账本更干净 —— 那会让人以为模型从没改过主意。样式复用验证/复核那套类名，
+   * 不新增 CSS（视觉沿用既有的一节）。
+   */
+  function findingsHtml(m) {
+    const fs = m.findings ?? [];
+    if (!fs.length) return "";
+    const rows = fs.map((f) => {
+      const gone = !!f.superseded_by;
+      return (
+        `<div class="session-gate-item">` +
+        `<span class="session-gate-tag">${gone ? "↩" : "•"} ${esc(f.id ?? "")}</span> ` +
+        `${esc(f.claim ?? "")}` +
+        (f.evidence ? `<span class="session-gate-ev">${esc(f.evidence)}</span>` : "") +
+        (gone ? ` <span class="session-gate-ev">→ ${esc(f.superseded_by)}</span>` : "") +
+        (f.note ? `<div class="session-gate-item">${esc(f.note)}</div>` : "") +
+        `</div>`);
+    });
+    return (
+      `<div class="session-gate">` +
+      `<div class="session-gate-row">` +
+      `<span class="session-gate-tag">📌 ${L("结论", "Findings")}</span>` +
+      `<span class="session-gate-text">${L("模型记下的依据（被取代的划线保留）", "what it established (superseded kept, struck through)")}</span>` +
+      `</div>` +
+      rows.join("") +
+      `</div>`);
+  }
+
+  /**
    * 验证 / 复核小节（v0.3 质量门禁）。
    *
    * 引擎每跑一次机械验证、每做一次复核都会推事件，run 结束时 ReplyAgent 里也带一份 ——
@@ -1065,7 +1100,7 @@
     //   ⑤ meta（run id / 状态）
     // 原先 bubble 在最前面 ⇒ 任务跑完后轨迹追加到气泡**下面**，读起来像"先给结论再做事"。
     return `<div class="session-msg ${mine ? "session-msg--user" : "session-msg--agent"}${wide}">` +
-      (mine ? shots + bubble : traceHtml(m, live) + askHtml(m) + gateHtml(m) + bubble) +
+      (mine ? shots + bubble : traceHtml(m, live) + askHtml(m) + findingsHtml(m) + gateHtml(m) + bubble) +
       (meta.length ? `<div class="session-meta">${meta.join(" ")}</div>` : "") +
       `</div>`;
   }
@@ -1539,6 +1574,9 @@
       // 验证 / 复核结论挂在这条助手消息上（持久化后重开也能看到"这轮验过没有"）
       placeholder.verify = rep.verifications ?? [];
       placeholder.reflect = rep.reflections ?? [];
+      // 结论账本（v1.1 §8-5）：跑完跟消息走 —— 字段没在 SessionMsg 里声明的话会被
+      // serde 静默抹掉（磁盘与内存一起丢），宿主侧已同步声明
+      placeholder.findings = rep.findings ?? [];
       // 提问留痕（v0.8）：跟着消息存档，重开会话仍看得见问过什么、怎么答的
       placeholder.ask = rep.asks ?? [];
       placeholder.status = gateStatus(placeholder);
@@ -1621,6 +1659,27 @@
     }
   }
 
+  /** 清空**当前**会话的结论视图（`agent findings clear`）。 */
+  async function clearFindings() {
+    const tab = (state?.tabs ?? []).find((x) => x._isSession && x.id === state.activeTabId);
+    const s = tab?._session;
+    if (!s) {
+      status(L("没有打开的会话 —— 先开一个会话再清", "No session open — open one first"), "error");
+      return;
+    }
+    let n = 0;
+    for (const m of s.messages) {
+      if (Array.isArray(m.findings)) n += m.findings.length;
+      m.findings = [];
+    }
+    if (tab._sessionEl) fillMsgs(tab._sessionEl, s);
+    await persist(s);
+    status(
+      L(`已清空本会话的结论视图（${n} 条）—— 落盘那份没动`,
+        `Cleared this session's findings view (${n}) — on-disk copies untouched`),
+    );
+  }
+
   /** 无后端演示：假 agent 回复（浏览器直开 / ui-smoke） */
   function demoReply(s, wrap) {
     const last = s.messages[s.messages.length - 1];
@@ -1646,6 +1705,13 @@
 
   async function handleCommand(rest) {
     const arg = String(rest || "").trim();
+    // `agent findings clear`：清空**本会话的结论视图**（v1.1 §8-3 当年拍了「给」，一直没实现）。
+    // 只清内存与存档里那份 active 视图 —— **不动落盘文件**（与 findings「不物理删除」一致），
+    // 所以这条命令**不许**调任何后端删除/清理命令，唯一的后端调用是会话保存。
+    if (/^findings\s+clear$/i.test(arg)) {
+      await clearFindings();
+      return;
+    }
     const s = await newSession(false);
     if (!s) return;
     if (!arg) return; // 仅打开新会话 tab

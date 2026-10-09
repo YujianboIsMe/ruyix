@@ -121,6 +121,9 @@ pub mod capsule;
 /// 子模块用 `use super::*` 看到这里的一切。
 pub mod context;
 pub mod findings;
+/// 与 `gate` / `prompt` 同款：`Finding` 也要能从 `agent::` 直接取到
+/// （宿主把它写进会话存档，路径短一点少一处抄错）。
+pub use findings::*;
 mod keys;
 pub(crate) use keys::*;
 pub mod ledger;

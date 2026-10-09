@@ -163,6 +163,13 @@ pub struct ReplyAgent {
     /// 复核（干净上下文反思）的每一次结论（v0.3）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reflections: Vec<engine::reflect::Reflection>,
+    /// 模型本轮确认过的事实（v1.1 findings 账本，**含被取代的**）。
+    ///
+    /// 与 `SessionMsg` 两侧都要声明：会话存档整条走 serde，**没声明的字段会被静默抹掉**
+    /// （磁盘与内存里的 tab 一起丢，v1.0 真踩过）。语义：这是"模型当时**凭什么**这么做"的记录，
+    /// 与落盘文件不是一回事（`findings.md` 是模型看的 active 视图，这里是完整账本）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<engine::agent::Finding>,
     /// 本轮的提问留痕（v0.8：问了什么、为什么问、用户怎么答的 / 为什么没答到）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asks: Vec<engine::agent::AskRecord>,
@@ -268,6 +275,7 @@ pub async fn agent_reply(
         shots,
         verifications: out.verifications,
         reflections: out.reflections,
+        findings: out.findings,
         asks: out.asks,
         usage: out.usage,
         elapsed_ms: out.elapsed_ms,

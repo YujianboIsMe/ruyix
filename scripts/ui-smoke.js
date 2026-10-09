@@ -1653,6 +1653,63 @@ async function runSessionChecks() {
       has(el("session-list").innerHTML, s.id),
       "发送后会话列表未刷新");
 
+    // ---- U76：结论账本**看得见、清得掉、清不掉落盘那份**（v1.1 §8-5 / §8-3，
+    //      交付记录里那两条"当年拍了「是」/「给」却一直没落"）----
+    const sessJs = read("ui/scripts/session.js");
+    check(
+      "U76",
+      "findings-view",
+      has(sessJs, "function findingsHtml(m)") && has(sessJs, "const fs = m.findings ?? [];"),
+      "结论账本（findings）没有渲染出口 —— 模型记下的依据用户看不见，等于跑了没记",
+    );
+    check(
+      "U76",
+      "findings-view",
+      has(sessJs, "askHtml(m) + findingsHtml(m) + gateHtml(m)"),
+      "findingsHtml 定义了却没挂进消息渲染（只判「文件里出现过」＝ 没立；U36 同款教训）",
+    );
+    check(
+      "U76",
+      "findings-view",
+      has(sessJs, "placeholder.findings = rep.findings ?? [];"),
+      "回复里的 findings 没落到消息上 ⇒ 重开会话就没了",
+    );
+    check(
+      "U76",
+      "findings-view",
+      has(sessJs, "findings\\s+clear") && has(sessJs, "async function clearFindings()"),
+      "`agent findings clear` 没接（§8-3：清了「给」却一直没实现的那条）",
+    );
+    const clearBody =
+      (sessJs.match(/async function clearFindings\(\)\s*\{([\s\S]*?)\n  \}/) || [])[1] || "";
+    check(
+      "U76",
+      "findings-view",
+      clearBody.length > 0 &&
+        !/delete_path|remove_file|agent_run_delete|findings_clear/.test(clearBody),
+      `清空只许动内存与存档那份（落盘文件不删）—— 取到函数体 ${clearBody.length} 字节`,
+    );
+    const hostModRs = read("src-tauri/src/agent/mod.rs");
+    const hostSessRs = read("src-tauri/src/agent/sessions.rs");
+    const engTypesRs = read("crates/harness-engine/src/agent/types.rs");
+    check(
+      "U76",
+      "findings-view",
+      // 类型路径两种写法都接受（`Vec<Finding>` + 顶部 use，或全路径）—— 这里断的是
+      // **字段声明与类型都对得上**，不是抄某一种写法
+      /pub findings: Vec<[^>]*Finding>/.test(hostModRs) &&
+        /pub findings: Vec<[^>]*Finding>/.test(hostSessRs) &&
+        /pub findings: Vec<[^>]*Finding>/.test(engTypesRs),
+      "三处字段必须齐（引擎 outcome → 宿主 reply → 会话存档）：少一处就被 serde 静默抹掉，重开会话看不见",
+    );
+    check(
+      "U76",
+      "findings-view",
+      has(sessJs, 'L("结论", "Findings")') && has(sessJs, "落盘那份没动") &&
+        has(sessJs, "on-disk copies untouched"),
+      "文案要两种语言齐（U49 的老病）",
+    );
+
     // ---- U8：项目关闭收口（会话随项目走）----
     SessionUI.projectClosed();
     check("U8", "session-close",
