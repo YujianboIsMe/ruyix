@@ -829,6 +829,9 @@ impl Default for EntropyConfig {
     }
 }
 
+fn d_kb_enabled() -> bool {
+    true
+}
 fn d_kb_top_k() -> usize {
     4
 }
@@ -853,12 +856,15 @@ fn d_kb_diversity() -> f64 {
 
 /// 本地知识库配置（v0.6）。
 ///
-/// 默认 `enabled = false`：**不改变现有行为**，添加了知识库才启用。
+/// **出厂默认开**（2026-10-09 拍板 7「新机制出厂默认全开」）：但"开着"的代价是零 ——
+/// 一个来源都没有时 `render_block` 一个字都不加（旧版会往 prompt 里塞一句"未注入知识"），
+/// 而主动检索 `read {scope:"kb"}` 没来源时会明说是"没有来源"而不是"没命中"。
+/// 于是"加一个语料目录就能用"这条路上**不需要再拧开关**。
 /// 预算放在这里而不是散在代码里，理由与熵管理的阈值一样 ——
 /// 「注入多少算合适」是策略，策略要能一处改、能被 trace 观察到。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KbConfig {
-    #[serde(default)]
+    #[serde(default = "d_kb_enabled")]
     pub enabled: bool,
     /// 追加来源（GUI 里加的来源落在 `kb.json`，这里给脚本化/无 GUI 的场景）
     #[serde(default)]
@@ -891,7 +897,7 @@ pub struct KbConfig {
 impl Default for KbConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: d_kb_enabled(),
             roots: Vec::new(),
             dir: String::new(),
             top_k: d_kb_top_k(),
@@ -1337,6 +1343,10 @@ const FORM_HIDDEN: &[&str] = &[
     // 项目状态根：由宿主按当前项目算好注入（值依赖项目路径，用户在配置里写死一个
     // 只会把状态写错地方），不是用户旋钮。
     "project_state_root",
+    // 知识库根目录（v1.5 荒服）：注册表 `kb.json` 与索引库都落这儿，宿主集成把它指到
+    // `<便携根>/global/kb`（"删文件夹即卸载"那条纪律）—— 用户在表单里填一个路径只会把
+    // 语料索引写到别处；实验室/脚本场景仍可走 `HARNESS_KB_DIR` 或配置文件。
+    "kb.dir",
 ];
 
 fn is_hidden(path: &str) -> bool {
@@ -1560,15 +1570,28 @@ mod tests {
     }
 
     #[test]
-    fn kb_is_off_by_default_and_has_a_budget() {
-        // 默认关 = 不改变现有行为；但预算/阈值必须有可用默认值，
+    fn kb_is_on_by_default_and_has_a_budget() {
+        // 出厂默认**开**（2026-10-09 拍板 7），但开着零代价：没有来源时 `render_block`
+        // 一个字都不加（见 `block_...` 那几条）⇒ 与"添加了知识库才启用"在行为上等价，
+        // 差别只是用户**不必再拧开关**。预算/阈值必须有可用默认值，
         // 否则用户一开开关就拿到"没有上限的注入"。
         let cfg = AppConfig::default();
-        assert!(!cfg.kb.enabled);
+        assert!(cfg.kb.enabled);
         assert!(cfg.kb.token_budget > 0);
         assert!(cfg.kb.top_k >= 1);
         assert!(cfg.kb.min_score > 0.0 && cfg.kb.min_score < 1.0);
         assert!(cfg.kb.per_source_limit >= 1);
+    }
+
+    /// 只写了 `kb.roots` 的段（用户加了一个语料目录）也必须拿到 `enabled = true` ——
+    /// 这正是"字段级 `#[serde(default)]` 与 `impl Default` 是两回事"的老坑：
+    /// `#[serde(default)]` 用的是 `bool::default()`（false），不是结构体的 Default。
+    #[test]
+    fn a_partial_kb_section_still_gets_the_factory_default() {
+        let cfg: AppConfig = toml::from_str("[kb]\nroots = [\"D:/Notes/ai-notes\"]\n").unwrap();
+        assert!(cfg.kb.enabled, "只写了来源的段也必须出厂即用");
+        let none: AppConfig = toml::from_str("").unwrap();
+        assert!(none.kb.enabled);
     }
 
     #[test]
@@ -1630,7 +1653,14 @@ mod tests {
     fn schema_hides_keys_owned_by_other_layers() {
         let specs = schema();
         let ui = |p: &str| specs.iter().find(|s| s.path == p).map(|s| s.ui);
-        for p in ["llm.api_key", "llm.base_url", "llm.model", "sandbox.engine"] {
+        for p in [
+            "llm.api_key",
+            "llm.base_url",
+            "llm.model",
+            "sandbox.engine",
+            // v1.5 荒服：知识库根目录由宿主指到便携根（`global/kb`），不是用户旋钮
+            "kb.dir",
+        ] {
             assert_eq!(ui(p), Some(false), "{p} 不该出现在配置表单里");
         }
         assert!(

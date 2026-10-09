@@ -80,6 +80,7 @@ fn parallel_reads_land_in_declared_order() {
         state_root: None,
         write_allow: Vec::new(),
         session_runs: Vec::new(),
+        kb: None,
     };
     let paths: Vec<ReadSpec> = ["a.txt", "ghost.txt", "c.txt", "b.txt"]
         .iter()

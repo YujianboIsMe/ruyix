@@ -91,6 +91,113 @@ fn build_project(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 只存在于**知识库**里的事实（项目里一个字都没有）—— `--kb` 那一臂的靶子。
+///
+/// 为什么这么设计：`files` 层那条路能答对，说明不了 `kb` 层被接住 —— 事实必须**只有**那一层有。
+const KB_FACT: &str = "日志保留 45 天";
+
+fn build_corpus(root: &Path) -> std::io::Result<()> {
+    let p = root.join("规范/部署规范.md");
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    std::fs::write(
+        p,
+        "# 部署规范\n\n- 日志保留 45 天，过期归档到冷存储。\n- 缓存上限 8G，超过就换出。\n",
+    )
+}
+
+/// `--kb` 那一臂：**事实只在知识库里**，看模型会不会主动问 `kb` 层。
+///
+/// 判据（退出码）与 files 臂同款：`0` 形状被接住且答案对 · `2` 答对但走的是别的路（要走 `files`
+/// 是徒劳 —— 事实不在项目里）· `1` 答案错 · `3` 环境不齐。
+fn run_kb_arm(cfg: &AppConfig, model_override: Option<String>) -> i32 {
+    let mut cfg = cfg.clone();
+    if let Some(m) = model_override {
+        cfg.llm.model = m;
+    }
+    // 知识库：语料目录（用户资料）+ 索引库（`<便携根>/global/kb` 的替身）
+    let base = std::env::temp_dir().join(format!("ruyix-kb-smoke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (proj, corpus, store) = (base.join("proj"), base.join("corpus"), base.join("kb"));
+    for d in [&proj, &corpus, &store] {
+        std::fs::create_dir_all(d).expect("建目录");
+    }
+    build_project(&proj).expect("写项目夹具");
+    build_corpus(&corpus).expect("写语料夹具");
+
+    cfg.kb.enabled = true;
+    cfg.kb.dir = store.to_string_lossy().to_string();
+    cfg.kb.roots = vec![corpus.to_string_lossy().to_string()];
+    cfg.agent.ctx.dedup = true;
+    // 索引：**真实形态**是宿主在启动 / 配置改完后建（`src-tauri/src/agent/kb.rs`），
+    // 这里替它跑一遍 —— 索引没建好时 `kb` 层会如实报"没有读数"，那也不算通过。
+    let entry = harness_engine::kb::ephemeral_entry(&corpus);
+    if let Err(e) = harness_engine::kb::index::index_source(
+        &store,
+        &entry,
+        &cfg.kb,
+        &harness_engine::exec::new_cancel_flag(),
+        &mut |_p| {},
+    ) {
+        eprintln!("[skip] 索引建不起来（{e}）—— 这条冒烟不跑，也不假装通过");
+        return 3;
+    }
+
+    let task = "我们团队的**部署规范**里说日志要保留多少天？项目代码里没有这条，去我的知识库里查。\
+                最后只用 final 回答（一句话 + 说清依据来自哪儿）。";
+    let sink = Rec::default();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio");
+    let out = rt.block_on(agent::run(
+        &cfg,
+        &proj,
+        task,
+        &[HistoryMsg {
+            role: "user".into(),
+            text: task.to_string(),
+            run_id: None,
+        }],
+        WritePolicy::Apply,
+        &agent::NoConnector,
+        &harness_engine::exec::new_cancel_flag(),
+        &sink,
+    ));
+    let logs = sink.lines.lock().map(|g| g.join("\n")).unwrap_or_default();
+    println!("=== 模型：{} · 端点 {}", cfg.llm.model, cfg.llm.base_url);
+    println!("=== 工具循环（引擎日志）\n{logs}");
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            println!("run 失败：{e}");
+            let _ = std::fs::remove_dir_all(&base);
+            return 1;
+        }
+    };
+    println!(
+        "=== 交付答案（前 600 字）\n{}",
+        out.answer.chars().take(600).collect::<String>()
+    );
+
+    let used_kb = logs.contains("read search kb");
+    let answered = out.answer.contains("45");
+    println!("\n=== 判读：用了 kb 层 = {used_kb} · 答出「{KB_FACT}」= {answered}");
+    let _ = std::fs::remove_dir_all(&base);
+    if !answered {
+        eprintln!("✗ 答案不对（没答出知识库里那条事实）");
+        return 1;
+    }
+    if !used_kb {
+        eprintln!(
+            "⚠ 答案对了，但模型**没用 kb 层**（走的是别的路）—— 声明面/提示词没被接住，\
+             这是要看的读数，不算通过"
+        );
+        return 2;
+    }
+    println!("✓ 通过：模型主动问了知识库，答出了只存在于那儿的事实");
+    0
+}
+
 fn main() {
     let cfg_path = arg("--config").unwrap_or_else(|| "target/debug/global/ai.toml".into());
     let cfg_path = PathBuf::from(&cfg_path);
@@ -101,6 +208,14 @@ fn main() {
             cfg_path.display()
         );
         std::process::exit(3);
+    }
+    let model = arg("--model");
+    if let Some(m) = &model {
+        cfg.llm.model = m.clone(); // 真 run 冒烟一律用 flash（pro 太贵，见仓库惯例）
+    }
+    let kb_arm = std::env::args().any(|a| a == "--kb");
+    if kb_arm {
+        std::process::exit(run_kb_arm(&cfg, None));
     }
     cfg.agent.ctx.dedup = true;
     cfg.agent.ctx.capsule = true;

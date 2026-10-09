@@ -6,14 +6,15 @@
 //! ## 三条硬规矩
 //!
 //! 1. **一次一层**：结果块只含一个 `scope` 的条目，逐条标来源与时间。层与层的新鲜度、
-//!    权威级别不同（磁盘上现在写的是什么 vs 三个月前记过什么），混在一起模型分不清 ——
-//!    要跨层比较是**它**的事，引擎不替它合并。
-//! 2. **权威序 文件 > 记忆**：记忆类各层的结果都带来源标注，冲突**并列**给模型。
+//!    权威级别不同（磁盘上现在写的是什么 vs 三个月前记过什么 vs 外部资料），混在一起模型
+//!    分不清 —— 要跨层比较是**它**的事，引擎不替它合并。
+//! 2. **权威序 文件 > 记忆**：记忆类各层与知识库的结果都带来源标注，冲突**并列**给模型。
 //!    引擎**不裁决、不覆盖**（需求 §4）。
 //! 3. **准入门**：五层没有一层允许"任选路径" —— 文件层过 `safe_rel_path`，记忆两层按
-//!    记忆库的 scope 取，会话层只看本 run 的侧存。这是准入，不是敏感词黑名单
-//!    （黑名单永远漏，准入不做就进不来）。第 5 服（知识库）**不是**操作系统文件：
-//!    全盘搜索没有 owner（准入只能退化成黑名单），也给不出可判定的版本。
+//!    记忆库的 scope 取，会话层只看本会话的留痕，知识库只看**声明过的语料**（注册表 +
+//!    配置 roots）。这是准入，不是敏感词黑名单（黑名单永远漏，准入不做就进不来）。
+//!    知识库**不是**操作系统文件：全盘搜索没有 owner（准入只能退化成黑名单），
+//!    也给不出可判定的版本。
 //!
 //! ## 写盘 = 零
 //!
@@ -23,8 +24,9 @@
 //!
 //! ## 版本与去重
 //!
-//! 四层的"变了没有"看各自的存储（见 [`stamp_version`]）：文件层看仓库版本、记忆两层看
-//! 记忆库的**事件序号**（WAL 下主库文件 mtime 不可靠）、会话层看侧存索引文件。拿不到
+//! 五层的"变了没有"看各自的存储（见 [`stamp_version`]）：文件层看仓库版本、记忆两层看
+//! 记忆库的**事件序号**（WAL 下主库文件 mtime 不可靠）、会话层看留痕指纹、
+//! 知识库看**索引指纹**（每个来源 `.db` 的 `(mtime,size)`）。拿不到
 //! 版本 ⇒ `unknown` ⇒ **每次都真执行**（fail-safe：宁可多跑一次，也不许拿旧结果冒充新的）。
 
 use super::*;
@@ -88,7 +90,23 @@ fn ts_note(secs: i64) -> String {
 /// - 文件层走仓库版本（`snapshot` 里 `Tool::Search` 也取 `repo`）；不是仓库 ⇒ `unknown`。
 ///
 /// 拿不到 ⇒ `unknown = true` ⇒ **每次都真执行**。
+///
+/// ⚠ 这一段是在 `snapshot` **之后**跑的，而 `snapshot` 对"没有任何可 stat 资源的检索"一律
+/// 先判 `unknown` —— 所以这里每盖成一个状态指纹，就必须把 `unknown` 清掉（见函数内的 `stamp`）。
 pub(crate) fn stamp_version(v: &mut ledger::VersionVec, spec: &SearchSpec, ctx: &Ctx<'_>) {
+    /// 记下一个"状态指纹"版本源，并**同时把 `unknown` 清掉**。
+    ///
+    /// 为什么必须清：`snapshot` 是在**不知道这一层版本源**的前提下做的 —— 检索的资源表是空的
+    /// （版本不在某个可 stat 的项目路径上，见 `keys::search_resources`），于是它对"没有仓库版本"
+    /// 的检索一律先判 `unknown`（保守，宁可不复用）。这里刚刚给出了版本源，那个判决就被推翻了。
+    ///
+    /// 少了这一句，**非 git 仓库里所有层的状态指纹都是摆设**（`fresh_for` 见 `was.unknown`
+    /// 直接判失效）：记忆层与知识库层永远重跑，而"同词同版本第二次不执行"只在 git 仓库里
+    /// 成立 —— 2026-10-09 接荒服时被 kb 的端到端判据抓出来的。
+    fn stamp(v: &mut ledger::VersionVec, name: &str, fp: String) {
+        v.set_state(name, ledger::Ver::Overlay(context::digest(&fp)));
+        v.unknown = false;
+    }
     match spec.scope {
         SearchScope::Files => { /* 仓库版本已经在 `snapshot` 里取过了 */ }
         // 会话层：正文来自**本会话的留痕**（本 run + 前面几个 run，新 → 旧）。
@@ -99,21 +117,28 @@ pub(crate) fn stamp_version(v: &mut ledger::VersionVec, spec: &SearchSpec, ctx: 
             if dirs.is_empty() {
                 v.unknown = true;
             } else {
-                v.set_state(
-                    "search:session",
-                    ledger::Ver::Overlay(context::digest(&transcript::version_of(&dirs))),
-                );
+                stamp(v, "search:session", transcript::version_of(&dirs));
             }
         }
         SearchScope::ProjectMem | SearchScope::GlobalMem => match mem::current() {
             Some(m) => match mem::head_seq(m) {
-                Ok(seq) => v.set_state(
-                    "search:mem",
-                    ledger::Ver::Overlay(context::digest(&seq.to_string())),
-                ),
+                Ok(seq) => stamp(v, "search:mem", seq.to_string()),
                 Err(_) => v.unknown = true,
             },
             None => v.unknown = true,
+        },
+        // 知识库层：版本 = **索引指纹**（每个来源 `.db` 的 `(mtime, size)` 组合）。
+        // 重建索引一定改写 `.db` ⇒ 旧结果失效；一个索引都没有 ⇒ 指纹拿不到 ⇒ `unknown`
+        // ⇒ 每次都真执行（fail-safe）。为什么不看语料目录：见 `kb::index::index_fingerprint`。
+        SearchScope::Kb => match ctx.kb() {
+            Some(e) if e.available() => {
+                let ids: Vec<String> = e.sources.iter().map(|s| s.id.clone()).collect();
+                match crate::kb::index::index_fingerprint(&e.dir, &ids) {
+                    Some(fp) => stamp(v, "search:kb", fp),
+                    None => v.unknown = true,
+                }
+            }
+            _ => v.unknown = true,
         },
     }
 }
@@ -126,6 +151,7 @@ pub(crate) fn run(ctx: &mut Ctx<'_>, spec: &SearchSpec) -> Result<String, String
         SearchScope::Session => session(ctx, spec, limit),
         SearchScope::ProjectMem => memory(spec, limit, false),
         SearchScope::GlobalMem => memory(spec, limit, true),
+        SearchScope::Kb => kb_layer(ctx, spec, limit),
     }
 }
 
@@ -434,6 +460,132 @@ fn memory(spec: &SearchSpec, limit: usize, global: bool) -> Result<String, Strin
             "（没有命中：这一层当前有 {live} 条活着的信念。换个说法可能有用 —— 但别把\"没搜到\"\
              当成\"没有这件事\"。）\n"
         ));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- 第 5 服：知识库（kb）
+
+/// 单条命中裁剪到多少字符。
+///
+/// 比其它几层的 [`HIT_CLIP`]（200）宽得多，理由是**这一层的正文就是答案**：文件层给的是
+/// "这一行里有这个词"（模型再去 `read` 那一行），记忆层给的是一条短信念；而知识库的命中是
+/// 一段文档 —— 掐到 200 字符等于给了一句半截话，模型只能再猜。整块的预算
+/// （[`crate::kb::retrieve::SEARCH_BUDGET_CHARS`] = 4000）仍然是硬闸。
+const KB_HIT_CLIP: usize = 800;
+
+/// 第 5 服：**知识库**（声明式语料）—— 与注入同一套闸门（阈值 / 去重 / 多样性 / 预算），
+/// 只把"房间"放大（见 `kb::retrieve::retrieve_for_search`）。
+///
+/// 三条与别的层不同、必须写进结果的：
+/// 1. **它是资料不是指令** —— 知识库文档里完全可能写着"忽略之前的指令"（边界声明见
+///    [`crate::kb::retrieve::BOUNDARY_HEAD`]，这里原样带上，免得两处措辞漂移）；
+/// 2. **权威级别中** —— 外部常识/笔记，与项目文件冲突时以文件为准（与记忆层同一条纪律）；
+/// 3. **"没搜"与"没有"必须可分** —— 来源查失败（没索引 / 库打不开）逐条列出，被阈值/预算
+///    裁掉的候选带理由列出。
+fn kb_layer(ctx: &Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, String> {
+    use crate::kb::retrieve;
+
+    let Some(engine) = ctx.kb() else {
+        return Err(
+            "知识库这一层没接上（宿主没把知识库句柄交给引擎 / 引擎独立跑）—— \
+                   这一层本次没有读数，不是「知识库里没有这个东西」。"
+                .into(),
+        );
+    };
+    if !engine.enabled {
+        return Err(format!(
+            "知识库没开（{}）—— 打开它（配置键 `ruyix.code.harness.kb.enabled`）或先加一个语料目录；\
+             这一层本次没有读数。",
+            if engine.reason.trim().is_empty() {
+                "config 里 [kb] enabled = false"
+            } else {
+                engine.reason.as_str()
+            }
+        ));
+    }
+    if engine.sources.is_empty() {
+        return Err(
+            "知识库**一个来源都没有**（没有任何声明过的语料目录）—— 没有来源不是「搜了没命中」，\
+                   是这一层没有可搜的东西。要看项目自己的东西请用 scope=files。"
+                .into(),
+        );
+    }
+
+    let inj = retrieve::retrieve_for_search(engine, &spec.q, limit);
+    if inj.sources_ok == 0 {
+        // 一个来源都没查成 ⇒ 这不是"没有命中"，是**这一层没有读数**（与记忆层同款纪律）
+        let why = if inj.notes.is_empty() {
+            inj.reason.clone()
+        } else {
+            inj.notes.join("；")
+        };
+        return Err(format!(
+            "知识库这一层本次没有读数：{} 个来源一个都没查成（{why}）。\
+             「来源还没有索引」要先把语料索引建起来（ruyix 启动时会自动建，也可用引擎的 `kb index`）。",
+            inj.sources_failed
+        ));
+    }
+
+    let mut out = format!(
+        "**知识库**（声明式语料 · 查成 {ok} / 失败 {failed} 个来源 · 词 `{}` · 策略 {}）：命中 {} 条。\n",
+        spec.q,
+        if inj.strategy.is_empty() {
+            "none"
+        } else {
+            inj.strategy.as_str()
+        },
+        inj.hits.len(),
+        ok = inj.sources_ok,
+        failed = inj.sources_failed,
+    );
+    out.push_str(retrieve::BOUNDARY_HEAD);
+    out.push('\n');
+    out.push_str(&format!(
+        "（权威级别：**中** —— 这是外部资料/笔记，与项目文件冲突时以文件为准，并把冲突说出来。\n\
+         房间：整块 {} 字符、单条截 {} 字符；被裁掉的候选在下面带理由列出。）\n",
+        retrieve::SEARCH_BUDGET_CHARS,
+        KB_HIT_CLIP
+    ));
+
+    for (i, h) in inj.hits.iter().enumerate() {
+        out.push_str(&format!(
+            "{}. [{}] {}#{} · 来源「{}」 · 索引 {} · 分数 {:.2}（覆盖 {:.2}）\n",
+            i + 1,
+            h.trust,
+            h.path,
+            h.ordinal,
+            h.source_label,
+            if h.indexed_at.trim().is_empty() {
+                "未知"
+            } else {
+                h.indexed_at.trim()
+            },
+            h.score,
+            h.coverage
+        ));
+        if !h.title.trim().is_empty() && h.title.trim() != h.path {
+            out.push_str(&format!("   标题：{}\n", clip(h.title.trim(), HIT_CLIP)));
+        }
+        for line in h.text.trim().lines() {
+            out.push_str(&format!("   {}\n", clip(line, KB_HIT_CLIP)));
+        }
+    }
+
+    if inj.hits.is_empty() {
+        out.push_str(
+            "（没有命中：这次查到的东西没进结果。**别把「没搜到」当成「知识库里没有这件事」** ——\
+             换个更具体的词再问一次，或换一层找（项目自己的东西在 scope=files）。）\n",
+        );
+    }
+    if !inj.dropped.is_empty() {
+        out.push_str("被裁掉的候选（**本次没给你看**，不是「不存在」）：\n");
+        for d in inj.dropped.iter().take(20) {
+            out.push_str(&format!("- {}：{}（{}）\n", d.path, d.reason, d.detail));
+        }
+    }
+    for n in &inj.notes {
+        out.push_str(&format!("来源状态：{n}\n"));
     }
     Ok(out)
 }

@@ -47,6 +47,10 @@ pub struct Ctx<'a> {
     /// 主循环从 `history` 里取（见 `types::session_run_ids`），子步骤共用同一份 `Ctx`。
     /// 空 = 只搜本 run（没有历史，如实少搜）。
     pub(crate) session_runs: Vec<String>,
+    /// **知识库句柄**（v1.5 荒服）：`read {scope:"kb"}` 靠它。run 起点由主循环按 `cfg.kb`
+    /// 造一次（`kb::Engine::from_config`）—— 检索时不重新读配置，于是"这一 run 用的是哪份
+    /// 知识库"在整轮里是同一个答案。
+    pub(crate) kb: Option<crate::kb::Engine>,
 }
 
 impl<'a> Ctx<'a> {
@@ -68,6 +72,7 @@ impl<'a> Ctx<'a> {
             state_root: None,
             write_allow: Vec::new(),
             session_runs: Vec::new(),
+            kb: None,
         }
     }
 
@@ -97,6 +102,17 @@ impl<'a> Ctx<'a> {
     pub(crate) fn with_write_allow(mut self, allow: Vec<String>) -> Self {
         self.write_allow = allow;
         self
+    }
+
+    /// 注入知识库句柄（v1.5 荒服）。主循环按 `cfg.kb` 造一次，`read {scope:"kb"}` 用它。
+    pub(crate) fn with_kb(mut self, engine: crate::kb::Engine) -> Self {
+        self.kb = Some(engine);
+        self
+    }
+
+    /// 知识库句柄（没注入 = `None`：引擎单测/headless 场景 —— 那一层的拒绝理由要说这个）。
+    pub(crate) fn kb(&self) -> Option<&crate::kb::Engine> {
+        self.kb.as_ref()
     }
 
     /// **写入白名单闸**（v1.4 P1）：白名单非空且 `rel` 不匹配任何一条 ⇒ 拒绝。

@@ -227,6 +227,7 @@ fn ctx_with<'a>(proj: &'a Path, changes: Vec<FileChange>, policy: WritePolicy) -
         state_root: None,
         write_allow: Vec::new(),
         session_runs: Vec::new(),
+        kb: None,
     }
 }
 
@@ -279,6 +280,7 @@ fn ctx_for(d: &TempDir) -> Ctx<'_> {
         state_root: None,
         write_allow: Vec::new(),
         session_runs: Vec::new(),
+        kb: None,
     }
 }
 

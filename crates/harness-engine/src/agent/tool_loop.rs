@@ -44,7 +44,11 @@ pub async fn run_with_ask(
             .with_write_allow(cfg.agent.write_allow.clone())
             // v1.5 会话层跨 run：宿主的会话历史里带着每个 run 的 id（新 → 旧）——
             // 会话层检索就靠它把"前面几个 run 的留痕"找出来（不必再加一条链路）。
-            .with_session_runs(super::types::session_run_ids(history));
+            .with_session_runs(super::types::session_run_ids(history))
+            // v1.5 荒服：知识库句柄。**在 run 起点造一次**（读注册表 + 配置里的 roots，
+            // 没有 sqlite 连接，毫秒级）—— 检索时不重新读配置，于是"这一轮问的是哪份
+            // 知识库"整轮同一个答案。宿主不需要接线：它由 `cfg.kb` 决定。
+            .with_kb(crate::kb::Engine::from_config(cfg));
     // ---- 本 run 的**留痕**（v1.5 会话层检索）+ capsule 侧存（P3）----
     // 一个 run 一个目录（`<状态根>/ctx/<run-id>/`），两份文件各管一件事：
     //   `transcript.jsonl` = 这一 run 的提问 / 每一次工具调用与结果 / 回答 —— **会话层检索读它**；

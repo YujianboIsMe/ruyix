@@ -31,7 +31,10 @@ const FROM_AI_NAMESPACE: &[&str] = &["llm.base_url", "llm.api_key", "llm.model",
 /// 这几个引擎键**必须由宿主按当前项目算出来**，因此不进 `harness.*` 命名空间：
 /// 用户在配置里写死一个路径，只会把项目状态写到别的项目头上（`project_state_root` 就是
 /// `<便携根>/projects/<项目 key>`，key 由项目路径决定）。
-const HOST_INJECTED: &[&str] = &["project_state_root"];
+/// `kb.dir`（v1.5 荒服）同理：知识库根目录是 `<便携根>/global/kb`（注册表是用户数据，
+/// 不许落 `%TEMP%`），让用户在表单里填只会把索引写到别处 —— 引擎侧也把它列进了
+/// `FORM_HIDDEN`。实验室 / 脚本场景仍可走 `HARNESS_KB_DIR`（引擎先看环境变量）。
+const HOST_INJECTED: &[&str] = &["project_state_root", "kb.dir"];
 
 /// 这个引擎键是不是由宿主 `ai` 段供值。
 ///
@@ -150,6 +153,21 @@ fn apply_engine_keys(cfg: &mut engine::config::AppConfig, raw: &[(String, String
     if !configured("workspace_root") {
         cfg.workspace_root = ruyix_workspace_root();
     }
+    // v1.5 荒服：知识库根目录同样落**便携根**（`global/kb`）。与记忆库同一档 ——
+    // 注册表（用户声明了哪些语料）是**用户数据**，落 `%TEMP%` 会被临时目录清理带走。
+    // 引擎侧 `kb.dir` 已进 `FORM_HIDDEN` + 宿主的 `HOST_INJECTED`（不是用户旋钮）。
+    cfg.kb.dir = ruyix_kb_dir();
+}
+
+/// 知识库根目录：`<便携根>/global/kb`（注册表 `kb.json` + 每个来源的索引库）。
+///
+/// 与 [`ruyix_project_state_root`] 同一条纪律：**引擎不 `discover`**（它是库，不许自己找 exe），
+/// 路径只能由宿主算好注入。实验室 / 脚本场景仍可走 `HARNESS_KB_DIR`（引擎先看环境变量）。
+pub fn ruyix_kb_dir() -> String {
+    crate::paths::current()
+        .kb_dir()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// 项目状态根的注入（**只在有项目时**）：没有项目就没有桶，此时引擎侧走兜底临时目录，
@@ -392,8 +410,11 @@ mod tests {
         // （PathBuf::join 在 Windows 上是反斜杠，先归一再断言）
         let normalized_root = cfg.workspace_root.replace('\\', "/");
         assert_eq!(normalized_root, "D:/tmp-ruyix-root/global/runs");
-        // kb 默认关闭（附录 C）
-        assert!(!cfg.kb.enabled);
+        // kb：**出厂默认开**（2026-10-09 拍板 7），且宿主把知识库根目录指到便携根
+        // （`global/kb`）—— 注册表是用户数据，不许落 `%TEMP%`。
+        assert!(cfg.kb.enabled);
+        let normalized_kb = cfg.kb.dir.replace('\\', "/");
+        assert_eq!(normalized_kb, "D:/tmp-ruyix-root/global/kb");
         // 不配 key 时保持空串（命令层据此走"未配置"状态而非报错）
         assert!(cfg.llm.api_key.is_empty());
     }

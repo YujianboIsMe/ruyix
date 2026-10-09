@@ -484,6 +484,28 @@ fn is_engine_managed_key(section: &str, key: &str) -> bool {
     (section == "ai" || section == "ai_fallback") && (k == "model" || k.ends_with(".model"))
 }
 
+/// 配置改完 → 后台对齐知识库索引（v1.5 荒服）。
+///
+/// **只在动过 `kb.*` 的键时**跑：`quick_stale` 要遍历语料目录，而配置是随时会改的东西
+/// （改个语言、换个模型走的是同一条路）—— 不该让每次无关的保存都去扫一遍语料。
+/// 与启动那条是同一个入口（`agent::kb::spawn_ensure_indexes`）。
+fn kick_kb_index(
+    config_mgr: &Mutex<config::ConfigManager>,
+    project_root: Option<&str>,
+    entries: &[config::ConfigEntryInput],
+) {
+    if !entries.iter().any(|e| e.key.starts_with("kb.")) {
+        return;
+    }
+    let cfg = config_mgr
+        .lock()
+        .ok()
+        .and_then(|m| agent::config_bridge::build_app_config(&m, project_root).ok());
+    if let Some(cfg) = cfg {
+        agent::kb::spawn_ensure_indexes(cfg);
+    }
+}
+
 fn emit_config_changed(
     app: &tauri::AppHandle,
     scope: &str,
@@ -566,6 +588,7 @@ fn config_form_save(
     // 上面那个作用域结束 = 配置锁已释放（见 emit_config_changed 的注释：
     // 握着锁发事件会撞自己 —— 监听者收到事件就会回头调要锁的配置命令）
     emit_config_changed(&app, &scope, &entries, false);
+    kick_kb_index(config_mgr.inner(), project_root.as_deref(), &entries);
     refresh_vendor(
         &app,
         vendor.inner(),
@@ -597,6 +620,7 @@ fn config_form_apply(
     };
     // 「应用」比「保存」更该广播：运行时内存真的变了，界面里所有派生状态当场就旧了
     emit_config_changed(&app, &scope, &entries, true);
+    kick_kb_index(config_mgr.inner(), project_root.as_deref(), &entries);
     refresh_vendor(
         &app,
         vendor.inner(),
@@ -1002,6 +1026,20 @@ fn main() {
             }
             Err(e) => eprintln!("[mem] 记忆库打开失败（继续跑，记忆不参与本轮）：{e}"),
         }
+    }
+
+    // 知识库（v1.5 荒服）：**后台**把"没有索引 / 陈旧"的语料来源建一遍。
+    // 为什么在启动时做而不是等模型去搜：`read {scope:"kb"}` 要求索引已经建好，而 ruyix
+    // 里没有知识库面板、也没有 CLI —— 用户加了目录却搜不到，就是"实现了 ≠ 用得上"。
+    // 后台线程 + 失败只留一行日志：它不该让 IDE 卡一下，也不该影响其他来源。
+    {
+        let cfg = config_mgr
+            .lock()
+            .ok()
+            .and_then(|m| agent::config_bridge::build_app_config(&m, None).ok())
+            // 配置读不出来（坏文件）不该拦住启动 —— 那一条路上别的功能也会各自报错
+            .unwrap_or_default();
+        agent::kb::spawn_ensure_indexes(cfg);
     }
 
     let plugin_reg = Mutex::new(reload_plugins(

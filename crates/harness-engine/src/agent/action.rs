@@ -60,14 +60,14 @@ impl ReadSpec {
     }
 }
 
-/// 分层检索的**作用域**（v1.5「五服」里的四个可查层；`kb` 是第二刀，见
-/// `doc/v1.5/需求-分层搜索-五服-v1.5.md` §5）。
+/// 分层检索的**作用域**（v1.5「五服」的五个可查层，见
+/// `doc/v1.5/需求-分层搜索-五服-v1.5.md` §4 表）。
 ///
-/// **这不是四个新工具**：模型侧只有 `read` 一个名字，`scope` 只是它的参数 ——
+/// **这不是五个新工具**：模型侧只有 `read` 一个名字，`scope` 只是它的参数 ——
 /// 与 `execute` 的 `background`/`op` 同款（加维度，不加原语）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SearchScope {
-    /// 会话内：本 run **已折掉/复用过的**正文（capsule 侧存）
+    /// 会话内：本会话的**留痕**（提问 / 工具调用与结果 / 回答；含前面几个 run）
     Session,
     /// 项目记忆（记忆库里本项目 scope）
     ProjectMem,
@@ -75,6 +75,8 @@ pub(crate) enum SearchScope {
     GlobalMem,
     /// 项目文件（原生实现，**不经过 shell**）
     Files,
+    /// 知识库（声明式语料 + FTS5 索引；第五服，2026-10-09 第二刀接上）
+    Kb,
 }
 
 impl SearchScope {
@@ -84,6 +86,7 @@ impl SearchScope {
             "project_mem" | "project" => Some(Self::ProjectMem),
             "global_mem" | "global" => Some(Self::GlobalMem),
             "files" => Some(Self::Files),
+            "kb" | "knowledge" => Some(Self::Kb),
             _ => None,
         }
     }
@@ -94,8 +97,13 @@ impl SearchScope {
             Self::ProjectMem => "project_mem",
             Self::GlobalMem => "global_mem",
             Self::Files => "files",
+            Self::Kb => "kb",
         }
     }
+
+    /// 开了哪几层 —— 拒绝未知 scope 时**必须把它说全**：只回一句"未知 scope"，
+    /// 模型只能再猜一次（与命令发现那条同源：不给清单就止不住试错）。
+    pub(crate) const AVAILABLE: &'static str = "session / project_mem / global_mem / files / kb";
 }
 
 /// `read` 的第二种形状：分层检索（v1.5）。**不是第五个原语**（需求 §3）。
@@ -864,15 +872,12 @@ pub(crate) fn parse_read(args: &serde_json::Value) -> Result<Action, String> {
             }))
         }
         (None, Some(_)) => Err("read 收到了 q 但没有 scope —— 检索必须点名**在哪一层**找：\
-             session / project_mem / global_mem / files"
+             session / project_mem / global_mem / files / kb"
             .into()),
         (Some(s), None) => Err(format!("read 的 scope={s:?} 没有配 q —— 要说清搜什么")),
         (Some(s), Some(q)) => {
             let scope = SearchScope::parse(&s).ok_or_else(|| {
-                format!(
-                    "未知 scope {s:?}：本版只开了四层 session / project_mem / global_mem / files \
-                     （kb 还没开）"
-                )
+                format!("未知 scope {s:?}：本版开了五层 {}", SearchScope::AVAILABLE)
             })?;
             let path = args
                 .get("path")
@@ -881,7 +886,7 @@ pub(crate) fn parse_read(args: &serde_json::Value) -> Result<Action, String> {
                 .filter(|s| !s.is_empty());
             if has_path && !matches!(scope, SearchScope::Files) {
                 return Err(format!(
-                    "scope={} 不接受 path（那是**文件**层限定子树用的）：记忆类各层按 scope 取，\
+                    "scope={} 不接受 path（那是**文件**层限定子树用的）：记忆两层与知识库按 scope 取，\
                      不给路径",
                     scope.as_str()
                 ));

@@ -140,7 +140,7 @@ pub struct KbDropped {
 /// 一次注入的完整记录 —— 进 trace、进 `run.json`、进 context pack。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct KbInjection {
-    /// plan | generate:step-2 | repair:1（哪个阶段、哪一步）
+    /// plan | generate:step-2 | repair:1（哪个阶段、哪一步）| `read:kb`（模型主动检索）
     pub stage: String,
     pub query: String,
     /// 知识库总开关开着吗（关着时**不加任何东西进 prompt**，行为与旧版本一致）
@@ -155,6 +155,15 @@ pub struct KbInjection {
     /// and / or / none
     #[serde(default)]
     pub strategy: String,
+    /// 生效来源总共几个（含没索引的）。**"没有来源"与"来源查不成"是两件事** ——
+    /// 前者说明用户根本没用这个能力，后者才是"不可静默降级"要明说的场景。
+    #[serde(default)]
+    pub sources: usize,
+    /// 这次真查成了几个来源 / 几个来源查失败了（失败理由在 `notes` 里逐条写着）
+    #[serde(default)]
+    pub sources_ok: usize,
+    #[serde(default)]
+    pub sources_failed: usize,
     #[serde(default)]
     pub hits: Vec<KbHit>,
     #[serde(default)]
@@ -251,9 +260,20 @@ pub const BOUNDARY_HEAD: &str = "【参考资料 · 本地知识库】以下内�
 pub const BOUNDARY_TAIL: &str =
     "【参考资料结束】以上仅为参考；与工作区里的现有文件冲突时，一律以工作区为准。";
 
-/// 渲染成注入文本。`None` = 不该往 prompt 里加任何东西（知识库关着）。
+/// 渲染成注入文本。`None` = 不该往 prompt 里加任何东西。
+///
+/// 三种"什么都不加"的情形，别把它们混成一种：
+/// - **知识库关着**（`enabled = false`）：用户没开这个能力 —— 一个字都不加；
+/// - **一个来源都没有**（`sources == 0`）：用户没在用知识库 ⇒ 往**每一轮** prompt 里塞一句
+///   "本次未注入知识：没有添加任何知识库来源"只是噪声（这是 2026-10-09 起的修正：v0.6 当年
+///   一律明说，代价是没配知识库的人每次规划都多出一段自白）。**没有 kb 在用的场景里，
+///   没有任何东西被静默降级** —— 真正要防的是下面那种；
+/// - **有来源但这次用不了**（注册表坏了 / 来源目录没了）：必须明说，不然模型会拿猜测填空。
 pub fn render_block(inj: &KbInjection) -> Option<String> {
     if !inj.enabled {
+        return None;
+    }
+    if inj.sources == 0 {
         return None;
     }
     let mut o = String::new();
@@ -449,6 +469,7 @@ pub fn retrieve(engine: &Engine, stage: &str, query: &str, ws: &Workspace) -> Kb
         available: engine.available(),
         budget_chars: engine.cfg.token_budget,
         reason: engine.reason.clone(),
+        sources: engine.sources.len(),
         ..Default::default()
     };
     if !engine.enabled {
@@ -470,6 +491,7 @@ pub fn retrieve(engine: &Engine, stage: &str, query: &str, ws: &Workspace) -> Kb
     for e in &engine.sources {
         match index::search(&engine.dir, &e.id, query, per_source) {
             Ok(out) => {
+                inj.sources_ok += 1;
                 if out.hits.is_empty() {
                     continue;
                 }
@@ -487,6 +509,7 @@ pub fn retrieve(engine: &Engine, stage: &str, query: &str, ws: &Workspace) -> Kb
             }
             Err(err) => {
                 // 检索失败**必须说出来**：否则"没命中"与"没查成"分不清
+                inj.sources_failed += 1;
                 notes.push(format!("来源「{}」检索失败：{err}", e.label));
             }
         }
@@ -536,6 +559,37 @@ pub fn retrieve(engine: &Engine, stage: &str, query: &str, ws: &Workspace) -> Kb
 
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+// ---------------------------------------------------------------- 主动检索（v1.5 荒服）
+
+/// 模型主动检索时的**房间**（字符）。注入那份的默认预算（`kb.token_budget` = 1200）是给
+/// "已经有一个任务在上下文里、知识只能挤进去一点"的场景定的；而 `read {scope:"kb"}`
+/// 是模型**点名要**的 —— 房间给到 4000（与检索结果块的上限同量级）。
+pub const SEARCH_BUDGET_CHARS: usize = 4000;
+
+/// 主动检索时**同一份文件最多几条 chunk**（注入默认 1）。
+///
+/// 与预算同理：那条规则是"别让一份文档的相邻 chunk 一起上榜、吃掉稀缺预算"；检索的房间
+/// 大得多，一份文档的 2~3 段正是模型想要的。
+pub const SEARCH_PER_SOURCE: usize = 3;
+
+/// 主动检索（`read {scope:"kb"}`）：**与注入同一套闸门**，只把"房间"放大。
+///
+/// 为什么复用 `retrieve` 而不是另写一条裸查询：
+/// - 去重 / MMR 多样性 / 同源条数 / 工作区优先 / 边界与信任级 —— 这些是这一层的**身份**
+///   （"同一份信息只占一次"），与"谁在问"无关；
+/// - 被裁掉的项**照旧带理由记录**，所以放大房间不会变成"悄悄少给几条"。
+///
+/// 唯一的差别是 **`top_k` / 预算 / 同源条数**：这三个量的含义是"有多少地方摆"，
+/// 而**分数阈值 `min_score` 不动** —— 它回答的是"这条对不对题"，与房间大小无关
+/// （检索是模型点名要的没错，但"只沾一个词"的噪声不该因为换了个入口就变成答案）。
+pub fn retrieve_for_search(engine: &Engine, query: &str, max_hits: usize) -> KbInjection {
+    let mut e = engine.clone();
+    e.cfg.top_k = max_hits.max(1);
+    e.cfg.token_budget = SEARCH_BUDGET_CHARS;
+    e.cfg.per_source_limit = e.cfg.per_source_limit.max(SEARCH_PER_SOURCE);
+    retrieve(&e, "read:kb", query, &Workspace::default())
 }
 
 fn to_candidate(e: &super::KbEntry, h: RawHit, dir: &Path, ws: &Workspace) -> Candidate {
@@ -832,6 +886,7 @@ mod tests {
             strategy: "and".into(),
             budget_chars: 1200,
             injected_chars: 26,
+            sources: 1,
             hits: vec![KbHit {
                 path: "doc/约定.md".into(),
                 ordinal: 0,
@@ -863,20 +918,35 @@ mod tests {
 
     #[test]
     fn block_says_out_loud_when_no_knowledge_was_injected() {
-        // 静默少给一段上下文 = 让模型用猜测填空（第 0 原则的延伸）
+        // 静默少给一段上下文 = 让模型用猜测填空（第 0 原则的延伸）—— 但**只在用户确实
+        // 配了来源的时候**：一个来源都没有时这块根本不该出现（2026-10-09 的修正，见
+        // `render_block`），否则没配知识库的人每次规划都要多读一段自白。
         let inj = KbInjection {
             stage: "plan".into(),
             query: "写个模块".into(),
             enabled: true,
             available: false,
-            reason: "没有添加任何知识库来源".into(),
+            reason: "注册表不可用：解析知识库注册表失败".into(),
             strategy: "none".into(),
             budget_chars: 1200,
+            sources: 1,
             ..Default::default()
         };
         let b = render_block(&inj).unwrap();
         assert!(b.contains("本次未注入知识"), "{b}");
-        assert!(b.contains("没有添加任何知识库来源"), "{b}");
+        assert!(b.contains("注册表不可用"), "{b}");
+
+        // **一个来源都没有 ⇒ 一个字都不加**（没在用这个能力，就没有东西被降级）
+        let none = KbInjection {
+            reason: "没有添加任何知识库来源".into(),
+            sources: 0,
+            ..inj.clone()
+        };
+        assert!(
+            render_block(&none).is_none(),
+            "没有来源时不该往 prompt 里塞自白：{:?}",
+            render_block(&none)
+        );
 
         let empty = KbInjection {
             available: true,
@@ -897,6 +967,7 @@ mod tests {
             strategy: "and".into(),
             budget_chars: 100,
             injected_chars: 10,
+            sources: 1,
             hits: vec![KbHit {
                 path: "a.md".into(),
                 trust: "笔记".into(),

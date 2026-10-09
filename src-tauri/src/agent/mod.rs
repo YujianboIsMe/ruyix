@@ -15,6 +15,7 @@ pub mod attachments;
 pub mod config_bridge;
 pub mod connect;
 pub mod env_setup;
+pub mod kb;
 pub mod machine;
 pub mod project_context;
 #[cfg(test)]

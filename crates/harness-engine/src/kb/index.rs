@@ -765,6 +765,38 @@ pub fn db_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.db"))
 }
 
+/// **索引指纹**（v1.5 荒服）：每个来源索引库的 `(id, mtime_ms, size)` 组合。
+///
+/// 用途只有一个 —— 当分层检索 `kb` 层在账本里的**版本源**（"这份语料变过没有"）。
+/// 重建索引一定改写 `.db`（mtime/size 必变）⇒ 旧结果失效、下次真执行；
+/// 而**一个索引库都没有**时返回 `None` ⇒ `unknown` ⇒ 每次都真执行（fail-safe：
+/// 宁可多跑一次，也不拿旧结果冒充新的）。
+///
+/// 为什么不是"来源目录的 mtime"：那要遍历整棵语料（贵），而且在索引根本没建的时候
+/// 也会给一个"看起来很新鲜"的版本 —— 与 `read` 那边的纪律一样：**版本必须来自
+/// 真正会被检索的那份数据**（索引），不是它的原材料。
+pub fn index_fingerprint(dir: &Path, ids: &[String]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for id in ids {
+        let p = db_path(dir, id);
+        let Ok(md) = std::fs::metadata(&p) else {
+            continue;
+        };
+        let mtime = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        parts.push(format!("{id}:{mtime}:{}", md.len()));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort();
+    Some(content_hash(parts.join("|").as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

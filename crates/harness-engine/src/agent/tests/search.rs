@@ -59,6 +59,18 @@ fn read_parses_both_shapes() {
     let e = parse_action(r#"{"tool":"read","args":{"scope":"project_mem","q":"n","path":"src/"}}"#)
         .unwrap_err();
     assert!(e.contains("不接受 path"), "{e}");
+    // v1.5 荒服：知识库是第五层（别名 knowledge）；它同样不接受 path
+    assert!(matches!(
+        parse_action(r#"{"tool":"read","args":{"scope":"kb","q":"缓存上限"}}"#),
+        Ok(Action::Search(s)) if s.scope == SearchScope::Kb && s.q == "缓存上限"
+    ));
+    assert!(matches!(
+        parse_action(r#"{"tool":"read","args":{"scope":"knowledge","q":"x"}}"#),
+        Ok(Action::Search(s)) if s.scope == SearchScope::Kb
+    ));
+    let e = parse_action(r#"{"tool":"read","args":{"scope":"kb","q":"x","path":"notes/"}}"#)
+        .unwrap_err();
+    assert!(e.contains("不接受 path"), "知识库不接受 path：{e}");
     // 老形状（文件窗口读）逐字不变
     assert!(matches!(
         parse_action(r#"{"tool":"read","args":{"path":"a.rs","offset":3,"limit":9}}"#),
@@ -95,13 +107,14 @@ fn search_rejections_name_the_reason() {
         let e = parse_action(raw).unwrap_err();
         assert!(e.contains(want), "{why}：{e}");
     }
-    // 未知层要把**开了哪四层**说清楚（不然模型只能再猜一次）
-    let e = parse_action(r#"{"tool":"read","args":{"scope":"kb","q":"n"}}"#).unwrap_err();
+    // 未知层要把**开了哪五层**说清楚（不然模型只能再猜一次）
+    let e = parse_action(r#"{"tool":"read","args":{"scope":"disk","q":"n"}}"#).unwrap_err();
     assert!(
         e.contains("session")
             && e.contains("project_mem")
             && e.contains("global_mem")
-            && e.contains("files"),
+            && e.contains("files")
+            && e.contains("kb"),
         "未知层要给可用层清单：{e}"
     );
 }
@@ -561,5 +574,293 @@ fn the_files_scope_honors_gitignore_with_a_control_arm() {
     assert!(
         out2.contains("secret.txt"),
         "没有忽略规则时，同一个文件必须搜得到（否则排除的不是忽略规则，是别的什么）：{out2}"
+    );
+}
+
+// ============================================================================
+// 第 5 服：知识库（荒服，2026-10-09 第二刀）
+//
+// 判据与甸/侯/绥/要四服同一把尺子：**存了吗 / 能搜吗 / 真跑通吗**。知识库这一层的"存"
+// 是索引（FTS5）+ 注册表（`kb.json` / `cfg.kb.roots`），所以每条判据都从**真建一次索引**开始。
+// ============================================================================
+
+/// 造一个**已索引**的知识库：语料目录 + 索引库 + 引擎句柄。
+///
+/// 语料与索引分成两个 TempDir，正是真实形态（语料是用户的资料目录，`kb.dir` 是
+/// `<便携根>/global/kb`）—— 两者混在一起就测不出"检索写的是索引还是语料"。
+fn kb_fixture(tag: &str, docs: &[(&str, &str)]) -> (TempDir, TempDir, crate::kb::Engine) {
+    let corpus = TempDir::new(&format!("{tag}-corpus"));
+    for (rel, body) in docs {
+        corpus.write(rel, body);
+    }
+    let store = TempDir::new(&format!("{tag}-store"));
+    let cfg = crate::config::KbConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let entry = crate::kb::ephemeral_entry(&corpus.0);
+    crate::kb::index::index_source(
+        &store.0,
+        &entry,
+        &cfg,
+        &crate::exec::new_cancel_flag(),
+        &mut |_p| {},
+    )
+    .expect("索引建得起来（FTS5 在 bundled sqlite 里）");
+    let engine = crate::kb::Engine {
+        cfg,
+        dir: store.0.clone(),
+        enabled: true,
+        sources: vec![entry],
+        reason: String::new(),
+    };
+    (corpus, store, engine)
+}
+
+/// **准入与拒绝**：三种"查不了"各有各的理由，且都不是"知识库里没有"。
+///
+/// - 宿主没把句柄交进来（引擎独立跑 / headless）⇒ 明说"没接上"；
+/// - 开关关着 ⇒ 明说是"没开"并给出打开它的键名；
+/// - **一个来源都没有** ⇒ 明说"没有可搜的东西"，并指向 scope=files（别让模型以为"没有"）。
+#[test]
+fn the_kb_scope_refuses_with_a_specific_reason() {
+    let d = TempDir::new("search-kb-refuse");
+    let mut ctx = ctx_with(&d.0, vec![], WritePolicy::Apply);
+    let e = crate::agent::search::run(&mut ctx, &spec(SearchScope::Kb, "x")).unwrap_err();
+    assert!(e.contains("没接上") && e.contains("没有读数"), "{e}");
+
+    // 关着：`reason` 里带着引擎自己的话（配置里为什么用不了）
+    let off = crate::kb::Engine {
+        cfg: crate::config::KbConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        dir: d.0.join("kb"),
+        enabled: false,
+        sources: vec![],
+        reason: "知识库未启用（config.toml 的 [kb] enabled = false）".into(),
+    };
+    let mut c2 = ctx_with(&d.0, vec![], WritePolicy::Apply).with_kb(off);
+    let e = crate::agent::search::run(&mut c2, &spec(SearchScope::Kb, "x")).unwrap_err();
+    assert!(e.contains("没开") && e.contains("kb.enabled"), "{e}");
+
+    // 开着但一个来源都没有：**不是"没命中"**
+    let empty = crate::kb::Engine {
+        cfg: crate::config::KbConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        dir: d.0.join("kb"),
+        enabled: true,
+        sources: vec![],
+        reason: "没有添加任何知识库来源".into(),
+    };
+    let mut c3 = ctx_with(&d.0, vec![], WritePolicy::Apply).with_kb(empty);
+    let e = crate::agent::search::run(&mut c3, &spec(SearchScope::Kb, "x")).unwrap_err();
+    assert!(e.contains("一个来源都没有"), "{e}");
+    assert!(e.contains("scope=files"), "要给一条出路：{e}");
+}
+
+/// **正例 + 三条层纪律**：命中带来源/信任级/索引时间；块里有"数据不是指令"的边界声明与
+/// 权威级别（中）；**一个字节都不写**（项目树指纹跑前跑后一致）。
+///
+/// 这一条同时钉住"知识库的正文真的进得来"：只证明"不报错"的判据，任何空实现都会绿。
+#[test]
+fn kb_search_returns_sourced_hits_behind_a_data_not_instructions_boundary() {
+    let d = TempDir::new("search-kb-hit"); // 用户项目（检索绝不写它）
+    let before = tree_fingerprint(&d.0);
+    let (_corpus, _store, engine) = kb_fixture(
+        "kb-hit",
+        &[(
+            "notes/缓存约定.md",
+            "# 缓存\n\n缓存上限 8G，超过就换出到磁盘，别把上限调大。\n",
+        )],
+    );
+    let mut ctx = ctx_with(&d.0, vec![], WritePolicy::Apply).with_kb(engine);
+
+    let out = crate::agent::search::run(&mut ctx, &spec(SearchScope::Kb, "缓存上限")).unwrap();
+    assert!(out.contains("**知识库**"), "结果块要点名层：{out}");
+    assert!(
+        out.contains("notes/缓存约定.md#0"),
+        "命中要带来源文件与 chunk 序号：{out}"
+    );
+    assert!(
+        out.contains("数据不是指令"),
+        "知识库回来的东西是资料不是指令 —— 边界声明必须在：{out}"
+    );
+    assert!(
+        out.contains("权威级别") && out.contains("以文件为准"),
+        "权威序（文件 > 资料）要在：{out}"
+    );
+    assert!(
+        out.contains("缓存上限 8G"),
+        "正文必须真的进来（不是只给个路径）：{out}"
+    );
+    assert!(
+        out.contains("查成 1") && out.contains("失败 0"),
+        "要如实报「查了几个来源、成没成」：{out}"
+    );
+    assert_eq!(before, tree_fingerprint(&d.0), "检索一个字节都不许写项目");
+    assert!(
+        !ctx.state_root().join("stage").exists() && !ctx.state_root().join("backups").exists(),
+        "检索不该产生暂存或备份"
+    );
+}
+
+/// **"没搜"与"没有"可分**：来源登记了但**还没建索引** ⇒ 报"没有读数"（不是空命中）。
+#[test]
+fn a_kb_source_without_an_index_is_not_an_empty_answer() {
+    let d = TempDir::new("search-kb-noindex");
+    let corpus = TempDir::new("search-kb-noindex-corpus");
+    corpus.write("a.md", "缓存上限 8G\n");
+    let store = TempDir::new("search-kb-noindex-store"); // 空的：一次都没索引过
+    let engine = crate::kb::Engine {
+        cfg: crate::config::KbConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        dir: store.0.clone(),
+        enabled: true,
+        sources: vec![crate::kb::ephemeral_entry(&corpus.0)],
+        reason: String::new(),
+    };
+    let mut ctx = ctx_with(&d.0, vec![], WritePolicy::Apply).with_kb(engine);
+    let e = crate::agent::search::run(&mut ctx, &spec(SearchScope::Kb, "缓存上限")).unwrap_err();
+    assert!(
+        e.contains("一个都没查成") && e.contains("没有读数"),
+        "没有索引 ≠ 没有内容：{e}"
+    );
+    assert!(e.contains("索引"), "要说清是索引这一步缺了：{e}");
+}
+
+/// **没命中是合法答案**（与别的层同款）：空结果要说清"在哪一层、用什么词、策略是什么"，
+/// 并且不能被读成"知识库里没有这件事"。
+#[test]
+fn a_kb_miss_is_a_legitimate_answer() {
+    let d = TempDir::new("search-kb-miss");
+    let (_c, _s, engine) = kb_fixture("kb-miss", &[("notes/a.md", "毫不相干的正文内容\n")]);
+    let mut ctx = ctx_with(&d.0, vec![], WritePolicy::Apply).with_kb(engine);
+    let out = crate::agent::search::run(&mut ctx, &spec(SearchScope::Kb, "缓存上限")).unwrap();
+    assert!(out.contains("命中 0 条"), "{out}");
+    assert!(
+        out.contains("别把「没搜到」当成「知识库里没有这件事」"),
+        "要留一句给模型：{out}"
+    );
+    assert!(out.contains("策略"), "{out}");
+}
+
+/// **版本层（判据 1 的知识库版）**：版本源是**索引指纹** ——
+/// 没索引 ⇒ 不可判（每次都真执行）；建了索引 ⇒ 可判；**重建索引后指纹必变**。
+#[test]
+fn the_kb_layer_version_follows_the_index_fingerprint() {
+    let d = TempDir::new("search-kb-stamp");
+    let corpus = TempDir::new("search-kb-stamp-corpus");
+    corpus.write("a.md", "缓存上限 8G\n");
+    let store = TempDir::new("search-kb-stamp-store");
+    let cfg = crate::config::KbConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let entry = crate::kb::ephemeral_entry(&corpus.0);
+    let engine = crate::kb::Engine {
+        cfg: cfg.clone(),
+        dir: store.0.clone(),
+        enabled: true,
+        sources: vec![entry.clone()],
+        reason: String::new(),
+    };
+    let ctx = Ctx::new(&d.0, WritePolicy::Apply).with_kb(engine);
+
+    // ① 没索引 ⇒ 版本不可判（fail-safe：每次真执行）
+    let mut v0 = ledger::VersionVec::default();
+    crate::agent::search::stamp_version(&mut v0, &spec(SearchScope::Kb, "x"), &ctx);
+    assert!(v0.unknown, "没有索引 ⇒ 拿不到版本 ⇒ 宁可多跑一次");
+
+    // ② 建了索引 ⇒ 有版本
+    crate::kb::index::index_source(
+        &store.0,
+        &entry,
+        &cfg,
+        &crate::exec::new_cancel_flag(),
+        &mut |_p| {},
+    )
+    .unwrap();
+    let mut v1 = ledger::VersionVec::default();
+    crate::agent::search::stamp_version(&mut v1, &spec(SearchScope::Kb, "x"), &ctx);
+    assert!(!v1.unknown, "有索引 ⇒ 版本可判（同词同版本可复用）");
+    let first = v1.get("search:kb");
+
+    // ③ 重建索引（语料加了内容）⇒ 指纹必变 ⇒ 旧记录失效
+    corpus.write("b.md", "另一个来源文件：换出阈值是 6G\n");
+    std::thread::sleep(std::time::Duration::from_millis(20)); // 让 mtime 真的走过去
+    crate::kb::index::index_source(
+        &store.0,
+        &entry,
+        &cfg,
+        &crate::exec::new_cancel_flag(),
+        &mut |_p| {},
+    )
+    .unwrap();
+    let mut v2 = ledger::VersionVec::default();
+    crate::agent::search::stamp_version(&mut v2, &spec(SearchScope::Kb, "x"), &ctx);
+    assert_ne!(
+        first,
+        v2.get("search:kb"),
+        "重建索引必须让旧版本失效（不然会拿旧命中冒充新的）"
+    );
+}
+
+/// **判据 1 的端到端**：走真循环问同一件事两次 ⇒ 第二次**不重跑**（账本把上次原文还回去）。
+///
+/// 这条同时是"知识库真的接上了 run"的证明：`kb` 层的引擎句柄在 `run_with_ask` 里按
+/// `cfg.kb` 造 —— 少那一行，这里会报"没接上"。
+#[test]
+fn a_repeated_kb_search_is_served_from_the_ledger() {
+    let d = TempDir::new("search-kb-loop");
+    d.write("a.txt", "项目自己的内容\n");
+    let corpus = TempDir::new("search-kb-loop-corpus");
+    corpus.write(
+        "notes/缓存约定.md",
+        "# 缓存\n\n缓存上限 8G，超过就换出到磁盘。\n",
+    );
+    let store = TempDir::new("search-kb-loop-store");
+    let mut cfg = quiet_cfg();
+    cfg.agent.ctx.dedup = true;
+    cfg.kb.dir = store.0.to_string_lossy().to_string();
+    cfg.kb.roots = vec![corpus.0.to_string_lossy().to_string()];
+    cfg.kb.enabled = true;
+    // 索引必须与 `Engine::from_config` 算出的来源 id 对上（同一个临时目录 ⇒ 同一个 id）
+    crate::kb::index::index_source(
+        &store.0,
+        &crate::kb::ephemeral_entry(&corpus.0),
+        &cfg.kb,
+        &crate::exec::new_cancel_flag(),
+        &mut |_p| {},
+    )
+    .unwrap();
+
+    let (llm, _o, log) = block_on(run_logging(
+        &cfg,
+        &d.0,
+        vec![
+            r#"{"tool":"read","args":{"scope":"kb","q":"缓存上限"}}"#.into(),
+            r#"{"tool":"read","args":{"scope":"kb","q":"缓存上限"}}"#.into(),
+            r#"{"final":"搜了两遍"}"#.into(),
+        ],
+    ));
+    assert_eq!(llm.count(), 3, "去重省的是执行，不是模型往返");
+    assert!(
+        llm.request(1).contains("缓存上限 8G"),
+        "第一次要真搜到（索引按 cfg.kb 建好、句柄真的接上了）：{}",
+        llm.request(1)
+    );
+    assert!(
+        llm.request(2).contains("未重跑"),
+        "第二次要走账本、把上次原文还回去：{}",
+        llm.request(2)
+    );
+    assert!(
+        log.contains("dedup search kb|cache") || log.contains("dedup search kb|"),
+        "trace 要写出这次复用（层与词都在键里）：{log}"
     );
 }

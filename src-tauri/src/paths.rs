@@ -87,6 +87,15 @@ impl Paths {
         self.global_dir().join("memory")
     }
 
+    /// 知识库（v1.5 荒服）：`<根>/global/kb/` —— 注册表 `kb.json` + 每个来源的索引库。
+    ///
+    /// 与记忆库同一档（**用户数据**）：注册表里是"用户声明了哪些语料"。放在 `%TEMP%`
+    /// 会在临时目录被清理时一起没掉，那就等于"删文件夹即卸载"删错了东西。
+    /// 语料本身仍在用户自己的目录里，这里只有索引与清单。
+    pub fn kb_dir(&self) -> PathBuf {
+        self.global_dir().join("kb")
+    }
+
     pub fn plugins_dir(&self) -> PathBuf {
         self.root.join("plugins")
     }
@@ -282,6 +291,9 @@ impl Paths {
             self.global_dir().join("logs"),
             self.global_dir().join("cache"),
             self.global_dir().join("webview"),
+            // 知识库（v1.5 荒服）：注册表 + 索引库的家。首启就把它摆好，
+            // 于是"加一个语料目录"不需要用户先手建任何目录。
+            self.kb_dir(),
             self.runs_root(),
             self.projects_dir(),
             self.plugins_dir(),
