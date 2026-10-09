@@ -144,6 +144,7 @@ sources; used by the memory embedding model),
 │   └── src/testllm.rs         # 脚本化假 LLM（单测与 examples 共用，不联网）
 │   └── examples/plan_only.rs  # plan-only e2e smoke (real LLM call via DEEPSEEK_API_KEY env)
 │   └── examples/agent_loop_smoke.rs  # 四原语工具循环 e2e（脚本化假 LLM，无需 Key，跑完自断言）
+│   └── examples/search_smoke.rs      # 分层检索的**真模型**冒烟（判据=退出码：形状有没有被接住）
 ├── tools/lint/             # harness_lint python package (engine lint stage; HARNESS_LINT_DIR can override)
 ├── scripts/                # check-style.js (style gate), ui-smoke.js (UI smoke: contracts + panel replays),
 │                           # nav-guard-probe.mjs (真窗口证明：外链闸门，CDP 连 WebView2)、
