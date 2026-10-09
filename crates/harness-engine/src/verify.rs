@@ -478,11 +478,19 @@ fn verify_dirs(plan: &sandbox::Plan, app_cfg: &AppConfig, root: &Path) -> Verify
     }
 }
 
-/// Python 检查的环境：编码 + **字节码缓存改道**（见 [`VerifyDirs::pycache`]）。
-fn py_envs(dirs: &VerifyDirs) -> [(&'static str, &str); 2] {
+/// Python 检查的环境：编码 + 改道 + **不写字节码**。
+///
+/// `PYTHONDONTWRITEBYTECODE` 与 `syntax_envs` 同款（v1.4 A-5 的纪律，2026-10-08 补齐到这条路上）：
+/// 判据是"跑完不写用户仓库"，而 `PYTHONPYCACHEPREFIX` 的**镜像**行为会把 pyc 路径变成
+/// ≈ **2 × 落点深度**（前缀 + 源码的绝对路径）⇒ 落点深一点就撞 Windows 的 260（假红/假环境错）。
+/// 不写盘，这条路径就不存在。
+///
+/// 改道**留着**是兜底：万一谁把写盘重新打开，也不许落进用户项目（那是更硬的判据）。
+fn py_envs(dirs: &VerifyDirs) -> [(&'static str, &str); 3] {
     [
         ("PYTHONIOENCODING", "utf-8"),
         ("PYTHONPYCACHEPREFIX", dirs.pycache.as_str()),
+        ("PYTHONDONTWRITEBYTECODE", "1"),
     ]
 }
 
@@ -525,6 +533,9 @@ fn syntax_envs() -> [(&'static str, &'static str); 2] {
 /// 两条都实测过：相对状态根会以 `cwd`（= 项目目录）为基准落进**用户项目**（违背"绝不写用户
 /// 仓库"），还会把 pyc 路径再叠一层；前缀 + 镜像的绝对源码路径越过 260 ⇒ python 回
 /// `[WinError 206]` 退出 1，那条检查于是报「语法/编译错误」—— 一次写对的改动被判成坏代码。
+///
+/// 现在它是一道**兜底**：整条 python 验证管线都已设 `PYTHONDONTWRITEBYTECODE=1`（语法格 A-5、
+/// 测试格与导入探针同日补齐），正常路径上根本没有 pyc 要写；这条闸只在"写盘被谁重新打开"时挡人。
 ///
 /// 返回 `Err(理由)` 时调用方必须把它变成**跳过 + 原因**（"这一轮没有读数"）：
 /// 既不许当通过（那是拿环境冒充绿灯），也不许当失败（那是假红）。
@@ -930,8 +941,8 @@ fn test_checks(
                 ));
                 return out;
             }
-            // 环境闸：这条路的 `import` / 测试**会写字节码**（走 `PYTHONPYCACHEPREFIX` 改道），
-            // 所以状态根必须绝对、路径不能越限 —— 坏了报"环境不支持"，不装成测试失败
+            // 环境闸（兜底）：正常路径上这条路**不写字节码**（见 [`py_envs`] / `syntax_envs`），
+            // 但它仍然要求状态根绝对、路径不越限 —— 写盘一旦被重新打开，这里挡在"假红"之前
             if let Err(why) = py_env_guard(dirs, root) {
                 out.push(CheckResult::skipped("test", "python", "单元测试", &why));
                 return out;
@@ -1293,6 +1304,20 @@ mod tests {
     /// **(a) 的平台无关判据**：语法检查跑完，一个字节码文件都不许出现。
     /// 为什么强调"平台无关"：那条 `[WinError 206]` 的假红只在 Windows 的 260 上限下复现
     /// （macOS 上限 ~1024，复现不了），而"不落盘"这条在任何平台都成立。
+    #[test]
+    fn every_python_env_the_pipeline_uses_writes_no_bytecode() {
+        // 一条纪律要有判据：**所有**给 python 的环境都带 `PYTHONDONTWRITEBYTECODE=1`。
+        // 少设一处的代价是实测过的（A-5 首版只换了语法格，标准库 import 仍写 pyc），
+        // 而 pyc 一旦写盘，`PYTHONPYCACHEPREFIX` 的镜像路径就会把落点算成 2×深度。
+        let d = VerifyDirs {
+            target: "C:/x/t".into(),
+            out: "C:/x/o".into(),
+            pycache: "C:/x/p".into(),
+        };
+        assert!(py_envs(&d).iter().any(|(k, v)| *k == "PYTHONDONTWRITEBYTECODE" && *v == "1"));
+        assert!(syntax_envs().iter().any(|(k, v)| *k == "PYTHONDONTWRITEBYTECODE" && *v == "1"));
+    }
+
     #[test]
     fn python_syntax_check_writes_no_bytecode_at_all() {
         let d = TempDir::new("py-nopyc");

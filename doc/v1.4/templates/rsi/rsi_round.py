@@ -65,11 +65,33 @@ def changed(before, after):
     return out
 
 
+def remove_path(p: pathlib.Path):
+    """删一个**文件**或一棵**树** —— 路径的种类不该让每个调用点各写一遍 if/elif。
+
+    `skills.toml` 这样的"面"就是一个文件（A-2 拍板的第二个面就是它），所以"面"的种类是**数据**，
+    不是这段代码的假设。
+    """
+    if p.is_dir():
+        shutil.rmtree(p)
+    elif p.exists() or p.is_symlink():
+        p.unlink()
+
+
 def copy_tree(src: pathlib.Path, dst: pathlib.Path):
-    if dst.exists():
-        shutil.rmtree(dst)
-    if src.exists():
+    """照原样拷一份（**文件也行**），先清掉落点上原来那个。
+
+    这里原先一律走 `copytree`，于是 `surfaces` 里只要写一个**文件**（`skills.toml`）就当场
+    `NotADirectoryError` —— 而它正是 A-2 拍板的第二个面。自检里当时只写过目录面（`plugins`），
+    所以这条一直没暴露：**面的形状是数据**，自检的世界里必须同时有目录面和文件面。
+    """
+    if not src.exists():
+        return
+    remove_path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
         shutil.copytree(src, dst)
+    else:
+        shutil.copy2(src, dst)
 
 
 class Rsi:
@@ -151,9 +173,22 @@ class Rsi:
         """把 surfaces 照原样拷成一条臂（臂目录 = 数据面的副本，评测台认的就是这个形状）。"""
         dst = self.arm(name)
         dst.mkdir(parents=True, exist_ok=True)
+        # **钉住的引擎条件**（`<rsi>/bench.toml`，如果有）：每条臂都要带上它，且它**不是面** ——
+        # 人/agent 都不许改它（改了就是改考场的规则，不是改候选）。没有它，那些"考引擎配置"的
+        # 任务（例如白名单边界）在臂里根本没有条件，会稳定地失败在"闸没开"上 —— 而读数不解释原因，
+        # 只留下一个恒定的 wrong（真踩过：`whitelist-holds` 两臂都 wrong）。
+        pinned = self.home / "bench.toml"
+        if pinned.is_file():
+            copy_tree(pinned, dst / "bench.toml")
         for s in self.cfg["surfaces"]:
             src = (self.root / s) if src_from_root else (self.arm(label) / s)
             copy_tree(src, dst / s)
+            # 每一条臂都必须**带全**声明的面：少一个面，读数就是在另一个世界上读的，却没人
+            # 看得出来。真实事故：一次崩溃把基准臂留在半途（文件面没拷上），此后每个候选都少这一面，
+            # 而 `promote` 的逐面三方哈希也照常"通过"（它只比自己那几面）—— 判据不会替你发现"面少了"。
+            if sha256_path(dst / s) is None:
+                die(f"臂 {name} 缺 surface {s!r}（源 {src} 不存在）—— 读数会悄悄少一个面。"
+                    f"修法：删掉 arms/{label} 再 `propose`（让它从便携根重播），或把那一面补回基准臂")
         return dst
 
     # ---- 命令
@@ -213,6 +248,10 @@ class Rsi:
         ]
         g = c.get("gates") or []
         lines.append(f"- 门禁（A-4，声明式）：{'；'.join(g) if g else '**没声明**（这一回合没有门禁证据）'}")
+        pinned = self.home / "bench.toml"
+        lines.append(
+            "- 钉住的引擎条件：`<rsi>/bench.toml`" + ("（每条臂都会带上它，**不是**面、不许改）"
+                                                   if pinned.is_file() else "（**没有**：臂跑的是引擎出厂条件）"))
         lines += [
             "- 不许动的：冻结考卷（`tasks/`）、判据、`receipts/`、`out/` —— 它们是适应度来源，"
             "改了就等于自己给自己发分",
@@ -479,12 +518,7 @@ class Rsi:
 
         # ③ 提升：用候选的数据面覆盖基准臂（只管 arms/，**不碰便携根**）
         for s in self.cfg["surfaces"]:
-            dst = base / s
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            elif dst.is_file():
-                dst.unlink()
-            copy_tree(cand / s, dst)
+            copy_tree(cand / s, base / s)   # 落点原来那份（文件或树）由 copy_tree 自己清
         print(f"已提升：round-{n} → {base}")
         print(f"回滚点：{backup}（`demote` 可退回）")
 
@@ -512,12 +546,7 @@ class Rsi:
             if rolled:
                 # ⑤ 自动回滚：把备份放回去，**并再核一次**哈希
                 for s in self.cfg["surfaces"]:
-                    dst = base / s
-                    if dst.is_dir():
-                        shutil.rmtree(dst)
-                    elif dst.is_file():
-                        dst.unlink()
-                    copy_tree(backup / s, dst)
+                    copy_tree(backup / s, base / s)
                 ok = self._surfaces_now(base) == before
                 print(f"✗ 回归不过 ⇒ 已自动回滚：{'哈希核对通过 ✓' if ok else '哈希核对**失败**，请手工检查'}")
         else:
@@ -562,12 +591,7 @@ class Rsi:
             die("没有可回滚的备份（`arms/baseline.bak-*`）—— 没提升过就不需要回滚")
         src = cands[-1]
         for s in self.cfg["surfaces"]:
-            dst = base / s
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            elif dst.is_file():
-                dst.unlink()
-            copy_tree(src / s, dst)
+            copy_tree(src / s, base / s)
         after = self._surfaces_now(base)
         (self.home / "receipts").mkdir(exist_ok=True)
         rp = self.home / "receipts" / f"demote-{time.strftime('%Y%m%d-%H%M%S')}.json"

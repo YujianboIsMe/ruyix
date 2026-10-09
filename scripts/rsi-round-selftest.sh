@@ -17,6 +17,8 @@ rm -rf "$W"; mkdir -p "$W/plugins/tools/demo" "$H/tasks/t1"
 
 # 假便携根：一个 surface（工具表）
 printf '[[discover]]\nname = "demo"\nbin = "demo-tool"\nmarkers = ["demo.marker"]\n' > "$W/plugins/tools/demo/tools.toml"
+# **文件面**：A-2 拍板的第二个面（`skills.toml`）是一个文件 —— 世界里有它，驱动器才不敢假设"面=目录"
+printf '# 空技能库\n' > "$W/skills.toml"
 # 极简任务集（1 个正样本）：任务名短 ⇒ 尺子的路径闸过得去
 cat > "$H/tasks/t1/task.toml" <<'TOML'
 prompt = "把 a.py 的 n 设成 1。"
@@ -38,7 +40,7 @@ echo "   退出码=$?（期望 2）"
 
 cat > "$H/allow.toml" <<'TOML'
 [rsi]
-surfaces = ["plugins"]
+surfaces = ["plugins", "skills.toml"]
 rounds = 2
 margin_pp = 5.0
 budget_secs = 300
@@ -301,7 +303,8 @@ class Args:
 
 r = m.Rsi(Args())
 home = pathlib.Path(Args.root) / "projects/rsi/rsi"
-r.cfg = {"surfaces": ["plugins"], "rounds": 3, "candidates": 1, "margin_pp": 5.0,
+# 面**同时含目录面和文件面**（A-2 的两个面就是这个组合）—— 世界里有它，才谈得上"带全"
+r.cfg = {"surfaces": ["plugins", "skills.toml"], "rounds": 3, "candidates": 1, "margin_pp": 5.0,
          "budget_secs": 3600, "gates": [], "bench_exe": "", "tasks": "tasks"}
 r.bench = pathlib.Path("stub-bench")
 r.tasks = home / "tasks"
@@ -373,6 +376,27 @@ try:
     ck("门禁没绿 ⇒ promote 拒绝（不许进主干）", rc == 2, f"退出码 {rc}")
 finally:
     m.subprocess.call = real_call
+
+# ④ 臂必须带全声明的面：临时往 surfaces 里加一个**世界上不存在**的面 ⇒ propose 必须拒绝
+#    （不许在"少一个面"的世界上读数）。**只动 cfg、不动世界** —— 早先那版是删掉基准臂里的
+#    文件面再"补回来"，顺序一乱就把后面的断言一起带崩（本次真踩了）。
+surf_before = list(r.cfg["surfaces"])
+r.cfg["surfaces"] = surf_before + ["plugins/does-not-exist"]
+rc = 0
+try:
+    r.propose(9, "")
+except SystemExit as e:
+    rc = e.code
+r.cfg["surfaces"] = surf_before
+ck("臂少一个面 ⇒ propose 拒绝（读数不许悄悄少一个面）", rc == 2, f"退出码 {rc}")
+# 钉住的引擎条件（<rsi>/bench.toml）必须**每条臂都有** —— 缺了它，考引擎配置的任务会恒定失败，
+# 而读数只留下一个 wrong，不告诉你为什么
+(home / "bench.toml").write_text('[agent]\nwrite_allow = ["*.py"]\n', encoding="utf-8")
+r.propose(10, "")
+ck("钉住的引擎条件随每条臂带上（不是面，但每条臂都要有）",
+   (r.arm("round-10") / "bench.toml").is_file()
+   and "write_allow" in (r.arm("round-10") / "bench.toml").read_text(encoding="utf-8"))
+ck("钉住的引擎条件**不算面**（不进逐面哈希）", "bench.toml" not in r.cfg["surfaces"])
 
 print("\n自检(⑧)：" + ("全过" if not fails else f"失败 {len(fails)} 条：{fails}"))
 sys.exit(1 if fails else 0)

@@ -993,22 +993,31 @@ fn guard_long_paths(out: &Path, run_ids: &[String], max_file: usize) -> Result<S
         .map(|s| s.chars().count())
         .max()
         .unwrap_or(16);
-    // <out>/runs/<run_id>/state/verify/pycache  ＋  镜像的 <out>/runs/<run_id>/project/<文件>
-    let state = base + 6 + rid + "/state/verify/pycache".len();
+    // 最长的落点 = **项目里的**文件 + 它旁边的 `__pycache__/<名字>.cpython-3XX.pyc`
+    // （`<out>/runs/<run_id>/project/<文件>`）：判据脚本与 agent 自己的 python 都会 import 被测
+    // 模块；而**验证管线自己一个字节都不写**（`PYTHONDONTWRITEBYTECODE=1`，见 verify.rs）。
+    //
+    // 这里原先还要加一项"`<out>/runs/<run_id>/state/verify/pycache` + 镜像的源码绝对路径"
+    // —— 那是 `PYTHONPYCACHEPREFIX` 的**镜像**行为（pyc 路径 ≈ 2×落点深度），A-5 之后那条路
+    // 已经不写了。留着它的代价是实测的：真实便携根的
+    // `D:\Tools\ruyix\projects\D-Projects-Rust-ruyix\rsi\arms` 被估成 **259 > 250 而拒跑**
+    // —— 键名长一点就命中，可那个世界其实跑得动。**判据只有拒绝方向 = 越保守越绿**，
+    // 所以自检第 7 条现在两个方向都钉。
     let src = base + 6 + rid + "/project/".len() + max_file;
-    let pyc = state + src + 2 + 31; // 镜像时多一层盘符目录 + `__pycache__/x.cpython-311.pyc`
+    let pyc = src + 2 + 31; // `__pycache__/x.cpython-311.pyc`
     if pyc > LIMIT {
         return Err(format!(
-            "落点太深：估算字节码路径 {pyc} 字符（上限 {LIMIT}）—— 越过 Windows 的 260 会让 python \
-             报 WinError 206（引擎侧已不会把它读成「语法/编译错误」，见 A-5；这条闸是兜底，免得 \
-             把一整轮烧在注定失败的环境上）。把 `--out` 指到更短的路径（例如便携根下的 \
-             `projects/rsi/arms`，别落在深层临时目录里）。现在：{}",
+            "落点太深：估算最长文件路径 {pyc} 字符（上限 {LIMIT}）—— 越过 Windows 的 260 会让 python \
+             报 WinError 206。把 `--out` 指到更短的地方（便携根下 `projects/<键>/rsi/arms` 够用；\
+             项目键很长时它也会变紧）。现在：{}",
             out.display()
         ));
     }
-    // 这句会进读数的"生效条件/闸"那一栏，所以措辞跟上事实：现在算的是**字节码**路径
-    // （语法格早已不写盘；真正还会写 pyc 的是测试 / import 那条路）。
-    Ok(format!("字节码路径估算 {pyc}/{LIMIT} 字符"))
+    // 这句会进读数的"生效条件/闸"那一栏，所以措辞跟上事实：算的是**判据/agent 的 import**
+    // 会在项目里写下的那个 pyc 路径（验证管线自己已经不写了）。
+    Ok(format!(
+        "最长文件路径估算 {pyc}/{LIMIT} 字符（验证管线不写字节码；判据/agent 的 import 仍可能在项目里原处写 __pycache__）"
+    ))
 }
 
 /// 词法折叠路径里的 `.` / `..`（只为**显示**好看：读数里的路径是证据，不该长成 `x/../y`）。
@@ -1842,7 +1851,20 @@ fn self_check() {
                 &["fix-add__baseline__r1".to_string()],
                 "calc.py".len(),
             )
-            .is_ok_and(|s| s.contains("字节码路径估算")),
+            .is_ok_and(|s| s.contains("最长文件路径估算")),
+            "",
+        );
+        // **放行方向**也要钉：真实便携根的项目键很长（`D-Projects-Rust-ruyix`），落点就是这个形状。
+        // 只钉拒绝方向 ⇒ 闸越保守越绿，真跑时才发现"世界根本开不了"。
+        let real = PathBuf::from("D:/Tools/ruyix/projects/D-Projects-Rust-ruyix/rsi/arms");
+        check(
+            "真实便携根那样长的落点（长项目键）必须放行",
+            guard_long_paths(
+                &real,
+                &["fix-mul-and-test__baseline__r3".to_string()],
+                "test_calc.py".len(),
+            )
+            .is_ok(),
             "",
         );
     }
