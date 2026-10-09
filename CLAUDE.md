@@ -424,6 +424,13 @@ three protocols via `request_plan`:
 get wrapped as `/responses`. All three protocols share one retry/error-classification path;
 only the URL, body, extractor and auth scheme differ.
 
+**扩展思考的块要原样回灌**（anthropic 路）：开了 `thinking` 的请求里，助手回合的**第一个**块必须是
+思考块，而工具结果回灌时服务端会校验它 —— 所以响应里的 `thinking` / `redacted_thinking` **连
+`signature` 一起**逐字存进 `ChatMessage.thinking`（`AnthropicContent` 用 `#[serde(flatten)]` 收下
+不认识的字段，否则签名当场就丢了），回灌时排在正文与 `tool_use` 之前。**OpenAI 兼容那条路不许带它**
+（非法字段）—— 手写的 `ChatMessage::Serialize` 因此刻意不序列化这个字段。`max_tokens` 默认 16384 也
+与它有关：思考与输出**共用**这个预算（8192 会被 thinking + 大 `write` 撑爆）。
+
 **Web search is a `(protocol × model)` capability, not a per-model one** (measured 2026-09-25, four
 models × both routes): on DeepSeek's `/anthropic` **all four models search** (flash included), while
 on `/responses` only `deepseek-v4-pro` does — so `ModelCaps` carries `web_search` (OpenAI-compatible

@@ -604,11 +604,16 @@ pub async fn run_with_ask(
         let assistant_idx = msgs.len();
         // 工具轮的 content 天生是空的（动作全在 `tool_calls` 里），原样回显等于给模型看一条
         // 空消息 —— 所以把**它自己发的那串调用**写回去（见 [`tool_calls_echo`]）。
-        msgs.push(ChatMessage::assistant(if via_tools {
+        let mut as_msg = ChatMessage::assistant(if via_tools {
             tool_calls_echo(&reply.tool_calls)
         } else {
             reply.content.clone()
-        }));
+        });
+        // anthropic 扩展思考：这一轮的思考块挂回助手消息 —— 下一轮回灌要**逐字**带回去
+        // （含 `signature`，服务端校验它）。丢了它，开了 `thinking` 的请求下一轮会被打回，
+        // 而且模型每轮都在失忆（`142b4ab` 自述遗留的那条）。
+        as_msg.thinking = reply.thinking.clone();
+        msgs.push(as_msg);
 
         // 第五个动作：向委托人提问。控制动作独占一轮（批里的 ask_user 已被当面拒）。
         // 上限是硬闸：`ask` 是稀缺资源，超了要求"交付并声明假设"，而不是继续追问。

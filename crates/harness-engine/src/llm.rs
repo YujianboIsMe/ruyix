@@ -33,6 +33,12 @@ pub struct ChatMessage {
     /// 随这条消息一起发的图片（v1.3 多模态输入）。空 = 纯文本，这是默认且**绝大多数**情形；
     /// 也只有空的时候序列化结果与以前的 derive **逐字节相同**（见手写的 `Serialize`）。
     pub images: Vec<ImagePart>,
+    /// anthropic 扩展思考的块（`thinking` / `redacted_thinking`），**原样**保存与回灌。
+    ///
+    /// 只在 anthropic 那条路上有值；手写的 `Serialize` 刻意**不**序列化它 —— OpenAI 兼容
+    /// 请求体里塞 `thinking` 是非法字段。回灌在 `anthropic_body` 的助手分支里做
+    /// （**必须排在正文与 tool_use 之前**，服务端要求它第一个）。
+    pub thinking: Vec<serde_json::Value>,
 }
 
 /// 一条随消息发出去的图片（v1.3）。
@@ -124,6 +130,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             images: Vec::new(),
+            thinking: Vec::new(),
         }
     }
     pub fn user(c: impl Into<String>) -> Self {
@@ -133,6 +140,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             images: Vec::new(),
+            thinking: Vec::new(),
         }
     }
     pub fn assistant(c: impl Into<String>) -> Self {
@@ -142,6 +150,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             images: Vec::new(),
+            thinking: Vec::new(),
         }
     }
     /// 工具结果消息（`role = tool`）—— 混合形态下暂未使用，见 [`ChatMessage::tool_calls`]。
@@ -152,6 +161,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(id.into()),
             images: Vec::new(),
+            thinking: Vec::new(),
         }
     }
     /// 给这条消息挂上图片（v1.3）：只有**任务消息**（第一条 user）会这么用。
@@ -231,6 +241,8 @@ pub struct ChatOutcome {
     /// 标题与链接都不回传。但**有查询词就够了** —— 复核员据此知道模型真去查过，
     /// 不会再把"证据池里没有"当成"主循环没做"（那是上一个死锁的成因）。
     pub web_queries: Vec<String>,
+    /// anthropic 扩展思考的块（原样；其它两条协议恒为空）。回灌见 `ChatMessage::thinking`。
+    pub thinking: Vec<serde_json::Value>,
     /// 标准工具协议返回的动作（模型按请求里声明的 `tools` 发回来的 `tool_calls`）。
     ///
     /// 与 `content` **并列**：`final` 之前的每一轮，模型要么给工具调用、要么（老习惯）把
@@ -502,6 +514,12 @@ struct RawReply {
     web_queries: Vec<String>,
     /// 标准工具协议返回的动作（没声明 `tools`、或模型这轮没用工具时为空）
     tool_calls: Vec<ToolCall>,
+    /// anthropic 扩展思考的块（`thinking` / `redacted_thinking`）**原样**。
+    ///
+    /// 必须回灌：开了 `thinking` 的请求里，助手回合的**第一个**块必须是思考块 —— 把工具结果
+    /// 回灌时丢了它，服务端会以"缺少 thinking 块"打回；而且它本身就是模型的推理记录，
+    /// 丢了等于每一轮都在失忆（`142b4ab` 自述遗留的那条）。其它两条协议没有这种块，恒为空。
+    thinking: Vec<serde_json::Value>,
 }
 
 /// 端点是不是 DeepSeek 官方（`api.deepseek.com` 及其子域）。
@@ -923,6 +941,12 @@ struct AnthropicContent {
     /// 这是与 OpenAI 那条路最大的差异，见 `extract_anthropic`。
     #[serde(default)]
     input: serde_json::Value,
+    /// **原样**收下没列出的字段。
+    ///
+    /// 为什么必须这么做：`type == "thinking"` 的块要**逐字**带回去（`thinking` 正文 + `signature`，
+    /// 服务端会校验签名），本结构里没有那两个字段 ⇒ 不 flatten 就等于把它们吃了。
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1027,6 +1051,9 @@ fn anthropic_parts(
                 match &m.tool_calls {
                     Some(calls) if !calls.is_empty() => {
                         let mut blocks: Vec<serde_json::Value> = Vec::new();
+                        // **思考块必须排第一**（服务端要求；顺序错了会 400）。它是对上一轮
+                        // 助手回合的原样回带，不是我们编的。
+                        blocks.extend(m.thinking.iter().cloned());
                         if !m.content.trim().is_empty() {
                             blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
                         }
@@ -1150,6 +1177,20 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
         .filter_map(|c| c.input.get("query").and_then(|q| q.as_str()))
         .map(|s| s.to_string())
         .collect();
+    // 扩展思考的块**原样收下**（含 `signature`）—— 回灌时要逐字带回去，见 `RawReply::thinking`
+    let thinking: Vec<serde_json::Value> = parsed
+        .content
+        .iter()
+        .filter(|c| c.kind == "thinking" || c.kind == "redacted_thinking")
+        .map(|c| {
+            let mut o = serde_json::Map::new();
+            o.insert("type".into(), serde_json::Value::String(c.kind.clone()));
+            for (k, v) in &c.rest {
+                o.insert(k.clone(), v.clone());
+            }
+            serde_json::Value::Object(o)
+        })
+        .collect();
     let finish_reason = match parsed.stop_reason.as_deref() {
         Some("max_tokens") => Some("length".to_string()),
         Some("end_turn") | Some("stop_sequence") => Some("stop".to_string()),
@@ -1184,6 +1225,7 @@ fn extract_anthropic(text: &str) -> Result<RawReply, String> {
         finish_reason,
         web_queries,
         tool_calls,
+        thinking,
     })
 }
 
@@ -1279,6 +1321,7 @@ fn extract_chat(text: &str) -> Result<RawReply, String> {
         finish_reason,
         web_queries: Vec::new(),
         tool_calls,
+        thinking: Vec::new(),
     })
 }
 
@@ -1356,6 +1399,7 @@ fn extract_responses(text: &str) -> Result<RawReply, String> {
         // 本次改造只覆盖 chat/completions：这里留空 = 这一路仍走老协议（content 里的 JSON），
         // 与改造前逐字一致。要覆盖它得另写一个映射，别在这里硬塞。
         tool_calls,
+        thinking: Vec::new(),
     })
 }
 
@@ -1551,6 +1595,7 @@ async fn attempt_loop(
                             content: raw.content,
                             usage: raw.usage,
                             model: raw.model.unwrap_or_else(|| cfg.model.clone()),
+                            thinking: raw.thinking,
                             finish_reason: raw.finish_reason,
                             elapsed_ms: started.elapsed().as_millis(),
                             web_queries: raw.web_queries,
@@ -3165,5 +3210,72 @@ mod protocol_tests {
         // 无图 ⇒ 什么模型都放行
         let plain = vec![ChatMessage::user("只有文字")];
         assert!(reject_images_for_a_blind_model(&blind, &plain).is_ok());
+    }
+
+    /// **anthropic 扩展思考：思考块必须原样收下**（`142b4ab` 自述遗留的那条）。
+    ///
+    /// 服务端要求开了 `thinking` 的回合把思考块（正文 + `signature`）**逐字**带回去 ——
+    /// 丢了它，下一轮会被以"缺少 thinking 块"打回；而它本身是模型的推理记录，丢了等于每轮失忆。
+    #[test]
+    fn the_anthropic_reply_keeps_its_thinking_blocks_verbatim() {
+        let raw = r#"{
+            "model": "claude-x",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "thinking", "thinking": "先看谁提到 RETRY_POLICY", "signature": "sig-abc"},
+                {"type": "tool_use", "id": "toolu_1", "name": "read",
+                 "input": {"scope": "files", "q": "RETRY_POLICY"}}
+            ],
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        }"#;
+        let reply = extract_anthropic(raw).expect("解析 anthropic 响应");
+        assert_eq!(
+            reply.thinking.len(),
+            1,
+            "思考块要收下：{:?}",
+            reply.thinking
+        );
+        assert_eq!(reply.thinking[0]["type"], "thinking");
+        assert_eq!(reply.thinking[0]["thinking"], "先看谁提到 RETRY_POLICY");
+        assert_eq!(
+            reply.thinking[0]["signature"], "sig-abc",
+            "签名必须逐字留住（服务端校验它）"
+        );
+        assert_eq!(reply.tool_calls.len(), 1, "工具调用照旧");
+    }
+
+    /// **回灌**：助手消息带思考块 + `tool_use` 时，请求体里它必须**排第一个**（服务端要求）；
+    /// 而 OpenAI 兼容那条路**不许**出现 `thinking`（那边是非法字段 —— 手写的 `Serialize` 担这条）。
+    #[test]
+    fn thinking_blocks_replay_first_and_only_on_the_anthropic_route() {
+        let mut a = ChatMessage::assistant("读了");
+        a.thinking = vec![serde_json::json!({
+            "type": "thinking", "thinking": "先搜索", "signature": "sig-1"
+        })];
+        a.tool_calls = Some(vec![ToolCall {
+            id: "toolu_1".into(),
+            kind: "function".into(),
+            function: ToolCallFn {
+                name: "read".into(),
+                arguments: "{\"scope\":\"files\"}".into(),
+            },
+        }]);
+        let msgs = vec![ChatMessage::user("找 RETRY_POLICY"), a];
+
+        let (_, body) = anthropic_parts(&anthropic_cfg(), &msgs, false, &["read"]);
+        let blocks = body["messages"][1]["content"].as_array().expect("块数组");
+        assert_eq!(
+            blocks[0]["type"], "thinking",
+            "思考块必须排第一：{blocks:?}"
+        );
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[2]["type"], "tool_use");
+
+        let ser = serde_json::to_string(&msgs[1]).unwrap();
+        assert!(
+            !ser.contains("thinking"),
+            "OpenAI 兼容请求体不许带 thinking（非法字段）：{ser}"
+        );
     }
 }
