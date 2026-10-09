@@ -160,6 +160,11 @@ sys.exit(1 if fails else 0)
 PY
 RC=$?
 echo
+echo "########## ⑦a promote / demote 的 **CLI 接线**（缺证据 ⇒ 拒绝，退出码 2）"
+python "$DRIVER" --root "$W" --key rsi --bench "$BENCH" promote 1; echo "   退出码=$?（期望 2）"
+python "$DRIVER" --root "$W" --key rsi --bench "$BENCH" demote; echo "   退出码=$?（期望 2）"
+
+echo
 echo "########## ⑦ promote / demote（P3：人合并 + 备份回滚点 + 提升即回归 + 自动回滚）"
 python - "$W" <<'PY'
 import importlib.util, json, pathlib, sys
