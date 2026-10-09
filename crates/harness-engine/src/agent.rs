@@ -93,6 +93,9 @@ pub async fn run(
 mod action;
 pub use action::*;
 mod connect;
+/// 分层检索（v1.5「五服」）：`read` 的第二种形状。**不是第五个原语** —— 见模块头。
+/// `pub(crate)`：`step_agent` 是 `agent` 的**兄弟**模块（不是子模块），子步骤也要能检索。
+pub(crate) mod search;
 pub use connect::*;
 mod dispatch;
 pub(crate) use dispatch::*;

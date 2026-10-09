@@ -13,6 +13,7 @@ mod parse;
 mod plan;
 mod prompt;
 mod read_write;
+mod search;
 mod waves;
 
 struct TempDir(PathBuf);

@@ -70,6 +70,13 @@ impl VersionVec {
         self.paths.iter().find(|(p, _)| p == path).map(|(_, v)| *v)
     }
 
+    /// 给**非文件资源**盖章（v1.5 检索）：版本不一定是"某个路径的 stat" ——
+    /// 记忆库在 WAL 模式下主库文件 mtime 不可靠，所以用"事件序号哈希"这类**状态指纹**。
+    /// 语义与路径版一致：`fresh_for` 只比相等，所以只要指纹能在该变的时候变，判定就是对的。
+    pub(crate) fn set_state(&mut self, name: &str, v: Ver) {
+        self.set(name, v);
+    }
+
     fn set(&mut self, path: &str, v: Ver) {
         match self.paths.iter_mut().find(|(p, _)| p == path) {
             Some(slot) => slot.1 = v,
@@ -146,7 +153,9 @@ pub fn snapshot(
             v.set(res, Ver::File(mtime, md.len()));
         }
     }
-    if call.tool == Tool::Execute {
+    // 仓库级版本：`execute`（命令的答案依赖整个工作树）与**检索**（文件层的答案同样依赖它）。
+    // 非 git 仓库 ⇒ `repo = None` ⇒ 下面判 `unknown` ⇒ 永不命中（fail-safe：宁可多跑一次）。
+    if matches!(call.tool, Tool::Execute | Tool::Search) {
         v.repo = repo.clone();
     }
     if v.paths.is_empty() && v.repo.is_none() {
@@ -642,13 +651,18 @@ pub(super) fn precheck(
         .iter()
         .map(|a| {
             let call = classify(a)?;
-            let versions = snapshot(
+            let mut versions = snapshot(
                 ctx.project_root(),
                 &call,
                 &ctx.overlay,
                 ctx.changes().len(),
                 repo,
             );
+            // 分层检索：各层的"变了没有"看的是**各自的存储**（侧存索引 / 记忆库事件序号），
+            // 不是项目里的某个路径 —— 盖章在这儿做（这里是唯一能同时看到 `ctx` 与快照的地方）。
+            if let Action::Search(spec) = a {
+                search::stamp_version(&mut versions, spec, ctx);
+            }
             let brief = call.norm.clone();
             let tool = call.tool.name();
             let reuse = if consult {

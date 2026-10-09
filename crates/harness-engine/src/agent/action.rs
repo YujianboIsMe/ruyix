@@ -60,6 +60,68 @@ impl ReadSpec {
     }
 }
 
+/// 分层检索的**作用域**（v1.5「五服」里的四个可查层；`kb` 是第二刀，见
+/// `doc/v1.5/需求-分层搜索-五服-v1.5.md` §5）。
+///
+/// **这不是四个新工具**：模型侧只有 `read` 一个名字，`scope` 只是它的参数 ——
+/// 与 `execute` 的 `background`/`op` 同款（加维度，不加原语）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchScope {
+    /// 会话内：本 run **已折掉/复用过的**正文（capsule 侧存）
+    Session,
+    /// 项目记忆（记忆库里本项目 scope）
+    ProjectMem,
+    /// 全局记忆（跨项目事实；用户拍板**默认开**，命中必须标来源）
+    GlobalMem,
+    /// 项目文件（原生实现，**不经过 shell**）
+    Files,
+}
+
+impl SearchScope {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "session" => Some(Self::Session),
+            "project_mem" | "project" => Some(Self::ProjectMem),
+            "global_mem" | "global" => Some(Self::GlobalMem),
+            "files" => Some(Self::Files),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::ProjectMem => "project_mem",
+            Self::GlobalMem => "global_mem",
+            Self::Files => "files",
+        }
+    }
+}
+
+/// `read` 的第二种形状：分层检索（v1.5）。**不是第五个原语**（需求 §3）。
+#[derive(Clone, Debug)]
+pub(crate) struct SearchSpec {
+    pub scope: SearchScope,
+    /// 搜什么（**字面串，大小写不敏感**；本刀不做正则）
+    pub q: String,
+    /// 只对 `files` 有意义：限定子树（走 `generate::safe_rel_path` 的 jail）
+    pub path: Option<String>,
+    /// 要几条（缺省 50，上限同）
+    pub max_hits: Option<usize>,
+}
+
+impl SearchSpec {
+    /// 日志 / trace / 账本里怎么称呼这次检索（**层名必须写出来**：不然"搜过"这件事
+    /// 在留痕里看不出搜的是哪一层，而层与层的权威级别不同）
+    pub(crate) fn brief(&self) -> String {
+        let mut s = format!("{} {:?}", self.scope.as_str(), self.q);
+        if let Some(p) = &self.path {
+            s.push_str(&format!(" @{p}"));
+        }
+        s
+    }
+}
+
 /// write 的一条**锚点改动**：把 `find` 换成 `replace`。
 ///
 /// `find` 必须与原文**逐字一致**（含缩进）且**恰好出现一次** —— 匹配规则不在这里重写，
@@ -129,6 +191,11 @@ pub(crate) enum Action {
     Final(String),
     Plan(Vec<PlanStep>),
     Read(ReadSpec),
+    /// **`read` 的第二种形状**（v1.5 分层检索）—— 不是第五种能力：它不写盘、不改状态，
+    /// 结果由资源当前状态决定，所以它是**读**。单独一个变体是为了让它在**账本里是一等公民**
+    /// （`Tool::Search`：同 scope 同词同版本 ⇒ 不重复执行）—— 否则"藏在 execute 里"那条老路
+    /// 依然不进账本（管道一加就判不纯），而重复检索正是 v1.2 账本要治的病。
+    Search(SearchSpec),
     Write(WriteSpec),
     Execute(String, Option<u64>),
     /// 后台启动：`execute` 的第三种生命周期（有界 / 无界托管 / 句柄操作）。
@@ -765,15 +832,75 @@ pub(crate) fn parse_findings(args: &serde_json::Value) -> Result<Action, String>
     Ok(Action::Findings(out))
 }
 
+/// `read` 的**两副面孔**收口在这一处（与 `parse_write` 同款）：`path` 是文件/目录读，
+/// `scope` + `q` 是分层检索。**两个形状同时给 = 当面拒**，不猜哪个优先。
 pub(crate) fn parse_read(args: &serde_json::Value) -> Result<Action, String> {
-    let path = get_str(args, "path")?;
-    let offset = get_pos_usize(args, "offset")?;
-    let limit = get_pos_usize(args, "limit")?;
-    Ok(Action::Read(ReadSpec {
-        path,
-        offset,
-        limit,
-    }))
+    let scope_raw = args
+        .get("scope")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let q_raw = args
+        .get("q")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let has_path = args
+        .get("path")
+        .and_then(|x| x.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    match (scope_raw, q_raw) {
+        // 老形状一字不改
+        (None, None) => {
+            let path = get_str(args, "path")?;
+            let offset = get_pos_usize(args, "offset")?;
+            let limit = get_pos_usize(args, "limit")?;
+            Ok(Action::Read(ReadSpec {
+                path,
+                offset,
+                limit,
+            }))
+        }
+        (None, Some(_)) => Err("read 收到了 q 但没有 scope —— 检索必须点名**在哪一层**找：\
+             session / project_mem / global_mem / files"
+            .into()),
+        (Some(s), None) => Err(format!("read 的 scope={s:?} 没有配 q —— 要说清搜什么")),
+        (Some(s), Some(q)) => {
+            let scope = SearchScope::parse(&s).ok_or_else(|| {
+                format!(
+                    "未知 scope {s:?}：本版只开了四层 session / project_mem / global_mem / files \
+                     （kb 还没开）"
+                )
+            })?;
+            let path = args
+                .get("path")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if has_path && !matches!(scope, SearchScope::Files) {
+                return Err(format!(
+                    "scope={} 不接受 path（那是**文件**层限定子树用的）：记忆类各层按 scope 取，\
+                     不给路径",
+                    scope.as_str()
+                ));
+            }
+            if args.get("offset").is_some() || args.get("limit").is_some() {
+                return Err(
+                    "检索不接受 offset/limit（那是文件窗口读的参数）—— 要少要几条就用 max_hits"
+                        .into(),
+                );
+            }
+            let max_hits = get_pos_usize(args, "max_hits")?;
+            Ok(Action::Search(SearchSpec {
+                scope,
+                q,
+                path,
+                max_hits,
+            }))
+        }
+    }
 }
 
 /// `write` 的两副面孔收口在这一处：`content`（整份）或 `edits`（锚点）。
@@ -879,6 +1006,8 @@ pub(crate) fn parse_execute(args: &serde_json::Value) -> Result<Action, String> 
 pub(crate) enum StepAction {
     Final(String),
     Read(ReadSpec),
+    /// 分层检索（只读 ⇒ 子步允许；它不动文件，所以**不参与**"声明文件已落地"的判据）
+    Search(SearchSpec),
     Write(WriteSpec),
     Execute(String, Option<u64>),
     ExecBg(crate::proc::StartSpec),
@@ -891,6 +1020,7 @@ pub(crate) fn to_step_action(a: Action) -> StepAction {
     match a {
         Action::Final(t) => StepAction::Final(t),
         Action::Read(s) => StepAction::Read(s),
+        Action::Search(s) => StepAction::Search(s),
         Action::Write(s) => StepAction::Write(s),
         Action::Execute(c, t) => StepAction::Execute(c, t),
         Action::ExecBg(s) => StepAction::ExecBg(s),
@@ -961,7 +1091,9 @@ pub(crate) fn action_name(a: &Action) -> &'static str {
     match a {
         Action::Final(_) => "final",
         Action::Plan(_) => "plan",
-        Action::Read(_) => "read",
+        // 分层检索是 `read` 的第二种形状 —— 工具名必须是 read（纠正话术、批上限、
+        // 审计计数全都按工具名对账，这里写错会让"读类动作"的账对不上）
+        Action::Read(_) | Action::Search(_) => "read",
         Action::Write(_) => "write",
         Action::Execute(..) | Action::ExecBg(_) | Action::Proc(..) => "execute",
         Action::Connect(_) => "connect",

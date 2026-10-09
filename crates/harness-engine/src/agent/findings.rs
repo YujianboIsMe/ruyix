@@ -380,6 +380,16 @@ impl Progress {
         self.dedup.attach_capsule(c);
     }
 
+    /// 本 run 的侧存（只读）。**分层检索的第 1 服**要用它：折掉的正文只能在这里找回来。
+    pub fn capsule(&self) -> Option<&crate::agent::capsule::Capsule> {
+        self.dedup.capsule()
+    }
+
+    /// 本 run 的侧存（可写）—— 检索要读正文并**校验 sha256**，校验计数记在胶囊自己身上。
+    pub fn capsule_mut(&mut self) -> Option<&mut crate::agent::capsule::Capsule> {
+        self.dedup.capsule_mut()
+    }
+
     /// **仪器**：把这一次执行喂给审计（`call = None` ⇒ 不纯动作）。
     /// 与 `dedup` 开关无关 —— 对照臂也要能数出"重复执行了几次"。
     ///

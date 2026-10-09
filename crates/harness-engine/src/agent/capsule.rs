@@ -37,6 +37,17 @@ impl Ref {
     }
 }
 
+/// 一次内容检索的命中（带**来源**：第几轮、哪个工具、什么目标、第几行）。
+#[derive(Clone, Debug)]
+pub struct Hit {
+    pub file: String,
+    pub step: u32,
+    pub tool: String,
+    pub target: String,
+    pub line_no: usize,
+    pub text: String,
+}
+
 /// 索引一行的元数据（**索引要能回答"这条是什么、什么时候的"**）。
 ///
 /// 打包成一个结构而不是散成六个参数：参数一多，调用点就会靠位置对齐 ——
@@ -161,6 +172,72 @@ impl Capsule {
             sha256: sum,
             len: body.len(),
         })
+    }
+
+    /// **按内容检索**（v1.5 第 1 服）：在**已折掉/复用过的**正文里找。
+    ///
+    /// 为什么第 1 服要的是"内容"而不是"按 key"：折掉的东西**模型手里已经没有 key 了** ——
+    /// 它是"我第 12 轮读过的那个文件里写过什么来着"，不是"我上次调用的规范串是什么"。
+    ///
+    /// 逐条命中都带**来源**（第几轮 / 哪个工具 / 什么目标）：记忆类结果没有来源标注就没法
+    /// 与"磁盘上现在写的"摆在一起比较（需求 §4 的权威序）。
+    pub fn search(&mut self, q: &str, limit: usize) -> Result<Vec<Hit>, String> {
+        let needle = q.to_lowercase();
+        if needle.trim().is_empty() {
+            return Err("检索词是空的".into());
+        }
+        let raw = match std::fs::read_to_string(&self.index) {
+            Ok(s) => s,
+            // 侧存还没建过（这一轮还没折过东西）—— 那是**合法的空**，不是错误
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut out: Vec<Hit> = Vec::new();
+        for line in raw.lines() {
+            if out.len() >= limit {
+                break;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("");
+            let sha = v.get("sha256").and_then(|x| x.as_str()).unwrap_or("");
+            if file.is_empty() || sha.is_empty() {
+                continue;
+            }
+            // **sha256 校验照旧**：检索也不能绕过"绝不静默给脏数据"这条（P3 的硬标准）
+            let body = self.get(&Ref {
+                file: file.to_string(),
+                sha256: sha.to_string(),
+                len: v.get("len").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+            })?;
+            let step = v.get("step").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let tool = v
+                .get("tool")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let target = v
+                .get("target")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            for (i, l) in body.lines().enumerate() {
+                if out.len() >= limit {
+                    break;
+                }
+                if l.to_lowercase().contains(&needle) {
+                    out.push(Hit {
+                        file: file.to_string(),
+                        step,
+                        tool: tool.clone(),
+                        target: target.clone(),
+                        line_no: i + 1,
+                        text: l.trim().to_string(),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 召回：读回来**逐字节**（sha256 校验；不符就报错，绝不静默交付）。

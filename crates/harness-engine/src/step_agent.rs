@@ -22,8 +22,8 @@ use crate::agent::{
     CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, STEP_TOOL_NAMES,
     STEP_TOOLS_HINT, StepAction, VerifyOutcome, WriteBody, WriteSpec, batch_hint,
     batch_json_result, batch_waves_for_step, content_channel_error, flush_write_disk, json_result,
-    narrow_verify, parse_failure_feedback, parse_step_actions, parse_step_tool_calls,
-    llm_failure_feedback, policy_system_note, proc_op_name, read_group, resolve_write,
+    llm_failure_feedback, narrow_verify, parse_failure_feedback, parse_step_actions,
+    parse_step_tool_calls, policy_system_note, proc_op_name, read_group, resolve_write,
     staged_execute_note, tool_calls_echo, tool_exec_bg, tool_execute, tool_proc,
     write_edits_ok_text, write_ok_text,
 };
@@ -285,6 +285,10 @@ async fn step_exec_one(
     action: StepAction,
 ) -> (String, String, Result<String, String>) {
     match action {
+        StepAction::Search(spec) => {
+            let brief = format!("read search {}", spec.brief());
+            ("read".into(), brief, crate::agent::search::run(cx, &spec))
+        }
         StepAction::Read(spec) => {
             let brief = format!("read {}", spec.brief());
             ("read".into(), brief, cx.tool_read(&spec))
@@ -364,6 +368,11 @@ async fn run_step_wave(
                 }
                 Err(e) => errs.push((i, "write".into(), spec.brief(), e)),
             },
+            // 与主循环同款：检索在波里同步跑（只读 + 结果确定）
+            StepAction::Search(spec) => {
+                let r = crate::agent::search::run(cx, spec);
+                slots[i] = Some(("read".into(), format!("read search {}", spec.brief()), r));
+            }
             StepAction::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
             StepAction::ExecBg(spec) => bgs.push((i, spec.clone())),
             StepAction::Proc(op, h) => procs.push((i, *op, h.clone())),
@@ -1523,7 +1532,7 @@ mod tests {
         let llm = fake_llm_raw(vec![
             empty.into(),
             empty.into(),
-            empty.into(), // 第 1 轮（内部重试 3 次）
+            empty.into(),    // 第 1 轮（内部重试 3 次）
             bad_args.into(), // 第 2 轮：HTTP 成功但解析失败 —— 半成功
             empty.into(),
             empty.into(),

@@ -33,6 +33,14 @@ pub(crate) fn shape_of(a: &Action) -> Shape<'_> {
         },
         // 冲突只看路径与"是不是写"，不看传的是 content 还是 edits：
         // 同一个文件的两种写法仍然互斥。
+        // 分层检索：**只读**，且它读的是"整棵树 / 整层记忆"而不是某条路径 ——
+        // 所以不参与路径冲突判定（同批里与写并发时，它的版本快照在**执行前**取，
+        // 于是那批写会让它下次判失效 ⇒ 重新执行；方向是安全的）。
+        Action::Search(_) => Shape {
+            path: None,
+            write: false,
+            proc: false,
+        },
         Action::Write(s) => Shape {
             path: Some(&s.path),
             write: true,
@@ -66,6 +74,11 @@ pub(crate) fn shape_of_step(a: &StepAction) -> Shape<'_> {
     match a {
         StepAction::Read(s) => Shape {
             path: Some(&s.path),
+            write: false,
+            proc: false,
+        },
+        StepAction::Search(_) => Shape {
+            path: None,
             write: false,
             proc: false,
         },
@@ -480,6 +493,12 @@ pub(crate) async fn exec_one(
             let brief = format!("read {}", spec.brief());
             ("read".into(), brief, ctx.tool_read(&spec))
         }
+        Action::Search(spec) => {
+            // 工具名回 `read`：检索是 read 的第二种形状（批上限、审计计数、纠正话术
+            // 全都按工具名对账，写 `search` 会让"读类动作"的账对不上）
+            let brief = format!("read search {}", spec.brief());
+            ("read".into(), brief, crate::agent::search::run(ctx, &spec))
+        }
         Action::Write(spec) => {
             let brief = spec.brief();
             let r = ctx.apply_write(&spec);
@@ -582,6 +601,12 @@ pub(crate) async fn run_wave(
                 }
                 Err(e) => slots[i] = Some(("write".into(), spec.brief(), Err(e))),
             },
+            // 分层检索：**只读**，但在波里**同步**跑（它要 walk 树 / 读库，进并发读那组
+            // 只会和文件读抢盘；同步跑还有个好处：同波里的写一定排它后面 ⇒ 结果确定）
+            Action::Search(spec) => {
+                let hits = crate::agent::search::run(ctx, spec);
+                slots[i] = Some(("read".into(), format!("read search {}", spec.brief()), hits));
+            }
             Action::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
             Action::ExecBg(spec) => bgs.push((i, spec.clone())),
             Action::Proc(op, h) => procs.push((i, *op, h.clone())),

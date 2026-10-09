@@ -304,6 +304,17 @@ pub fn install(m: Memory) -> Result<(), String> {
         .map_err(|_| "记忆库已经安装过了（install 只该在启动时调一次）".to_string())
 }
 
+/// 记忆库的**事件序号**（"这一层变了没有"的廉价真值）。
+///
+/// 为什么不用库文件的 `(mtime,size)`：库跑在 **WAL** 模式，小写入落 `mem.db-wal`，
+/// 主库文件的 mtime / size **不动** ⇒ 拿它当版本会**假新鲜**（库里已经变了，而账本说没变，
+/// 于是拿旧结果冒充新的）。事件表是**只追加**的（`seq` 自增主键）⇒ 任何一次入账都让它变大。
+pub fn head_seq(m: &Memory) -> Result<i64, String> {
+    let conn = m.conn()?;
+    conn.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))
+        .map_err(|e| format!("读记忆事件序号失败: {e}"))
+}
+
 pub fn current() -> Option<&'static Memory> {
     INSTALLED.get()
 }

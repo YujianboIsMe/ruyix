@@ -732,8 +732,8 @@ pub fn tool_decls_for(names: &[&str]) -> Vec<serde_json::Value> {
 const TOOL_DECLS: &[(&str, &str, &str)] = &[
     (
         "read",
-        "读项目内的文件：路径给目录返回结构树，给文件返回内容。大文件用 offset/limit 窗口分段读。Git 历史用 execute 跑 git log / git show。",
-        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔；给目录返回结构树，给 \".\" 返回项目根结构"},"offset":{"type":"integer","description":"从第几行开始读（行号从 1 起）"},"limit":{"type":"integer","description":"最多读多少行，一次上限 400 行"}},"required":["path"]}"#,
+        "读项目内的文件：路径给目录返回结构树，给文件返回内容。大文件用 offset/limit 窗口分段读。**分层检索**改用 scope + q（一次只查一层）：files=项目文件（原生实现，不经过 shell）/ session=本会话已折掉的正文 / project_mem=项目记忆 / global_mem=全局记忆（跨项目）。记忆层的答案是主张、文件层的答案是事实，冲突时以文件为准并说出来。Git 历史用 execute 跑 git log / git show。",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"项目内相对路径，用 / 分隔；给目录返回结构树，给 \".\" 返回项目根结构；检索时（scope=files）可另给 path 限定子树"},"offset":{"type":"integer","description":"从第几行开始读（行号从 1 起）"},"limit":{"type":"integer","description":"最多读多少行，一次上限 400 行"},"scope":{"type":"string","enum":["files","session","project_mem","global_mem"],"description":"分层检索：查哪一层（与 path 形状二选一，必配 q）。files=项目文件 / session=本会话已折掉的正文 / project_mem=项目记忆 / global_mem=全局记忆"},"q":{"type":"string","description":"检索词（字面匹配、大小写不敏感）"},"max_hits":{"type":"integer","description":"最多几条命中，默认 50、上限 50"}},"required":[]}"#,
     ),
     (
         "write",
@@ -2892,7 +2892,24 @@ mod protocol_tests {
             .find(|x| x["name"] == "read")
             .expect("read 不在声明里");
         // anthropic 叫 `input_schema`，不是 OpenAI 的 `parameters`
-        assert_eq!(read["input_schema"]["required"][0], "path", "{read}");
+        //
+        // v1.5：`read` 有**两副面孔**（`path` 文件读 / `scope`+`q` 分层检索）⇒ 两边都不再是
+        // 必填（`required` 必须为空），但**两副面孔的参数必须都在** —— 写死 `required:["path"]`
+        // 会让检索形状在 schema 这一层就被挡回去，模型根本没机会发它。
+        let req = read["input_schema"]["required"]
+            .as_array()
+            .expect("required 必须是数组");
+        assert!(req.is_empty(), "两副面孔都不必填: {read}");
+        for k in ["path", "scope", "q"] {
+            assert!(
+                read["input_schema"]["properties"].get(k).is_some(),
+                "缺参数 {k}: {read}"
+            );
+        }
+        let scopes = read["input_schema"]["properties"]["scope"]["enum"]
+            .as_array()
+            .expect("scope 要有枚举（省得模型猜层名）");
+        assert_eq!(scopes.len(), 4, "{read}");
         assert!(read["description"].as_str().is_some_and(|d| !d.is_empty()));
         // 也不该混进 OpenAI 的 `{type:"function", function:{…}}` 外壳（发过去就是 400）
         assert!(read.get("function").is_none(), "混进了 OpenAI 形态: {read}");
@@ -3005,7 +3022,19 @@ mod protocol_tests {
             .expect("read 没被声明");
         assert_eq!(read["type"], "function");
         // 与 /chat/completions 的差别：**扁平**，不裹 `function` 那一层
-        assert_eq!(read["parameters"]["required"][0], "path", "{read}");
+        //
+        // v1.5 同 anthropic 那条：两副面孔 ⇒ `required` 为空，但 `path`/`scope`/`q` 必须都在
+        // （三个协议发的是同一份 `TOOL_DECLS`，这里断的是"没被某条路改形"）
+        let req = read["parameters"]["required"]
+            .as_array()
+            .expect("required 必须是数组");
+        assert!(req.is_empty(), "两副面孔都不必填: {read}");
+        for k in ["path", "scope", "q"] {
+            assert!(
+                read["parameters"]["properties"].get(k).is_some(),
+                "缺参数 {k}: {read}"
+            );
+        }
         assert!(
             read.get("function").is_none(),
             "混进了 chat/completions 形态: {read}"

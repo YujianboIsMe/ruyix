@@ -1046,6 +1046,7 @@ pub(crate) fn ledger_line_for(
 pub(crate) fn call_shape(actions: &[Action]) -> String {
     let one = |a: &Action| match a {
         Action::Read(s) => format!("read {}", s.brief()),
+        Action::Search(s) => format!("read search {}", s.brief()),
         Action::Write(s) => s.brief(),
         Action::Execute(c, _) => format!("execute {}", clip(c, 60)),
         Action::ExecBg(s) => format!("execute bg {}", clip(&s.cmd, 60)),

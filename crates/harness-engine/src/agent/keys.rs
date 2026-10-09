@@ -25,6 +25,12 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Read,
+    /// 分层检索（v1.5）：**读类的第二种纯工具**。
+    ///
+    /// 为什么要单独一个工具名而不是并进 `Read`：两者的**包含关系不同** ——
+    /// `read` 的"整份 ⊇ 区间"那套（[`SpanKey`]）对检索毫无意义（"搜过 a.rs"不蕴含
+    /// "搜过某个词"），并进去会让包含判定给出错的复用。
+    Search,
     Execute,
 }
 
@@ -32,6 +38,7 @@ impl Tool {
     pub fn name(&self) -> &'static str {
         match self {
             Tool::Read => "read",
+            Tool::Search => "search",
             Tool::Execute => "execute",
         }
     }
@@ -378,6 +385,34 @@ pub(crate) fn read_span(path: &str, offset: Option<usize>, limit: Option<usize>)
     }
 }
 
+/// 检索在账上怎么称呼：`scope + 归一后的词 + 归一后的限定路径`。
+///
+/// 词要归一（折叠空白 + 折大小写）：`"  Foo  Bar "` 与 `"foo bar"` 是**同一次检索**，
+/// 不归一就等于"换个空格重搜一遍"，那正是这个账本要治的病。
+pub(crate) fn search_norm(spec: &SearchSpec) -> String {
+    let q = spec.q.split_whitespace().collect::<Vec<_>>().join(" ");
+    match &spec.path {
+        Some(p) => format!(
+            "{}|{}|{}",
+            spec.scope.as_str(),
+            q.to_lowercase(),
+            norm_path(p)
+        ),
+        None => format!("{}|{}", spec.scope.as_str(), q.to_lowercase()),
+    }
+}
+
+/// 检索的**版本源**：这里刻意返回空 —— 四层的版本**不是一个可 stat 的项目路径**。
+///
+/// - 文件层：走仓库版本（`snapshot` 里 `Tool::Search` 也取 `repo`）；非 git 仓库 ⇒ `unknown`；
+/// - 记忆两层：记忆库是 **WAL** 模式，主库文件 `(mtime,size)` 在小写入时**不动** ⇒ 拿它当版本
+///   会假新鲜。所以用**事件序号**做指纹，盖章在 [`classify`] 之后由 `search::stamp_version`
+///   完成（那里能同时看到 `Ctx` 与快照）；
+/// - 会话层：侧存索引文件（普通追加文件，`(mtime,size)` 可靠）。
+pub(crate) fn search_resources(_spec: &SearchSpec) -> Vec<String> {
+    Vec::new()
+}
+
 /// 动作 → 账本键。`None` = 这个动作**不参与**去重（不纯 / 不是读类动作）。
 pub(super) fn classify(action: &Action) -> Option<LedgerCall> {
     match action {
@@ -390,6 +425,14 @@ pub(super) fn classify(action: &Action) -> Option<LedgerCall> {
                 Some(span),
                 vec![path],
             ))
+        }
+        // 分层检索：**永远纯**（它没有任何写路径 —— 需求 §5 的"写盘=零"）。
+        // 资源 = 该层的**版本源**（侧存索引 / 记忆库文件 / 仓库），见 `search_resources`。
+        // span = None：检索之间没有包含关系（"搜过 a.rs"不蕴含"搜过某个词"）。
+        Action::Search(spec) => {
+            let norm = search_norm(spec);
+            let resources = search_resources(spec);
+            Some(LedgerCall::new(Tool::Search, norm, None, resources))
         }
         Action::Execute(cmd, _) => {
             let (norm, resources) = norm_cmd_and_resources(cmd);
