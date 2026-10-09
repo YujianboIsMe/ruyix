@@ -247,6 +247,14 @@ pub async fn agent_reply(
 
     // 转录压实（切片 3）：历史超出预算就压，**压了必留收据** ——
     // 收据说的是"注意力丢了什么、去哪儿取回来"（转录本身不复制进账本）。
+    // **本项目的作用域**：一次算好、显式传下去。
+    //
+    // 原先这里是"先写压缩收据、后 set_scope"，而收据用的是 `engine::mem::scope()`（上一次的 scope，
+    // 新进程里就是 `_global`）⇒ 实测：22 条收据**全部**落在 `_global`（2026-10-09 查库）；
+    // 用户切项目时更糟 —— 收据会落到**上一个项目**的 scope 里。现在作用域是显式参数，
+    // 谁先谁后都不影响正确性。
+    let project_scope = crate::paths::Paths::from_root(&root).project_key(&root);
+    engine::mem::set_scope(&project_scope);
     let compacted_history = {
         let c = engine::mem::compact_history(&history, engine::mem::compact::DEFAULT_BUDGET_CHARS);
         if c.happened()
@@ -257,8 +265,7 @@ pub async fn agent_reply(
             let sess_ref = session_id
                 .clone()
                 .unwrap_or_else(|| format!("会话（以「{head}」开头那条）"));
-            if let Err(e) = engine::mem::record_compaction(m, &engine::mem::scope(), &sess_ref, &c)
-            {
+            if let Err(e) = engine::mem::record_compaction(m, &project_scope, &sess_ref, &c) {
                 eprintln!("[mem] 压实收据没写成（继续跑，但这次压实无迹可查）：{e}");
             }
         }
@@ -268,7 +275,6 @@ pub async fn agent_reply(
     // 恰恰可能在更早的地方。所以把原始历史里有、压实结果里没有的 run id 补成几条**中性备注**
     // （role=system）：模型看得见"更早还有哪些 run"，引擎拿得到它们去搜留痕。
     let session_history = carry_session_runs(compacted_history, &history);
-    engine::mem::set_scope(&crate::paths::Paths::from_root(&root).project_key(&root));
     let cfg = build_cfg(&config, Some(&root))?;
     // 截图：**先落盘再跑**。落不下就整条消息失败（半张图发出去比报错更坏），
     // 也绝不允许"图没带上但照样跑了" —— 模型会对着纯文本问题编答案，用户以为它看过图。
@@ -286,6 +292,22 @@ pub async fn agent_reply(
     let machine_note = tokio::task::spawn_blocking(machine::note)
         .await
         .map_err(|e| format!("环境采集失败: {e}"))?;
+    // **绥服（全局记忆）**：把这台机器的事实记成**全局观察**（key 固定 ⇒ 折成一条信念、永远最新）。
+    //
+    // 为什么必须有这一笔：全局记忆此前只有命令发现（`tool.<bin>`）写 —— 库里 3 条信念全是
+    // `tool.cargo/git/docker`（2026-10-09 查库）。而"这台机器什么 GPU / 多少内存"是**跨项目通用**
+    // 的事实：记一次，换个项目也搜得到（用户要的正是"上一句话在别的项目里也成立"的那种记忆）。
+    // 失败不打扰 run（记忆坏了不该让一次 run 挂掉）。
+    if let Some(m) = engine::mem::current() {
+        let _ = m.record_obs(
+            engine::mem::GLOBAL_SCOPE,
+            "machine.note",
+            machine::facts().trim(),
+            engine::mem::Origin::Probe,
+            &[],
+            None,
+        );
+    }
     let task = format!(
         "{}\n\n{}",
         machine_note,

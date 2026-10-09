@@ -364,6 +364,40 @@ pub fn prompt_block_for_current() -> Option<String> {
     out
 }
 
+/// 把一条**结论**（findings 账本里的那条）记成项目记忆里的一条观察。
+///
+/// 为什么要有这个入口（2026-10-09 实测）：记忆库里有 44 条事件、全在 `_global`，
+/// 项目 scope **一条都没有** —— 于是"项目记忆"（侯服）看着在、其实搜不到任何东西。
+/// 原因不是检索坏了，是**没人往里写**：命令发现写了、压缩收据写了（还写错了 scope，见宿主），
+/// 而模型跑一遍确认下来的结论**从来没进过记忆库**。
+///
+/// 两条约定：
+/// - **必须带 key**：`record_obs` 只在 key 非空时折叠成信念，而检索读的是信念 ——
+///   无 key 的观察进不去检索，等于没记；
+/// - **key = `finding.<claim 的 sha256 前 8 位>`**：不用"主题"当键 —— 主题要从自由文本里猜，
+///   猜错就把两条**不该合并**的结论折成一条；而彼此矛盾的结论**必须并存**（与检索那条
+///   "冲突并列、引擎不裁决"是同一条纪律）。同一条 claim 才会折（重复记不会积压）。
+pub fn record_finding_obs(
+    m: &Memory,
+    scope: &str,
+    claim: &str,
+    evidence: &str,
+    note: &str,
+    origin: Origin,
+) -> Result<Event, String> {
+    let claim = claim.trim();
+    let evidence = evidence.trim();
+    let mut value = format!("{claim}\n证据：{evidence}");
+    if !note.trim().is_empty() {
+        value.push_str(&format!("\n说明：{}", note.trim()));
+    }
+    let key = format!(
+        "finding.{}",
+        &crate::agent::capsule::Capsule::sha256(claim)[..8]
+    );
+    m.record_obs(scope, &key, &value, origin, &[], None)
+}
+
 /// 把一次命令发现的结论**记成观察**（origin = probe：探针自己就是证据）。
 ///
 /// 这是 `discover` 的升级点：以前它是 300 秒 TTL 缓存（过期即遗忘），现在是账本里的信念 ——

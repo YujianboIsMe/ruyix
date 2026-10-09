@@ -131,6 +131,47 @@ pub(crate) fn run(ctx: &mut Ctx<'_>, spec: &SearchSpec) -> Result<String, String
 
 // ---------------------------------------------------------------- 第 4 服：项目文件
 
+/// 目录树遍历取文件清单（**非 git 仓库**那条路）。
+///
+/// 除 `SKIP_DIRS` 之外还有一道**已访问目录**守卫：符号链接 / Windows junction 指回祖先会绕死，
+/// 而 junction 在这台机器上是常态（`AppData\\Local\\Temp` 本身就是）。没有这道守卫，
+/// 一次检索就能把 run 挂在那儿，而界面上只会看到它"一直在跑"。
+fn walk_files(root: &Path, base: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        // 规范化后比对：同一个真实目录只进去一次（软链/junction 绕回祖先时到此为止）
+        let Ok(canon) = std::fs::canonicalize(&dir) else {
+            continue;
+        };
+        if !seen.insert(canon) {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        entries.sort(); // 稳定顺序：同一棵树搜两次结果逐条一致（账本与判据都靠它）
+        for p in entries {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let Ok(md) = std::fs::metadata(&p) else {
+                continue;
+            };
+            if md.is_dir() {
+                if SKIP_DIRS.contains(&name) {
+                    continue;
+                }
+                stack.push(p);
+            } else if md.is_file() {
+                let _ = base; // 显示口径由调用方算（这里只出清单）
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 fn files(ctx: &Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, String> {
     // 准入（唯一的入口检查）：限定子树必须过 jail —— 绝对路径 / `..` / `.git` 全拒
     let sub = match spec.path.as_deref() {
@@ -154,16 +195,27 @@ fn files(ctx: &Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, Strin
     let mut not_searched: Vec<String> = Vec::new();
     let mut bytes = 0usize;
     let mut truncated = false;
-    let mut stack: Vec<PathBuf> = vec![root.clone()];
 
-    'walk: while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-        entries.sort(); // 稳定顺序：同一棵树搜两次结果逐条一致（账本与判据都靠它）
-        for p in entries {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // ---- 文件清单的**来源**（2026-10-09 审计要服后改）----
+    //
+    // git 仓库里**问 git**（`ls-files --others --exclude-standard`）：老路 `git grep` 认
+    // `.gitignore`，而硬编码的 `SKIP_DIRS` 覆盖不到用户自定义忽略的目录 —— 那些会被整棵扫进来。
+    // 不是仓库 ⇒ 退回目录树遍历，并把"忽略规则不适用"写进结果（"没搜"与"没有"可分）。
+    let mut listed: Vec<PathBuf> = Vec::new();
+    let how = match crate::gitops::listed_files(&root) {
+        Ok(files) => {
+            listed.extend(files.iter().map(|rel| root.join(rel)));
+            "按 git 的忽略规则取清单（`.gitignore` 生效）".to_string()
+        }
+        Err(_) => {
+            listed = walk_files(&root, &base);
+            "**不是 git 仓库**：按目录树搜（`.gitignore` 不适用，只跳固定的生成物目录）".to_string()
+        }
+    };
+    listed.sort(); // 稳定顺序：同一棵树搜两次结果逐条一致（账本与判据都靠它）
+
+    'walk: for p in listed {
+        {
             let Ok(md) = std::fs::metadata(&p) else {
                 continue;
             };
@@ -172,13 +224,6 @@ fn files(ctx: &Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, Strin
                 .unwrap_or(&p)
                 .to_string_lossy()
                 .replace('\\', "/");
-            if md.is_dir() {
-                if SKIP_DIRS.contains(&name) {
-                    continue;
-                }
-                stack.push(p);
-                continue;
-            }
             if !md.is_file() {
                 continue;
             }
@@ -228,7 +273,7 @@ fn files(ctx: &Ctx<'_>, spec: &SearchSpec, limit: usize) -> Result<String, Strin
         ));
     }
     out.push_str(&format!(
-        "已跳过目录：{}（生成物与依赖，不是项目源码）。\n",
+        "文件清单：{how}。\n（目录树遍历时跳过这些目录：{} —— 生成物与依赖，不是项目源码。）\n",
         SKIP_DIRS.join(", ")
     ));
     if !not_searched.is_empty() {

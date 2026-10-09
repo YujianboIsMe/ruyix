@@ -750,3 +750,120 @@ fn 转录压实必须留收据且最新一句原样保留() {
         "注入块要能说出：压实过"
     );
 }
+
+// ============================================================ 五服：侯服（项目记忆）/ 绥服（全局记忆）
+
+/// **侯服判据**：模型确认的结论（findings）写进项目记忆后，**按内容搜得到**。
+///
+/// 2026-10-09 实测的反面：库里有 44 条事件、全在 `_global`，项目 scope **一条都没有** ——
+/// 那一层看着在、其实问什么都是空的。根因是"没人往里写"，所以这条判据盯的是**写进去这一步**：
+/// 结论 → 观察（带 key）→ 折成信念 → 检索读得到。
+#[test]
+fn 侯服_结论写进项目记忆后按内容搜得到() {
+    let m = mem("hou");
+    record_finding_obs(
+        &m,
+        SCOPE,
+        "user 表的 password 字段是 varchar(72)",
+        "db/schema.sql:14",
+        "与最早建表的 varchar(60) 不一致",
+        Origin::Agent,
+    )
+    .expect("记一条结论");
+
+    let hits = retrieve::now(&m, SCOPE, "password", 10, None).expect("按内容检索");
+    assert!(
+        !hits.is_empty(),
+        "写进去的结论必须能按内容搜到（侯服的全部意义）"
+    );
+    let joined = hits
+        .iter()
+        .map(|h| format!("{:?}", h))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        joined.contains("varchar(72)"),
+        "命中的正文要带得上结论：{joined}"
+    );
+    // 证据与说明一起进正文 —— 没有证据的结论只是把幻觉抬进提示词（v1.1 的 fail-closed）
+    assert!(
+        joined.contains("schema.sql") || joined.contains("证据"),
+        "{joined}"
+    );
+}
+
+/// **侯服的键约定**：同一条 claim 折（不积压），不同 claim **并存**（矛盾必须看得见）。
+///
+/// 用"主题"当键会把两条不该合并的结论折成一条 —— 而彼此矛盾的结论必须并存，
+/// 这与检索那条"冲突并列、引擎不裁决"是同一条纪律。
+#[test]
+fn 侯服_同一条结论折不同结论并存() {
+    let m = mem("hou-key");
+    let one = "password 字段是 varchar(60)";
+    record_finding_obs(&m, SCOPE, one, "db/schema.sql:14", "", Origin::Agent).unwrap();
+    record_finding_obs(
+        &m,
+        SCOPE,
+        one,
+        "db/schema.sql:14",
+        "复核一次",
+        Origin::Agent,
+    )
+    .unwrap();
+    record_finding_obs(
+        &m,
+        SCOPE,
+        "password 字段是 varchar(72)",
+        "docs/api.md:3",
+        "",
+        Origin::Agent,
+    )
+    .unwrap();
+
+    let all = retrieve::now(&m, SCOPE, "", 20, None).unwrap();
+    let keys: Vec<String> = all.iter().map(|h| format!("{:?}", h)).collect();
+    assert!(
+        keys.iter().filter(|s| s.contains("varchar")).count() >= 2,
+        "两条**互相矛盾**的结论必须并存（引擎不裁决）：{keys:?}"
+    );
+    let same_key = retrieve::now(&m, SCOPE, "varchar(60)", 20, None).unwrap();
+    assert!(
+        !same_key.is_empty(),
+        "同一条结论重复记也仍搜得到：{same_key:?}"
+    );
+}
+
+/// **绥服判据**：全局记忆里"跨项目通用"的事实（命令发现 / 这台机器）按内容搜得到。
+///
+/// 现状（2026-10-09 查库）：全局只有 `tool.cargo/git/docker` 三条 —— 机制通、内容薄。
+/// 这一条同时钉住新加的**机器事实**（`machine.note`）落在这个 scope 里、且能按 "GPU" 之类的词搜到。
+#[test]
+fn 绥服_全局事实按内容搜得到() {
+    let m = mem("sui");
+    m.record_obs(
+        GLOBAL_SCOPE,
+        "tool.cargo",
+        "C:\\Users\\me\\.cargo\\bin\\cargo.exe (cargo 1.97.1)",
+        Origin::Probe,
+        &[],
+        None,
+    )
+    .unwrap();
+    m.record_obs(
+        GLOBAL_SCOPE,
+        "machine.note",
+        "操作系统：Windows 11\nCPU：16 核\n内存：32 GB\nGPU：NVIDIA GeForce RTX 5060 (8 GB)",
+        Origin::Probe,
+        &[],
+        None,
+    )
+    .unwrap();
+
+    let gpu = retrieve::global_now(&m, "GPU", 10).expect("全局按内容检索");
+    assert!(!gpu.is_empty(), "机器事实要能按 GPU 搜到：{gpu:?}");
+    let cargo = retrieve::global_now(&m, "cargo", 10).expect("全局按内容检索");
+    assert!(!cargo.is_empty(), "命令发现仍要搜得到：{cargo:?}");
+    // 项目 scope 里**不该有**这两条（层与层不串）
+    let cross = retrieve::now(&m, SCOPE, "GPU", 10, None).unwrap();
+    assert!(cross.is_empty(), "全局事实不许出现在项目层：{cross:?}");
+}

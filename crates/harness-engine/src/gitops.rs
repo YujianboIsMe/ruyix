@@ -48,6 +48,41 @@ pub fn is_clean(dir: &Path) -> Result<bool, String> {
     Ok(must(dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty())
 }
 
+/// `git ls-files` —— "git 认为该管的文件"清单（**用 git 自己的忽略规则**）。
+///
+/// 为什么检索要问它（2026-10-09 审计要服时发现）：老路 `git grep` 认 `.gitignore`，而原生实现
+/// 只按硬编码的 `SKIP_DIRS` 跳 ⇒ 用户**自定义忽略**的目录（数据集、构建产物、本地配置…）
+/// 会被整棵扫进来、烧光检索预算。与其在这里重写一套 gitignore 匹配（patterns / 取反 /
+/// 目录专属 / 嵌套 `.gitignore` …），不如问 git 本身 —— 它就是这个规则的定义者。
+///
+/// `--cached --others --exclude-standard` = 已跟踪的 + 未跟踪但**没被忽略**的（用户刚写的新文件
+/// 也要能搜到）。`-z` 用 NUL 分隔，怪文件名（空格/换行/中文）也不会被切坏。
+/// 路径**相对 `dir`** 给出（在子目录里跑 git，它就给相对子目录的路径，正合检索的显示口径）。
+///
+/// 不是仓库 / 没装 git ⇒ `Err` ⇒ 调用方退回目录树遍历，并把这件事**写进结果**
+/// （"没搜"与"没有"必须可分）。
+pub fn listed_files(dir: &Path) -> Result<Vec<String>, String> {
+    let out = git(
+        dir,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    );
+    if !out.passed() {
+        return Err(format!("git ls-files 没跑成（退出码 {:?}）", out.exit_code));
+    }
+    Ok(out
+        .stdout
+        .split('\0')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.replace('\\', "/"))
+        .collect())
+}
+
 /// 建仓（幂等）：把运行目录变成一个独立仓库，并落一个初始提交。
 ///
 /// 刻意**不在用户目录里 init** —— 生成的代码本来就不该进用户的仓库；

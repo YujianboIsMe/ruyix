@@ -152,12 +152,28 @@ impl<'a> Ctx<'a> {
 
     /// 记一条结论（`record_findings` 的落点）
     pub(crate) fn record_finding(&mut self, spec: &FindingSpec) -> Result<String, String> {
-        self.progress.record(
+        let id = self.progress.record(
             &spec.claim,
             &spec.evidence,
             &spec.note,
             spec.supersedes.as_deref(),
-        )
+        )?;
+        // **顺路写项目记忆**（侯服）：findings 是"这一 run 的结论账本"（跟会话存档走、人看得到），
+        // 项目记忆是**跨会话**的信念库（可按内容检索、可被推翻、旧的可按时间点查回）。
+        // 少了这一笔，侯服永远是空的（2026-10-09 实测：项目 scope 零条）。
+        // 记忆坏了不该让一次 run 挂掉 —— 与 `record_discovery` 同款：失败不打扰。
+        if let Some(m) = crate::mem::current() {
+            let scope = crate::mem::scope();
+            let _ = crate::mem::record_finding_obs(
+                m,
+                &scope,
+                &spec.claim,
+                &spec.evidence,
+                &spec.note,
+                crate::mem::Origin::Agent,
+            );
+        }
+        Ok(id)
     }
 
     pub(crate) fn note_probe(&mut self, cmd: &str, output: &str) {

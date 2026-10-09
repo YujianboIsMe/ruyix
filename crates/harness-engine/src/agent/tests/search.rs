@@ -123,7 +123,12 @@ fn files_search_finds_hits_and_never_writes() {
     assert!(out.contains("src/a.rs:2:"), "命中要带 path:line：{out}");
     assert!(out.contains("README.md:1:"), "{out}");
     assert!(!out.contains("target/gen.rs"), "生成物目录默认不搜：{out}");
-    assert!(out.contains("已跳过目录"), "跳过了什么必须写出来：{out}");
+    // 「没搜」必须写出来：这里是"不是 git 仓库（忽略规则不适用）+ 跳过的固定目录"两件事。
+    // 2026-10-09 起清单来源改成"git 优先、目录树兜底"，措辞跟着事实走。
+    assert!(
+        out.contains("不是 git 仓库") && out.contains("跳过这些目录"),
+        "「没搜」与「没有」必须可分：{out}"
+    );
     assert!(
         out.contains("磁盘上现在写的"),
         "文件层的权威说明要在：{out}"
@@ -512,5 +517,49 @@ fn the_session_layer_is_self_invalidating_and_that_is_the_safe_direction() {
     assert!(
         log.contains("版本失效重执行") || log.contains("唯一执行"),
         "账本要如实记下这次真执行：{log}"
+    );
+}
+
+/// **要服判据**：git 仓库里**认 `.gitignore`**（2026-10-09 审计补上；老路 `git grep` 就是认的）。
+///
+/// 两个方向都钉（只钉"排除了"的话，任何"什么都搜不到"的实现都会绿）：
+/// ① 有 `.gitignore` ⇒ 被忽略的目录**搜不到**；② 没有 `.gitignore` ⇒ 同样的文件**必须搜到**。
+/// 第二条是**对照臂**：证明排除来自忽略规则，而不是"因为文件名/目录名眼熟被跳了"。
+#[test]
+fn the_files_scope_honors_gitignore_with_a_control_arm() {
+    let needle = "NEEDLE-IGNORE-CASE";
+
+    // 臂 A：仓库 + `.gitignore` 忽略 `ignored/`
+    let a = TempDir::new("search-gi-a");
+    if let Err(e) = crate::gitops::snapshot_init(&a.0, "init") {
+        // 这台机器没有可用的 git ⇒ **大声跳过**（静默跳过等于没判据）
+        eprintln!("跳过 the_files_scope_honors_gitignore_with_a_control_arm：建不了仓库（{e}）");
+        return;
+    }
+    a.write("keep.txt", needle);
+    a.write("ignored/secret.txt", needle);
+    a.write(".gitignore", "ignored/\n");
+    let mut ctx = ctx_with(&a.0, vec![], WritePolicy::Apply);
+    let out = crate::agent::search::run(&mut ctx, &spec(SearchScope::Files, needle)).unwrap();
+    assert!(out.contains("keep.txt"), "该搜到的文件要搜到：{out}");
+    assert!(
+        !out.contains("secret.txt"),
+        "被 `.gitignore` 忽略的文件不许出现在结果里：{out}"
+    );
+    assert!(
+        out.contains(".gitignore"),
+        "结果里要写明是按 git 的忽略规则取的清单：{out}"
+    );
+
+    // 臂 B（对照）：同样的树、**没有** `.gitignore` ⇒ 那个文件必须在结果里
+    let b = TempDir::new("search-gi-b");
+    crate::gitops::snapshot_init(&b.0, "init").expect("臂 A 建得起来，臂 B 也该建得起来");
+    b.write("keep.txt", needle);
+    b.write("ignored/secret.txt", needle);
+    let mut ctx2 = ctx_with(&b.0, vec![], WritePolicy::Apply);
+    let out2 = crate::agent::search::run(&mut ctx2, &spec(SearchScope::Files, needle)).unwrap();
+    assert!(
+        out2.contains("secret.txt"),
+        "没有忽略规则时，同一个文件必须搜得到（否则排除的不是忽略规则，是别的什么）：{out2}"
     );
 }

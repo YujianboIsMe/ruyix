@@ -302,6 +302,18 @@ Such message-level fields **must be declared in `agent::sessions::SessionMsg`** 
 ⇒ 拿它当版本会**假新鲜**；改用**事件序号**（`mem::head_seq`）② **会话层是自失效的**：检索自己的
 结果也进留痕，而那一组留痕的 `(字节, mtime)` 组合指纹就是这一层的版本源 ⇒ 下一次必然重跑（判据钉住：
 `the_session_layer_is_self_invalidating_and_that_is_the_safe_direction`）。
+**另外三服的正文来源与纪律**（同日验收，见 `doc/v1.5/验收-三服-侯绥要-v1.5.md`）：
+**侯服**（project_mem）—— 模型确认的 findings 由 `Ctx::record_finding` 顺路写进项目记忆
+（`mem::record_finding_obs`，**必须带 key** 才折成信念、检索才读得到；键 = `finding.<claim 的 sha256 前 8 位>`
+—— 不用"主题"当键，因为彼此矛盾的结论**必须并存**，与"冲突并列、引擎不裁决"同一条纪律）；
+**绥服**（global_mem）—— 命令发现（`tool.<bin>`）+ 宿主每跑一次的 `machine.note`（`machine::facts()`，
+**不含时间**：含时间会让那条信念天天翻新），全局事实不许出现在项目层；
+**要服**（files）—— 清单**问 git**（`gitops::listed_files` = `ls-files --cached --others --exclude-standard -z`，
+认 `.gitignore`；不自己重写匹配规则），不是仓库才回退目录树遍历并把"忽略规则不适用"写进结果；
+目录树遍历有**已访问目录**守卫（软链/junction 指回祖先是 Windows 常态）。
+宿主侧另修一处 scope bug：`record_compaction` 原先用 `mem::scope()`（它在 `set_scope` **之前**跑）
+⇒ 收据落进上一次的 scope（实测 22 条全在 `_global`）—— 现在显式传本项目 scope。
+
 **跨 run 的钥匙搭在 `HistoryMsg.run_id` 上**（2026-10-09 用户刚需：一个会话三个 run，"第 1 个和第 3 个
 关于某字段有没有冲突"）：宿主本来就把整段会话发过来，`SessionMsg.run_id` 也已经落盘 ⇒ 不必再开链路。
 环是这么闭的：引擎给本 run 开留痕并把它当 `AgentOutcome.run_id` 交回 → 宿主 `ReplyAgent.run_id` →
