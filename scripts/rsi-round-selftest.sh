@@ -159,6 +159,129 @@ print("\n自检(⑥)：" + ("全过" if not fails else f"失败 {len(fails)} 条
 sys.exit(1 if fails else 0)
 PY
 RC=$?
+echo
+echo "########## ⑦ promote / demote（P3：人合并 + 备份回滚点 + 提升即回归 + 自动回滚）"
+python - "$W" <<'PY'
+import importlib.util, json, pathlib, sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("rsi_round", "doc/v1.4/templates/rsi/rsi_round.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+class Args:
+    root = sys.argv[1]; key = "rsi"; bench = ""; bench_arg = []; propose_cmd = ""
+    skip_verify = False; tag = ""
+
+r = m.Rsi(Args())
+home = pathlib.Path(Args.root) / "projects/rsi/rsi"
+r.cfg = {"surfaces": ["plugins"], "rounds": 1, "margin_pp": 5.0,
+         "budget_secs": 60, "bench_exe": "", "tasks": "tasks"}
+base, cand = home / "arms/baseline", home / "arms/round-1"
+fails = []
+def ck(name, ok, extra=""):
+    print(("PASS " if ok else "FAIL ") + name + (f" —— {extra}" if extra else ""))
+    if not ok: fails.append(name)
+
+def rc_of(fn):
+    try:
+        fn(); return 0
+    except SystemExit as e:
+        return e.code
+
+# ① 没有 receipt ⇒ 不许合并（没有证据就没有合并）
+ck("没跑过 score ⇒ promote 拒绝（没有可复核的证据）", rc_of(lambda: r.promote(1, verify=False)) == 2)
+
+# ② 裁决不是「候选更优」⇒ 拒绝
+rec = home / "receipts/round-1.json"
+payload = json.loads(rec.read_text(encoding="utf-8")) if rec.is_file() else {}
+payload.update({"decision": "拒绝：差额 +0.0 pp 在 MARGIN 5 之内", "patch": None})
+rec.parent.mkdir(parents=True, exist_ok=True)
+rec.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+ck("裁决是「拒绝」⇒ promote 拒绝（判据 7：没有更优就不许合）", rc_of(lambda: r.promote(1, verify=False)) == 2)
+
+# ③ 补一份**真的**「候选更优」receipt（三方哈希按现状算，patch 指向真实文件）⇒ 提升成功
+before = {s: m.sha256_path(base / s) for s in r.cfg["surfaces"]}
+cand_hash = {s: m.sha256_path(cand / s) for s in r.cfg["surfaces"]}
+root_hash = {s: m.sha256_path(pathlib.Path(Args.root) / s) for s in r.cfg["surfaces"]}
+patch = home / "out/round-1.patch"; patch.parent.mkdir(parents=True, exist_ok=True); patch.write_text("--- a\n+++ b\n", encoding="utf-8")
+payload.update({
+    "decision": "候选更优：+9.0 pp",
+    "patch": str(patch),
+    "surfaces_hash": {s: {"portable_root": root_hash[s], "baseline": before[s], "candidate": cand_hash[s]}
+                      for s in r.cfg["surfaces"]},
+})
+rec.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+ck("证据齐 ⇒ 提升成功", rc_of(lambda: r.promote(1, verify=False)) == 0)
+after = {s: m.sha256_path(base / s) for s in r.cfg["surfaces"]}
+ck("baseline 已变成候选的数据面", after == cand_hash, f"{after}")
+baks = sorted((home / "arms").glob("baseline.bak-*"))
+ck("提升前留了回滚点（baseline.bak-*）", len(baks) == 1, str([b.name for b in baks]))
+prec = home / "receipts/promote-1.json"
+pr = json.loads(prec.read_text(encoding="utf-8")) if prec.is_file() else {}
+ck("提升 receipt 如实记了 skip-verify", pr.get("kind") == "rsi-promote-receipt" and pr.get("verify_skipped") is True)
+ck("提升 receipt 记了提升前后哈希与备份路径",
+   pr.get("baseline_after") == cand_hash and pr.get("baseline_before") == before and pr.get("backup"))
+ck("提升 receipt 里原件哈希**仍与现状一致**（没写便携根）",
+   pr.get("portable_root_after") == root_hash)
+
+# ④ 回归比较：**按尺子收参数的顺序**认新旧（不是字母序 —— 那条会把 baseline 与 baseline.bak 颠倒，
+#    于是把"变好"报成"回归"）
+def fake(arms, kinds):
+    return {"arms": [{"arm": a} for a in arms],
+            "records": [{"task": "t1", "arm": a, "kind": k} for a, k in zip(arms, kinds)]}
+reg, err = r._regressions(fake(["baseline.bak-1", "baseline"], ["ok", "wrong"]))
+ck("回归判据：旧 ok / 新 wrong ⇒ 报回归", len(reg) == 1 and not err, f"{reg} {err}")
+reg2, _ = r._regressions(fake(["baseline.bak-1", "baseline"], ["wrong", "ok"]))
+ck("反过来（旧 wrong / 新 ok）⇒ 不是回归（顺序认错了就会把它当回归）", not reg2)
+ng, _ = r._regressions(fake(["baseline.bak-1", "baseline"], ["ok", "ok"]))
+ck("两臂都 ok ⇒ 不是回归（别把「本来就好」当回归）", not ng)
+# 负样本（expect=fail）现在**通过**了，在尺子里就是 `wrong` —— 与上面那条同一个形状，
+# 所以「奖励劫持」不需要另一套判据，它天然落在这条比较里。
+ck("负样本通过 == new 是 wrong ⇒ 同一套比较抓住它（判据只需 kind）",
+   reg and reg[0]["new"] == ["wrong"])
+
+# ⑤ 提升后的自动回滚：桩掉子进程，让"回归那一跑"写出一个**有回归**的读数
+real_call = m.subprocess.call
+def stub_call(argv, *a, **k):
+    out = pathlib.Path(Args.root) / "projects/rsi/rsi/arms/verify-1"
+    out.mkdir(parents=True, exist_ok=True)
+    names = [pathlib.Path(argv[i + 1]).name for i, x in enumerate(argv) if x == "--arm"]
+    (out / "receipt.json").write_text(json.dumps({
+        "decision": "候选更优：+9.0 pp",
+        "arms": [{"arm": n} for n in names],
+        "records": [{"task": "t1", "arm": names[0], "kind": "ok"},
+                    {"task": "t1", "arm": names[1], "kind": "wrong"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    return 0
+# 先把 baseline 退回提升前，再走"带回归"的提升
+m.copy_tree(baks[0] / "plugins", base / "plugins_tmp")
+m.shutil.rmtree(base / "plugins"); m.copy_tree(baks[0] / "plugins", base / "plugins")
+m.shutil.rmtree(base / "plugins_tmp")
+# `load()` 之外手工构造：它会给的两个路径属性这里自己补上（真身都被桩掉了，只做占位）
+r.bench = pathlib.Path("stub-bench")
+r.tasks = pathlib.Path("tasks")
+m.subprocess.call = stub_call
+rc = rc_of(lambda: r.promote(1, verify=True))
+m.subprocess.call = real_call
+restored = {s: m.sha256_path(base / s) for s in r.cfg["surfaces"]}
+ck("有回归 ⇒ 提升被拒（退出码 2）", rc == 2, f"退出码 {rc}")
+ck("**已自动回滚**：baseline 回到提升前那份", restored == before, f"{restored}")
+pr2 = json.loads(prec.read_text(encoding="utf-8"))
+ck("回滚写进了 receipt（rolled_back + 回归清单）",
+   pr2.get("rolled_back") is True and pr2.get("regression"))
+
+# ⑥ demote：退回最近一次备份
+ck("demote 成功", rc_of(lambda: r.demote("")) == 0)
+ck("demote 之后 baseline == 备份", {s: m.sha256_path(base / s) for s in r.cfg["surfaces"]} == before)
+ck("demote 也留 receipt", any(p.name.startswith("demote-") for p in (home / "receipts").iterdir()))
+
+print("\n自检(⑦)：" + ("全过" if not fails else f"失败 {len(fails)} 条：{fails}"))
+sys.exit(1 if fails else 0)
+PY
+RC2=$?
 rm -rf "$W"
 echo "EXIT=$RC"
-exit $RC
+[ "$RC" = "0" ] || exit $RC
+echo "EXIT2=$RC2"
+exit $RC2

@@ -159,7 +159,9 @@ class Rsi:
         print(f"   基准臂 {self.arm('baseline')} ← 现状数据面的副本")
         print(f"   候选臂 {self.arm('round-<n>')} ← `propose <n>` 生成，然后改它")
         print("② 配对测：`score <n>`（一臂一进程、同任务集、同温度、同轮数）")
-        print("③ 判定：差额 > MARGIN 才出 out/round-<n>.patch + receipts/round-<n>.json；**人合并**")
+        print("③ 判定：差额 > MARGIN 才出 out/round-<n>.patch + receipts/round-<n>.json")
+        print("④ **人合并**：`promote <n>`（复核证据 → 备份回滚点 → 提升 → 立刻跑回归；")
+        print("   有回归就自动回滚）；反悔用 `demote`（退回最近一次提升前的 baseline）")
         for s in c["surfaces"]:
             print(f"   （绝不允许写便携根的 {s}）")
 
@@ -301,6 +303,182 @@ class Rsi:
         return str(p)
 
 
+    # ---------------------------------------------------------------- P3：人合并与回滚
+
+    def _surfaces_now(self, arm_dir):
+        return {s: sha256_path(arm_dir / s) for s in self.cfg["surfaces"]}
+
+    def _regressions(self, receipt):
+        """从尺子的读数里挑出**回归**：某个任务在旧臂上是 ok、在新臂上不是 ok。
+
+        负样本（`expect=fail`）现在**通过**了，在尺子里就是 `wrong` ⇒ 同一套比较天然覆盖
+        「奖励劫持」那条（判据 5 的回归面）。
+        """
+        per = {}
+        for r in receipt.get("records") or []:
+            per.setdefault((r.get("task"), r.get("arm")), []).append(r.get("kind"))
+        tasks = sorted({k[0] for k in per})
+        # **新旧按尺子收参数的顺序**（`--arm 旧 --arm 新`），不按字母序 —— 目录名是
+        # `baseline` 与 `baseline.bak-<ts>`，字母序会把两者**颠倒**，于是把"变好"报成"回归"。
+        arms = [a.get("arm") for a in (receipt.get("arms") or []) if a.get("arm")]
+        if len(arms) != 2:
+            return [], f"读数里不是两条臂（{arms}）—— 没法比回归"
+        old, new = arms[0], arms[1]
+        bad = []
+        for tk in tasks:
+            o = per.get((tk, old), [])
+            n = per.get((tk, new), [])
+            if o and n and all(k == "ok" for k in o) and any(k != "ok" for k in n):
+                bad.append({"task": tk, "old": o, "new": n})
+        return bad, ""
+
+    def promote(self, n, verify=True):
+        """**人**把第 n 回合的候选提升成新的基准臂（v1.4 P3）。**驱动器绝不自动合并** ——
+        这条命令由人显式跑，它只负责三件机械的事：复核证据、留回滚点、提升后立刻回归。
+
+        为什么提升完不能就算完：候选是在副本里改出来的，它一进 baseline 就成了下一回合的**起点**
+        与原件对照物；万一它其实更差（读数被噪声/环境骗了），后面每一回合都踩在坏地基上。
+        所以任何一步不对就**自己退回去**，并把原因写清楚。
+        """
+        base, cand = self.arm("baseline"), self.arm(f"round-{n}")
+        rec_path = self.home / "receipts" / f"round-{n}.json"
+        if not rec_path.is_file():
+            die(f"没有 {rec_path} —— 没跑过 `score {n}` 就没有可复核的证据，不许合并")
+        rec = json.loads(rec_path.read_text(encoding="utf-8"))
+        if "候选更优" not in (rec.get("decision") or ""):
+            die(f"第 {n} 回合的裁决是「{rec.get('decision')}」—— 没有「候选更优」就不许提升（判据 7）")
+        if not rec.get("patch"):
+            die("这一回合没出 patch —— 没有可审的改动就不许提升")
+        if not cand.is_dir():
+            die(f"候选臂不在 {cand}（提升谁？）")
+        if not base.is_dir():
+            die(f"基准臂不在 {base}（先 `propose {n}` 建它）")
+
+        # ① 复核证据：三条哈希都要与 receipt 记的一致 —— 原件没被写、候选没被后来动过
+        want = rec.get("surfaces_hash") or {}
+        now_root = {s: sha256_path(self.root / s) for s in self.cfg["surfaces"]}
+        now_cand = self._surfaces_now(cand)
+        for s in self.cfg["surfaces"]:
+            w = want.get(s) or {}
+            if now_root[s] != w.get("portable_root"):
+                die(f"便携根的 {s} 与 receipt 记的不一致（原件被谁动过？）—— 先重建基准臂再谈合并")
+            if now_cand[s] != w.get("candidate"):
+                die(f"候选臂的 {s} 与 receipt 记的不一致 —— 候选在评分之后被改过了，这一回合的证据作废")
+
+        # ② 回滚点：先备份当前 baseline，备份失败就**不许**继续（没有回滚点的合并不做）
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        backup = self.home / "arms" / f"baseline.bak-{ts}"
+        before = self._surfaces_now(base)
+        backup.mkdir(parents=True, exist_ok=True)
+        for s in self.cfg["surfaces"]:
+            copy_tree(base / s, backup / s)
+        if self._surfaces_now(backup) != before:
+            die(f"备份校验不过（{backup}）—— 没有可信回滚点，拒绝合并")
+
+        # ③ 提升：用候选的数据面覆盖基准臂（只管 arms/，**不碰便携根**）
+        for s in self.cfg["surfaces"]:
+            dst = base / s
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            elif dst.is_file():
+                dst.unlink()
+            copy_tree(cand / s, dst)
+        print(f"已提升：round-{n} → {base}")
+        print(f"回滚点：{backup}（`demote` 可退回）")
+
+        # ④ 回归：同一套参数再跑一次（新 baseline vs 旧 baseline）。
+        #    判据 5 要的是"人能凭 receipt 决定合不合，且合完可回滚" —— 这一步就是那句话的执行体。
+        reg, err = [], ""
+        verify_rec = None
+        if verify:
+            out = self.home / "arms"
+            argv = [
+                str(self.bench), "--tasks", str(self.tasks),
+                "--arm", str(backup), "--arm", str(base),
+                "--rounds", str(self.cfg["rounds"]), "--margin", str(self.cfg["margin_pp"]),
+                "--out", str(out / f"verify-{n}"), "--budget-secs", str(self.cfg["budget_secs"]),
+            ] + list(self.extra)
+            print("回归跑尺子：" + " ".join(argv))
+            rc = subprocess.call(argv)
+            rp = out / f"verify-{n}" / "receipt.json"
+            if not rp.is_file():
+                err = f"回归没产出读数（退出码 {rc}）"
+            else:
+                verify_rec = json.loads(rp.read_text(encoding="utf-8"))
+                reg, err = self._regressions(verify_rec)
+            rolled = bool(reg) or bool(err)
+            if rolled:
+                # ⑤ 自动回滚：把备份放回去，**并再核一次**哈希
+                for s in self.cfg["surfaces"]:
+                    dst = base / s
+                    if dst.is_dir():
+                        shutil.rmtree(dst)
+                    elif dst.is_file():
+                        dst.unlink()
+                    copy_tree(backup / s, dst)
+                ok = self._surfaces_now(base) == before
+                print(f"✗ 回归不过 ⇒ 已自动回滚：{'哈希核对通过 ✓' if ok else '哈希核对**失败**，请手工检查'}")
+        else:
+            print("⚠ 按 `--skip-verify` 跳过了回归 —— 这次提升**没有**回归证据（receipt 里会如实记）")
+
+        rec2 = {
+            "kind": "rsi-promote-receipt",
+            "round": n,
+            "when": int(time.time()),
+            "backup": str(backup),
+            "baseline_before": before,
+            "baseline_after": self._surfaces_now(base),
+            "portable_root_after": now_root,
+            "regression": reg,
+            "regression_error": err,
+            "verify_receipt": str((self.home / "arms" / f"verify-{n}" / "receipt.json")) if verify_rec else None,
+            "verify_rc_decision": (verify_rec or {}).get("decision"),
+            "rolled_back": bool(reg) or bool(err),
+            "verify_skipped": (not verify),
+        }
+        (self.home / "receipts").mkdir(exist_ok=True)
+        rp2 = self.home / "receipts" / f"promote-{n}.json"
+        rp2.write_text(json.dumps(rec2, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"提升 receipt：{rp2}")
+        if rec2["rolled_back"]:
+            die(f"提升**已回滚**（回归 {len(reg)} 项{('；' + err) if err else ''}）—— 这一版不许合")
+        for s in self.cfg["surfaces"]:
+            same = now_root[s] == sha256_path(self.root / s)
+            print(f"便携根的 {s} 仍未被动过：{'✓' if same else '✗'}")
+
+    def demote(self, tag=""):
+        """回滚：把 `arms/baseline` 退回某个备份（缺省取最新的 `baseline.bak-*`）。
+
+        与 `promote` 一样只动 `arms/`：**便携根的原件永远不在这一链上**（要不"原件没被写"
+        那条判据就白立了）。
+        """
+        base = self.arm("baseline")
+        cands = sorted((self.home / "arms").glob("baseline.bak-*"))
+        if tag:
+            cands = [c for c in cands if tag in c.name]
+        if not cands:
+            die("没有可回滚的备份（`arms/baseline.bak-*`）—— 没提升过就不需要回滚")
+        src = cands[-1]
+        for s in self.cfg["surfaces"]:
+            dst = base / s
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            elif dst.is_file():
+                dst.unlink()
+            copy_tree(src / s, dst)
+        after = self._surfaces_now(base)
+        (self.home / "receipts").mkdir(exist_ok=True)
+        rp = self.home / "receipts" / f"demote-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        rp.write_text(json.dumps({
+            "kind": "rsi-demote-receipt",
+            "when": int(time.time()),
+            "restored_from": str(src),
+            "baseline_after": after,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"已回滚：{src} → {base}")
+        print(f"回滚 receipt：{rp}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="RSI 一回合的驱动器（v1.4 P2，用户侧，零依赖）")
     ap.add_argument("--root", required=True, help="便携根（ruyix.exe 所在目录）")
@@ -310,14 +488,22 @@ def main():
     ap.add_argument("--bench-arg", action="append", default=[],
                     help="原样透给评测台的参数（可重复）：--fake / --model deepseek-v4-flash / --config …。"
                          "驱动器不替尺子决定参数 —— 要覆盖什么就显式写出来")
-    ap.add_argument("cmd", choices=["plan", "propose", "score"])
-    ap.add_argument("n", nargs="?", type=int, help="回合号（propose / score 要）")
+    ap.add_argument("--skip-verify", action="store_true",
+                    help="promote 时跳过提升后的回归跑（**不推荐**：这次提升就没有回归证据，"
+                         "receipt 里会如实记 verify_skipped）")
+    ap.add_argument("cmd", choices=["plan", "propose", "score", "promote", "demote"])
+    ap.add_argument("n", nargs="?", type=int, help="回合号（propose / score / promote 要）")
+    ap.add_argument("--tag", default="", help="demote 时指定备份名里的片段（缺省取最新那个）")
     a = ap.parse_args()
     r = Rsi(a).load(require_bench=(a.cmd == "score"))
     if a.cmd == "plan":
         r.plan()
     elif a.cmd == "propose":
         r.propose(a.n or 1, a.propose_cmd)
+    elif a.cmd == "promote":
+        r.promote(a.n or 1, verify=not a.skip_verify)
+    elif a.cmd == "demote":
+        r.demote(a.tag)
     else:
         r.score(a.n or 1)
 
