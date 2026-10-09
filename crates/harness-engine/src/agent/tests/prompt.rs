@@ -66,6 +66,23 @@ fn staged_execute_note_gated_by_mode_and_changes() {
 /// 后台模式的**词汇**（background / ready_cmd / handle / 就绪）以工具声明为家 ——
 /// 声明面是三个受众共享的，模型在调用时刻看的就是它。不写这些词，模型就还用
 /// start / Start-Process 那套花招，而那正是这轮的病根（输出拿不到 + 进程脱离掌控 + 桌面弹窗）。
+/// **子步骤那份提示词要自成一体**（与 U36 同一条契约，这里在 `cargo test` 里也钉一次）：
+/// 子步声明的是同一份 `TOOL_DECLS`，但**选择判据**（何时用窗口读、何时用锚点改）必须自己写全 ——
+/// 少了，子步只会在每个文件上反复整份读，正是"省 token"的反面；而那句老的"交回整份内容"
+/// 必须不在（留着它，模型看见新形状也不会用）。
+#[test]
+fn the_step_prompt_documents_the_shapes_its_agent_must_choose_between() {
+    let s = crate::step_agent::STEP_SYSTEM;
+    for need in ["offset", "edits", "content", "scope"] {
+        assert!(s.contains(need), "子步提示词缺形状 {need}：{s}");
+    }
+    assert!(
+        s.contains("只要一段"),
+        "要写清什么时候该用窗口读（只说「能窗口」不够）：{s}"
+    );
+    assert!(!s.contains("交回的必须是整份内容"), "{s}");
+}
+
 #[test]
 fn the_execute_declaration_documents_the_background_mode() {
     let decl = crate::llm::tool_decls()
@@ -76,7 +93,10 @@ fn the_execute_declaration_documents_the_background_mode() {
     for k in ["background", "ready_cmd", "handle", "就绪", "keep_alive"] {
         assert!(text.contains(k), "execute 声明缺 {k}：{text}");
     }
-    assert!(text.contains("Start-Process"), "得把 start 花招点掉：{text}");
+    assert!(
+        text.contains("Start-Process"),
+        "得把 start 花招点掉：{text}"
+    );
 }
 
 /// 命令发现：本机有什么命令必须**实测后告诉模型**，而不是让模型自己试。
@@ -390,7 +410,7 @@ fn llm_failure_feeds_back_and_half_success_keeps_the_streak() {
     let llm = crate::testllm::fake_llm_raw(vec![
         empty.into(),
         empty.into(),
-        empty.into(), // 第 1 轮（内部重试 3 次）
+        empty.into(),    // 第 1 轮（内部重试 3 次）
         bad_args.into(), // 第 2 轮：HTTP 成功但解析失败 —— 半成功
         empty.into(),
         empty.into(),

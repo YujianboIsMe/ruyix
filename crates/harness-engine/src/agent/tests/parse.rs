@@ -694,7 +694,10 @@ fn llm_failure_feedback_distinguishes_truncation_from_flakiness() {
     );
 
     let flaky = llm_failure_feedback("DeepSeek 调用失败（已重试 3 次）: 模型返回了空内容");
-    assert!(!flaky.contains("截断"), "波动轮不该让模型以为自己被截断：{flaky}");
+    assert!(
+        !flaky.contains("截断"),
+        "波动轮不该让模型以为自己被截断：{flaky}"
+    );
 
     for f in [trunc, flaky] {
         let v: serde_json::Value =
