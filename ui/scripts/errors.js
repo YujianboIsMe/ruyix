@@ -52,6 +52,11 @@
     "开事务": "begin the transaction",
     "清派生层": "clear the derived layer",
     "读账本头": "read the ledger head",
+    // 分层检索（v1.5）：记忆两层的版本源（WAL 下唯一可靠的"变没变"）
+    "读记忆事件序号": "read the memory event sequence",
+    // 分层检索：文件层的准入（越界一律在入口拒掉）
+    "检索": "search",
+    "检索词": "the search term",
     "写账本": "write to the ledger",
     "读账本": "read the ledger",
     "词法检索": "lexical search",
@@ -260,6 +265,8 @@
     "这段录音是空的（没采到数据）": "that recording is empty (no data captured)",
     "没听出内容（可能太短或太吵）—— 再录一次试试": "nothing recognised (too short or too noisy) — try recording again",
     "空命令": "empty command",
+    // 分层检索（v1.5）
+    "检索词是空的": "the search term is empty",
     "空路径": "empty path",
     "路径为空": "empty path",
     "未配置模型目录（宿主未设、也没有 RUYIX_MEM_MODEL_DIR）":
@@ -448,6 +455,23 @@
   // 产出仍含中文也作废 —— **宁可退回原文，也不产出"半英半中"的怪句子**。
   // ============================================
   const RULES = [
+    // ⓪ 分层检索（v1.5）的形状缺件 —— 这两句是 `read` 两副面孔的入口拒绝，
+    //    形状与文件读**二选一**，缺哪件必须说清（模型据此改发，而不是瞎猜一轮）
+    //
+    // 注意两条：① 尾部的白话说明**不回显**（它是中文散文，回显会让整句作废 ⇒ 退回原文）；
+    // ② 层名清单原样留着（`session / project_mem / …` 本来就是标识符，不是中文）。
+    [
+      /^read 的 scope=(.+?) 没有配 q(.*)$/,
+      (m) => `read scope=${m[1]} has no q — say what to search for`,
+    ],
+    [
+      /^read 收到了 q 但没有 scope(.*)$/,
+      (m) => "read got a q but no scope — searching must name the layer",
+    ],
+    [
+      /^未知 scope (.+?)：本版只开了四层 (.+?)(.*)$/,
+      (m) => `unknown search scope ${m[1]} — this build has four layers: ${m[2]}`,
+    ],
     // ① `<动词短语>失败（<上下文>）: <原因>`
     [
       /^(.+?)(?:失败|出错|错误)（(.+?)）[:：]\s*(.+)$/,

@@ -268,6 +268,35 @@ The `state` object drives the UI:
 - **shell 构造只有一份**：`exec::shell_command`，Windows 走 `cmd /S /C` + `raw_arg` + 自己裹一层引号。两条都是实测踩出来的——用 std 的 `arg` 会把内部引号转义成 `\"`（cmd 回"不是内部或外部命令"）；只换 `raw_arg` 又会撞上 `cmd /C` 对"以引号开头的串"的剥引号规则（回"文件名、目录名或卷标语法不正确"）。`examples/proc_demo.rs` 是这条的可复现证明。
 - 可复现证明：`cargo run -q -p harness-engine --example proc_demo`（用示例自身当"永不退出的服务"替身，不依赖 java/maven，任何平台都能跑出同一份结论）。契约见 ui-smoke U23。
 
+### 分层检索（`read` 的第二种形状，v1.5「五服」）
+
+**不是第五个原语**：search 不写盘、不改状态、结果由资源当前状态决定 ⇒ 它是**读**；四原语编码的是
+**效果**（加维度不加原语 —— 与 v0.6「时长」对 execute 的处理同款）。模型侧形状
+`read {scope, q, path?, max_hits?}`（`path` 文件读与 `scope`+`q` 检索**二选一**，两个都给、缺 `q`、
+未知层、与 `offset/limit` 混用都**逐条给具体理由**）；引擎侧 `Action::Search` 是**新变体**，
+在账本里是**一等纯工具**（`Tool::Search`：键 = `scope`+归一后的词+归一后的限定路径，`span = None`
+—— 检索之间没有包含关系），否则"藏在 execute 里"那条老路依然不进账本（管道一加就判不纯）。
+
+**四层**（`session` 本 run 已折掉的正文 / `project_mem` / `global_mem` / `files`；`kb` 是第二刀）——
+四层里**三个后端早已存在**（`agent/capsule.rs` 侧存、`mem/` 的 `retrieve::now`、`kb/` 的 FTS5），缺的是
+**能主动问的统一入口**；唯一"能主动问"的文件层原先走 `execute`（`git grep`/`findstr`），代价是
+不进账本（带管道即不纯 ⇒ 换个拼法就能重跑）、Windows 专属提示词替工具擦屁股、结果没有来源与指纹。
+文件层现在是**原生实现**（`agent/search.rs`：tree walk + 字面匹配，跳过 `.git`/`target`/`node_modules`
+等生成物并把**跳过名单写进结果** —— 让"没搜"与"没有"可分）。**一次一层**：结果块只含一个 scope，
+逐条标来源与时间；**权威序 文件 > 记忆，冲突并列回给模型，引擎不裁决**（与提示词里既有的
+"本地证据比检索结果硬"同一条纪律）。记忆两层覆盖不到的**只有**这个入口 —— `execute` 够不着记忆库与侧存。
+
+**版本与去重**（`agent/ledger.rs::precheck` 里由 `search::stamp_version` 盖章）—— 四层各有各的
+"变了没有"，且**两处不能想当然**：① 记忆库跑 **WAL**，主库文件 `(mtime,size)` 在小写入时**不动**
+⇒ 拿它当版本会**假新鲜**；改用**事件序号**（`mem::head_seq`）② **会话层是自失效的**：检索自己的
+结果也进侧存，而侧存索引就是这一层的版本源 ⇒ 下一次必然重跑（判据钉住：
+`the_session_layer_is_self_invalidating_and_that_is_the_safe_direction`）。文件层用**仓库版本**
+（`git HEAD + 工作树脏否`）⇒ **非 git 仓库里永不复用**（`repo = None ⇒ unknown`），这是有意的
+fail-safe 而非漏做。拿不到版本 ⇒ `unknown` ⇒ **每次都真执行**。
+
+**写盘 = 零**：检索没有任何写路径（不碰 `apply_write` / 白名单 / 暂存 / 备份）；判据用**整棵树指纹**
+跑前跑后对比。落地记录与 14 条判据读数：`doc/v1.5/实施-分层搜索-v1.5.md`。
+
 ### 外链：WebView 是画布，不是浏览器（P0）
 
 **这条 P0 的真身**：agent 回一句「服务已起，访问 `http://localhost:8080`」，点一下那个链接，**整块 IDE 变成那张网页**
