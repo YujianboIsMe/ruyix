@@ -1,6 +1,7 @@
 # 需求：Agent 进展记忆与循环守卫（record_findings + 证据不被折叠，v1.1）
 
-状态：**方案已拍板**（2026-09-26），待实施
+状态：**已实施**（2026-09-26 拍板；落地在 `agent/findings.rs` 的 findings 账本 + 停滞守卫
+（`agent.stall_rounds` / `agent.findings_max_bytes`）+ 历史折叠；§8 五个小点已于 2026-10-08 逐条结清，见文末）
 归属版本：v1.1（Agent 工具循环）
 提出日期：2026-09-26（用户原话：*"我测试了一下，现在 agent 根本无法用，只保留 6 轮，然后折叠之前的方案，
 导致根本无法解决复杂任务，LLM 反复探索重复内容。我的想法是加一个新的工具，record_findings。
@@ -207,11 +208,17 @@ ai_model_caps  → {"model":"deepseek-flash","web_search_anthropic":true,"multim
 **配置键**（沿用 house style，都给一键回退）：`agent.findings_max_bytes`（默认 **8192**）、
 `agent.stall_rounds`（默认 **8**）、`agent.findings.enabled`（默认开）。
 
-## 8. 待明确（实施前值得再确认的小点）
+## 8. 待明确（实施前值得再确认的小点）—— **已全部结清（2026-10-08 对账）**
 
-1. `record_findings` 的参数名与形状定稿（本文 §4.2 是提案）；
+1. `record_findings` 的参数名与形状定稿（本文 §4.2 是提案）；→ **已定稿**：`items[{claim, evidence, note, supersedes}]`（`agent/action.rs` 的 `FindingSpec`）
 2. 落盘文件是**一会话一份**还是**一 run 一份**（会话复用时怎么续）；
 3. 是否给用户一条"清空本会话 findings"的命令（**给**，但只清提示词里的 active 视图、
-   不动落盘文件 —— 与"不物理删除"一致）；
+   不动落盘文件 —— 与"不物理删除"一致）；→ **已实现（2026-10-08）**：`agent findings clear`
+   （`ui/scripts/session.js::clearFindings`：只清消息上的那层视图 + 存会话，**不调**任何后端删除命令；
+   契约 ui-smoke **U76**）
 4. 停滞守卫的计时是否也把"反复读同一个文件"单独计一分（这轮先不叠加，避免两个守卫互相掩盖）；
 5. findings 是否随会话 `SessionMsg` 一起持久化（**是**，否则重开会话就看不见模型当时确认了什么）。
+   → **已实现（2026-10-08）**：`AgentOutcome.findings`（引擎，**完整账本**含被取代的）→ `ReplyAgent.findings`
+   → `SessionMsg.findings`（**三处都要声明**，少了任何一处都会被 serde 静默抹掉），界面在回复下渲染
+   「📌 结论」一节（被取代的划线保留）。判据：引擎 `the_outcome_carries_the_findings_ledger_including_superseded_ones`、
+   宿主 `findings_survive_the_session_roundtrip`、ui-smoke U76。
