@@ -1314,8 +1314,16 @@ mod tests {
             out: "C:/x/o".into(),
             pycache: "C:/x/p".into(),
         };
-        assert!(py_envs(&d).iter().any(|(k, v)| *k == "PYTHONDONTWRITEBYTECODE" && *v == "1"));
-        assert!(syntax_envs().iter().any(|(k, v)| *k == "PYTHONDONTWRITEBYTECODE" && *v == "1"));
+        assert!(
+            py_envs(&d)
+                .iter()
+                .any(|(k, v)| *k == "PYTHONDONTWRITEBYTECODE" && *v == "1")
+        );
+        assert!(
+            syntax_envs()
+                .iter()
+                .any(|(k, v)| *k == "PYTHONDONTWRITEBYTECODE" && *v == "1")
+        );
     }
 
     #[test]
