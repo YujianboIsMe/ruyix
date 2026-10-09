@@ -353,6 +353,7 @@ fn requests(llm: &FakeLlm) -> Vec<Vec<ChatMessage>> {
                     tool_calls: None,
                     tool_call_id: None,
                     images: Vec::new(),
+                    thinking: Vec::new(),
                 })
                 .collect()
         })
