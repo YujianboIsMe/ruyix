@@ -36,11 +36,25 @@ function setupCommandBar() {
   });
 
   // 点击页面空白区域时聚焦命令栏（不劫持编辑器、终端、输入框等可编辑区域）
+  //
+  // 2026-10-09 修 —— 用户报「会话里圈中文字，只要一松鼠标就不保持高亮，所以无法复制」。
+  // 原先只豁免了表单控件与终端，于是**内容面**上的每一次点击都会把焦点抢给命令栏；
+  // 而焦点一进文本框，浏览器就把页面上的选区**折叠**掉 ⇒ 拖蓝刚松手就没了
+  // （真事故的读数：选中 15 字 → 点一下 → 0 字，activeElement=command-input）。
+  // 两条豁免，缺一不可：
+  //   ① **内容面**不抢焦点 —— 与 styles.css 里 `user-select: text` 那一组同源（看/选/复制的地方）；
+  //   ② **有选区时一律不抢** —— 空白处拖蓝也常见，而它同样会毁掉刚选好的东西。
+  // 判据：`scripts/session-trace-layout.js` 判据 10（真浏览器里合成 mousedown/mouseup/click 量选区，
+  // 并且带对照臂：点真 chrome 仍然要聚焦命令栏 —— 只钉前半条的话，把 handler 删了也能"绿"）。
+  const CONTENT_SURFACE = "#navigator, #editor-area, #git-panel, #modal-overlay, #project-edit-modal";
   document.addEventListener("click", (e) => {
     const tag = e.target.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" || tag === "SELECT") return;
     if (e.target.isContentEditable || e.target.closest("[contenteditable]")) return;
     if (e.target.closest("#terminal-container")) return;
+    if (e.target.closest(CONTENT_SURFACE)) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && String(sel).trim().length) return;
     input.focus();
   });
 }

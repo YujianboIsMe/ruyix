@@ -21,6 +21,14 @@
  *   6. **内容面能拖蓝复制**：会话气泡/轨迹/输入框/导航/编辑器的 computed `user-select` 必须是
  *      `text`，而标题栏/状态栏/命令栏必须仍是 `none`（继承来的 `none` 会把内容盖住 ——
  *      用户报的「agent 聊天界面的内容无法选中复制」就是它；不许用"把全局翻成可选"来糊）。
+ *   7. 工具栏一排控件**同高**、不撑破、模型下拉不吃掉半行（盒模型只能量）；
+ *   8. 截图附件的三件事（待发条显示 → 发送后清空 → 进历史）；
+ *   9. 换皮后的**对比度**（状态栏 / 助手气泡 / 用户气泡 ≥ 4.5:1）；
+ *   10. **拖蓝之后松手，选区还在**（用户 2026-10-09：「圈中文字后一松鼠标就不保持高亮」）。
+ *      凶手是 command.js 的全局 click handler（"点空白处聚焦命令栏"）—— 焦点进文本框，
+ *      浏览器就把页面选区折叠掉。三小条成对：内容面上点击不许抢焦点/不许清选区 ·
+ *      有选区时点空白也不许 · **点真 chrome 仍要聚焦命令栏**（少了最后一条，把 handler
+ *      整段删掉也能"绿"）。
  *
  * 用法：
  *   node scripts/session-trace-layout.js          # 有 Edge 就跑，没有就 SKIP（退出码 0）
@@ -62,6 +70,9 @@ let html = read("ui/index.html")
 const css = read("ui/styles.css");
 const enc = (s) => JSON.stringify(s).replace(/</g, "\\u003c");
 const sessionSrc = read("ui/scripts/session.js");
+// 判据 10（2026-10-09 补）要复现"点一下就把选区清掉"那条真事故，而凶手住在 command.js 的
+// 全局 click handler 里 ⇒ 必须把**真的 command.js** 也拼进来（并真调它的 setupCommandBar）。
+const commandSrc = read("ui/scripts/command.js");
 
 const driver = `
 (async function () {
@@ -281,6 +292,54 @@ const driver = `
           scrollW: tb.scrollWidth,
         }
       : null;
+
+    // ---- 判据 10（2026-10-09 补）：拖蓝之后**松手，选区还得在** ----
+    // 用户现场：「圈中文字后，只要一松鼠标就不保持高亮，所以无法复制」。
+    // 机制：command.js 的全局 click handler 在**任何**非表单控件上点击后 input.focus()
+    // （本意是"点击空白处聚焦命令栏"）—— 焦点进文本框 ⇒ 浏览器把页面选区**折叠**掉。
+    // 真拖拽在探针里做不到，但**凶手是 JS 处理器**：合成 mousedown/mouseup/click 会照跑它，
+    // 而 programmatic focus() 清选区与真点击同效 ⇒ 这条判据能抓住它（红 ⇒ 修 ⇒ 绿）。
+    // 三小条**成对写**（只钉"选区还在"的话，把整个 handler 删掉也能绿 —— 那是把功能砍了）：
+    //   A 内容面上点击：选区仍在，且焦点**没**被命令栏抢走；
+    //   B 有选区时点空白（#app 背景）：选区仍在（兜底那一条）；
+    //   C 对照臂：点真正的 chrome（状态栏）⇒ **仍然**聚焦命令栏（功能没被删）。
+    setupCommandBar();
+    const cmdInput = document.getElementById("command-input");
+    const mouse = (el, type) =>
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, detail: 1 }));
+    const clickOn = (el) => { mouse(el, "mousedown"); mouse(el, "mouseup"); mouse(el, "click"); };
+    const selLen = () => String(window.getSelection() || "").length;
+    const pickText = (el) => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const s = window.getSelection();
+      s.removeAllRanges();
+      s.addRange(r);
+      return selLen();
+    };
+    const who = () => {
+      const a = document.activeElement;
+      return a ? (a.id || a.tagName + (a.className ? "." + String(a.className).split(" ")[0] : "")) : "none";
+    };
+    const target = wrap.querySelector("[data-msgs] .session-msg .session-bubble") ||
+      wrap.querySelector("[data-msgs] .session-msg");
+    out.selection = { picked: pickText(target), note: "内容面（气泡）" };
+    clickOn(target);
+    out.selection.afterContentClick = selLen();
+    out.selection.focusAfterContentClick = who();
+    // B：**先 blur**（否则"焦点已经在命令栏、focus() 成了空操作"会让这条假绿 —— 第一版就蒙过去了），
+    //    再在**有选区**时点空白背景
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    pickText(target);
+    clickOn(document.getElementById("app") || document.body);
+    out.selection.afterBlankClick = selLen();
+    out.selection.focusAfterBlankClick = who();
+    // C（对照）：清掉选区，点状态栏 ⇒ 命令栏必须拿到焦点
+    window.getSelection().removeAllRanges();
+    const sbEl = document.querySelector("#statusbar") || document.body;
+    clickOn(sbEl);
+    out.selection.focusAfterChromeClick = who();
+    out.selection.cmdInputPresent = !!cmdInput;
   } catch (err) {
     out.errors.push("DRIVER: " + ((err && err.stack) || err));
   }
@@ -293,7 +352,8 @@ const driver = `
 
 html = html.replace(
   /<\/body>/,
-  () => `<style>${css}</style><script>${driver}</script></body>`
+  () =>
+    `<style>${css}</style><script>${commandSrc}</script><script>${driver}</script></body>`
 );
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ruyix-trace-layout-"));
 const page = path.join(dir, "probe.html");
@@ -472,6 +532,32 @@ for (const [name, r, min] of pairs) {
       ? ok(`${name}对比度 ${r}:1 ≥ ${min}:1`)
       : fail(`${name}对比度只有 ${r}:1（要 ≥ ${min}:1）—— 灰阶挑得太近，深色主题更容易犯这个错`);
 }
+
+// 判据 10：拖蓝之后**松手，选区还在**（用户 2026-10-09：「圈中文字后一松鼠标高亮就没了」）。
+// 成对写：内容面上点击不许抢焦点、不许清选区；而**真 chrome 上点击仍要聚焦命令栏** ——
+// 只钉前半条的话，把那个 handler 整段删掉也能绿，那是把功能砍了。
+const s10 = out.selection || {};
+s10.cmdInputPresent
+  ? ok("探针里挂上了命令栏的 click handler（真 command.js 的 setupCommandBar 跑过了）")
+  : fail("探针里没有 #command-input：判据 10 量的是空气");
+s10.picked > 0
+  ? ok(`夹具能选中内容面文字（${s10.picked} 字）`)
+  : fail("夹具选不中气泡文字（选择本身就没建立）—— 判据 10 的前提不成立");
+s10.afterContentClick > 0
+  ? ok(`内容面上点一下之后选区仍在（${s10.afterContentClick} 字）—— 松手还能复制`)
+  : fail(`内容面上点一下之后选区被清掉了（${s10.picked} → 0 字，焦点跑到了 ${s10.focusAfterContentClick}）` +
+      " —— 用户报的「一松鼠标高亮就没了」就是这个：全局 click handler 把焦点抢给了命令栏，" +
+      "浏览器随即折叠页面选区。内容面（navigator/editor/git 面板等）与「有选区时」都不许抢焦点");
+s10.focusAfterContentClick !== "command-input"
+  ? ok(`内容面上点击不抢焦点（activeElement=${s10.focusAfterContentClick}）`)
+  : fail("内容面上点击把焦点抢到了命令栏（activeElement=command-input）—— 每一次点击都会清一次选区");
+s10.afterBlankClick > 0
+  ? ok(`有选区时点空白处也不清选区（${s10.afterBlankClick} 字）`)
+  : fail(`有选区时点空白处把选区清了（${s10.picked} → 0 字）—— 兜底那一条没生效`);
+s10.focusAfterChromeClick === "command-input"
+  ? ok("对照组通过：点真 chrome（状态栏）仍会聚焦命令栏（功能没被砍掉）")
+  : fail(`对照组失败：点状态栏之后焦点在 ${s10.focusAfterChromeClick}，不再是命令栏` +
+      " —— 那不是收窄，是把「点空白处聚焦命令栏」这条功能删了");
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (bad) {

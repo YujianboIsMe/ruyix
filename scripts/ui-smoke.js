@@ -188,7 +188,9 @@
  *                     （终端永远停在 100×24、窗口怎么变都不动）⇒ 挂真浏览器探针
  *                     `scripts/terminal-layout.js`（真 index.html + styles.css + xterm.js +
  *                     main.js，用**真的 xterm**走"宽屏 → 缩小 → 放大"）。
- *   U42 session-trace-layout-real  轨迹的**真实几何**：Node 桩量不到"看起来是一行、
+ *   U42 session-trace-layout-real  轨迹的**真实几何** + **选区存活**（判据 10，2026-10-09：
+ *                     内容面上点击不许抢焦点/不许清选区 —— 用户报的"圈中文字一松鼠标高亮就没了"
+ *                     就是被 command.js 那句 input.focus() 清掉的）：Node 桩量不到"看起来是一行、
  *                     显示不下用省略号收尾"（没有布局引擎），所以挂一张真浏览器探针
  *                     `scripts/session-trace-layout.js` —— 真 index.html + styles.css +
  *                     session.js 在无头 Edge 里跑起来，逐元素量折行 / 溢出 / 横向滚动条 /

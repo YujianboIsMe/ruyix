@@ -36,6 +36,19 @@ when a browser was actually found). `memory-layout.js` 的判据 0 专门钉"**�
 打开**"——接线写在 `build()` 里时"点菜单才建面板/建面板才接线"互为前提，那条绑定一次都没跑过，
 按钮看上去就是死的（2026-09-30 报的 bug）。
 
+**UI 交互注意项 · 全局处理器不许抢焦点**（2026-10-09）：`command.js` 的 `setupCommandBar()` 有一条
+"点击空白处聚焦命令栏"，原先只豁免表单控件与终端 ⇒ 任何**内容面**（会话气泡、帮助页、差异面板、
+记忆面板…）上的点击都会 `input.focus()`，而**焦点一进文本框，浏览器就把页面上的选区折叠掉** ——
+用户看到的正是"圈中文字、**一松鼠标**高亮就没了、所以复制不了"（`click` 在 mouseup 时触发）。
+两条豁免缺一不可：① **内容面不抢**（`#navigator / #editor-area / #git-panel / #modal-overlay /
+#project-edit-modal` —— 与 `styles.css` 里 `user-select: text` 那组同源，凡是"看/选/复制的地方"
+都要在这里列出来）；② **有选区时一律不抢**（空白处拖蓝同样常见，一样会被毁掉）。
+判据是 `scripts/session-trace-layout.js` 的**判据 10**（真浏览器里合成 mousedown/mouseup/click，
+再量 `getSelection()` 与 `activeElement`），并且**成对写**：内容面上点击不许抢焦点/不许清选区，
+而点真 chrome（状态栏）**仍然**要聚焦命令栏 —— 只钉前半条的话，把 handler 整段删掉也能"绿"
+（ui-smoke U42 常年跑它）。同类陷阱：任何在 `click` / `mousedown` 里 `focus()`、重渲染内容面、
+或替换包含选区的 DOM 的代码，都会以同样方式吃掉用户的选区。
+
 ## Project Vision
 
 ruyix is an IDE built on **Tauri 2 + Rust backend**, aiming to eventually use Monaco Editor. Currently the editor is a custom implementation using a transparent `<textarea>` overlaid on a syntax-highlighted backdrop via CSS Grid.
