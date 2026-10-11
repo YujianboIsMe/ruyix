@@ -1,0 +1,61 @@
+# ruyix 预装高亮插件（内置 tree-sitter 解析器）
+#
+# 这份文件**就是** v1.0.0 出厂的"语法高亮"本体：语言表、扩展名、图标、token 配色全在这里。
+# 预装模式编译时它会被嵌进可执行文件，首启物化到 `<便携根>/plugins/highlight/ruyix-builtin/`；
+# 纯净模式编译时它**根本不在二进制里**（想用就把它拷回插件目录，或写自己的）。
+#
+# 格式说明见 doc/highlight-plugins.md；用户改这份文件不需要重编译。
+
+id = "ruyix-builtin"
+name = "ruyix 内置高亮（tree-sitter）"
+version = "1.0.0"
+# 主题里**只允许** `.tok-*` 规则（插件不许碰 IDE 自己的样式，见 doc 的信任边界）
+theme = "theme.css"
+
+[[lang]]
+id = "python"
+ext = ["py", "pyw"]
+icon = "🐍"
+grammar = "builtin"
+
+[[lang]]
+id = "rust"
+ext = ["rs"]
+icon = "🦀"
+grammar = "builtin"
+
+[[lang]]
+id = "html"
+ext = ["html", "htm"]
+icon = "🌏"
+grammar = "builtin"
+
+[[lang]]
+id = "css"
+ext = ["css"]
+icon = "🎨"
+grammar = "builtin"
+
+[[lang]]
+id = "javascript"
+ext = ["js", "mjs", "cjs", "jsx"]
+icon = "Ⓙ"
+grammar = "builtin"
+
+[[lang]]
+id = "markdown"
+ext = ["md", "markdown"]
+icon = "Ⓜ️"
+grammar = "builtin"
+
+[[lang]]
+id = "sql"
+ext = ["sql"]
+icon = "🛢️"
+grammar = "builtin"
+
+[[lang]]
+id = "java"
+ext = ["java"]
+icon = "☕"
+grammar = "builtin"

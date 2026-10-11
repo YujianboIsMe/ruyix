@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-lint"
+version = "0.1.0"
+description = "自定义 lint 规则 + 诊断内嵌修复指令，让 Agent 能自我纠正"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+harness-lint = "harness_lint.cli:main"
+
+[project.entry-points."flake8.extension"]
+HX = "harness_lint.flake8_plugin:HarnessLintPlugin"
+
+[tool.setuptools]
+packages = ["harness_lint", "harness_lint.rules"]
+
+[tool.setuptools.package-data]
+harness_lint = ["conventions/*.md"]

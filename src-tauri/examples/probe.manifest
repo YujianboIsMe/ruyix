@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  探针（examples/）用的应用清单。
+
+  为什么需要它：tauri-build 只给**主二进制**嵌清单，示例拿不到 —— 而 tao/wry 会导入
+  comctl32 **v6 才有**的导出（SetWindowSubclass / TaskDialogIndirect）。没有清单时加载器挑
+  system32 里的 v5，进程在 `main` 之前就死在 0xC0000139（STATUS_ENTRYPOINT_NOT_FOUND），
+  **一个字都不输出**。P0 探针实测踩过，见 doc/架构-便携根与项目状态搬迁-v1.0.0.md §八。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

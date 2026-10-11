@@ -1,0 +1,1575 @@
+/**
+ * 双语内联文案（与 session.js / mcp.js 等面板同款）：英文界面走第二段。
+ *
+ * ⚠️ 全局 L 只在这一处定义，而且必须挂在 window 上：index.html 的脚本都是**经典脚本**
+ * （没有 type="module"），它们共享**同一个全局作用域**。要是这里写成顶层 `const L`，而另一个
+ * 文件也写了一次，第二个脚本会在**求值之前**抛 SyntaxError 并**整份不执行**：
+ *   Uncaught SyntaxError: Identifier 'L' has already been declared
+ * 实测代价：main.js 曾有这样一份重复声明 ⇒ main.js 整份没跑、window.state 没建、界面死掉。
+ * 门禁：ui-smoke U56（静态：跨文件顶层词法声明不许重名）+ U57（真浏览器按真清单跑一遍）。
+ */
+window.L = (zh, en) => (window.I18N && I18N.getLang() === "en" ? en : zh);
+
+/**
+ * ruyix — Command System
+ * 命令栏、命令解析与分发、以及各命令的实现。
+ * 注意：本文件必须先于 main.js 加载——命令函数引用 main.js 中的
+ * UI 基础设施函数（setStatus / state / getTauriInvoke / renderTabs 等）作为全局。
+ */
+
+// ============================================
+// 命令栏
+// ============================================
+
+function setupCommandBar() {
+  const input = document.getElementById("command-input");
+  if (!input) return;
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const cmd = input.value.trim();
+      if (cmd) {
+        handleCommand(cmd);
+        input.value = "";
+      }
+    }
+  });
+
+  // 点击页面空白区域时聚焦命令栏（不劫持编辑器、终端、输入框等可编辑区域）
+  //
+  // 2026-10-09 修 —— 用户报「会话里圈中文字，只要一松鼠标就不保持高亮，所以无法复制」。
+  // 原先只豁免了表单控件与终端，于是**内容面**上的每一次点击都会把焦点抢给命令栏；
+  // 而焦点一进文本框，浏览器就把页面上的选区**折叠**掉 ⇒ 拖蓝刚松手就没了
+  // （真事故的读数：选中 15 字 → 点一下 → 0 字，activeElement=command-input）。
+  // 两条豁免，缺一不可：
+  //   ① **内容面**不抢焦点 —— 与 styles.css 里 `user-select: text` 那一组同源（看/选/复制的地方）；
+  //   ② **有选区时一律不抢** —— 空白处拖蓝也常见，而它同样会毁掉刚选好的东西。
+  // 判据：`scripts/session-trace-layout.js` 判据 10（真浏览器里合成 mousedown/mouseup/click 量选区，
+  // 并且带对照臂：点真 chrome 仍然要聚焦命令栏 —— 只钉前半条的话，把 handler 删了也能"绿"）。
+  const CONTENT_SURFACE = "#navigator, #editor-area, #git-panel, #modal-overlay, #project-edit-modal";
+  document.addEventListener("click", (e) => {
+    const tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" || tag === "SELECT") return;
+    if (e.target.isContentEditable || e.target.closest("[contenteditable]")) return;
+    if (e.target.closest("#terminal-container")) return;
+    if (e.target.closest(CONTENT_SURFACE)) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && String(sel).trim().length) return;
+    input.focus();
+  });
+}
+
+// ============================================
+// 命令解析与分发
+// ============================================
+
+/**
+ * 解析并执行命令
+ */
+async function handleCommand(raw, _fromAi = false) {
+  const parts = raw.split(/\s+/);
+  const verb = parts[0]?.toLowerCase();
+
+  switch (verb) {
+    case "open":
+      // 原始串一起交下去：`open url <链接>` 的 URL 里可能带 `&` / `=` / `%20`，
+      // 再按空白切一次就是给自己造 bug（与 `project lang/edit` 同一条处理）
+      await handleOpenCommand(parts.slice(1), raw);
+      break;
+    case "close":
+      await handleCloseCommand(parts.slice(1));
+      break;
+    case "config":
+      await handleConfigCommand(raw);
+      break;
+    case "new":
+      await handleNewCommand(parts.slice(1));
+      break;
+    case "refresh":
+      await handleRefreshCommand(parts.slice(1));
+      break;
+    case "del":
+    case "delete":
+    case "remove":
+    case "rm":
+      await handleDeleteCommand(raw, _fromAi);
+      break;
+    case "rename":
+    case "mv":
+      await handleRenameCommand(parts.slice(1));
+      break;
+    case "term":
+    case "terms":
+      await handleTermCommand(raw);
+      break;
+    case "run":
+      await handleRunCommand(raw);
+      break;
+    case "help":
+      openHelp();
+      break;
+    case "mem":
+    case "memory": {
+      // `mem` 开记忆面板（当前信念 / why 链 / as-of / 收据）
+      window.MemoryUI?.open();
+      break;
+    }
+    case "service":
+    case "services": {
+      // `service` 开服务面板；`service log <pid>` 直接开某个进程的输出标签页
+      const sub = (parts[1] || "").toLowerCase();
+      if (sub === "log" || sub === "output") {
+        await window.ServiceUI?.openLog(parts[2]);
+      } else {
+        window.ServiceUI?.open();
+      }
+      break;
+    }
+    case "agent":
+      if (!state.currentProject) {
+        setStatus(I18N.t("cmd.agent.no_project"), "error");
+        break;
+      }
+      window.SessionUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "mcp":
+      window.McpUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "a2a":
+      window.A2aUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "tools":
+      window.ToolsUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "skill":
+    case "skills":
+      window.SkillsUI?.handleCommand(parts.slice(1).join(" "));
+      break;
+    case "git":
+      await handleGitCommand(raw, _fromAi);
+      break;
+    case "project":
+      await handleProjectCommand(raw);
+      break;
+    case "bucket":
+    case "buckets":
+      await handleBucketCommand(raw);
+      break;
+    default:
+      // 标准命令未命中 → 调用 AI 翻译（防止递归）
+      if (!_fromAi) {
+        await handleAiCommand(raw);
+      } else {
+        setStatus(I18N.t("status.unknown_cmd", { verb }), "error");
+      }
+  }
+}
+
+/**
+ * run 命令：快捷添加运行目标
+ * 语法: run <name>=<cmd>
+ * 等价于:
+ *   config add -p ruyix.code.run.target<N>.cmd=<cmd>
+ *   config add -p ruyix.code.run.target<N>.name=<name>
+ * 其中 <N> = 现有运行目标数量
+ */
+/**
+ * `term [list|add <名字>=<命令>|del <key|名字>]` —— 终端目标的增删改（bug 4）。
+ *
+ * 为什么与 `run` 一个形状：两者都是"给我起一条命令"，差别只在起在哪 —— 运行目标一次性跑完
+ * （`run`）、终端是常驻的交互式 PTY 会话。既然形状相同，配置与命名也跟着走：
+ * `ruyix.code.term.target<N>.name` / `.cmd`，后端用**同一份扫描器**读回来
+ * （`config::scan_target_file`），面板里加一条不会因为"漏改另一处"而看不见。
+ *
+ * 为什么 upsert 而不是纯 add：`add` 带的是**名字**，名字相同就该是"改这一条"——
+ * 否则用户改一次名字就会多出一条，而旧那条永远留在列表里。
+ */
+async function handleTermCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+  if (!state.currentProject) {
+    setStatus(I18N.t("terminal.no_project"), "error");
+    return;
+  }
+  const projectRoot = state.currentProject.path || undefined;
+  const rest = raw.replace(/^terms?/i, "").trim();
+  const sub = (rest.split(/\s+/)[0] || "list").toLowerCase();
+
+  if (sub === "list" || sub === "ls" || !rest) {
+    await window.refreshTerminalTargets?.();
+    return;
+  }
+
+  if (sub === "del" || sub === "delete" || sub === "remove" || sub === "rm") {
+    const what = rest.slice(sub.length).trim();
+    if (!what) {
+      setStatus(I18N.t("terminal.usage"), "error");
+      return;
+    }
+    try {
+      const targets = (await invoke("get_term_targets", { projectRoot })) || [];
+      const hit = targets.find((t) => t.key === what || (t.name || "") === what);
+      if (!hit) {
+        setStatus(I18N.t("terminal.not_found", { name: what }), "error");
+        return;
+      }
+      for (const suffix of ["name", "cmd"]) {
+        await invoke("config_delete", {
+          scope: "project",
+          key: `ruyix.code.term.${hit.key}.${suffix}`,
+          projectRoot,
+        });
+      }
+      setStatus(I18N.t("terminal.deleted", { name: hit.name || hit.key }));
+      await window.refreshTerminalTargets?.();
+    } catch (err) {
+      setStatus(I18N.t("terminal.del_fail", { err }), "error");
+    }
+    return;
+  }
+
+  // add：`term add <名字>=<命令>`（没有 `=` 就把整段当名字、命令后面再补）
+  const body = rest.slice(sub.length).trim();
+  const eq = body.indexOf("=");
+  if (!body || eq <= 0) {
+    setStatus(I18N.t("terminal.usage"), "error");
+    return;
+  }
+  const name = body.slice(0, eq).trim();
+  const cmd = body.slice(eq + 1).trim();
+  if (!name || !cmd) {
+    setStatus(I18N.t("terminal.usage"), "error");
+    return;
+  }
+  try {
+    const targets = (await invoke("get_term_targets", { projectRoot })) || [];
+    const same = targets.find((t) => (t.name || "") === name);
+    let key = same?.key;
+    if (!key) {
+      // 下一个空位：`target<N>` 里没被占用的最小 N（与 `run` 的取号规则一致）
+      const used = new Set(targets.map((t) => t.key));
+      let i = 0;
+      while (used.has(`target${i}`)) i += 1;
+      key = `target${i}`;
+    }
+    await invoke("config_set", {
+      scope: "project",
+      key: `ruyix.code.term.${key}.name`,
+      value: name,
+      projectRoot,
+    });
+    await invoke("config_set", {
+      scope: "project",
+      key: `ruyix.code.term.${key}.cmd`,
+      value: cmd,
+      projectRoot,
+    });
+    setStatus(I18N.t("terminal.saved", { name }));
+    await window.refreshTerminalTargets?.();
+  } catch (err) {
+    setStatus(I18N.t("terminal.save_fail", { err }), "error");
+  }
+}
+
+async function handleRunCommand(raw) {
+  const rest = raw.slice("run".length).trim();
+  if (!rest) {
+    setStatus(I18N.t("cmd.run.usage"));
+    return;
+  }
+
+  // ============================================
+  // 删除语法: run del/delete/remove/rm <name>
+  // ============================================
+  const delMatch = rest.match(/^(del|delete|remove|rm)\s+(.+)$/i);
+  if (delMatch) {
+    const targetName = delMatch[2].trim();
+    if (!targetName) {
+      setStatus(I18N.t("cmd.run.del_usage"), "error");
+      return;
+    }
+    if (!state.currentProject) {
+      setStatus(I18N.t("cmd.run.no_project"), "error");
+      return;
+    }
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+      setStatus(I18N.t("status.tauri_unavail"));
+      return;
+    }
+    try {
+      const projectRoot = state.currentProject?.path || undefined;
+      const targets = await invoke("get_run_targets", { projectRoot });
+      // 按 name 或 key 查找
+      const target = (targets || []).find(
+        (t) => t.name === targetName || t.key === targetName
+      );
+      if (!target) {
+        setStatus(I18N.t("cmd.run.del_not_found", { name: targetName }), "error");
+        return;
+      }
+      const cmdKey = `ruyix.code.run.${target.key}.cmd`;
+      const nameKey = `ruyix.code.run.${target.key}.name`;
+      const bindKey = `ruyix.code.run.${target.key}.bind`;
+      await executeConfigAction("remove", "p", cmdKey);
+      await executeConfigAction("remove", "p", nameKey);
+      // bind 可能不存在，忽略错误
+      try { await executeConfigAction("remove", "p", bindKey); } catch {}
+      setStatus(I18N.t("cmd.run.del_ok", { name: targetName }));
+      loadRunTargets();
+    } catch (err) {
+      setStatus(I18N.t("cmd.run.del_fail", { err }), "error");
+    }
+    return;
+  }
+
+  // ============================================
+  // 编辑语法: run edit <name>
+  // ============================================
+  const editMatch = rest.match(/^edit\s+(.+)$/i);
+  if (editMatch) {
+    const targetName = editMatch[1].trim();
+    if (!state.currentProject) {
+      setStatus(I18N.t("cmd.run.no_project"), "error");
+      return;
+    }
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+      setStatus(I18N.t("status.tauri_unavail"));
+      return;
+    }
+    try {
+      const projectRoot = state.currentProject?.path || undefined;
+      const targets = await invoke("get_run_targets", { projectRoot });
+      const target = (targets || []).find(
+        (t) => t.name === targetName || t.key === targetName
+      );
+      if (!target) {
+        setStatus(I18N.t("cmd.run.del_not_found", { name: targetName }), "error");
+        return;
+      }
+
+      const cmdKey = `ruyix.code.run.${target.key}.cmd`;
+      const nameKey = `ruyix.code.run.${target.key}.name`;
+
+      // 提示用户输入新名称
+      const newName = await showPrompt(L("修改运行目标名称", "Edit run target name"), target.name);
+      if (!newName) return;
+
+      // 提示用户输入新命令
+      const newCmd = await showPrompt(L("修改运行目标命令", "Edit run target command"), target.cmd || "");
+      if (!newCmd) return;
+
+      await executeConfigAction("update", "p", nameKey, newName);
+      await executeConfigAction("update", "p", cmdKey, newCmd);
+      setStatus(I18N.t("cmd.run.edit_ok", { name: newName }));
+      loadRunTargets();
+    } catch (err) {
+      setStatus(I18N.t("cmd.run.edit_fail", { err }), "error");
+    }
+    return;
+  }
+
+  // ============================================
+  // 添加语法: run <name>=<cmd>
+  // ============================================
+  const eqIdx = rest.indexOf("=");
+  if (eqIdx < 0) {
+    setStatus(I18N.t("cmd.run.no_eq"), "error");
+    return;
+  }
+
+  const name = rest.slice(0, eqIdx).trim();
+  const cmd = rest.slice(eqIdx + 1).trim();
+
+  if (!name) {
+    setStatus(I18N.t("cmd.run.empty_name"), "error");
+    return;
+  }
+  if (!cmd) {
+    setStatus(I18N.t("cmd.run.empty_cmd"), "error");
+    return;
+  }
+
+  if (!state.currentProject) {
+    setStatus(I18N.t("cmd.run.no_project"), "error");
+    return;
+  }
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+
+  // 用户手动创建：以用户提供的名称作为 key
+  const cmdKey = `ruyix.code.run.${name}.cmd`;
+  const nameKey = `ruyix.code.run.${name}.name`;
+
+  // 检查是否已存在同名目标
+  try {
+    const projectRoot = state.currentProject?.path || undefined;
+    const existing = await invoke("config_get", {
+      scope: "project",
+      key: cmdKey,
+      projectRoot,
+    });
+    if (existing != null) {
+      setStatus(I18N.t("cmd.run.exists", { name }), "error");
+      return;
+    }
+  } catch {
+    // 忽略查询错误
+  }
+
+  // 依次写入两个配置项
+  try {
+    await executeConfigAction("add", "p", cmdKey, cmd);
+  } catch (err) {
+    setStatus(I18N.t("cmd.run.add_cmd_fail", { err }), "error");
+    return;
+  }
+
+  try {
+    await executeConfigAction("add", "p", nameKey, name);
+  } catch (err) {
+    setStatus(I18N.t("cmd.run.add_name_fail", { err }), "error");
+    return;
+  }
+
+  setStatus(I18N.t("cmd.run.success", { name, cmd }));
+  loadRunTargets();
+}
+
+/**
+ * project 命令：项目属性管理
+ * 语法:
+ *   project lang <语言> <项目路径>                设置项目语言（路径取 lang 之后的剩余部分）
+ *   project edit "<项目路径>" "<名称>" <语言>     修改项目名称与图标（路径不可修改）
+ *   project delete <项目路径>                     从项目列表删除（路径取剩余部分，可含空格）
+ */
+/**
+ * `bucket [list|delete <key>]` —— IDE 状态桶（v1.0.0）。
+ *
+ * 项目侧的暂存 / 备份 / 会话 / 验证产物都在**便携根**的 `projects/<key>/` 里（不在用户仓库里）。
+ * 这些桶属于 IDE、不属于项目：项目改名或移动后就会留下孤儿桶，所以用户得能**看见**、能**收掉**
+ * —— "绿色"不只是"不往别处写"，也包括"写过的东西看得见、删得掉"。
+ *
+ * **只在确认后删**：桶里有暂存与写前备份，自动删等于替用户做决定。
+ */
+async function handleBucketCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_browser"));
+    return;
+  }
+  const rest = raw.replace(/^\S+/, "").trim();
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || "list").toLowerCase();
+
+  if (sub === "list" || sub === "ls") {
+    await window.refreshProjectBuckets?.();
+    setStatus(I18N.t("bucket.listed"));
+    return;
+  }
+  if (sub !== "delete" && sub !== "del" && sub !== "rm") {
+    setStatus(I18N.t("bucket.usage"), "error");
+    return;
+  }
+  const key = parts[1];
+  if (!key) {
+    setStatus(I18N.t("bucket.usage"), "error");
+    return;
+  }
+  const ok = await showConfirm(
+    I18N.t("bucket.del_title"),
+    I18N.t("bucket.del_confirm", { key, path: key })
+  );
+  if (!ok) return;
+  try {
+    await invoke("project_bucket_delete", { key });
+    setStatus(I18N.t("bucket.deleted", { key }));
+  } catch (err) {
+    setStatus(I18N.t("bucket.delete_fail", { err }), "error");
+  }
+  await window.refreshProjectBuckets?.();
+}
+
+async function handleProjectCommand(raw) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_browser"));
+    return;
+  }
+
+  const rest = raw.slice("project".length).trim();
+  if (!rest) {
+    setStatus(I18N.t("cmd.project.usage"));
+    return;
+  }
+
+  // project lang <lang> <path>
+  const langMatch = rest.match(/^lang\s+(\S+)\s+(.+)$/i);
+  if (langMatch) {
+    const lang = langMatch[1].toLowerCase();
+    const path = langMatch[2].trim();
+    try {
+      await invoke("set_project_lang", { path, lang });
+      setStatus(I18N.t("project.lang.ok", { lang: I18N.t(`lang.${lang}`) || lang }));
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.lang.fail", { err }), "error");
+    }
+    return;
+  }
+
+  // project edit "<path>" "<name>" <lang>
+  const editMatch = rest.match(/^edit\s+(.+)$/i);
+  if (editMatch) {
+    // parseQuotedTokens：保留 Windows 路径反斜杠，引号内可含空格
+    const args = parseQuotedTokens(editMatch[1]);
+    if (args.length !== 3) {
+      setStatus(I18N.t("cmd.project.edit_usage"));
+      return;
+    }
+    const [path, name, lang] = args;
+    try {
+      await invoke("update_project", { path, name, lang: lang.toLowerCase() });
+      setStatus(I18N.t("project.edit.ok", { name }));
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.edit.fail", { err }), "error");
+    }
+    return;
+  }
+
+  // project delete <path>（路径取剩余部分，自动去除外层引号）
+  const delMatch = rest.match(/^delete\s+(.+)$/i);
+  if (delMatch) {
+    let path = delMatch[1].trim();
+    if (
+      (path.startsWith('"') && path.endsWith('"')) ||
+      (path.startsWith("'") && path.endsWith("'"))
+    ) {
+      path = path.slice(1, -1);
+    }
+    try {
+      await invoke("delete_project", { path });
+      setStatus(I18N.t("project.delete.ok", { path }));
+      if (typeof loadProjectList === "function") await loadProjectList();
+    } catch (err) {
+      setStatus(I18N.t("project.delete.fail", { err }), "error");
+    }
+    return;
+  }
+
+  setStatus(I18N.t("cmd.project.usage"));
+}
+
+/**
+ * AI 命令：将自然语言翻译为标准命令后执行
+ */
+async function handleAiCommand(raw) {
+  console.log("[AI] 输入:", raw);
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+
+  // ============================================
+  // 二级：先尝试 Lua 脚本（零网络开销）
+  // ============================================
+  if (state.currentProject) {
+    try {
+      const luaResult = await invoke("lua_translate", {
+        input: raw,
+        projectRoot: state.currentProject.path
+      });
+      console.log("[AI] Lua 返回:", luaResult);
+      if (luaResult) {
+        // Lua 命中 → 直接执行命令，不再调用 LLM
+        const lines = luaResult.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+        console.log("[AI] Lua 命令:", lines);
+        for (const line of lines) {
+          await handleCommand(line, true);
+        }
+        setStatus("⚡ Lua: " + luaResult);
+        return;
+      }
+    } catch (err) {
+      console.warn("[AI] Lua 异常:", err);
+      // Lua 失败 → 静默降级到 LLM
+    }
+  }
+
+  // ============================================
+  // 三级：LLM API 调用
+  // ============================================
+  setStatus(I18N.t("status.thinking"));
+  try {
+    const result = await invoke("ai_translate", {
+      input: raw,
+      projectRoot: state.currentProject?.path || undefined
+    });
+    console.log("[AI] LLM 原始返回:", JSON.stringify(result));
+
+    // AI 返回了 (不支持) 提示
+    if (result.startsWith("不支持")) {
+      console.log("[AI] → 不支持");
+      setStatus(result, "error");
+      return;
+    }
+
+    // 闲聊回复（不是标准命令动词开头）→ 直接显示
+    const firstWord = result.split(/\s+/)[0]?.toLowerCase();
+    if (!["open", "close", "config", "new", "run", "help", "service", "services", "agent", "mcp", "a2a", "tools", "skill", "skills", "bucket", "buckets", "del", "delete", "remove", "rm", "rename", "mv", "git", "mem",
+      "memory"].includes(firstWord)) {
+      console.log("[AI] → 闲聊:", result);
+      setStatus(result);
+      return;
+    }
+
+    // AI 返回的标准命令，逐行执行（禁止递归 AI）
+    const lines = result.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    console.log("[AI] → 执行命令:", lines);
+    for (const line of lines) {
+      await handleCommand(line, true);
+    }
+  } catch (err) {
+    console.error("[AI] LLM 异常:", err);
+    setStatus(I18N.t("project.ai_fail", { err }), "error");
+  }
+}
+
+/**
+ * 处理 open 命令及其子命令
+ *   open project <path>  — 打开项目
+ *   open file <path>     — 打开文件 (待实现)
+ */
+async function handleOpenCommand(args, raw = "") {
+  if (args.length === 0) {
+    setStatus(I18N.t("cmd.open.usage"));
+    return;
+  }
+
+  const sub = args[0]?.toLowerCase();
+  // `open url <链接>`：从**原始串**里截（URL 别再被空白切一次）
+  const urlArg = (/^open\s+url\s+(.+)$/i.exec(String(raw).trim()) || [])[1] || "";
+  // project / file 的路径：handleCommand 入口是**哑空白切分**，引号原样混在 token 里；
+  // 而标题栏项目切换下拉发的是转义过的 `open project "D:\\Projects\\Go\\ai-gateway"`
+  // （main.js 的 escArg 把 \ 与 " 翻倍，约定由 parseQuotedTokens 还原）。哑 token
+  // 直接拼给后端 = 路径带着字面引号 → exists() 必然 false —— 实测 2026-09-23：
+  // 下拉切项目从来没成功过。路径首 token 带引号时从原始串用引号感知的分词器重切；
+  // 不带引号保持原样，UNC（\\server\share）打头的双反斜杠才不会被转义规则吃掉。
+  const targetPath = /^["']/.test(String(args[1] ?? ""))
+    ? parseQuotedTokens(String(raw).trim()).slice(2).join(" ")
+    : args.slice(1).join(" ");
+
+  switch (sub) {
+    case "project":
+      if (!targetPath) {
+        setStatus(I18N.t("cmd.open.project_usage"));
+        return;
+      }
+      await openProject(targetPath);
+      break;
+    case "file":
+      if (!targetPath) {
+        setStatus(I18N.t("cmd.open.file_usage"));
+        return;
+      }
+      await openFile(targetPath);
+      break;
+    case "url":
+      await openExternalUrl(urlArg || targetPath);
+      break;
+    default:
+      // 直接给一条链接（`open http://…`）也算：比 `open url http://…` 顺口，AI 也常这么翻
+      if (isUrlLike(sub)) {
+        await openExternalUrl(String(raw).trim().replace(/^open\s+/i, ""));
+        break;
+      }
+      setStatus(I18N.t("cmd.open.unknown", { sub }));
+  }
+}
+
+/** 去掉包裹的引号：`open url "http://…"` 是命令栏里最自然的写法 */
+function stripQuotes(s) {
+  const t = String(s ?? "").trim();
+  const first = t[0];
+  if (t.length >= 2 && (first === '"' || first === "'") && t[t.length - 1] === first) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
+/** 看着像链接（有 scheme）就给 `open` 一个机会 */
+function isUrlLike(s) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(String(s ?? "").trim());
+}
+
+/**
+ * 外链的**唯一出口**：交给操作系统浏览器。
+ *
+ * 为什么不能只是「让 WebView 打开」：整个 IDE 活在一个文档里（标签页只是 DOM 状态），
+ * 文档一换，标签栏 / 文件树 / 会话全跟着没 —— 这就是那个 P0。后端 `open_external`
+ * 只放行 http / https / mailto，并用系统默认处理程序打开。
+ */
+async function openExternalUrl(url) {
+  const target = stripQuotes(url);
+  if (!target) {
+    setStatus(I18N.t("cmd.open.url_usage"));
+    return;
+  }
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    // 浏览器直开（无后端）也没有"当前文档不能动"的问题，但仍不动它：开新标签
+    window.open(target, "_blank", "noopener");
+    return;
+  }
+
+  try {
+    const opened = await invoke("open_external", { url: target });
+    setStatus(I18N.t("link.opened", { url: opened || target }));
+  } catch (err) {
+    setStatus(I18N.t("cmd.open.url_fail", { err }), "error");
+  }
+}
+
+/**
+ * 处理 close 命令及其子命令
+ *   close project       — 关闭项目
+ *   close all           — 关闭所有文件
+ *   close <index>       — 按序号关闭（0-based，负数为从右数，-1 是最后一个）
+ *   close other/others  — 关闭除当前外的所有文件
+ *   close left          — 关闭当前文件左边的所有文件
+ *   close right         — 关闭当前文件右边的所有文件
+ */
+async function handleCloseCommand(args) {
+  if (args.length === 0) {
+    setStatus(I18N.t("cmd.close.usage"));
+    return;
+  }
+
+  const sub = args[0];
+
+  // 判断是否为数字（支持负数，如 -1 表示最后一个）
+  if (/^-?\d+$/.test(sub)) {
+    closeByIndex(parseInt(sub, 10));
+    return;
+  }
+
+  switch (sub.toLowerCase()) {
+    case "project":
+      closeProject();
+      break;
+    case "all":
+      closeAll();
+      break;
+    case "other":
+    case "others":
+      closeOthers();
+      break;
+    case "left":
+      closeLeft();
+      break;
+    case "right":
+      closeRight();
+      break;
+    default:
+      setStatus(I18N.t("cmd.close.unknown", { sub }));
+  }
+}
+
+// ============================================
+// 路径安全校验
+// ============================================
+
+/**
+ * 校验并拼接项目相对路径。返回完整路径，失败返回 null（已弹 setStatus）。
+ *
+ * 分隔符**跟项目根自己的那一种走**：根来自后端（Windows `D:\proj`、mac/Linux `/Users/…/proj`），
+ * 相对路径这一侧（命令栏手输 / 导航双击 / 右键新建）写成 `/` 还是 `\` 都要接得住。
+ * 以前这里写死 `+ "\\" +` —— 在 macOS 上拼出 `/Users/…/proj\src\main.rs` 这种路径，
+ * `read_file` 当然找不到（用户实测：导航里点文件 → 状态栏「打开文件失败」+ 一条带反斜杠的路径）。
+ */
+function resolveProjectPath(rawPath) {
+  if (!state.currentProject) {
+    setStatus(I18N.t("cmd.run.no_project"), "error");
+    return null;
+  }
+  if (/^\/|^[A-Za-z]:[/\\]/i.test(rawPath)) {
+    setStatus(I18N.t("status.no_permission"), "error");
+    return null;
+  }
+  // 根去掉尾部分隔符，再按它自己的那一种拼；相对路径里的连续分隔符一并归一
+  const base = String(state.currentProject.path).replace(/[/\\]+$/, "");
+  const sep = base.includes("\\") ? "\\" : "/";
+  const rel = String(rawPath).replace(/^[/\\]+/, "").replace(/[/\\]+/g, sep);
+  return rel ? base + sep + rel : base;
+}
+
+// ============================================
+// new 命令
+// ============================================
+
+/** 类型子命令 → 扩展名映射 */
+const TYPE_EXT = { py: ".py", rs: ".rs", md: ".md", c: ".c" };
+
+async function handleNewCommand(args) {
+  if (args.length < 2) {
+    setStatus(I18N.t("cmd.new.usage"));
+    return;
+  }
+
+  const sub = args[0]?.toLowerCase();
+  const rawPath = args.slice(1).join(" ");
+
+  const base = resolveProjectPath(rawPath);
+  if (!base) return;
+
+  // 类型子命令：自动追加扩展名
+  if (TYPE_EXT[sub]) {
+    await createNewFile(base + TYPE_EXT[sub]);
+    return;
+  }
+
+  // 通用子命令
+  if (sub === "file") {
+    await createNewFile(base);
+  } else if (sub === "folder" || sub === "dir") {
+    const invoke = getTauriInvoke();
+    if (!invoke) return;
+    try {
+      await invoke("create_dir", { path: base });
+      setStatus(I18N.t("cmd.new.dir_created", { path: rawPath }));
+      loadFileTree(state.currentProject.path);
+    } catch (err) {
+      setStatus(I18N.t("cmd.new.dir_failed", { err }), "error");
+    }
+  } else {
+    setStatus(I18N.t("cmd.new.unknown", { sub }));
+  }
+}
+
+// ============================================
+// refresh 命令 — 从磁盘刷新文件树
+// ============================================
+
+/**
+ * refresh            刷新整个文件树（项目根目录）
+ * refresh <相对路径>  刷新指定文件夹（保持展开状态）
+ */
+async function handleRefreshCommand(args) {
+  if (!state.currentProject) {
+    setStatus(I18N.t("cmd.run.no_project"), "error");
+    return;
+  }
+
+  // 无参数：整树刷新（含根目录新增/删除的文件）
+  if (args.length === 0 || args.every((a) => a === "")) {
+    try {
+      await loadFileTree(state.currentProject.path);
+      setStatus(I18N.t("cmd.refresh.ok"));
+    } catch (err) {
+      setStatus(I18N.t("cmd.refresh.failed", { err }), "error");
+    }
+    return;
+  }
+
+  // 带参数：定向刷新指定文件夹
+  const rawPath = args.join(" ");
+  const base = resolveProjectPath(rawPath);
+  if (!base) return;
+
+  try {
+    const ok = await refreshTreeNode(base);
+    if (ok) {
+      setStatus(I18N.t("cmd.refresh.dir_ok", { path: rawPath }));
+    } else {
+      setStatus(I18N.t("cmd.refresh.not_found", { path: rawPath }), "error");
+    }
+  } catch (err) {
+    setStatus(I18N.t("cmd.refresh.failed", { err }), "error");
+  }
+}
+
+async function createNewFile(fullPath) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    await invoke("create_file", { path: fullPath });
+    setStatus(I18N.t("cmd.new.file_created", { path: fullPath }));
+    // 自动打开新文件
+    await openFile(fullPath);
+    // 刷新文件树
+    if (state.currentProject) {
+      loadFileTree(state.currentProject.path);
+    }
+  } catch (err) {
+    setStatus(I18N.t("cmd.new.file_failed", { err }), "error");
+  }
+}
+
+async function handleDeleteCommand(raw, skipConfirm = false) {
+  // 提取相对路径（去掉动词）
+  const rawPath = raw.replace(/^\S+\s+/, "").trim();
+  if (!rawPath) {
+    setStatus(I18N.t("cmd.delete.usage"));
+    return;
+  }
+
+  const fullPath = resolveProjectPath(rawPath);
+  if (!fullPath) return;
+
+  if (!skipConfirm) {
+    const ok = await showConfirm("删除", I18N.t("cmd.delete.confirm", { path: fullPath }));
+    if (!ok) return;
+  }
+
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    await invoke("delete_path", { path: fullPath });
+    setStatus(I18N.t("cmd.delete.success", { path: rawPath }));
+    // 关闭已打开的标签页
+    const tab = state.tabs.find((t) => t.path === fullPath);
+    if (tab) closeTab(tab.id);
+    loadFileTree(state.currentProject.path);
+  } catch (err) {
+    setStatus(I18N.t("cmd.delete.failed", { err }), "error");
+  }
+}
+
+// ============================================
+// rename / mv 命令
+// ============================================
+
+async function handleRenameCommand(args) {
+  if (args.length < 2) {
+    setStatus(I18N.t("cmd.rename.usage"), "error");
+    return;
+  }
+
+  const oldRaw = args[0];
+  const newRaw = args.slice(1).join(" ");
+
+  // 非法字符检测
+  const illegal = /[<>:"/\\|?*]/;
+  if (illegal.test(newRaw)) {
+    setStatus(I18N.t("cmd.rename.illegal_chars"), "error");
+    return;
+  }
+
+  const oldPath = resolveProjectPath(oldRaw);
+  if (!oldPath) return;
+
+  const parentDir = oldPath.replace(/[/\\][^/\\]*$/, "");
+  const newPath = parentDir + "\\" + newRaw;
+
+  // 目标路径检查
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+  try {
+    const exists = await invoke("path_exists", { path: newPath });
+    if (exists) {
+      setStatus(I18N.t("cmd.rename.exists", { path: newRaw }), "error");
+      return;
+    }
+  } catch {}
+
+  try {
+    await invoke("rename_path", { from: oldPath, to: newPath });
+    const oldName = oldPath.split(/[/\\]/).pop();
+    setStatus(I18N.t("cmd.rename.ok", { old: oldName, new: newRaw }));
+    // 关闭旧标签
+    const tab = state.tabs.find((t) => t.path === oldPath);
+    if (tab) closeTab(tab.id);
+    if (state.currentProject) loadFileTree(state.currentProject.path);
+  } catch (err) {
+    setStatus(I18N.t("cmd.rename.fail", { err }), "error");
+  }
+}
+
+// ============================================
+// git 命令
+// ============================================
+
+/**
+ * git 命令：直接执行系统 git 命令（不设计子命令 DSL，原样透传给 git）
+ * 语法: git <任意 git 子命令>，例如 git status / git add -A / git commit -m "x"
+ * - AI 路径（_fromAi=true）：输出到编辑区终端标签页
+ * - GUI / 命令栏路径（_fromAi=false）：状态栏提示 + 刷新 Git 面板
+ */
+async function handleGitCommand(raw, _fromAi = false) {
+  const rest = raw.replace(/^\S+\s*/, "").trim();
+  if (!rest) {
+    setStatus(I18N.t("git.usage"), "error");
+    return;
+  }
+  if (!state.currentProject) {
+    setStatus(I18N.t("git.no_project"), "error");
+    return;
+  }
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+
+  if (_fromAi) {
+    await runGitInTab(rest);
+    return;
+  }
+
+  // GUI 路径：静默执行
+  setStatus(I18N.t("git.executing", { cmd: rest }));
+  try {
+    const out = await invoke("git_run", { args: rest, projectRoot: state.currentProject.path });
+    if (out.exit_code === 0) {
+      setStatus(I18N.t("git.done", { cmd: rest }));
+    } else {
+      const errMsg = (out.stderr || out.stdout || "").trim().split("\n")[0] || L("未知错误", "unknown error");
+      setStatus(I18N.t("git.fail", { cmd: rest, err: errMsg }), "error");
+    }
+  } catch (err) {
+    setStatus(I18N.t("git.fail", { cmd: rest, err }), "error");
+  }
+  if (typeof loadGitStatus === "function") await loadGitStatus();
+}
+
+/**
+ * 在编辑区打开输出标签页执行 git 命令（AI 路径）
+ */
+async function runGitInTab(rest) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return;
+
+  const verb = rest.split(/\s+/)[0] || "git";
+  const tab = {
+    id: "git-" + Date.now().toString(),
+    name: "git " + verb,
+    path: "",
+    content: "git " + rest,
+    _runTarget: true,
+  };
+  state.tabs.push(tab);
+  renderTabs();
+  switchTab(tab.id);
+  renderTerminalOutput(tab, `> git ${rest}\n\n${I18N.t("runtarget.executing")}`);
+
+  try {
+    const result = await invoke("git_run", { args: rest, projectRoot: state.currentProject?.path });
+    let output = `> git ${rest}\n`;
+    if (result.stdout) {
+      output += result.stdout;
+      if (!result.stdout.endsWith("\n")) output += "\n";
+    }
+    if (result.stderr) {
+      output += result.stderr;
+      if (!result.stderr.endsWith("\n")) output += "\n";
+    }
+    if (result.exit_code != null) {
+      output += `\n[进程退出，代码: ${result.exit_code}]`;
+    } else {
+      output += `\n[进程结束]`;
+    }
+    renderTerminalOutput(tab, output);
+    if (result.exit_code === 0) {
+      setStatus(I18N.t("git.done", { cmd: rest }));
+    } else {
+      setStatus(I18N.t("git.fail", { cmd: rest, err: "exit " + result.exit_code }), "error");
+    }
+  } catch (err) {
+    renderTerminalOutput(tab, `> git ${rest}\n\n[错误] ${err}`);
+    setStatus(I18N.t("git.fail", { cmd: rest, err }), "error");
+  }
+  if (typeof loadGitStatus === "function") await loadGitStatus();
+}
+
+// ============================================
+// config 命令
+// ============================================
+
+/**
+ * 解析 config 命令
+ * 格式: config <action> [-g|-p|-r] [key] 或 config <action> [-g|-p|-r] key="value"
+ * 默认 scope 为 -r (runtime)
+ */
+async function handleConfigCommand(raw) {
+  // 去掉 "config " 前缀
+  const rest = raw.slice("config".length).trim();
+  if (!rest) {
+    setStatus(I18N.t("cmd.config.sub_usage"));
+    return;
+  }
+
+  // 配置表单子动词（扫描配置项 → 表单）在 config.js，路由过去
+  const first = rest.split(/\s+/)[0].toLowerCase();
+  if (["form", "save", "apply", "cancel"].includes(first)) {
+    await window.ConfigUI?.handleCommand(rest);
+    return;
+  }
+
+  // 解析: action scope key=value
+  // 分词：保留引号内容
+  const tokens = parseConfigTokens(rest);
+  if (tokens.length === 0) {
+    setStatus(I18N.t("cmd.config.sub_usage"));
+    return;
+  }
+
+  const actions = ["add", "get", "update", "remove", "delete"];
+  let idx = 0;
+
+  // 子命令
+  const action = tokens[idx]?.toLowerCase();
+  if (!actions.includes(action)) {
+    setStatus(I18N.t("cmd.config.unknown", { action, actions: actions.join(", ") }));
+    return;
+  }
+  idx++;
+
+  // scope 标志
+  let scope = "r";
+  if (tokens[idx] === "-g" || tokens[idx] === "-p" || tokens[idx] === "-r") {
+    scope = tokens[idx].slice(1);
+    idx++;
+  }
+
+  // key[=value]
+  const kv = tokens.slice(idx).join(" "); // 剩余的合并
+  const eqIdx = kv.indexOf("=");
+  const key = eqIdx >= 0 ? kv.slice(0, eqIdx).trim() : kv.trim();
+  const value = eqIdx >= 0 ? kv.slice(eqIdx + 1).trim() : null;
+
+  // 去掉 value 外层的引号
+  let cleanValue = value;
+  if (cleanValue) {
+    if (
+      (cleanValue.startsWith('"') && cleanValue.endsWith('"')) ||
+      (cleanValue.startsWith("'") && cleanValue.endsWith("'"))
+    ) {
+      cleanValue = cleanValue.slice(1, -1);
+    }
+  }
+
+  if (!key) {
+    setStatus(I18N.t("cmd.config.missing_key"));
+    return;
+  }
+
+  await executeConfigAction(action, scope, key, cleanValue);
+}
+
+/**
+ * 分词：按空格分割但保留引号内内容。
+ * 与 parseConfigTokens 不同：引号内反斜杠原样保留（兼容 Windows 路径），
+ * 仅 \" 和 \\ 作为转义处理。
+ */
+function parseQuotedTokens(s) {
+  const tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    // 跳过空白
+    while (i < s.length && s[i] === " ") i++;
+    if (i >= s.length) break;
+
+    // 引号包裹
+    if (s[i] === '"' || s[i] === "'") {
+      const quote = s[i];
+      i++;
+      let tok = "";
+      while (i < s.length && s[i] !== quote) {
+        if (
+          s[i] === "\\" &&
+          i + 1 < s.length &&
+          (s[i + 1] === quote || s[i + 1] === "\\")
+        ) {
+          tok += s[i + 1];
+          i += 2;
+        } else {
+          tok += s[i];
+          i++;
+        }
+      }
+      i++; // 跳过闭合引号
+      tokens.push(tok);
+    } else {
+      let tok = "";
+      while (i < s.length && s[i] !== " ") {
+        tok += s[i];
+        i++;
+      }
+      tokens.push(tok);
+    }
+  }
+  return tokens;
+}
+
+/**
+ * 分词：按空格分割但保留引号内内容
+ */
+function parseConfigTokens(s) {
+  const tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    // 跳过空白
+    while (i < s.length && s[i] === " ") i++;
+    if (i >= s.length) break;
+
+    // 引号包裹
+    if (s[i] === '"' || s[i] === "'") {
+      const quote = s[i];
+      i++;
+      let tok = "";
+      while (i < s.length && s[i] !== quote) {
+        if (s[i] === "\\" && i + 1 < s.length) {
+          tok += s[i + 1];
+          i += 2;
+        } else {
+          tok += s[i];
+          i++;
+        }
+      }
+      i++; // 跳过闭合引号
+      tokens.push(tok);
+    } else {
+      let tok = "";
+      while (i < s.length && s[i] !== " ") {
+        tok += s[i];
+        i++;
+      }
+      tokens.push(tok);
+    }
+  }
+  return tokens;
+}
+
+/**
+ * 执行配置操作
+ */
+async function executeConfigAction(action, scope, key, value) {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_unavail"));
+    return;
+  }
+
+  const scopeMap = { g: "global", p: "project", r: "runtime" };
+
+  // 从 state 取项目根路径（确保不为空字符串）
+  const projectRoot = state.currentProject?.path || undefined;
+  if (projectRoot === undefined && state.currentProject) {
+    setStatus(I18N.t("cmd.config.internal_err"), "error");
+    return;
+  }
+
+  // -p 需要已打开项目
+  if (scope === "p" && !projectRoot) {
+    setStatus(I18N.t("cmd.config.no_project"), "error");
+    return;
+  }
+
+  switch (action) {
+    case "add":
+      {
+        try {
+          const existing = await invoke("config_get", {
+            scope: scopeMap[scope],
+            key,
+            projectRoot,
+          });
+          if (existing != null) {
+            setStatus(I18N.t("cmd.config.exists", { key, val: existing }), "error");
+            return;
+          }
+        } catch {
+          // get 失败视为不存在
+        }
+        try {
+          await invoke("config_set", { scope: scopeMap[scope], key, value, projectRoot });
+          setStatus(I18N.t("cmd.config.add_ok", { key, val: value }));
+        } catch (err) {
+          setStatus(I18N.t("cmd.config.add_fail", { err }), "error");
+        }
+      }
+      break;
+
+    case "get":
+      {
+        try {
+          const val = await invoke("config_get", { scope: scopeMap[scope], key, projectRoot });
+          if (val == null) {
+            setStatus(I18N.t("cmd.config.not_found", { key }), "error");
+          } else {
+            setStatus(`${key} = ${val}`);
+          }
+        } catch (err) {
+          setStatus(I18N.t("cmd.config.get_fail", { err }), "error");
+        }
+      }
+      break;
+
+    case "update":
+      {
+        try {
+          await invoke("config_set", { scope: scopeMap[scope], key, value, projectRoot });
+          setStatus(I18N.t("cmd.config.update_ok", { key, val: value }));
+        } catch (err) {
+          setStatus(I18N.t("cmd.config.update_fail", { err }), "error");
+        }
+      }
+      break;
+
+    case "remove":
+    case "delete":
+      {
+        try {
+          await invoke("config_delete", { scope: scopeMap[scope], key, projectRoot });
+          setStatus(I18N.t("cmd.config.delete_ok", { key }));
+        } catch (err) {
+          setStatus(I18N.t("cmd.delete.failed", { err }), "error");
+        }
+      }
+      break;
+  }
+}
+
+// ============================================
+// close 命令实现
+// ============================================
+
+/**
+ * 清场当前项目：逐个关闭终端 PTY、清空标签页、回到欢迎页。
+ * 关闭项目与切换项目（openProject）共用。
+ */
+function teardownProject() {
+  // 逐个关闭终端标签页的 PTY 进程，避免关闭/切换项目后进程泄漏
+  const invoke = getTauriInvoke();
+  if (invoke) {
+    state.tabs.forEach((t) => {
+      if (t._isTerminal) {
+        invoke("pty_close", { tabId: t.id }).catch(() => {});
+        if (t._ptyUnlisten) t._ptyUnlisten();
+        if (t._term) t._term.dispose();
+      }
+    });
+  }
+
+  state.currentProject = null;
+  if (typeof updateProjectMenu === "function") updateProjectMenu();
+  updateTitlebarTitle();
+  if (typeof updateWindowTitle === "function") updateWindowTitle();
+  showWelcomePage();
+}
+
+function closeProject() {
+  if (!state.currentProject) {
+    setStatus(I18N.t("close.project.none"));
+    return;
+  }
+
+  const name = state.currentProject.name;
+  teardownProject();
+  setStatus(I18N.t("close.project.ok", { name }));
+}
+
+function closeAll() {
+  if (state.tabs.length === 0) {
+    setStatus(I18N.t("close.all.none"));
+    return;
+  }
+  state.tabs = [];
+  state.activeTabId = null;
+  renderTabs();
+  hideEditor();
+  setStatus(I18N.t("close.all.ok"));
+}
+
+/**
+ * 按序号关闭标签页。
+ * 正数: 0-based 从左到右
+ * 负数: -1-based 从右到左（-1 = 最后一个）
+ */
+function closeByIndex(index) {
+  if (state.tabs.length === 0) {
+    setStatus(I18N.t("close.all.none"));
+    return;
+  }
+  const i = index >= 0 ? index : state.tabs.length + index;
+  if (i < 0 || i >= state.tabs.length) {
+    setStatus(I18N.t("close.index.range", { index, total: state.tabs.length }));
+    return;
+  }
+  const tab = state.tabs[i];
+  closeTab(tab.id);
+  setStatus(I18N.t("close.one.ok", { name: tab.name }));
+}
+
+/** 关闭除当前活动标签外的所有标签 */
+function closeOthers() {
+  if (state.tabs.length <= 1) {
+    setStatus(I18N.t("close.other.none"));
+    return;
+  }
+  const active = state.tabs.find((t) => t.id === state.activeTabId);
+  state.tabs = active ? [active] : [];
+  renderTabs();
+  setStatus(I18N.t("close.other.ok"));
+}
+
+/** 关闭当前活动标签左边的所有标签 */
+function closeLeft() {
+  const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+  if (idx <= 0) {
+    setStatus(I18N.t("close.left.none"));
+    return;
+  }
+  const removed = state.tabs.slice(0, idx).map((t) => t.name).join(", ");
+  state.tabs = state.tabs.slice(idx);
+  renderTabs();
+  setStatus(I18N.t("close.left.ok", { names: removed }));
+}
+
+/** 关闭当前活动标签右边的所有标签 */
+function closeRight() {
+  const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+  if (idx < 0 || idx >= state.tabs.length - 1) {
+    setStatus(I18N.t("close.right.none"));
+    return;
+  }
+  const removed = state.tabs.slice(idx + 1).map((t) => t.name).join(", ");
+  state.tabs = state.tabs.slice(0, idx + 1);
+  renderTabs();
+  setStatus(I18N.t("close.right.ok", { names: removed }));
+}
+
+/**
+ * 调用后端打开项目
+ */
+async function openProject(path) {
+  const invoke = getTauriInvoke();
+
+  if (!invoke) {
+    // 浏览器开发模式 — 模拟打开项目
+    setStatus(I18N.t("status.tauri_browser"));
+    return;
+  }
+
+  // 已是当前项目：直接返回
+  if (state.currentProject && samePath(state.currentProject.path, path)) {
+    setStatus(I18N.t("open.project.already"));
+    return;
+  }
+
+  // 切换项目：先清场当前项目（关 PTY、清标签页、回欢迎页）
+  if (state.currentProject) {
+    teardownProject();
+  }
+
+  try {
+    setStatus(I18N.t("open.project.opening"));
+    const info = await invoke("open_project", { path });
+
+    // 保存项目信息
+    state.currentProject = info;
+
+    // 更新项目菜单状态
+    if (typeof updateProjectMenu === "function") updateProjectMenu();
+
+    // 切换为项目工作区视图
+    showProjectWorkspace();
+    // 会话列表跟着项目走：必须在这里触发一次（启动时 attach() 那次往往还没有项目，
+    // 早退之后再没人叫它 —— 这就是"重启 IDE 会话历史全丢"的根因）
+    window.SessionUI?.syncForProject?.(true);
+    updateTitlebarTitle();
+    if (typeof updateWindowTitle === "function") updateWindowTitle();
+    setStatus(I18N.t("open.project.ok", { path: info.path }));
+  } catch (err) {
+    setStatus(I18N.t("open.project.fail", { err }), "error");
+  }
+}
+
+/**
+ * 调用后端打开文件，创建标签页并高亮
+ */
+async function openFile(path) {
+  const fullPath = resolveProjectPath(path);
+  if (!fullPath) return;
+
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    setStatus(I18N.t("status.tauri_browser"));
+    return;
+  }
+
+  // 检查是否已打开
+  const existing = state.tabs.find((t) => t.path === fullPath);
+  if (existing) {
+    switchTab(existing.id);
+    setStatus(I18N.t("open.file.switched", { name: existing.name }));
+    return;
+  }
+
+  // 提取文件名和扩展名
+  const name = fullPath.split(/[/\\]/).pop() || fullPath;
+  const ext = name.split(".").pop()?.toLowerCase();
+
+  // 图片文件：读取 base64 数据用于预览
+  if (typeof isImageExt === "function" && isImageExt(ext)) {
+    try {
+      setStatus(I18N.t("open.file.reading"));
+      const data = await invoke("read_file_base64", { path: fullPath });
+      const tab = {
+        id: Date.now().toString(),
+        name,
+        path: data.path || fullPath,
+        content: "",
+        _isImage: true,
+        _imageMime: data.mime,
+        _imageBase64: data.base64,
+      };
+      state.tabs.push(tab);
+      renderTabs();
+      switchTab(tab.id);
+      setStatus(I18N.t("open.file.ok", { name }));
+    } catch (err) {
+      setStatus(I18N.t("open.file.fail", { err }), "error");
+    }
+    return;
+  }
+
+  try {
+    setStatus(I18N.t("open.file.reading"));
+    const file = await invoke("read_file", { path: fullPath });
+
+    // 创建标签页
+    const tab = { id: Date.now().toString(), name, path: file.path, content: file.content };
+    // 超长行（>2000 视觉列）先打标记：下一行 renderTabs() 就能一次把图标画成 🔒，
+    // 不留"先画成普通文件、再闪一下变锁"的中间态
+    tab._wideReadOnly = isWideText(tab.content);
+    state.tabs.push(tab);
+    renderTabs();
+    switchTab(tab.id);
+
+    // 语法高亮：根据扩展名确定语言；宽行走只读分块视图（不进 tree-sitter，理由见 renderWideReadOnly）
+    const lang = extToLanguage(ext);
+    if (tab._wideReadOnly) {
+      renderWideReadOnly(tab);
+    } else if (lang) {
+      await highlightAndRender(tab, lang);
+    } else {
+      renderPlainCode(tab);
+    }
+
+    setStatus(I18N.t("open.file.ok", { name }));
+  } catch (err) {
+    setStatus(I18N.t("open.file.fail", { err }), "error");
+  }
+}

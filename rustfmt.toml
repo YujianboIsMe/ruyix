@@ -1,0 +1,10 @@
+# Rust 代码风格配置 —— Google 的 Rust 风格即 rustfmt 风格
+# 参考：Fuchsia Rust style guide（Google 采用的 Rust 风格指南）
+#   https://fuchsia.dev/fuchsia-src/development/languages/rust/rust-idiom
+# 除下列参数外一律用 rustfmt 默认值；本地/CI 门禁：cargo fmt --check
+#
+# 注：format_code_in_doc_comments 等选项属于 nightly 专属，stable 下会告警，
+# 因此这里只保留 stable 可用的参数。
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true

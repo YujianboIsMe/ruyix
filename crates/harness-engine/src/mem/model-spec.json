@@ -1,0 +1,40 @@
+{
+  "_comment": "嵌入模型的**规格**（该取什么、怎么校验）。几百字节的元数据，用 include_str! 编进二进制 —— 于是**只有单 exe 也能自检并下载模型**。权重本身不进 git、也不在外面裸放：它落 <便携根>/global/memory/model/ 下。这份清单是 Node 取模型步骤与运行时兜底的**同一份事实**：谁都不许另抄一遍。",
+  "_provenance": "逐文件 sha256 来自 ModelScope 的 BAAI/bge-small-zh-v1.5（master 修订），2026-09-25 实测。换源（hf 兜底）拿到不同字节时不接受 —— 那时我们不知道拿到的是什么，宁可报错并把两个哈希都打出来。",
+  "model": "BAAI/bge-small-zh-v1.5",
+  "dir_name": "bge-small-zh-v1.5",
+  "dim": 512,
+  "sources": [
+    {
+      "tag": "modelscope",
+      "url": "https://www.modelscope.cn/api/v1/models/BAAI/bge-small-zh-v1.5/repo?Revision=master&FilePath={file}"
+    },
+    {
+      "tag": "huggingface",
+      "url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/main/{file}"
+    }
+  ],
+  "files": [
+    {
+      "name": "config.json",
+      "bytes": 776,
+      "sha256": "3853a7979202c348751b753e36f579c41d8da7d36af617d3d907e1fc9b441f2a"
+    },
+    {
+      "name": "tokenizer.json",
+      "bytes": 439125,
+      "sha256": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26"
+    },
+    {
+      "name": "model.safetensors",
+      "bytes": 95827648,
+      "sha256": "354763b9b1357bc9c44f62c6be2276321081ed2567773608c0d0785b61d5a026"
+    },
+    {
+      "name": "vocab.txt",
+      "bytes": 109540,
+      "sha256": "45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c",
+      "optional": true
+    }
+  ]
+}

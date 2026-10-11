@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ruyix</title>
+  <link rel="icon" type="image/svg+xml" href="logo/logo.svg" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="packages/xterm.css" />
+    <!-- 后端消息的英文翻译（bug 1/2 收尾）：必须在 main.js / 各面板之前 -->
+    <script src="scripts/errors.js"></script>
+  <script src="packages/xterm.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- 眉部：菜单区 + Windows 窗口按钮 -->
+    <header id="titlebar" data-tauri-drag-region>
+      <div class="titlebar-left">
+        <nav class="menu-bar">
+          <!-- 项目 -->
+          <span class="menu-item" id="menu-project" style="position:relative">
+            <span data-i18n="menu.project">项目</span>
+            <div class="menu-dropdown" id="menu-project-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-action="new-project" data-i18n="menu.project.new">新建</div>
+              <div class="menu-dropdown-item" data-action="close-project" data-i18n="menu.project.close">退出</div>
+            </div>
+          </span>
+          <!-- 配置 -->
+          <span class="menu-item" id="menu-config" style="position:relative">
+            <span data-i18n="menu.config">配置</span>
+            <div class="menu-dropdown" id="menu-config-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-config-scope="global" data-i18n="menu.config.global">全局</div>
+              <div class="menu-dropdown-item" data-config-scope="project" data-i18n="menu.config.project">项目</div>
+              <div class="menu-dropdown-item" data-config-scope="runtime" data-i18n="menu.config.runtime">运行</div>
+            </div>
+          </span>
+          <!-- 能力：MCP / A2A / 工具 / SKILL -->
+          <span class="menu-item" id="menu-capability" style="position:relative">
+            <span data-i18n="menu.capability">能力 ▾</span>
+            <div class="menu-dropdown" id="menu-capability-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-cap="mcp" data-i18n="menu.cap.mcp">MCP 服务器</div>
+              <div class="menu-dropdown-item" data-cap="a2a" data-i18n="menu.cap.a2a">A2A 远端</div>
+              <div class="menu-dropdown-item" data-cap="tools" data-i18n="menu.cap.tools">工具（命令行白名单）</div>
+              <div class="menu-dropdown-item" data-cap="skills" data-i18n="menu.cap.skills">SKILL（技能）</div>
+            </div>
+          </span>
+          <!-- 语言 -->
+          <span class="menu-item" id="menu-lang" style="position:relative">
+            <span data-i18n="menu.lang">语言 ▾</span>
+            <div class="menu-dropdown" id="menu-lang-dropdown" style="display:none">
+              <div class="menu-dropdown-item" data-lang="zh-CN">
+                <span data-i18n="menu.lang.zh">中文</span><span class="lang-check">✔️</span>
+              </div>
+              <div class="menu-dropdown-item" data-lang="en">
+                <span data-i18n="menu.lang.en">English</span><span class="lang-check">✔️</span>
+              </div>
+            </div>
+          </span>
+          <!-- 服务：agent 用 background 起的托管进程（mvn spring-boot:run / java -jar …），
+               引擎持有、UI 原先看不见也停不掉 —— 这个面板读的是引擎同一份表 -->
+          <span class="menu-item" id="menu-memory" style="position:relative">
+            <span data-i18n="mem.menu">记忆</span>
+          </span>
+          <span class="menu-item" id="menu-service" style="position:relative">
+            <span data-i18n="menu.service">服务</span>
+          </span>
+          <!-- 帮助 -->
+          <span class="menu-item" id="menu-help" style="position:relative">
+            <span data-i18n="menu.help">帮助</span>
+          </span>
+        </nav>
+      </div>
+      <div class="titlebar-center" data-tauri-drag-region>
+        <!-- 点击项目名快速切换项目（no-drag 保证可点击） -->
+        <div id="project-switch-trigger" class="project-switch-trigger"
+             data-tauri-drag-region="false" data-i18n-title="titlebar.switch_project">
+          <span id="titlebar-title" class="titlebar-title">ruyix</span>
+          <span id="project-switch-arrow" class="project-switch-arrow" style="display:none">▾</span>
+          <div id="project-switch-dropdown" class="menu-dropdown project-switch-dropdown" style="display:none"></div>
+        </div>
+      </div>
+      <div class="titlebar-right">
+        <button class="window-btn" id="btn-minimize" title="最小化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="window-btn" id="btn-maximize" title="最大化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+        </button>
+        <button class="window-btn window-btn--close" id="btn-close" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 工作区 -->
+    <main id="workspace">
+      <!-- 项目工作区始终可见 -->
+      <div id="project-workspace" class="project-layout">
+        <!-- 导航区：多标签页侧边栏 -->
+        <aside id="navigator" class="navigator">
+          <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="projects">项目列表</button>
+            <button class="nav-tab" data-tab="files">项目文件</button>
+            <button class="nav-tab" data-tab="terminal">终端资源</button>
+            <button class="nav-tab" data-tab="target">运行目标</button>
+            <button class="nav-tab" data-tab="sessions" data-i18n="nav.tab_sessions">会话</button>
+            <button class="nav-tab" data-tab="capability" data-i18n="nav.tab_capability">能力</button>
+          </div>
+          <div class="nav-content">
+            <div id="nav-panel-projects" class="nav-panel active">
+              <div id="project-list" class="project-list"></div>
+            </div>
+            <div id="nav-panel-files" class="nav-panel">
+              <div id="file-tree" class="file-tree"></div>
+            </div>
+            <div id="nav-panel-terminal" class="nav-panel">
+              <!-- 终端目标是**可添加的**（bug 4）：与「运行目标」同一套形态，
+                 内置的那几条（PowerShell / Cmd / …）仍在这里，用户加的自己往下排。 -->
+            <div class="terminal-add-row">
+              <button id="terminal-add" class="terminal-add" data-i18n="terminal.add">➕ 添加终端</button>
+            </div>
+            <ul id="terminal-list" class="terminal-list">
+                <li data-cmd="powershell.exe">
+                  <span class="terminal-name">PowerShell</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="cmd.exe">
+                  <span class="terminal-name">Cmd</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="wsl.exe">
+                  <span class="terminal-name">Ubuntu (WSL)</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="claude">
+                  <span class="terminal-name">Claude</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="python.exe">
+                  <span class="terminal-name">Python</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="node.exe">
+                  <span class="terminal-name">Node.js</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+                <li data-cmd="&quot;C:\Program Files\Git\bin\bash.exe&quot; --login -i"
+                    data-cmd-window="&quot;C:\Program Files\Git\git-bash.exe&quot;">
+                  <span class="terminal-name">Git Bash</span>
+                  <span class="terminal-new-window" title="在新窗口中打开">🪟</span>
+                </li>
+              </ul>
+            </div>
+            <div id="nav-panel-target" class="nav-panel">
+              <div id="run-targets-list" class="run-targets-list"></div>
+            </div>
+            <div id="nav-panel-sessions" class="nav-panel">
+              <button id="session-new-btn" class="agent-btn agent-btn--run" data-i18n="session.new">＋ 新建会话</button>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="session.list">会话列表</div>
+                <div id="session-list" class="agent-history-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="agent.env">环境探针</div>
+                <div id="agent-env-chips" class="agent-env-chips"></div>
+              </div>
+            </div>
+          <div id="nav-panel-capability" class="nav-panel">
+          <div class="cap-sub-tabs">
+            <button class="cap-sub-tab active" data-cap-tab="mcp" data-i18n="cap.tab_mcp">MCP</button>
+            <button class="cap-sub-tab" data-cap-tab="a2a" data-i18n="cap.tab_a2a">A2A</button>
+            <button class="cap-sub-tab" data-cap-tab="tools" data-i18n="cap.tab_tools">工具</button>
+            <button class="cap-sub-tab" data-cap-tab="skills" data-i18n="cap.tab_skills">技能</button>
+          </div>
+          <div id="cap-sub-mcp" class="cap-sub-panel active">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.servers">MCP 服务器</div>
+                <div id="mcp-server-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.add">添加服务器</div>
+                <input type="text" id="mcp-add-name" class="a2a-input"
+                       placeholder="名称，例如 fs" data-i18n-placeholder="mcp.name_ph">
+                <input type="text" id="mcp-add-command" class="a2a-input"
+                       placeholder="命令，例如 npx -y @modelcontextprotocol/server-filesystem /tmp"
+                       data-i18n-placeholder="mcp.cmd_ph">
+                <button id="mcp-add-btn" class="agent-btn agent-btn--run" data-i18n="mcp.add_btn">＋ 添加</button>
+              </div>
+              <div id="mcp-tool-section" class="agent-side-section" style="display:none">
+                <div class="agent-side-title"><span id="mcp-selected-name"></span>
+                  <button id="mcp-start-btn" class="agent-btn agent-btn--run mcp-mini-btn" data-i18n="mcp.connect">连接</button>
+                  <button id="mcp-stop-btn" class="agent-btn agent-btn--cancel mcp-mini-btn" data-i18n="mcp.disconnect" style="display:none">断开</button>
+                </div>
+                <div id="mcp-tool-list" class="mcp-tool-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="mcp.call">调用工具</div>
+                <select id="mcp-call-tool" class="a2a-input"><option value="">—</option></select>
+                <textarea id="mcp-call-args" class="agent-task-input" rows="3"
+                          placeholder='参数 JSON，例如 {"path": "src/main.rs"}'
+                          data-i18n-placeholder="mcp.args_ph"></textarea>
+                <button id="mcp-call-btn" class="agent-btn agent-btn--run" data-i18n="mcp.call_btn">▶ 调用</button>
+                <pre id="mcp-call-result" class="mcp-call-result"></pre>
+              </div>
+            </div>
+            <div id="cap-sub-a2a" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="a2a.agents">远端 Agent</div>
+                <div id="a2a-agent-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="a2a.discover">发现 Agent</div>
+                <input type="text" id="a2a-discover-url" class="a2a-input"
+                       placeholder="基址 URL，例如 http://127.0.0.1:9000"
+                       data-i18n-placeholder="a2a.url_ph">
+                <button id="a2a-discover-btn" class="agent-btn agent-btn--run" data-i18n="a2a.discover_btn">🔍 发现</button>
+              </div>
+              <div id="a2a-task-section" class="agent-side-section" style="display:none">
+                <div class="agent-side-title" data-i18n="a2a.task">委托任务 → <span id="a2a-selected-name"></span></div>
+                <textarea id="a2a-task-input" class="agent-task-input" rows="3"
+                          placeholder="任务描述" data-i18n-placeholder="a2a.task_ph"></textarea>
+                <button id="a2a-send-btn" class="agent-btn agent-btn--run" data-i18n="a2a.send_btn">▶ 发送</button>
+                <div id="a2a-state-line" class="a2a-state-line"></div>
+                <pre id="a2a-result" class="mcp-call-result"></pre>
+              </div>
+            </div>
+            <div id="cap-sub-tools" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="tools.list">工具白名单</div>
+                <div id="tools-list" class="mcp-server-list"></div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="tools.add">添加工具</div>
+                <input type="text" id="tools-add-name" class="a2a-input"
+                       placeholder="名称，例如 graphviz" data-i18n-placeholder="tools.name_ph">
+                <input type="text" id="tools-add-command" class="a2a-input"
+                       placeholder="命令（缺省同名称），例如 dot" data-i18n-placeholder="tools.cmd_ph">
+                <input type="text" id="tools-add-desc" class="a2a-input"
+                       placeholder="描述（给 agent 看的用途说明）" data-i18n-placeholder="tools.desc_ph">
+                <button id="tools-add-btn" class="agent-btn agent-btn--run" data-i18n="tools.add_btn">＋ 添加</button>
+              </div>
+            </div>
+            <div id="cap-sub-skills" class="cap-sub-panel">
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="skill.list">SKILL 技能</div>
+                <div id="skills-list" class="mcp-server-list"></div>
+                <div class="agent-btn-row" style="margin-top:6px">
+                  <button id="skill-new-btn" class="agent-btn agent-btn--run" data-i18n="skill.new">＋ 新建</button>
+                  <button id="skill-del-btn" class="agent-btn agent-btn--cancel" data-i18n="skill.delete">✕ 删除</button>
+                </div>
+              </div>
+              <div class="agent-side-section">
+                <div class="agent-side-title" data-i18n="skill.editor">编辑</div>
+                <input type="text" id="skill-edit-name" class="a2a-input"
+                       placeholder="技能名（保存时的唯一标识）" data-i18n-placeholder="skill.name_ph">
+                <input type="text" id="skill-edit-desc" class="a2a-input"
+                       placeholder="一句话描述" data-i18n-placeholder="skill.desc_ph">
+                <textarea id="skill-edit-content" class="agent-task-input" rows="8"
+                          placeholder="Markdown 正文：步骤、规约、注意事项…" data-i18n-placeholder="skill.content_ph"></textarea>
+                <button id="skill-save-btn" class="agent-btn agent-btn--run" data-i18n="skill.save">💾 保存</button>
+              </div>
+            </div>
+          </div>
+          </div>
+        </aside>
+
+        <!-- 编辑区 -->
+        <section id="editor-area" class="editor-area">
+          <!-- 标签页栏 -->
+          <div id="tab-bar" class="tab-bar"></div>
+          <!-- 欢迎内容（无项目时显示）— 由 loadWelcome() 从 welcome-zh.html / welcome-en.html 动态加载 -->
+          <div id="welcome-content" class="welcome" style="display:none"></div>
+
+          <!-- 帮助页：正文是 markdown 源文件（help-zh.md / help-en.md），由 markdown-it 渲染 -->
+          <div id="help-page" class="help-page" style="display:none">
+            <div id="help-body" class="help-content"></div>
+            <button id="btn-help-back" class="help-back-btn" data-i18n="help.back">← 返回</button>
+          </div>
+
+          <!-- Agent 控制台（融合计划 Z4）：引擎落位前含演示回放 -->
+                    <!-- 编辑器主体：gutter + 代码区 -->
+          <div id="editor-body" class="editor-body">
+            <div id="editor-empty" class="editor-empty">
+              <p>打开文件以开始编辑</p>
+            </div>
+            <div id="editor-view" class="editor-view" style="display:none">
+              <div id="editor-gutter" class="editor-gutter"></div>
+              <div id="editor-code-container" class="editor-code-container">
+                <div id="editor-code-backdrop" class="editor-code-backdrop"></div>
+                <!-- 宽行只读视图（v0.13）的**流内**高度来源：那一路把 textarea 整个移出布局
+                     （它装着几十万字符的单行，留在流里就是让浏览器去排版那一行），
+                     于是全文高度必须另有元素给出。普通模式恒为 0，对正常文件零影响。 -->
+                <div id="editor-flow-spacer" class="editor-flow-spacer"></div>
+                <!-- wrap="off" 必须有：textarea 默认软换行，长行会在它内部折成两行，
+                     而 backdrop 按「一行」画 —— 光标就会和高亮文字错开。
+                     关掉之后 textarea 的可视行数恒等于逻辑行数。 -->
+                <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" wrap="off"></textarea>
+              </div>
+            </div>
+            <div id="memory-view" class="memory-view" style="display:none"></div>
+            <div id="service-view" class="service-view" style="display:none">
+              <div class="service-head">
+                <div class="service-head-main">
+                  <span class="service-title" data-i18n="service.title">服务</span>
+                  <span id="service-count" class="service-count"></span>
+                </div>
+                <div class="service-head-actions">
+                  <button id="service-btn-refresh" class="service-btn"
+                          data-i18n="service.btn_refresh">刷新</button>
+                </div>
+              </div>
+              <div id="service-hint" class="service-hint" data-i18n="service.hint"></div>
+              <div id="service-body" class="service-body"></div>
+            </div>
+            <div id="config-view" class="config-view" style="display:none">
+              <div class="config-head">
+                <div class="config-head-main">
+                  <span id="config-scope-title" class="config-scope-title">配置</span>
+                  <span id="config-dir" class="config-dir"></span>
+                </div>
+                <div class="config-head-actions">
+                  <span id="config-dirty" class="config-dirty" style="display:none"
+                        data-i18n="config.dirty">● 未保存</span>
+                  <button id="config-btn-save" class="config-btn" data-i18n="config.btn_save">保存</button>
+                  <button id="config-btn-apply" class="config-btn config-btn--primary"
+                          data-i18n="config.btn_apply">应用</button>
+                  <button id="config-btn-cancel" class="config-btn"
+                          data-i18n="config.btn_cancel">取消</button>
+                </div>
+              </div>
+              <div id="config-hint" class="config-hint" data-i18n="config.hint"></div>
+              <div id="config-body" class="config-body"></div>
+            </div>
+            <div id="terminal-view" class="terminal-view" style="display:none">
+              <div id="terminal-container" class="terminal-container"></div>
+            </div>
+            <!-- 托管进程的输出（每个标签页一个 pane，切回来内容还在） -->
+            <div id="proc-log-view" class="proc-log-view" style="display:none">
+              <div id="proc-log-panes" class="proc-log-panes"></div>
+            </div>
+            <div id="session-view" class="terminal-view" style="display:none">
+              <div id="session-container" class="session-container"></div>
+            </div>
+            <div id="image-view" class="image-view" style="display:none">
+              <div id="image-container" class="image-container">
+                <img id="image-preview" src="" alt="" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 大纲区：多标签（大纲 / Git） -->
+        <aside id="outline" class="outline">
+          <div class="outline-tabs">
+            <button class="outline-tab active" data-outline-tab="outline" data-i18n="outline.header">大纲</button>
+            <button class="outline-tab" data-outline-tab="git">Git</button>
+          </div>
+          <div id="outline-content" class="outline-content">
+            <div class="outline-placeholder">
+              大纲（支持 Markdown / Rust / Python / Java）
+            </div>
+          </div>
+          <div id="git-panel" class="git-panel" style="display:none">
+            <!-- 非仓库：仓库初始化引导视图（git_status.is_repo=false 时显示） -->
+            <div id="git-init-view" class="git-init-view" style="display:none">
+              <div class="git-init-icon">🌱</div>
+              <div class="git-init-title" data-i18n="git.init.title">当前项目还不是 Git 仓库</div>
+              <div class="git-init-desc" data-i18n="git.init.desc">初始化后即可在此查看改动、提交与推送</div>
+              <div class="git-init-actions">
+                <button id="git-btn-init" class="git-btn git-btn-primary" data-i18n="git.init.btn">初始化仓库</button>
+                <button id="git-btn-init-remote" class="git-btn" disabled
+                        data-i18n="git.remote.add" data-i18n-title="git.remote.need_init">添加远程仓库</button>
+              </div>
+              <div class="git-init-hint" data-i18n="git.remote.need_init">初始化仓库后才能添加远程仓库</div>
+            </div>
+
+            <!-- 仓库视图：分支 / 远程提示 / 提交输入 / staged + unstaged -->
+            <div id="git-repo-view" class="git-repo-view">
+              <div class="git-actions">
+                <button id="git-btn-commit" class="git-btn git-btn-primary" data-i18n="git.btn_commit">Commit ✅</button>
+                <button id="git-btn-pull" class="git-btn" data-i18n="git.btn_pull">Pull 📥</button>
+                <button id="git-btn-push" class="git-btn" data-i18n="git.btn_push">Push 📤</button>
+              </div>
+              <div id="git-branch" class="git-branch"></div>
+              <!-- 已初始化但未配置远程仓库时的提示条 -->
+              <div id="git-remote-banner" class="git-banner" style="display:none">
+                <span class="git-banner-text" data-i18n="git.remote.missing">尚未配置远程仓库</span>
+                <button id="git-btn-add-remote" class="git-banner-btn" data-i18n="git.remote.add">添加远程仓库</button>
+              </div>
+              <input id="git-commit-input" class="git-commit-input" type="text"
+                     data-i18n-placeholder="git.commit_msg" placeholder="commit message" />
+              <div class="git-section-header">
+                <span id="git-staged-header" class="git-section-title" data-i18n="git.staged">Staged</span>
+              </div>
+              <div id="git-staged-tree" class="git-file-tree"></div>
+              <div class="git-section-header">
+                <span id="git-unstaged-header" class="git-section-title" data-i18n="git.unstaged">Unstaged</span>
+                <button id="git-btn-stage-all" class="git-stage-all-btn" data-i18n-title="git.stage_all">➕</button>
+              </div>
+              <div id="git-unstaged-tree" class="git-file-tree"></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- 命令区：单行命令输入 -->
+    <div id="command-bar">
+      <span class="command-prompt">&gt;</span>
+      <input
+        type="text"
+        id="command-input"
+        class="command-input"
+        placeholder="任意输入，回车执行，最懂你的IDE"
+        autofocus
+      />
+    </div>
+
+    <!-- 状态栏 -->
+    <footer id="statusbar">
+      <span class="status-item">就绪</span>
+      <span class="status-spacer"></span>
+      <span class="status-item">UTF-8</span>
+      <span class="status-item">Rust 2024</span>
+    </footer>
+  </div>
+
+  <!-- 自定义右键菜单 -->
+  <div id="context-menu" class="context-menu" style="display:none">
+    <div class="context-menu-item" data-action="copy-path" data-i18n="ctx.copy_path">📋 复制路径</div>
+    <div class="context-menu-item" data-action="copy-full-path" data-i18n="ctx.copy_full_path">📋 复制绝对路径</div>
+    <div class="context-menu-sep"></div>
+    <div class="context-menu-item context-menu-file-only" data-action="run" data-i18n="ctx.run">▶️ 运行</div>
+    <div class="context-menu-item context-menu-file-only" data-action="try-run" data-i18n="ctx.try_run">🔍 试跑</div>
+    <div class="context-menu-sep"></div>
+    <div class="context-menu-item" data-action="delete" data-i18n="ctx.delete">🗑️ 删除</div>
+    <div class="context-menu-item" data-action="rename" data-i18n="ctx.rename">✏️ 重命名</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfile" data-i18n="ctx.new_file">📄 创建文件</div>
+    <div class="context-menu-item context-menu-folder-only" data-action="newfolder" data-i18n="ctx.new_folder">📁 创建文件夹</div>
+  </div>
+
+  <!-- 标签页右键菜单（编辑器多标签）。不拦的话 WebView 会弹**系统**菜单（后退/刷新/检查元素…），
+       与 IDE 的标签操作无关。目标标签由**事件命中的那个**决定，绝不改激活标签 ——
+       否则"关闭其他"会把用户刚右键的那个也关掉。 -->
+  <div id="tab-context-menu" class="context-menu" style="display:none">
+    <div class="context-menu-item" data-tab-action="close" data-i18n="ctx.tab_close">✖️ 关闭</div>
+    <div class="context-menu-item" data-tab-action="others" data-i18n="ctx.tab_close_others">🧹 关闭其他</div>
+    <div class="context-menu-item" data-tab-action="right" data-i18n="ctx.tab_close_right">➡️ 关闭右侧</div>
+    <div class="context-menu-item" data-tab-action="left" data-i18n="ctx.tab_close_left">⬅️ 关闭左侧</div>
+    <div class="context-menu-item" data-tab-action="all" data-i18n="ctx.tab_close_all">🗑️ 全部关闭</div>
+    <div class="context-menu-sep"></div>
+    <div class="context-menu-item context-menu-path-only" data-tab-action="copy-path" data-i18n="ctx.copy_path">📋 复制路径</div>
+    <div class="context-menu-item context-menu-path-only" data-tab-action="copy-full-path" data-i18n="ctx.copy_full_path">📋 复制绝对路径</div>
+  </div>
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-input-row" id="modal-input-row" style="display:none">
+        <input type="text" id="modal-input" class="modal-input" />
+      </div>
+      <div class="modal-buttons">
+        <button id="modal-btn-cancel" class="modal-btn modal-btn-cancel">取消</button>
+        <button id="modal-btn-ok" class="modal-btn modal-btn-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改项目弹窗 -->
+  <div id="project-edit-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box" style="max-width:420px">
+      <div class="modal-title" data-i18n="project.edit.title">修改项目</div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.name_label">名称</label>
+        <input type="text" id="project-edit-name" class="modal-input" />
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.icon_label">图标</label>
+        <div id="project-edit-icons" class="project-icon-options"></div>
+      </div>
+      <div class="modal-input-row">
+        <label class="modal-input-label" data-i18n="project.edit.path_label">路径（不可修改）</label>
+        <div id="project-edit-path" class="project-edit-path"></div>
+      </div>
+      <div class="modal-buttons">
+        <button id="project-edit-cancel" class="modal-btn modal-btn-cancel" data-i18n="modal.cancel">取消</button>
+        <button id="project-edit-ok" class="modal-btn modal-btn-ok" data-i18n="modal.ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="scripts/i18n.js"></script>
+  <script src="scripts/command.js"></script>
+  <script src="packages/markdown-it.min.js"></script>
+  <script src="scripts/session.js"></script>
+  <script src="scripts/mcp.js"></script>
+  <script src="scripts/a2a.js"></script>
+  <script src="scripts/capability.js"></script>
+  <script src="scripts/config.js"></script>
+  <script src="scripts/service.js"></script>
+  <script src="scripts/memory.js"></script>
+  <script src="scripts/proc-log.js"></script>
+  <script src="scripts/external.js"></script>
+  <script src="scripts/titlebar.js"></script>
+  <script src="scripts/menus.js"></script>
+  <script src="scripts/contextmenu.js"></script>
+  <script src="scripts/commandbar.js"></script>
+  <script src="scripts/navigator.js"></script>
+  <script src="scripts/editor.js"></script>
+  <script src="scripts/terminal.js"></script>
+  <script src="scripts/main.js"></script>
+</body>
+</html>

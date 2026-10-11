@@ -1,0 +1,64 @@
+/* ruyix 内置高亮插件的主题（VS Code Dark+ 风格）
+ *
+ * 这份文件以前以 `.tok-*` 规则的形式躺在 `ui/styles.css` 里 —— 现在它是**插件的一部分**：
+ * 换主题 = 换这个文件（改完重开 ruyix 即可，不用重编译），纯净模式下这些颜色根本不存在。
+ *
+ * 规则限制（加载时逐条校验，见 src-tauri/src/plugin.rs::filter_theme_css）：
+ * 只允许 `.tok-<名字>` 选择器 —— 插件不许碰 IDE 自己的样式。
+ * 每条选择器必须**单独**是 `.tok-*`（`.a, .tok-b` 这种混着的整条丢弃）。
+ */
+
+.tok-comment { color: #6a9955; font-style: italic; }
+.tok-string { color: #ce9178; }
+.tok-keyword { color: #569cd6; }
+.tok-function { color: #dcdcaa; }
+.tok-type { color: #4ec9b0; }
+.tok-number { color: #b5cea8; }
+.tok-operator { color: #d4d4d4; }
+.tok-property { color: #9cdcfe; }
+.tok-variable { color: #9cdcfe; }
+.tok-constant { color: #4fc1ff; }
+.tok-punctuation { color: #d4d4d4; }
+.tok-parameter { color: #9cdcfe; }
+.tok-constructor { color: #4ec9b0; }
+.tok-label { color: #569cd6; }
+.tok-namespace { color: #4ec9b0; }
+.tok-escape { color: #d7ba7d; }
+.tok-regexp { color: #d16969; }
+.tok-decorator { color: #dcdcaa; }
+.tok-attribute { color: #9cdcfe; }
+.tok-include { color: #569cd6; }
+.tok-boolean { color: #569cd6; }
+.tok-repeat { color: #569cd6; }
+.tok-conditional { color: #569cd6; }
+.tok-exception { color: #569cd6; }
+.tok-storageclass { color: #569cd6; }
+.tok-struct { color: #4ec9b0; }
+.tok-enum-member { color: #4fc1ff; }
+.tok-field { color: #9cdcfe; }
+.tok-text { color: #d4d4d4; }
+.tok-title { color: #dcdcaa; }
+.tok-literal { color: #ce9178; }
+.tok-uri { color: #d4d4d4; text-decoration: underline; }
+.tok-strong { font-weight: bold; }
+.tok-emphasis { font-style: italic; }
+.tok-tag { color: #569cd6; }
+.tok-tag-delimiter { color: #808080; }
+.tok-selector { color: #d7ba7d; }
+.tok-id { color: #d7ba7d; }
+.tok-class { color: #4ec9b0; }
+.tok-unit { color: #b5cea8; }
+.tok-attr-value { color: #ce9178; }
+.tok-doctype { color: #808080; }
+.tok-entity { color: #4ec9b0; }
+/* 高亮器能产出、但曾经"没配色"的那几个：缺了就是渲染成默认色、看起来像高亮丢了。
+   门禁（Rust `every_tag_has_a_css_class`）保证这张表与 TOK_TABLE 永远对得上。 */
+.tok-macro { color: #dcdcaa; }
+.tok-link { color: #4fc1ff; text-decoration: underline; }
+.tok-strikethrough { text-decoration: line-through; }
+.tok-diff-add { color: #b5cea8; }
+.tok-diff-delete { color: #d16969; }
+.tok-embedded { color: #d4d4d4; }
+
+/* 从 ui/styles.css 搬完的最后几条（v1.0.0 漏搬过，契约测试当场抓住） */
+.tok-error { color: #d16969; }

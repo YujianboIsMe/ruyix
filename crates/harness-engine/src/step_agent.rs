@@ -1,0 +1,1577 @@
+//! 计划步骤的执行体（子 agent）：**一个步骤 = 一个上下文干净的 agent 循环**（v0.4）。
+//!
+//! 为什么新开上下文：主循环的 messages **只增不减**，每次 read 回灌最多 8K 字符、
+//! execute 4K，全 run 没有任何裁剪 —— 累积量随轮数近似平方增长，96 轮时它不是"有点大"，
+//! 而是主要成本。把"一步的执行"放进自己的上下文，父上下文里从此不再出现那些文件内容。
+//!
+//! 三条纪律：
+//! 1. **上下文隔离**：子上下文只有 `STEP_SYSTEM` + 本步输入包（[`build_user_prompt`]）。
+//!    主循环的历史、计划原文、它读过的文件，一条都不进来；跨步骤唯一能流动的东西是
+//!    引擎写的 [`StepSummary`] 一行（模型自述不算事实）。
+//! 2. **覆盖层不分裂**：子 agent 不持有自己的 overlay/changes —— 那会让
+//!    `emit_step_progress` / `gate_before_final` / `flush_stage` 全部失明。它借的是主循环
+//!    **同一份** `&mut Ctx`，写完文件后父的进度判据（声明文件是否落地）自动成立。
+//! 3. **失败不撒谎**：超预算 / 取消一律落 `status=error` 并把原因写清楚；已经产出的文件
+//!    仍留在覆盖层里（与 `settle_steps` 的"文件全落地就算数"一致）。只有"致命模型错误"
+//!    上抛 `Err`，由父循环决定是中断整个 run 还是记一条失败 —— 这与主循环今天的语义相同。
+//!
+//! 本模块**不发 `sink.step`**：`ui/scripts/session.js` 用一维 index（`s._plan[index-1]`）认步骤，
+//! 子步骤自报事件会撞掉父的 index。步骤进度由父循环在派发前/返回后统一发。
+
+use crate::agent::{
+    CallResult, Ctx, FileChange, LLM_FAIL_LIMIT, ProcOp, ReadSpec, STEP_TOOL_NAMES,
+    STEP_TOOLS_HINT, StepAction, VerifyOutcome, WriteBody, WriteSpec, batch_hint,
+    batch_json_result, batch_waves_for_step, content_channel_error, flush_write_disk, json_result,
+    llm_failure_feedback, narrow_verify, parse_failure_feedback, parse_step_actions,
+    parse_step_tool_calls, policy_system_note, proc_op_name, read_group, resolve_write,
+    staged_execute_note, tool_calls_echo, tool_exec_bg, tool_execute, tool_proc,
+    write_edits_ok_text, write_ok_text,
+};
+use crate::config::AppConfig;
+use crate::discover;
+use crate::exec::{CancelFlag, clip, is_cancelled};
+use crate::generate::safe_rel_path;
+use crate::llm::{self, ChatMessage, Usage};
+use crate::pipeline::Sink;
+use crate::plan::PlanStep;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// 本步交付说明的留存上限。它只是给父循环打日志用的，**不是事实来源**。
+const SELF_REPORT_CLIP: usize = 1_200;
+/// 轨迹一行最长多少字符
+const TRACE_CLIP: usize = 160;
+/// 前置步骤摘要最多列几条 / 总共多少字符 —— 跨步骤通道必须有界，否则它自己就是新的膨胀源
+const PRIOR_MAX: usize = 12;
+const PRIOR_CLIP: usize = 1_500;
+
+/// 步骤执行体的系统提示词。
+///
+/// 刻意**不复用** `AGENT_SYSTEM`：角色约束（只做本步、看不到父对话）是它独有的；
+/// 工具的机械事实（形态 / 上限 / 失败语义）不在这里复述 —— 子步声明的是同一份
+/// `TOOL_DECLS`，声明面自动到达，复述只会漂移（照 `REFLECT_SYSTEM` 的做法独立成常量）。
+pub const STEP_SYSTEM: &str = r#"你是 ruyix 的步骤执行体：只负责**一个**计划步骤，做完把结果交回去。你看不到主循环的对话历史 —— 这是刻意的，你的上下文里只有本步需要的东西。
+
+**动作一律用工具调用表达**（引擎已声明 read / write / execute / final 四个工具，参数、形态与上限以工具声明为准）。怎么选：找东西先想**在哪一层**找（read 的检索形状 scope+q：files / session / project_mem / global_mem —— 后三层 execute 够不着）；读文件**只要一段就带 offset/limit**（别整份读进来），要整篇重写它就先整份读；改已有文件的几处用 write + edits（只传改动，不重发全文）；新建文件、整篇重排、或没读过原文才用 content 交回整份。常驻服务用 execute 后台模式（background + ready_cmd，返回 handle），别用 start / Start-Process 那类花招；重启同一个服务前先 status / stop。
+
+规则：
+1. 每轮用**工具调用**表达动作（可以一轮发多个互不依赖的）；不要输出解释文字、不要 markdown 代码块包裹，也不要把动作写成 content 里的 JSON。
+2. 只做本步。发现计划与实际不符（要改的文件不存在、步骤拆得不对、范围明显比本步大）时不要自作主张扩大范围：做你能做的部分，并在交付说明里写清哪里对不上。
+3. 改代码：先 read 拿到现状；没把握的地方原样保留，绝不丢内容。
+4. 能验证就验证：execute 跑本项目自己的编译/测试命令，失败就继续修。
+5. 本步做完**调用 final 工具交付**：final(answer="本步做了什么、产出哪些文件、跑了什么验证、结果如何；对不上的地方写在这里")"#;
+
+/// 交给下一步的那一行（引擎写的事实，只有它允许跨步骤流动）
+#[derive(Clone, Debug, Default)]
+pub struct StepSummary {
+    pub id: u32,
+    pub title: String,
+    /// done | error | skipped
+    pub status: String,
+    /// 本步实际写入的文件（相对路径）
+    pub files: Vec<String>,
+    /// 引擎写的补充事实：产出 / 未产出、语法检查结论、失败原因
+    pub note: String,
+}
+
+impl StepSummary {
+    /// 这一行事实的正文：`format_prior` 给它加列表符号，父循环的日志直接用同一份
+    pub fn line(&self) -> String {
+        let mut s = format!("步骤 {}「{}」：{}", self.id, self.title.trim(), self.status);
+        if !self.files.is_empty() {
+            s.push_str(&format!("｜产出 {}", self.files.join("、")));
+        }
+        if !self.note.trim().is_empty() {
+            s.push_str(&format!("｜{}", self.note.trim()));
+        }
+        s
+    }
+}
+
+/// 本步的输入包 —— 子上下文里**唯一**允许出现的东西
+#[derive(Clone, Debug)]
+pub struct StepInput<'a> {
+    pub project_root: &'a Path,
+    /// 任务原文（模型的 final 里常有"整体交付说明"，本步只做自己那一段）
+    pub task: &'a str,
+    pub step: &'a PlanStep,
+    /// 第几步（1-based）与总步数 —— 模型需要知道自己在哪一步，才不会重做前面的活
+    pub index: usize,
+    pub total: usize,
+    /// 已完成的前置步骤（引擎累积的事实）
+    pub done: &'a [StepSummary],
+}
+
+/// 一次步骤执行的结果
+#[derive(Clone, Debug, Default)]
+pub struct StepReport {
+    /// done | error
+    pub status: String,
+    /// 本步实际写入的文件（按写入顺序）
+    pub files: Vec<String>,
+    /// 本步读过哪些文件/目录。父循环要拿它喂复核员（"依据核对"的证据集合）——
+    /// 子步骤的 read 不进父上下文，这份清单是**唯一**能让父知道"它查过什么"的通道。
+    pub read_paths: Vec<String>,
+    /// 引擎写的本步事实（产出 + 语法检查结论）—— 交回父循环与下一步用的就是它
+    pub note: String,
+    /// 模型自己写的交付说明。**仅供参考**（它可能自述"已完成"而文件根本没写），
+    /// 父循环要判事实就看 `files` / `note` / `verify`。
+    pub self_report: String,
+    /// 失败原因（`status == error` 时必有）
+    pub error: Option<String>,
+    /// 本步最后一次语法检查的结论（`gate.narrow` 关闭或本步没写文件时为 None）
+    pub verify: Option<VerifyOutcome>,
+    /// 实际用掉的轮次
+    pub rounds: usize,
+    pub usage: Usage,
+    pub elapsed_ms: u128,
+    /// 工具轨迹（一行一次调用，父循环可以直接打日志）
+    pub trace: Vec<String>,
+}
+
+impl StepReport {
+    pub fn ok(&self) -> bool {
+        self.status == "done"
+    }
+
+    /// 给父循环打日志的一行：与交给下一步的那一行**同一个事实来源**，不许两套说法
+    pub fn headline(&self, step: &PlanStep) -> String {
+        self.as_summary(step).line()
+    }
+
+    /// → 下一步输入包里的那一行
+    pub fn as_summary(&self, step: &PlanStep) -> StepSummary {
+        StepSummary {
+            id: step.id,
+            title: step.title.clone(),
+            status: self.status.clone(),
+            files: self.files.clone(),
+            note: match &self.error {
+                Some(e) => format!("{}｜失败：{}", self.note, clip(e, 160)),
+                None => self.note.clone(),
+            },
+        }
+    }
+}
+
+/// 组装本步的用户消息（纯函数，可单测）
+pub fn build_user_prompt(inp: &StepInput<'_>) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("项目根目录：{}\n", inp.project_root.display()));
+    s.push_str(&format!("\n【任务原文】\n{}\n", inp.task.trim()));
+    s.push_str(&format!(
+        "\n【计划进度】第 {} / {} 步 —— 你只做这一步，不要重做前面的步骤，也不要顺手做后面的。\n本步标题：{}\n",
+        inp.index,
+        inp.total,
+        inp.step.title.trim()
+    ));
+    if !inp.step.detail.trim().is_empty() {
+        s.push_str(&format!("本步说明：{}\n", inp.step.detail.trim()));
+    }
+    if inp.step.files.is_empty() {
+        s.push_str("本步应产出：（计划没声明具体文件）\n");
+    } else {
+        s.push_str(&format!("本步应产出：{}\n", inp.step.files.join("、")));
+    }
+    s.push_str(&format!(
+        "\n【已完成的前置步骤】\n{}\n",
+        format_prior(inp.done)
+    ));
+    s.push_str(&format!(
+        "\n请开始第 {} 步；做完输出 {{\"final\":\"…\"}}。",
+        inp.index
+    ));
+    s
+}
+
+/// 前置步骤摘要 → 有界的一段文本
+fn format_prior(done: &[StepSummary]) -> String {
+    if done.is_empty() {
+        return "（无 —— 这是第一步）".into();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut budget = PRIOR_CLIP;
+    for (i, d) in done.iter().enumerate() {
+        if i >= PRIOR_MAX {
+            lines.push(format!(
+                "- …还有 {} 步没列出来（需要细节就自己 read 相关文件）",
+                done.len() - PRIOR_MAX
+            ));
+            break;
+        }
+        let line = d.line();
+        if line.chars().count() > budget {
+            lines.push(format!(
+                "- 步骤 {}「{}」：{}（摘要已截断，细节自己 read）",
+                d.id,
+                d.title.trim(),
+                d.status
+            ));
+            break;
+        }
+        budget = budget.saturating_sub(line.chars().count());
+        lines.push(format!("- {line}"));
+    }
+    lines.join("\n")
+}
+
+/// 引擎写的本步事实：产出了什么 + 语法检查结论（没查就明说没查，不许留白当通过）
+fn step_note(written: &[String], verify: Option<&VerifyOutcome>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if written.is_empty() {
+        parts.push("未产出文件".into());
+    }
+    parts.push(match verify {
+        Some(v) => format!("{}：{}", v.layer_label(), clip(&v.verdict, 80)),
+        None => "（本次未做语法检查）".into(),
+    });
+    parts.join("｜")
+}
+
+/// 本步写过的文件对应的变更记录（按步过滤：父循环是"全量改动再查一遍"，这里不必重复）
+fn step_changes(cx: &Ctx<'_>, written: &[String]) -> Vec<FileChange> {
+    cx.changes()
+        .iter()
+        .filter(|c| written.iter().any(|w| w == &c.path))
+        .cloned()
+        .collect()
+}
+
+/// 不支持的能力：明确拒绝 + 给出替代动作，别让模型在那儿反复试
+fn unsupported_reason(name: &str) -> String {
+    format!(
+        "步骤执行体只有 read / write / execute 三种能力，没有 {name}：\
+         任务清单由主循环维护（本步不要重排计划），外部能力（MCP / 远端 Agent）不在本步范围内。\
+         请改用上面三种能力，或直接交回 {{\"final\":\"…\"}}。"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn error_report(
+    reason: String,
+    written: Vec<String>,
+    read: Vec<String>,
+    verify: Option<VerifyOutcome>,
+    rounds: usize,
+    usage: Usage,
+    trace: Vec<String>,
+    started: Instant,
+) -> StepReport {
+    let note = step_note(&written, verify.as_ref());
+    StepReport {
+        status: "error".into(),
+        files: written,
+        read_paths: read,
+        note,
+        self_report: String::new(),
+        error: Some(reason),
+        verify,
+        rounds,
+        usage,
+        elapsed_ms: started.elapsed().as_millis(),
+        trace,
+    }
+}
+
+/// 执行一个步骤：开自己的 messages，只允许 read / write / execute，直到它交回 `final`。
+///
+/// `cx` 是主循环那一份（共享覆盖层，见模块文档第 2 条）。写盘/暂存策略由 `cx` 决定。
+/// 返回 `Err` 只在"致命模型错误"（Key 无效、余额不足、连续抖动到上限）—— 与主循环
+/// 一致，由父循环决定中断还是记一条失败；其余情况一律是 `Ok(status=error)` 的报告。
+/// 一个步骤动作 → `(tool, brief, result)`。单条路径与并发波**共用同一份实现**。
+async fn step_exec_one(
+    cfg: &AppConfig,
+    cx: &mut Ctx<'_>,
+    action: StepAction,
+) -> (String, String, Result<String, String>) {
+    match action {
+        StepAction::Search(spec) => {
+            let brief = format!("read search {}", spec.brief());
+            ("read".into(), brief, crate::agent::search::run(cx, &spec))
+        }
+        StepAction::Read(spec) => {
+            let brief = format!("read {}", spec.brief());
+            ("read".into(), brief, cx.tool_read(&spec))
+        }
+        StepAction::Write(spec) => {
+            let brief = spec.brief();
+            let r = cx.apply_write(&spec);
+            ("write".into(), brief, r)
+        }
+        StepAction::Execute(cmd, t) => {
+            let mut r = tool_execute(cx.project_root(), &cmd, t);
+            // 确认模式 + 本步已有暂存改动：这条命令看不到本次修改，贴一行说明兜住
+            r.push_str(staged_execute_note(cx.policy(), !cx.changes().is_empty()));
+            (
+                "execute".into(),
+                format!("execute {}", clip(&cmd, 80)),
+                Ok(r),
+            )
+        }
+        StepAction::ExecBg(spec) => (
+            "execute".into(),
+            format!("execute bg {}", clip(&spec.cmd, 70)),
+            tool_exec_bg(cx.project_root(), cfg, &spec),
+        ),
+        StepAction::Proc(op, handle) => (
+            "execute".into(),
+            format!("execute {} {handle}", proc_op_name(op)),
+            tool_proc(cx.project_root(), op, &handle),
+        ),
+        StepAction::Unsupported(name) => (
+            name.to_string(),
+            format!("{name}（本步不支持）"),
+            Err(unsupported_reason(name)),
+        ),
+        StepAction::Final(_) => unreachable!("Final 在上面已经返回"),
+    }
+}
+
+/// 一波（波内互不冲突）的**并发执行**：只读走 [`read_group`]；写入拆"磁盘并行 + 记账按序"
+/// （与主循环同一套 `Ctx::before_of` / `flush_write_disk` / `Ctx::record`）；执行与托管进程各起
+/// 线程。子步骤没有 connect，所以不涉及 [`crate::agent::JoinAll`]。
+/// 参数多：与主循环的 `run_wave` 同款（它要同时知道配置、覆盖层、动作与结果槽位）。
+#[allow(clippy::too_many_arguments)]
+async fn run_step_wave(
+    cfg: &AppConfig,
+    cx: &mut Ctx<'_>,
+    actions: &[StepAction],
+    wave: &[usize],
+    slots: &mut [Option<CallResult>],
+) {
+    // 一行回退：波内也不并发
+    if !cfg.agent.batch_parallel {
+        for &i in wave {
+            slots[i] = Some(step_exec_one(cfg, cx, actions[i].clone()).await);
+        }
+        return;
+    }
+
+    let mut reads: Vec<(usize, ReadSpec)> = Vec::new();
+    let mut writes: Vec<(usize, String, Option<String>, String)> = Vec::new();
+    let mut execs: Vec<(usize, String, Option<u64>)> = Vec::new();
+    let mut bgs: Vec<(usize, crate::proc::StartSpec)> = Vec::new();
+    let mut procs: Vec<(usize, ProcOp, String)> = Vec::new();
+    let mut errs: Vec<(usize, String, String, String)> = Vec::new(); // (i, tool, brief, err)
+
+    for &i in wave {
+        match &actions[i] {
+            StepAction::Read(spec) => reads.push((i, spec.clone())),
+            // 与主循环同款：归约（edits 要先读当前内容）在**主线程**做完，线程里只写盘
+            StepAction::Write(spec) => match safe_rel_path(&spec.path) {
+                Ok(rel) => {
+                    let before = cx.before_of(&rel);
+                    match resolve_write(&rel, &spec.body, before.as_deref()) {
+                        Ok(after) => writes.push((i, rel, before, after)),
+                        Err(e) => errs.push((i, "write".into(), spec.brief(), e)),
+                    }
+                }
+                Err(e) => errs.push((i, "write".into(), spec.brief(), e)),
+            },
+            // 与主循环同款：检索在波里同步跑（只读 + 结果确定）
+            StepAction::Search(spec) => {
+                let r = crate::agent::search::run(cx, spec);
+                slots[i] = Some(("read".into(), format!("read search {}", spec.brief()), r));
+            }
+            StepAction::Execute(cmd, t) => execs.push((i, cmd.clone(), *t)),
+            StepAction::ExecBg(spec) => bgs.push((i, spec.clone())),
+            StepAction::Proc(op, h) => procs.push((i, *op, h.clone())),
+            // 不支持的能力（计划 / 连接）：与单条路径同样的拒绝文本，不静默
+            StepAction::Unsupported(name) => errs.push((
+                i,
+                name.to_string(),
+                format!("{name}（本步不支持）"),
+                unsupported_reason(name),
+            )),
+            StepAction::Final(_) => unreachable!("Final 在上面已经返回"),
+        }
+    }
+
+    if !reads.is_empty() {
+        let specs: Vec<ReadSpec> = reads.iter().map(|(_, s)| s.clone()).collect();
+        for ((i, spec), r) in reads.iter().zip(read_group(cx, &specs, true)) {
+            slots[*i] = Some(("read".to_string(), format!("read {}", spec.brief()), r));
+        }
+    }
+    for (i, tool, brief, e) in errs {
+        slots[i] = Some((tool, brief, Err(e)));
+    }
+
+    let bdir = if writes.iter().any(|(_, _, b, _)| b.is_some()) {
+        cx.ensure_backup_dir(true)
+    } else {
+        cx.backup_dir_path()
+    };
+    let text_changes = !cx.changes().is_empty();
+
+    let mut write_out: Vec<(usize, Result<(), String>)> = Vec::new();
+    let mut exec_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    let mut bg_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    let mut proc_out: Vec<(usize, Result<String, String>)> = Vec::new();
+    {
+        let proj = cx.project_root().to_path_buf();
+        std::thread::scope(|s| {
+            let hw: Vec<_> = writes
+                .iter()
+                .map(|(i, rel, before, after)| {
+                    let (i, rel, before, after) = (*i, rel.clone(), before.clone(), after.clone());
+                    let (bdir, proj) = (bdir.clone(), proj.clone());
+                    (
+                        i,
+                        s.spawn(move || {
+                            flush_write_disk(
+                                &proj,
+                                bdir.as_deref(),
+                                &rel,
+                                before.as_deref(),
+                                &after,
+                            )
+                        }),
+                    )
+                })
+                .collect();
+            let he: Vec<_> = execs
+                .iter()
+                .map(|(i, cmd, t)| {
+                    let (i, cmd, t, proj) = (*i, cmd.clone(), *t, proj.clone());
+                    (i, s.spawn(move || tool_execute(&proj, &cmd, t)))
+                })
+                .collect();
+            let hb: Vec<_> = bgs
+                .iter()
+                .map(|(i, spec)| {
+                    let (i, spec, proj) = (*i, spec.clone(), proj.clone());
+                    (i, s.spawn(move || tool_exec_bg(&proj, cfg, &spec)))
+                })
+                .collect();
+            let hp: Vec<_> = procs
+                .iter()
+                .map(|(i, op, handle)| {
+                    // 项目根也 clone 进来：外层是 FnMut，把 proj 移出去会被借用检查挡住
+                    let (i, op, handle, proj) = (*i, *op, handle.clone(), proj.clone());
+                    (i, s.spawn(move || tool_proc(&proj, op, &handle)))
+                })
+                .collect();
+            for (i, h) in hw {
+                write_out.push((i, h.join().unwrap_or_else(|_| Err("写入线程异常".into()))));
+            }
+            for (i, h) in he {
+                exec_out.push((
+                    i,
+                    Ok(h.join().unwrap_or_else(|_| "执行线程异常（未返回）".into())),
+                ));
+            }
+            for (i, h) in hb {
+                bg_out.push((i, h.join().unwrap_or_else(|_| Err("启动线程异常".into()))));
+            }
+            for (i, h) in hp {
+                proc_out.push((i, h.join().unwrap_or_else(|_| Err("句柄线程异常".into()))));
+            }
+        });
+    }
+
+    for ((i, rel, before, after), (_, r)) in writes.iter().zip(write_out) {
+        // 摘要用调用方声明的形状（content 报字节、edits 报几处替换）
+        let brief = match &actions[*i] {
+            StepAction::Write(spec) => spec.brief(),
+            _ => format!("write {rel}（{} 字节）", after.len()),
+        };
+        let res = match r {
+            Ok(()) => {
+                cx.record(rel.clone(), before.clone(), after.clone());
+                let ok = match &actions[*i] {
+                    StepAction::Write(WriteSpec {
+                        body: WriteBody::Edits(e),
+                        ..
+                    }) => write_edits_ok_text(rel, e.len(), after.len(), cx.policy()),
+                    _ => write_ok_text(rel, after.len(), cx.policy()),
+                };
+                Ok(ok)
+            }
+            Err(e) => Err(e),
+        };
+        slots[*i] = Some(("write".into(), brief, res));
+    }
+    for ((i, cmd, _), (_, r)) in execs.iter().zip(exec_out) {
+        let r = r.map(|txt| format!("{txt}{}", staged_execute_note(cx.policy(), text_changes)));
+        slots[*i] = Some(("execute".into(), format!("execute {}", clip(cmd, 80)), r));
+    }
+    for ((i, spec), (_, r)) in bgs.iter().zip(bg_out) {
+        slots[*i] = Some((
+            "execute".into(),
+            format!("execute bg {}", clip(&spec.cmd, 70)),
+            r,
+        ));
+    }
+    for ((i, op, handle), (_, r)) in procs.iter().zip(proc_out) {
+        slots[*i] = Some((
+            "execute".into(),
+            format!("execute {} {handle}", proc_op_name(*op)),
+            r,
+        ));
+    }
+}
+
+pub async fn run_step(
+    cfg: &AppConfig,
+    cx: &mut Ctx<'_>,
+    inp: &StepInput<'_>,
+    cancel: &CancelFlag,
+    // run 级总时长的截止时刻（`None` = 不限）。父循环与子步骤看的是**同一条**闸 ——
+    // 只掐父循环不够：一个步骤内部可能连跑几十轮编译/测试，父那边毫无感知。
+    deadline: Option<Instant>,
+    sink: &dyn Sink,
+) -> Result<StepReport, String> {
+    let started = Instant::now();
+    let mut usage = Usage::default();
+    let mut written: Vec<String> = Vec::new();
+    let mut read: Vec<String> = Vec::new();
+    let mut trace: Vec<String> = Vec::new();
+    let mut last_verify: Option<VerifyOutcome> = None;
+    let mut llm_failures: u32 = 0;
+    let max_steps = cfg.step.max_steps.max(1);
+
+    // 上下文隔离的落点：从零开始，只有系统提示词 + 本步输入包
+    let mut user = build_user_prompt(inp);
+    // 运行模式与父循环共用同一份说明（同一处真相）：确认模式下本步的 write 只暂存，
+    // execute 看不到 —— 不说清这条，子步会像父一样拿 execute 的失败反复"修"一个已经写对的改动
+    if let Some(note) = policy_system_note(cx.policy()) {
+        user.push_str(&format!("\n\n{note}"));
+    }
+    // 命令发现：子步骤与父循环**上下文隔离**，父那份到不了这里 —— 不补一遍，每个步骤
+    // 都会各自重新"试 mvn 在不在"（就是那个 65 轮空转的放大版）。
+    // 第二个参数恒 false：`STEP_SYSTEM` 里没有 connect 原语，缺失工具只能如实说明。
+    let tools = discover::discover(
+        inp.project_root,
+        &cfg.discover,
+        &cfg.verify.python_bin,
+        &cfg.verify.node_bin,
+    );
+    if let Some(note) = discover::render_note(&tools, false) {
+        user.push_str(&format!("\n\n{note}"));
+    }
+    // 批量调用：父子上下文隔离，父的那份到不了这里 —— 不补一遍，每个步骤里还会退化成
+    // "一轮一个调用"（正是本步预算被读文件吃掉的原因）
+    if cfg.agent.batch {
+        user.push_str(&format!("\n\n{}", batch_hint(cfg.agent.batch_max, false)));
+    }
+    let mut msgs = vec![ChatMessage::system(STEP_SYSTEM), ChatMessage::user(user)];
+    // content 通道连续被拒的次数（严格模式：第 1 次讲清道理，之后只说短话）
+    let mut content_strikes: usize = 0;
+
+    for round in 1..=max_steps {
+        if is_cancelled(cancel) {
+            return Ok(error_report(
+                "用户取消，本步骤中断".into(),
+                written,
+                read,
+                last_verify,
+                round.saturating_sub(1),
+                usage,
+                trace,
+                started,
+            ));
+        }
+        // 总时长闸：与父循环共用同一条 deadline，超了立刻交回（已产出的文件留在覆盖层里）
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            return Ok(error_report(
+                "本次 run 的总时长预算已用尽，本步骤中断".into(),
+                written,
+                read,
+                last_verify,
+                round.saturating_sub(1),
+                usage,
+                trace,
+                started,
+            ));
+        }
+        sink.log(
+            "info",
+            format!("[step {}] 第 {round} 轮（预算 {max_steps}）", inp.index),
+        );
+        // **声明面就是权限面**：只声明这一步真能执行的四个工具。
+        // 用 `llm::chat` 会声明全七个（read/write/execute/**connect/plan/ask_user**/final）——
+        // 模型一试那三个就被 `to_step_action` 打回（Unsupported），白烧一轮；
+        // 而且与 `STEP_SYSTEM` 里那句"引擎已声明 read / write / execute / final 四个工具"自相矛盾。
+        // 工具协议关掉时走 content 通道：一个都不声明（空切片 = 请求里不发 tools 字段）。
+        let step_tools: &[&str] = if cfg.llm.tool_protocol {
+            STEP_TOOL_NAMES
+        } else {
+            &[]
+        };
+        let reply = match llm::chat_with_tools(
+            &cfg.llm,
+            cfg.llm_fallback.as_ref(),
+            &msgs,
+            true,
+            step_tools,
+        )
+        .await
+        {
+            Ok(r) => r, // 清零挪到「解析成功」处：HTTP 成功但输出不可用（半成功）不许清零
+            Err(e) => {
+                llm_failures += 1;
+                // 鉴权/余额这类确定性失败重试无意义：直接上抛（与主循环同一判据）
+                if llm::is_fatal_error(&e) || llm_failures >= LLM_FAIL_LIMIT {
+                    return Err(format!("步骤 {} 的模型调用失败：{e}", inp.index));
+                }
+                sink.log(
+                    "warn",
+                    format!(
+                        "[step {}] 第 {round} 轮模型调用失败（连续 {llm_failures}/{LLM_FAIL_LIMIT}，退避后重试）：{e}",
+                        inp.index
+                    ),
+                );
+                // 失败回灌进可变尾：模型对"上一条输出蒸发了"不再毫不知情，
+                // 下一条请求它就能改小体量（不回灌时实测原样重发、六轮零进展）
+                msgs.push(ChatMessage::user(llm_failure_feedback(&e)));
+                tokio::time::sleep(Duration::from_millis(1200 * llm_failures as u64)).await;
+                continue;
+            }
+        };
+        usage.add(&reply.usage);
+
+        // **严格模式**：动作只认工具调用（与主循环同一条纪律）；content 通道一律不执行 ——
+        // 但要"认出来再拒"（见 [`content_channel_error`]），只报"无法解析"模型会换包装重发。
+        let via_tools = !reply.tool_calls.is_empty();
+        if !via_tools && cfg.llm.tool_protocol {
+            content_strikes += 1;
+        }
+        let parsed = if via_tools {
+            parse_step_tool_calls(&reply.tool_calls, cfg.agent.batch_max, cfg.agent.batch)
+        } else if cfg.llm.tool_protocol {
+            Err(content_channel_error(
+                &reply.content,
+                content_strikes,
+                STEP_TOOLS_HINT,
+            ))
+        } else {
+            parse_step_actions(&reply.content, cfg.agent.batch_max, cfg.agent.batch)
+        };
+        let mut actions = match parsed {
+            // 这一轮**解析成功**才算真的成功，清零模型失败计数。半成功（HTTP 200 但输出
+            // 不可用）也清零的话，空内容/坏参数交替永远凑不满连续 3 次 —— 实测 step
+            // 第 28-33 轮就这样 ping-pong（坏参数轮把计数清零，步骤烧到预算为止）。
+            Ok(a) => {
+                llm_failures = 0;
+                a
+            }
+            Err(e) => {
+                sink.log(
+                    "warn",
+                    format!("[step {}] 第 {round} 轮输出无法解析：{e}", inp.index),
+                );
+                msgs.push(ChatMessage::user(parse_failure_feedback(
+                    &e,
+                    reply.finish_reason.as_deref(),
+                    cfg.llm.tool_protocol,
+                )));
+                continue;
+            }
+        };
+        // 工具轮的 content 是空的：把它自己发的调用回显回去（同主循环，见 `tool_calls_echo`）
+        msgs.push(ChatMessage::assistant(if via_tools {
+            tool_calls_echo(&reply.tool_calls)
+        } else {
+            reply.content.clone()
+        }));
+
+        // final 只可能是单动作（批里的 final 已被 parse_actions 当面拒）
+        if actions.len() == 1 && matches!(actions[0], StepAction::Final(_)) {
+            let StepAction::Final(text) = actions.remove(0) else {
+                unreachable!("上面刚判过是 final")
+            };
+            let note = step_note(&written, last_verify.as_ref());
+            let report = StepReport {
+                status: "done".into(),
+                files: written,
+                read_paths: read,
+                note,
+                self_report: clip(&text, SELF_REPORT_CLIP),
+                error: None,
+                verify: last_verify,
+                rounds: round,
+                usage,
+                elapsed_ms: started.elapsed().as_millis(),
+                trace,
+            };
+            sink.log("ok", clip(&report.headline(inp.step), 240));
+            return Ok(report);
+        }
+
+        // ---- 执行本轮动作：按**波次**（波内并发、波间按序）----
+        let n = actions.len();
+        let waves = batch_waves_for_step(&actions);
+        let mut slots: Vec<Option<CallResult>> = (0..n).map(|_| None).collect();
+        for wave in &waves {
+            if wave.len() == 1 {
+                let i = wave[0];
+                slots[i] = Some(step_exec_one(cfg, cx, actions[i].clone()).await);
+            } else {
+                run_step_wave(cfg, cx, &actions, wave, &mut slots).await;
+            }
+        }
+        let results: Vec<CallResult> = slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| {
+                o.unwrap_or_else(|| {
+                    (
+                        "call".into(),
+                        format!("第 {} 条调用", i + 1),
+                        Err("未执行".into()),
+                    )
+                })
+            })
+            .collect();
+
+        // 记账 / 轨迹 / 日志：批里每条一行，轮号相同
+        let mut any_write_ok = false;
+        for (i, (tool, brief, res)) in results.iter().enumerate() {
+            let ok = res.is_ok();
+            if *tool == "write" && ok {
+                any_write_ok = true;
+            }
+            // 读过 / 写过什么：父循环靠这两份清单（复核员的证据集合、进度对账）。
+            // 记的都是**路径** —— 同一文件读了两个窗口、或分两次锚点改，都只记一次
+            if ok
+                && let StepAction::Read(spec) = &actions[i]
+                && !read.contains(&spec.path)
+            {
+                read.push(spec.path.clone());
+            }
+            if ok
+                && let StepAction::Write(spec) = &actions[i]
+                && !written.contains(&spec.path)
+            {
+                written.push(spec.path.clone());
+            }
+            let icon = if ok { "✓" } else { "✗" };
+            trace.push(clip(&format!("{tool} {icon} {brief}"), TRACE_CLIP));
+            let head = if n == 1 {
+                String::new()
+            } else {
+                format!("[{}/{}] ", i + 1, n)
+            };
+            sink.log(
+                if ok { "info" } else { "warn" },
+                clip(
+                    &format!("[step {}] {head}{tool} {icon} {brief}", inp.index),
+                    400,
+                ),
+            );
+        }
+        if n > 1 {
+            let same_wave: usize = waves.iter().filter(|w| w.len() > 1).map(|w| w.len()).sum();
+            sink.log(
+                "info",
+                clip(
+                    &format!(
+                        "[step {}] 一批 {n} 个调用（{} 波，同波并发 {same_wave} 条）",
+                        inp.index,
+                        waves.len()
+                    ),
+                    240,
+                ),
+            );
+        }
+
+        // 机械验证（窄层）：事实触发 —— 本步真的写成了文件（批里有写也算）。与主循环同一判据、
+        // 同一实现；失败当成"观察"回灌，不打断本步（它是即时反馈，交付判据在父循环的门禁里）。
+        if any_write_ok && cfg.gate.narrow && !is_cancelled(cancel) {
+            let mine = step_changes(cx, &written);
+            if !mine.is_empty() {
+                let v = narrow_verify(cfg, &mine).await;
+                let failed = v.status == "failed";
+                sink.log(
+                    if failed { "warn" } else { "info" },
+                    format!("[step {}] {}", inp.index, clip(&v.verdict, 200)),
+                );
+                sink.verify(&v);
+                if failed {
+                    msgs.push(ChatMessage::user(v.to_observation()));
+                }
+                last_verify = Some(v);
+            }
+        }
+
+        // 回灌：单动作老形状（模型学过它），批走 results 数组、按声明顺序逐条给
+        if n == 1 {
+            let (_, _, r) = results.into_iter().next().expect("n == 1 时必有结果");
+            msgs.push(ChatMessage::user(json_result(r)));
+        } else {
+            msgs.push(ChatMessage::user(batch_json_result(&results)));
+        }
+    }
+
+    // 预算用尽：不冒充完成。已产出的文件仍留在覆盖层里，父循环收尾时会照实算。
+    Ok(error_report(
+        format!("{max_steps} 轮内没有交付本步（预算用尽）"),
+        written,
+        read,
+        last_verify,
+        max_steps,
+        usage,
+        trace,
+        started,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    /// 子步骤的提示词也要有后台模式：父子上下文隔离，父那份到不了这里 —— 不补一遍，
+    /// 每个步骤都会各自重新"用 start 去绕"，正是那 17 轮空转的放大版。
+    #[test]
+    fn step_prompt_documents_the_background_mode() {
+        for k in ["background", "ready_cmd", "handle"] {
+            assert!(STEP_SYSTEM.contains(k), "子步骤提示词缺 {k}");
+        }
+    }
+    use super::*;
+    use crate::agent::WritePolicy;
+    use crate::exec::new_cancel_flag;
+    use crate::testllm::{FakeLlm, fake_llm, fake_llm_raw};
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+
+    struct Quiet;
+    impl Sink for Quiet {}
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn temp_project(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "harness-step-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn plan_step(id: u32, title: &str, files: &[&str]) -> PlanStep {
+        PlanStep {
+            id,
+            title: title.into(),
+            detail: "把上一步留下的问题修掉".into(),
+            files: files.iter().map(|s| s.to_string()).collect(),
+            kind: "code".into(),
+        }
+    }
+
+    /// 单测不依赖本机装没装 python：语法层默认关掉，要验它的用例自己打开
+    fn cfg_for(llm: &FakeLlm) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.llm.base_url = llm.base_url.clone();
+        cfg.llm.api_key = "smoke".into();
+        cfg.llm.model = "fake".into();
+        cfg.gate.narrow = false;
+        cfg
+    }
+
+    fn js(v: &str) -> String {
+        serde_json::to_string(v).unwrap()
+    }
+
+    fn body(v: &str) -> serde_json::Value {
+        serde_json::from_str(v).expect("请求体该是 JSON")
+    }
+
+    /// 输入包只装本步：任务、位置、本步标题/说明/声明文件、前置步骤事实
+    #[test]
+    fn prompt_is_scoped_to_the_one_step() {
+        let done = vec![StepSummary {
+            id: 1,
+            title: "读代码".into(),
+            status: "done".into(),
+            files: vec!["a.py".into()],
+            note: "语法检查：通过：1 项检查全过".into(),
+        }];
+        let s = plan_step(2, "改 add", &["a.py"]);
+        let p = build_user_prompt(&StepInput {
+            project_root: Path::new("D:/proj"),
+            task: "把 add 改对",
+            step: &s,
+            index: 2,
+            total: 3,
+            done: &done,
+        });
+        assert!(p.contains("第 2 / 3 步"), "{p}");
+        assert!(p.contains("把 add 改对"), "{p}");
+        assert!(p.contains("本步标题：改 add"), "{p}");
+        assert!(p.contains("本步说明：把上一步留下的问题修掉"), "{p}");
+        assert!(p.contains("本步应产出：a.py"), "{p}");
+        assert!(
+            p.contains("- 步骤 1「读代码」：done｜产出 a.py｜语法检查：通过"),
+            "{p}"
+        );
+        assert!(p.contains("D:/proj"), "{p}");
+        assert!(p.contains("{\"final\""), "{p}");
+    }
+
+    /// 跨步骤通道必须有界 —— 20 步的计划不能把 20 行全塞进下一步
+    #[test]
+    fn prior_summaries_are_bounded() {
+        let done: Vec<StepSummary> = (1..=20)
+            .map(|i| StepSummary {
+                id: i,
+                title: format!("步骤 {i}"),
+                status: "done".into(),
+                files: Vec::new(),
+                note: String::new(),
+            })
+            .collect();
+        let s = plan_step(21, "收尾", &[]);
+        let p = build_user_prompt(&StepInput {
+            project_root: Path::new("."),
+            task: "长任务",
+            step: &s,
+            index: 21,
+            total: 21,
+            done: &done,
+        });
+        assert!(p.contains("步骤 12「步骤 12」：done"), "{p}");
+        assert!(p.contains("还有 8 步没列出来"), "{p}");
+        assert!(!p.contains("步骤 13"), "超上限的不许列：{p}");
+        assert!(p.contains("本步应产出：（计划没声明具体文件）"), "{p}");
+    }
+
+    /// 端到端（脚本化假 LLM）：写对文件 + 上下文干净 + 与父共用同一份覆盖层
+    #[test]
+    fn writes_through_the_shared_overlay_with_a_clean_context() {
+        let dir = temp_project("write");
+        std::fs::write(dir.join("util.py"), "def add(a, b):\n    return a - b\n").unwrap();
+        let good = "def add(a, b):\n    return a + b\n";
+        let llm = fake_llm(vec![
+            r#"{"tool":"read","args":{"path":"util.py"}}"#.into(),
+            format!(
+                r#"{{"tool":"write","args":{{"path":"util.py","content":{}}}}}"#,
+                js(good)
+            ),
+            format!(r#"{{"final":{}}}"#, js("把 add 的减号改成了加号。")),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(2, "修正 add", &["util.py"]);
+        let done = vec![StepSummary {
+            id: 1,
+            title: "读代码".into(),
+            status: "done".into(),
+            files: vec!["util.py".into()],
+            note: "语法检查：通过".into(),
+        }];
+        let inp = StepInput {
+            project_root: &dir,
+            task: "把 util.py 的 add 改对",
+            step: &s,
+            index: 2,
+            total: 3,
+            done: &done,
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该是致命失败");
+
+        assert_eq!(rep.status, "done");
+        assert_eq!(rep.files, vec!["util.py".to_string()]);
+        assert_eq!(rep.rounds, 3);
+        assert!(rep.note.contains("未做语法检查"), "{}", rep.note);
+        assert!(
+            rep.headline(&s).contains("产出 util.py"),
+            "{}",
+            rep.headline(&s)
+        );
+        assert!(
+            rep.as_summary(&s)
+                .line()
+                .contains("步骤 2「修正 add」：done")
+        );
+        assert_eq!(rep.self_report.trim(), "把 add 的减号改成了加号。");
+        assert!(
+            std::fs::read_to_string(dir.join("util.py"))
+                .unwrap()
+                .contains("a + b"),
+            "Apply 策略该落到磁盘"
+        );
+        assert_eq!(llm.count(), 3, "剧本刚好演完，没有多余轮次");
+
+        // ① 上下文隔离：首条请求就是 STEP_SYSTEM + 本步输入包，两条消息，没有父对话
+        let first = body(&llm.request(0));
+        let msgs = first["messages"].as_array().expect("messages 该是数组");
+        assert_eq!(msgs.len(), 2, "子上下文从零开始：{first}");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"].as_str(), Some(STEP_SYSTEM));
+        assert_eq!(msgs[1]["role"], "user");
+        let user_msg = msgs[1]["content"].as_str().unwrap_or_default();
+        assert!(user_msg.contains("第 2 / 3 步"), "{user_msg}");
+        assert!(user_msg.contains("已完成的前置步骤"), "{user_msg}");
+        // 主循环的系统提示词与它的工具说明，一条都不许出现
+        assert!(!user_msg.contains("你是 ruyix IDE 里的编程 Agent"));
+        assert!(!user_msg.contains("connect"));
+        assert!(
+            !user_msg.contains("plan"),
+            "本步不该看到计划伪工具：{user_msg}"
+        );
+
+        // ② 它自己的上下文只随自己的轮次长：第 2 条请求 = system+user+assistant+user
+        let second = body(&llm.request(1));
+        let msgs2 = second["messages"].as_array().unwrap();
+        assert_eq!(msgs2.len(), 4, "只多了它自己的回灌：{second}");
+        assert!(
+            msgs2[3]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("return a - b"),
+            "读回来的内容在它自己的上下文里"
+        );
+
+        // ③ 覆盖层不分裂：父拿到的 changes 里就有这一步写的文件
+        assert_eq!(cx.changes().len(), 1);
+        assert_eq!(cx.changes()[0].path, "util.py");
+        assert!(cx.changes()[0].after.contains("a + b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 确认模式（Stage）：上下文必须说清"写入只暂存、execute 看到的是改动前的文件" ——
+    /// 不说这条，子步会像父循环那样拿 execute 的失败反复"修"一个已经写对的改动
+    /// （实测 run `agent-20260920-152312`：65 轮里 45+ 轮就是这种空转）。
+    #[test]
+    fn confirm_mode_is_declared_in_the_step_context() {
+        let dir = temp_project("stage-note");
+        std::fs::write(dir.join("util.py"), "def add(a, b):\n    return a - b\n").unwrap();
+        let good = "def add(a, b):\n    return a + b\n";
+        let llm = fake_llm(vec![
+            format!(
+                r#"{{"tool":"write","args":{{"path":"util.py","content":{}}}}}"#,
+                js(good)
+            ),
+            // 紧接着跑一次 execute —— 这正是原来会点燃"再修一次"死循环的那一步
+            r#"{"tool":"execute","args":{"cmd":"findstr a util.py"}}"#.into(),
+            format!(r#"{{"final":{}}}"#, js("改成 a + b，已暂存待确认。")),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Stage);
+        let s = plan_step(1, "修正 add", &["util.py"]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "把 util.py 的 add 改对",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该是致命失败");
+        assert_eq!(rep.status, "done");
+
+        // ① 首条 user 消息（本步输入包）里带着确认模式说明
+        let first = body(&llm.request(0));
+        let user_msg = first["messages"][1]["content"].as_str().unwrap_or_default();
+        assert!(user_msg.contains("确认模式"), "{user_msg}");
+        assert!(user_msg.contains("暂存"), "{user_msg}");
+        assert!(user_msg.contains("不要用 execute"), "{user_msg}");
+
+        // ② 确认模式不许碰项目磁盘：文件还是旧的
+        assert!(
+            std::fs::read_to_string(dir.join("util.py"))
+                .unwrap()
+                .contains("a - b"),
+            "Stage 策略不该改磁盘"
+        );
+
+        // ③ execute 的结果里贴了"看到的是改动前文件"的说明（兜住模型不读提示的情况）
+        let third = body(&llm.request(2));
+        let exec_result = third["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or_default();
+        assert!(exec_result.contains("改动前"), "{exec_result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 子步骤的上下文与父循环是**隔离**的（这是刻意的），所以命令发现那份说明必须在
+    /// 每个步骤里**重来一遍**。父那份到不了这儿 —— 不补就是"每个步骤各自试一遍
+    /// mvn 在不在"，正是那个 65 轮空转的放大版。
+    #[test]
+    fn step_context_repeats_the_discovered_command_list() {
+        let dir = temp_project("step-discover-note");
+        let llm = fake_llm(vec![format!(r#"{{"final":{}}}"#, js("本步没动文件。"))]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看一眼工具链", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "随便问一句",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let _ = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该是致命失败");
+
+        let user_msg = body(&llm.request(0));
+        let text = user_msg["messages"][1]["content"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("本机命令"), "{text}");
+        // `STEP_SYSTEM` 里没有 connect 原语 —— 缺失工具只能"如实说明"，不许指向 connect
+        assert!(!text.contains("connect"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 窄验证绑在"本步真的写成了文件"这条事实上（与主循环同一判据）：
+    /// 打开它就必须留下一条结论。本机装没装 python 都能过 —— 装了就真跑，
+    /// 没装就是 skipped，但**不许静默无结论**。
+    #[test]
+    fn a_narrow_check_leaves_a_verdict_when_it_is_on() {
+        let dir = temp_project("verify");
+        let llm = fake_llm(vec![
+            format!(
+                r#"{{"tool":"write","args":{{"path":"hello.py","content":{}}}}}"#,
+                js("def hi():\n    return \"hi\"\n")
+            ),
+            format!(r#"{{"final":{}}}"#, js("写好 hello.py。")),
+        ]);
+        let mut cfg = cfg_for(&llm);
+        cfg.gate.narrow = true;
+        cfg.gate.staged_timeout_secs = 10;
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "写 hello.py", &["hello.py"]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "写一个 hello 模块",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        assert_eq!(rep.status, "done");
+        let v = rep.verify.as_ref().expect("开了窄验证就必须有结论");
+        assert_eq!(v.layer, "narrow");
+        assert!(rep.note.contains("语法检查："), "{}", rep.note);
+        // 验证结论同时交给父循环（UI 的「验证」小节靠它）
+        assert_eq!(llm.count(), 2, "验证不该额外多烧一轮模型调用");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// plan / connect 在步骤里被明确拒绝（不整步失败），模型看得到替代动作
+    #[test]
+    fn plan_and_connect_are_refused_inside_a_step() {
+        let dir = temp_project("reject");
+        let llm = fake_llm(vec![
+            r#"{"tool":"plan","args":{"steps":[{"title":"再拆一步","files":["x.py"]}]}}"#.into(),
+            r#"{"tool":"connect","args":{"action":"list"}}"#.into(),
+            format!(r#"{{"final":{}}}"#, js("两种能力都用不了，直接交付本步。")),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看看项目", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "看看项目",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        assert_eq!(rep.status, "done");
+        assert_eq!(llm.count(), 3);
+        let after_plan = llm.request(1);
+        assert!(after_plan.contains("没有 plan"), "{after_plan}");
+        assert!(
+            after_plan.contains("read / write / execute"),
+            "{after_plan}"
+        );
+        let after_connect = llm.request(2);
+        assert!(after_connect.contains("没有 connect"), "{after_connect}");
+        assert!(
+            rep.trace
+                .iter()
+                .any(|t| t.contains("plan") && t.contains("✗")),
+            "{:?}",
+            rep.trace
+        );
+    }
+
+    /// 预算用尽：落 error，绝不冒充 done
+    #[test]
+    fn budget_exhaustion_is_reported_never_dressed_up_as_done() {
+        let dir = temp_project("budget");
+        let llm = fake_llm(vec![
+            r#"{"tool":"read","args":{"path":"."}}"#.into(),
+            r#"{"tool":"read","args":{"path":"."}}"#.into(),
+        ]);
+        let mut cfg = cfg_for(&llm);
+        cfg.step.max_steps = 2;
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "一直读不写", &["x.py"]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "做点事",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        assert_eq!(rep.status, "error");
+        assert!(!rep.ok());
+        let err = rep.error.as_deref().unwrap_or_default();
+        assert!(err.contains("2 轮") && err.contains("预算用尽"), "{err}");
+        assert_eq!(rep.rounds, 2);
+        assert!(
+            rep.as_summary(&s).line().contains("失败："),
+            "下一步要知道上一步没成"
+        );
+    }
+
+    /// 取消位已置：一个请求都不发
+    #[test]
+    fn cancel_is_honored_before_any_request() {
+        let dir = temp_project("cancel");
+        let llm = fake_llm(Vec::new());
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "做点事", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "做点事",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let flag = new_cancel_flag();
+        flag.store(true, Ordering::Relaxed);
+        let rep =
+            block_on(run_step(&cfg, &mut cx, &inp, &flag, None, &Quiet)).expect("取消不是致命错误");
+
+        assert_eq!(rep.status, "error");
+        assert!(rep.error.as_deref().unwrap_or_default().contains("取消"));
+        assert_eq!(llm.count(), 0, "取消后一个请求都不发");
+    }
+
+    /// 致命模型错误上抛（不伪装成"这一步失败了"）—— 没配 Key 时 `llm::chat` 立即返回 Err
+    #[test]
+    fn a_fatal_model_error_propagates() {
+        let dir = temp_project("fatal");
+        let mut cfg = AppConfig::default();
+        cfg.llm.api_key = String::new();
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "做点事", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "做点事",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let err = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .unwrap_err();
+        assert!(err.contains("API Key"), "{err}");
+        assert!(err.contains("步骤 1"), "{err}");
+    }
+
+    /// 父的步骤动作只认三种：可用的原样透传，plan / connect 收窄成不支持
+    #[test]
+    fn step_action_narrows_the_primary_loop_abilities() {
+        use crate::agent::parse_step_action as parse;
+        assert!(matches!(
+            parse(r#"{"tool":"read","args":{"path":"a.py"}}"#).unwrap(),
+            StepAction::Read(spec) if spec.path == "a.py" && !spec.is_window()
+        ));
+        assert!(matches!(
+            parse(r#"{"tool":"write","args":{"path":"a.py","content":"x"}}"#).unwrap(),
+            StepAction::Write(WriteSpec { path, body: WriteBody::Content(c) })
+                if path == "a.py" && c == "x"
+        ));
+        assert!(matches!(
+            parse(r#"{"tool":"execute","args":{"cmd":"ls"}}"#).unwrap(),
+            StepAction::Execute(c, _) if c == "ls"
+        ));
+        assert!(matches!(
+            parse(r#"{"final":"好了"}"#).unwrap(),
+            StepAction::Final(t) if t == "好了"
+        ));
+        assert!(matches!(
+            parse(r#"{"tool":"plan","args":{"steps":[{"title":"x"}]}}"#).unwrap(),
+            StepAction::Unsupported("plan")
+        ));
+        assert!(matches!(
+            parse(r#"{"tool":"connect","args":{"action":"list"}}"#).unwrap(),
+            StepAction::Unsupported("connect")
+        ));
+        // 格式烂仍然是要重发的错，不该被当成"不支持的能力"
+        assert!(parse("随便聊聊").is_err());
+    }
+
+    /// 子步骤也能一批读：3 个 read 只花 1 轮，三份内容一起回来 ——
+    /// 子步的轮次预算同样被"一轮一个调用"吃掉（预算再宽也经不住一轮只读一个文件）。
+    #[test]
+    fn a_step_can_read_a_batch_in_one_round() {
+        let dir = temp_project("step-batch");
+        std::fs::write(dir.join("a.txt"), "AAA").unwrap();
+        std::fs::write(dir.join("b.txt"), "BBB").unwrap();
+        std::fs::write(dir.join("c.txt"), "CCC").unwrap();
+        let llm = fake_llm(vec![
+            concat!(
+                r#"{"actions":[{"tool":"read","args":{"path":"a.txt"}},"#,
+                r#"{"tool":"read","args":{"path":"b.txt"}},"#,
+                r#"{"tool":"read","args":{"path":"c.txt"}}]}"#
+            )
+            .into(),
+            r#"{"final":"读完了"}"#.into(),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "读三个文件", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "做点事",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let rep = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        assert_eq!(llm.count(), 2, "一批 3 个 read = 1 轮（外加 final 那轮）");
+        assert_eq!(rep.status, "done");
+        assert_eq!(
+            rep.read_paths,
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string()
+            ],
+            "读过什么要按声明顺序报给父循环（复核员的证据集合）"
+        );
+        assert_eq!(rep.trace.len(), 3, "三条调用都进轨迹：{:?}", rep.trace);
+        let second = llm.request(1);
+        for content in ["AAA", "BBB", "CCC"] {
+            assert!(second.contains(content), "缺 {content}：{second}");
+        }
+    }
+
+    /// **声明面就是权限面**：子步只声明它真能执行的四个工具。
+    ///
+    /// 旧实现走 `llm::chat`（= 声明全七个），于是 `STEP_SYSTEM` 里那句"引擎已声明
+    /// read / write / execute / final 四个工具"是**假的**：模型能从 `tools` 字段里看到
+    /// connect / plan / ask_user，一试就被 `to_step_action` 打回（`Unsupported`），白烧一轮。
+    /// 判据直接看**请求体** —— 那才是服务端看到的东西。
+    #[test]
+    fn a_step_declares_only_the_tools_it_can_execute() {
+        let dir = temp_project("step-tools-decl");
+        std::fs::write(dir.join("a.txt"), "AAA").unwrap();
+        let llm = fake_llm(vec![
+            r#"{"tool":"read","args":{"path":"a.txt"}}"#.into(),
+            r#"{"final":"看完了"}"#.into(),
+        ]);
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看一眼", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "看一眼",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect("不该失败");
+
+        let req: serde_json::Value = serde_json::from_str(&llm.request(0)).expect("请求体是 JSON");
+        let names: Vec<String> = req["tools"]
+            .as_array()
+            .expect("工具协议开着就必须声明 tools")
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap_or("").to_string())
+            .collect();
+        let want: Vec<String> = crate::llm::TOOL_NAMES_ALL
+            .iter()
+            .filter(|n| STEP_TOOL_NAMES.contains(n))
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(
+            names, want,
+            "子步只该拿到它能执行的那几个（顺序按 TOOL_DECLS）"
+        );
+        for bad in ["connect", "plan", "ask_user"] {
+            assert!(
+                !names.iter().any(|n| n == bad),
+                "子步不该被声明 {bad}（它执行不了，试了只会白烧一轮）：{names:?}"
+            );
+        }
+    }
+
+    /// 契约：`STEP_TOOL_NAMES`（请求里声明的）必须与 `STEP_TOOLS_HINT`（话术里写的）一字不差，
+    /// 且不含父循环独有的那三个。**两处分开写正是本单漏洞的来源** —— 这条把"记得改两处"
+    /// 变成"改坏了就红"。
+    #[test]
+    fn step_tool_names_match_the_hint_and_exclude_parent_only_ones() {
+        assert_eq!(
+            STEP_TOOL_NAMES,
+            &["read", "write", "execute", "final"],
+            "声明表变了要同时改 STEP_SYSTEM 与 STEP_TOOLS_HINT"
+        );
+        assert_eq!(
+            STEP_TOOLS_HINT.split(" / ").collect::<Vec<_>>(),
+            STEP_TOOL_NAMES.to_vec(),
+            "话术（STEP_TOOLS_HINT）与声明（STEP_TOOL_NAMES）必须一字不差地对齐"
+        );
+        for bad in ["connect", "plan", "ask_user"] {
+            assert!(
+                !STEP_TOOL_NAMES.contains(&bad),
+                "子步没有 {bad} —— 它的 messages 是干净上下文，一问就破了「一轮 = 一步」"
+            );
+        }
+        // 每个声明名都必须真在工具表里（漂移 = 声明一个不存在的工具，模型会照着幻觉）
+        for n in STEP_TOOL_NAMES {
+            assert!(
+                crate::llm::TOOL_NAMES_ALL.contains(n),
+                "声明了工具表里没有的 {n}"
+            );
+        }
+    }
+
+    /// **半成功不清零 + 失败回灌**（2026-09-30 step 第 28-33 轮实测病灶的回归）：
+    /// 空内容 → 坏参数（HTTP 200 但解析失败）→ 空内容 → 空内容，必须在第 4 轮终止。
+    /// 修复前坏参数轮把模型失败计数清零，这个序列永远凑不满连续 3 次，一路烧到
+    /// 轮预算；且失败从不进上下文，模型对"输出蒸发了"毫不知情、原样重发同样的体量。
+    /// 判据直接看**请求体**：第 4 次请求（第 2 轮）必须带着上一轮的失败说明。
+    #[test]
+    fn a_half_successful_round_keeps_the_llm_failure_streak_and_feeds_back() {
+        let empty = ""; // content 空 + 无 tool_calls ⇒「模型返回了空内容」
+        let bad_args = r#"{"tool_calls":[{"type":"function","function":{"name":"read","arguments":"{\"file\":\"a.txt\"}"}}]}"#;
+        let llm = fake_llm_raw(vec![
+            empty.into(),
+            empty.into(),
+            empty.into(),    // 第 1 轮（内部重试 3 次）
+            bad_args.into(), // 第 2 轮：HTTP 成功但解析失败 —— 半成功
+            empty.into(),
+            empty.into(),
+            empty.into(), // 第 3 轮
+            empty.into(),
+            empty.into(),
+            empty.into(), // 第 4 轮 ⇒ 连续 3 次，终止
+        ]);
+        let dir = temp_project("step-half-success");
+        let cfg = cfg_for(&llm);
+        let mut cx = Ctx::new(&dir, WritePolicy::Apply);
+        let s = plan_step(1, "看一眼", &[]);
+        let inp = StepInput {
+            project_root: &dir,
+            task: "看一眼",
+            step: &s,
+            index: 1,
+            total: 1,
+            done: &[],
+        };
+        let err = block_on(run_step(
+            &cfg,
+            &mut cx,
+            &inp,
+            &new_cancel_flag(),
+            None,
+            &Quiet,
+        ))
+        .expect_err("计数凑满连续 3 次应当终止");
+        assert!(err.contains("模型调用失败"), "{err}");
+        assert!(
+            err.contains("空内容"),
+            "终止时的病应是空内容，不是剧本耗尽的网络错：{err}"
+        );
+        assert_eq!(llm.count(), 10, "3+1+3+3：坏参数轮不许清零计数");
+        assert!(
+            llm.request(3).contains("上一轮模型调用失败"),
+            "失败说明没进下一条请求：{}",
+            llm.request(3)
+        );
+    }
+}
